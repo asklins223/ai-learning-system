@@ -177,8 +177,8 @@ $$;
 -- DEFINER/search_path below; extension-owned functions remain untouched.
 DO $$
 BEGIN
-  IF to_regprocedure('public.ailearn_claim_jobs(integer,integer)') IS NOT NULL THEN
-    ALTER FUNCTION public.ailearn_claim_jobs(integer, integer)
+  IF to_regprocedure('public.ailearn_claim_jobs(integer,integer,integer)') IS NOT NULL THEN
+    ALTER FUNCTION public.ailearn_claim_jobs(integer, integer, integer)
       OWNER TO ailearn_migrator;
   END IF;
 
@@ -608,10 +608,10 @@ $$;
 
 DO $$
 BEGIN
-  IF to_regprocedure('public.ailearn_claim_jobs(integer,integer)') IS NOT NULL THEN
-    REVOKE ALL ON FUNCTION public.ailearn_claim_jobs(integer, integer)
+  IF to_regprocedure('public.ailearn_claim_jobs(integer,integer,integer)') IS NOT NULL THEN
+    REVOKE ALL ON FUNCTION public.ailearn_claim_jobs(integer, integer, integer)
       FROM PUBLIC, ailearn_api;
-    GRANT EXECUTE ON FUNCTION public.ailearn_claim_jobs(integer, integer)
+    GRANT EXECUTE ON FUNCTION public.ailearn_claim_jobs(integer, integer, integer)
       TO ailearn_worker;
   END IF;
 
@@ -1091,12 +1091,12 @@ BEGIN
     RAISE EXCEPTION 'migration journal privilege matrix mismatch';
   END IF;
 
-  IF to_regprocedure('public.ailearn_claim_jobs(integer,integer)') IS NOT NULL AND (
+  IF to_regprocedure('public.ailearn_claim_jobs(integer,integer,integer)') IS NOT NULL AND (
     NOT has_function_privilege(
-      'ailearn_worker', 'public.ailearn_claim_jobs(integer,integer)', 'EXECUTE'
+      'ailearn_worker', 'public.ailearn_claim_jobs(integer,integer,integer)', 'EXECUTE'
     )
     OR has_function_privilege(
-      'ailearn_api', 'public.ailearn_claim_jobs(integer,integer)', 'EXECUTE'
+      'ailearn_api', 'public.ailearn_claim_jobs(integer,integer,integer)', 'EXECUTE'
     )
   ) THEN
     RAISE EXCEPTION 'job claim function privilege matrix mismatch';
@@ -1150,7 +1150,7 @@ BEGIN
     SELECT 1
     FROM pg_proc p
     WHERE p.oid IN (
-      to_regprocedure('public.ailearn_claim_jobs(integer,integer)'),
+      to_regprocedure('public.ailearn_claim_jobs(integer,integer,integer)'),
       to_regprocedure('public.ailearn_reap_stale_jobs(integer,integer)'),
       to_regprocedure('public.ailearn_renew_job_lease(uuid,uuid,text)'),
       to_regprocedure('public.ailearn_finish_job(uuid,uuid,text)'),
@@ -1180,7 +1180,7 @@ BEGIN
   WHERE n.nspname = 'public'
     AND has_function_privilege('ailearn_worker', p.oid, 'EXECUTE')
     AND p.oid IS DISTINCT FROM
-      to_regprocedure('public.ailearn_claim_jobs(integer,integer)')
+      to_regprocedure('public.ailearn_claim_jobs(integer,integer,integer)')
     AND p.oid IS DISTINCT FROM
       to_regprocedure('public.ailearn_reap_stale_jobs(integer,integer)')
     AND p.oid IS DISTINCT FROM

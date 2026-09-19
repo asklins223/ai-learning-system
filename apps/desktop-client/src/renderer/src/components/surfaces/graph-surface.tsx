@@ -76,21 +76,23 @@ const NO_EDGES: GraphEdge[] = [];
  * `fit()` reserves those screen-space bands so the default view still reads as
  * a map instead of hiding labels under chrome. Keep every edge in step with the
  * matching CSS custom property in understanding-universe.css:
- *   top    — below the top row (search + help), which starts at 100px and is
- *            48px tall, plus the heading chip's own band;
+ *   top    — below the top row (search + filters), which starts at 100px and is
+ *            52px tall, plus the heading chip's own band;
  *   bottom — above the upper instrument row, whose 54px plates start 86px off
  *            the bottom edge;
  *   left   — past the 73px navigation rail;
  *   right  — the same 22px gutter every plate on the right ends at.
  */
 const UNIVERSE_HUD_INSETS = { top: 160, bottom: 156, left: 96, right: 36 } as const;
+const COMPACT_UNIVERSE_HUD_INSETS = { top: 72, bottom: 72, left: 210, right: 24 } as const;
+const COMPACT_UNIVERSE_QUERY = "(max-width: 760px), (max-height: 480px)";
 
 const FILTERS: ReadonlyArray<{
   readonly value: StateFilter;
   readonly label: string;
   readonly states: readonly string[] | null;
 }> = [
-  { value: "all", label: "全部星域", states: null },
+  { value: "all", label: "全部", states: null },
   { value: "attention", label: "需关注", states: ["misunderstood", "due_review"] },
   { value: "unseen", label: "待验证", states: ["unseen"] },
   { value: "understood", label: "已理解", states: ["preliminary_understood", "reviewed"] },
@@ -132,6 +134,22 @@ function objectiveActionLabel(node: ObjectiveNode): string {
 function searchableText(node: GraphNode): string {
   return `${node.label} ${node.description ?? ""} ${node.state ?? ""} ${NODE_TYPE_LABEL[node.type]}`
     .toLocaleLowerCase("zh-CN");
+}
+
+function useCompactUniverseLayout(): boolean {
+  const [compact, setCompact] = useState(() => (
+    typeof window !== "undefined" && window.matchMedia(COMPACT_UNIVERSE_QUERY).matches
+  ));
+
+  useEffect(() => {
+    const query = window.matchMedia(COMPACT_UNIVERSE_QUERY);
+    const sync = () => setCompact(query.matches);
+    sync();
+    query.addEventListener("change", sync);
+    return () => query.removeEventListener("change", sync);
+  }, []);
+
+  return compact;
 }
 
 function toUniverseGraph(
@@ -245,6 +263,8 @@ export function GraphSurface() {
   const [indexActiveIndex, setIndexActiveIndex] = useState(0);
   const [pendingFocusId, setPendingFocusId] = useState<string | null>(null);
   const [fitRequest, setFitRequest] = useState(0);
+  const compactLayout = useCompactUniverseLayout();
+  const compactLayoutRef = useRef(compactLayout);
   const listboxId = `universe-search-listbox-${useId().replace(/:/g, "")}`;
 
   const { data, loading, failure, reload } = useSurfaceProjection(
@@ -357,6 +377,12 @@ export function GraphSurface() {
   }, [fitRequest]);
 
   useEffect(() => {
+    if (compactLayoutRef.current === compactLayout) return;
+    compactLayoutRef.current = compactLayout;
+    setFitRequest((value) => value + 1);
+  }, [compactLayout]);
+
+  useEffect(() => {
     const outside = (event: PointerEvent) => {
       if (!searchShellRef.current?.contains(event.target as Node)) setSearchOpen(false);
     };
@@ -380,6 +406,12 @@ export function GraphSurface() {
   useEffect(() => {
     setSearchActiveIndex(searchOpen && searchResults.length > 0 ? 0 : -1);
   }, [searchOpen, searchResults]);
+
+  useEffect(() => {
+    setIndexActiveIndex((index) => (
+      visibleGraph.nodes.length > 0 ? Math.min(index, visibleGraph.nodes.length - 1) : 0
+    ));
+  }, [visibleGraph.nodes.length]);
 
   const filterCounts = useMemo(() => {
     const objectives = rawGraph.nodes.filter((node) => node.type === "card");
@@ -417,6 +449,9 @@ export function GraphSurface() {
   }, [rawNodeById]);
 
   const revealNode = useCallback((node: GraphNode) => {
+    // Search is a locator, not a persistent graph filter. Clear it before
+    // focusing so the selected star and every relation around it stay visible.
+    setQuery("");
     setStateFilter("all");
     if (node.type === "source") setShowSources(true);
     if (node.type === "key_point") setShowEvidence(true);
@@ -424,6 +459,11 @@ export function GraphSurface() {
     setPendingFocusId(node.id);
     setSearchOpen(false);
   }, []);
+
+  const revealProjection = useCallback((node: UnderstandingNodeProjectionV3) => {
+    const graphNode = rawNodeById.get(graphNodeKey(node));
+    if (graphNode) revealNode(graphNode);
+  }, [rawNodeById, revealNode]);
 
   const openNodeRecord = (node: UnderstandingNodeProjectionV3) => {
     const ref = node.nodeRef;
@@ -444,6 +484,7 @@ export function GraphSurface() {
   const counts = useMemo(() => ({
     objectives: rawGraph.nodes.filter((node) => node.type === "card").length,
     evidence: rawGraph.nodes.filter((node) => node.type === "key_point").length,
+    sources: rawGraph.nodes.filter((node) => node.type === "source").length,
     edges: rawGraph.edges.length,
   }), [rawGraph]);
   const telemetry = useMemo(() => [
@@ -465,7 +506,7 @@ export function GraphSurface() {
           highlightedNodeIds={selectedPath?.nodeIds ?? EMPTY_IDS}
           highlightedEdgeIds={selectedPath?.edgeIds ?? EMPTY_IDS}
           onSelect={selectNode}
-          insets={UNIVERSE_HUD_INSETS}
+          insets={compactLayout ? COMPACT_UNIVERSE_HUD_INSETS : UNIVERSE_HUD_INSETS}
           offsetStorageKey={data?.workspaceId ? `understanding-universe:node-offsets:v1:${data.workspaceId}` : undefined}
           title="理解星图：你的真实知识宇宙"
         />
@@ -482,7 +523,7 @@ export function GraphSurface() {
               onFocus={() => setSearchOpen(true)}
               onKeyDown={(event) => {
                 if (!searchResults.length) {
-                  if (event.key === "Escape") { event.stopPropagation(); setSearchOpen(false); }
+                  if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setSearchOpen(false); }
                   return;
                 }
                 if (event.key === "ArrowDown") {
@@ -498,13 +539,15 @@ export function GraphSurface() {
                     revealNode(active);
                   }
                 } else if (event.key === "Escape") {
+                  event.preventDefault();
                   event.stopPropagation();
                   setSearchOpen(false);
                 }
               }}
-              placeholder="搜索一颗星、笔记或证据"
+              placeholder="搜索并定位来源、笔记或目标"
               aria-label="搜索理解星图"
               role="combobox"
+              aria-autocomplete="list"
               aria-expanded={searchOpen && Boolean(query.trim())}
               aria-controls={listboxId}
               aria-activedescendant={searchOpen && searchActiveIndex >= 0 ? `${listboxId}-option-${searchActiveIndex}` : undefined}
@@ -534,7 +577,7 @@ export function GraphSurface() {
             ) : null}
           </div>
 
-          <nav className="universe-filter-dock" aria-label="按理解状态探索星域" title="筛选理解恒星；计数为各状态的理解恒星数量">
+          <nav className="universe-filter-dock" aria-label="按理解目标状态筛选星图" title="计数仅表示各状态的理解目标数量；相关来源、笔记与证据会一并保留">
             {FILTERS.map((item) => (
               <button key={item.value} type="button" className={`universe-filter${stateFilter === item.value ? " is-active" : ""}`} onClick={() => setStateFilter(item.value)} disabled={item.value !== "all" && filterCounts[item.value] === 0} aria-pressed={stateFilter === item.value}>
                 <span>{item.label}</span><small>{filterCounts[item.value]}</small>
@@ -551,9 +594,9 @@ export function GraphSurface() {
         </div>
 
         <div className="universe-layer-dock" role="group" aria-label="控制知识宇宙图层">
-          <label className="universe-layer-toggle"><input type="checkbox" checked={showEvidence} onChange={(event) => setShowEvidence(event.target.checked)} /><Quote size={14} /><span>证据卫星</span></label>
-          <label className="universe-layer-toggle"><input type="checkbox" checked={showSources} onChange={(event) => setShowSources(event.target.checked)} /><BookOpenText size={14} /><span>来源行星</span></label>
-          <label className="universe-layer-toggle"><input type="checkbox" checked={showLinks} onChange={(event) => setShowLinks(event.target.checked)} />{showLinks ? <Eye size={14} /> : <EyeOff size={14} />}<span>关系光路</span></label>
+          <label className="universe-layer-toggle" title={counts.evidence === 0 ? "当前星图没有证据节点" : undefined}><input type="checkbox" checked={showEvidence} disabled={counts.evidence === 0} onChange={(event) => setShowEvidence(event.target.checked)} /><Quote size={14} /><span>证据卫星</span></label>
+          <label className="universe-layer-toggle" title={counts.sources === 0 ? "当前星图没有来源节点" : undefined}><input type="checkbox" checked={showSources} disabled={counts.sources === 0} onChange={(event) => setShowSources(event.target.checked)} /><BookOpenText size={14} /><span>来源行星</span></label>
+          <label className="universe-layer-toggle" title={counts.edges === 0 ? "当前星图没有关系光路" : undefined}><input type="checkbox" checked={showLinks} disabled={counts.edges === 0} onChange={(event) => setShowLinks(event.target.checked)} />{showLinks ? <Eye size={14} /> : <EyeOff size={14} />}<span>关系光路</span></label>
           <span className="universe-layer-readout" aria-live="polite">{telemetry}</span>
         </div>
 
@@ -569,15 +612,15 @@ export function GraphSurface() {
               </header>
               <div className="universe-detail-body">
                 <section><h2 className="universe-detail-title">{graphNodeLabel(selectedProjection)}</h2><p className="universe-detail-description">{graphNodeSummary(selectedProjection)}</p></section>
-                <section className="universe-detail-timing">
-                  <span>节点类型 <strong>{graphNodeKindLabel(selectedProjection.nodeRef.kind)}</strong></span>
-                  <span>直接关系 <strong>{selectedNeighbors.length} 条</strong></span>
-                  {isObjectiveNode(selectedProjection) ? <span>当前状态 <strong>{graphObjectiveStateLabel(selectedProjection.personal.state)}</strong></span> : null}
-                </section>
+                <dl className="universe-detail-timing">
+                  <div><dt>节点类型</dt><dd>{graphNodeKindLabel(selectedProjection.nodeRef.kind)}</dd></div>
+                  <div><dt>直接关系</dt><dd>{selectedNeighbors.length} 条</dd></div>
+                  {isObjectiveNode(selectedProjection) ? <div><dt>当前状态</dt><dd>{graphObjectiveStateLabel(selectedProjection.personal.state)}</dd></div> : null}
+                </dl>
                 <section className="universe-detail-relations">
-                  <div className="universe-detail-section-title"><span>真实光路</span><small>{selectedNeighbors.length > RELATION_LIMIT ? `前 ${RELATION_LIMIT} / 共 ${selectedNeighbors.length} 条` : `${selectedNeighbors.length} 条直接关系`}</small></div>
+                  <div className="universe-detail-section-title"><span>真实光路</span><small>{selectedNeighbors.length > RELATION_LIMIT ? `显示前 ${RELATION_LIMIT} 条，共 ${selectedNeighbors.length} 条` : selectedNeighbors.length ? "选择一条光路继续探索" : "暂无相邻星体"}</small></div>
                   {selectedNeighbors.length ? <div>{selectedNeighbors.slice(0, RELATION_LIMIT).map(({ edge, node }) => (
-                    <button key={edge.edgeId} type="button" className="universe-detail-relation" onClick={() => { setStateFilter("all"); setSelectedId(graphNodeKey(node)); setPendingFocusId(graphNodeKey(node)); }}>
+                    <button key={edge.edgeId} type="button" className="universe-detail-relation" onClick={() => revealProjection(node)}>
                       <i className={`is-${node.nodeRef.kind === "objective" ? "card" : node.nodeRef.kind === "evidence" ? "key_point" : node.nodeRef.kind}`} aria-hidden="true" />
                       <span><small>{graphEdgeKindLabel(edge.kind)} · {graphNodeKindLabel(node.nodeRef.kind)}</small><strong>{graphNodeLabel(node)}</strong></span><ChevronRight size={14} />
                     </button>
@@ -585,8 +628,8 @@ export function GraphSurface() {
                 </section>
               </div>
               <footer className="universe-detail-actions">
-                <button type="button" onClick={() => universeRef.current?.focusNode(selectedNode.id)}><Focus size={14} /> 聚焦星体</button>
-                {!isEvidenceNode(selectedProjection) ? <button type="button" onClick={() => openNodeRecord(selectedProjection)}>
+                <button className={isEvidenceNode(selectedProjection) ? "is-primary" : "is-secondary"} type="button" onClick={() => universeRef.current?.focusNode(selectedNode.id)}><Focus size={14} /> 聚焦星体</button>
+                {!isEvidenceNode(selectedProjection) ? <button className="is-primary" type="button" onClick={() => openNodeRecord(selectedProjection)}>
                   {isObjectiveNode(selectedProjection) ? objectiveActionLabel(selectedProjection) : isNoteNode(selectedProjection) ? "打开笔记" : "打开来源"}<ArrowRight size={14} />
                 </button> : null}
               </footer>
@@ -598,7 +641,7 @@ export function GraphSurface() {
           <div className="universe-status-overlay">
             <section className="universe-status-card" aria-busy={loading || undefined} role={failure ? "alert" : "status"}>
               <span className="universe-status-orbit" aria-hidden="true">{failure ? <CircleHelp size={20} /> : rawGraph.nodes.length > 0 ? <Search size={20} /> : <Network size={20} />}</span>
-              {loading ? <><strong>正在点亮你的知识宇宙</strong><p>计算星系位置、关系光路与证据信号…</p></> : failure ? <><strong>理解星图暂时不可用</strong><p>{failure}</p><button type="button" onClick={() => void reload()}>重新读取</button></> : rawGraph.nodes.length === 0 ? <><strong>这片宇宙还没有星体</strong><p>先从来源写下笔记并形成理解目标，真实路径会在这里出现。</p></> : <><strong>这个星域里没有匹配项</strong><p>清除搜索或切回“全部星域”即可恢复。</p><button type="button" onClick={() => { setQuery(""); setStateFilter("all"); setFitRequest((value) => value + 1); }}>显示全部星体</button></>}
+              {loading ? <><strong>正在点亮你的知识宇宙</strong><p>计算星系位置、关系光路与证据信号…</p></> : failure ? <><strong>理解星图暂时不可用</strong><p>{failure}</p><button type="button" onClick={() => void reload()}>重新读取</button></> : rawGraph.nodes.length === 0 ? <><strong>这片宇宙还没有星体</strong><p>先从来源写下笔记并形成理解目标，真实路径会在这里出现。</p><button type="button" onClick={() => invoke("open-sources")}><BookOpenText size={14} />查看来源库</button></> : <><strong>这个星域里没有匹配项</strong><p>清除搜索或切回“全部”即可恢复。</p><button type="button" onClick={() => { setQuery(""); setStateFilter("all"); setFitRequest((value) => value + 1); }}>显示全部星体</button></>}
             </section>
           </div>
         ) : null}

@@ -680,7 +680,7 @@ export class OpenCodeGoProvider implements AIProvider {
    * Agent turn（native tools）。
    *
    * Responses API 用 `tools[].{type:"function",name,parameters}`（扁平，无
-   * `function` 包装层），无工具时回退 `text.format = json_object`。
+   * `function` 包装层）；无工具轮保持自然文本（不写 text.format，见下方注释）。
    * 一次 attempt 最多一次 provider 请求。
    */
   async executeAgentTurn(
@@ -709,9 +709,11 @@ export class OpenCodeGoProvider implements AIProvider {
         parameters: tool.parameters,
       }));
       body.tool_choice = "auto";
-    } else {
-      body.text = { format: { type: "json_object" as const } };
     }
+    // 无工具轮不再强制 json_object（根因二 2026-09-19，与 openai-compatible 同步）：
+    // executeAgentTurn 的无工具轮是伴星自然文本终答，强制 JSON 是 json_envelope_leak
+    // 的直接来源。structured_action fallback 由 parseResponsesAgentTurn 对 content
+    // 的解析承担。chatCompletion 的默认 JSON 模式不受影响（显式调用方需要 JSON）。
 
     const response = await this.request(this.endpoint, this.headers(false), body, signal);
     if (signal?.aborted) throw abortError(signal, "after agent turn response");

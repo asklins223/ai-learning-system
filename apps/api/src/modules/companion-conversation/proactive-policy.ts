@@ -80,3 +80,24 @@ export function evaluateProactivePolicy(input: ProactivePolicyInput): ProactiveP
   }
   return { allow: true, reasonCode: "allowed" };
 }
+
+// ─── 展示反馈进生成（念头管线切片①，2026-09-18 落地） ────────────────────
+// 设计（outputs/ai-伴星能力与主动性设计汇总 §四·反馈回路）：被回应→强化、
+// 被忽略→降权。最小闭环：最近窗口内真正送达过用户的主动提示里，被 dismiss
+// 的占到多数 → 本轮沉默（大多数念头默默过期）。
+export const DISMISSAL_FEEDBACK = {
+  /** 参与反馈判定的最近送达条数。 */
+  windowSize: 3,
+  /** 该窗口内 dismiss 数达到阈值即抑制本轮。 */
+  dismissLimit: 2,
+} as const;
+
+/**
+ * 输入为最近若干条「已送达用户」的 delivery 状态（最新在前，只收
+ * displayed/acted/dismissed——未读的 queued/delivered 不构成反馈）。
+ */
+export function evaluateDismissalFeedback(states: readonly string[]): { suppress: boolean } {
+  const recent = states.slice(0, DISMISSAL_FEEDBACK.windowSize);
+  const dismissed = recent.filter((state) => state === "dismissed").length;
+  return { suppress: dismissed >= DISMISSAL_FEEDBACK.dismissLimit };
+}

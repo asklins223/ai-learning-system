@@ -42,6 +42,7 @@ import {
   unwrapGatewayResult,
 } from "../../app/desktop-client";
 import { SurfaceReturnControl } from "./SurfaceReturnControl";
+import { learningRunPhaseLabels } from "./learning-run-surface";
 import { useHudPage } from "../hud/use-hud-page";
 
 type SurfaceHeaderProps = {
@@ -404,7 +405,7 @@ export function ObjectiveLibrarySurface() {
               <h3 id="goal-focus-title">{activeGoal.conceptLabel ?? activeGoal.primaryNoteTitle ?? "未命名理解目标"}</h3>
               <blockquote>{activeGoal.publicSummary}</blockquote>
               <button type="button" className="v3-goal-focus__action" onClick={() => openObjective(activeGoal.objectiveId)}>
-                <span><small>下一步已经准备好</small>{actionLabel(activeGoal.primaryAction)}</span>
+                <span><small>打开目标详情</small>{actionLabel(activeGoal.primaryAction)}</span>
                 <ArrowRight size={19} aria-hidden="true" />
               </button>
             </div>
@@ -420,7 +421,7 @@ export function ObjectiveLibrarySurface() {
             <header className="v3-goal-ledger__header">
               <div>
                 <h3 id="goal-ledger-title">目标口袋</h3>
-                <p>已载入 {page?.items.length ?? 0} / {page?.total ?? 0} 条 · 更新于 {formatDateTime(page?.snapshotAt)}</p>
+                <p>已载入 {page?.items.length ?? 0} / {page?.total ?? 0} 条{page?.snapshotAt ? ` · 更新于 ${formatDateTime(page.snapshotAt)}` : ""}</p>
               </div>
               <label className="v3-goal-search">
                 <Search size={14} aria-hidden="true" />
@@ -479,6 +480,11 @@ function actionLabel(action: LearningObjectivePrimaryActionV3): string {
     case "refresh": return "重新读取";
     case "none": return "暂无动作";
   }
+}
+
+/** 目标详情只拿到 phase 字符串；复用学习旅程的中文标签，未知值原样显示。 */
+function formatRunPhase(phase: string): string {
+  return (learningRunPhaseLabels as Record<string, string>)[phase] ?? phase;
 }
 
 export function ObjectiveDetailSurface() {
@@ -599,7 +605,7 @@ export function ObjectiveDetailSurface() {
                 </div>
                 <div>
                   <dt><Clock3 size={14} aria-hidden="true" />学习旅程</dt>
-                  <dd>{objective.personal.activeRun ? `进行中 · ${objective.personal.activeRun.phase}` : "没有进行中的旅程"}</dd>
+                  <dd>{objective.personal.activeRun ? formatRunPhase(objective.personal.activeRun.phase) : "没有进行中的旅程"}</dd>
                   <small>{objective.personal.lastCanonicalAt ? `最近一次正式结果 ${formatDateTime(objective.personal.lastCanonicalAt)}` : "还没有正式验证结果"}</small>
                 </div>
                 <div>

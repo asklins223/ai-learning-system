@@ -110,6 +110,8 @@ describe("useSurfaceProjection refreshOnFocus", () => {
     // A background re-read owns neither the loading paper nor an error card.
     expect(latest?.loading).toBe(false);
     expect(latest?.failure).toBeNull();
+    expect(latest?.refreshing).toBe(false);
+    expect(latest?.refreshFailure).toBeNull();
   });
 
   it("keeps the records already on the paper when a focus re-read fails", async () => {
@@ -124,6 +126,50 @@ describe("useSurfaceProjection refreshOnFocus", () => {
 
     expect(latest?.data).toBe("first");
     expect(latest?.failure).toBeNull();
+    expect(latest?.refreshing).toBe(false);
+    expect(latest?.refreshFailure).toBe("服务暂时没有返回可确认的结果。");
+  });
+
+  it("exposes non-blocking refresh progress without blanking the paper", async () => {
+    installApi();
+    let resolveRefresh: ((value: string) => void) | undefined;
+    const refresh = new Promise<string>((resolve) => { resolveRefresh = resolve; });
+    const read = vi.fn().mockResolvedValueOnce("first").mockReturnValueOnce(refresh);
+    render(<Probe read={read} options={{ refreshOnFocus: true }} />);
+    await waitFor(() => expect(latest?.data).toBe("first"));
+
+    await act(async () => { window.dispatchEvent(new Event("focus")); await Promise.resolve(); });
+    await waitFor(() => expect(latest?.refreshing).toBe(true));
+    expect(latest?.data).toBe("first");
+    expect(latest?.loading).toBe(false);
+
+    await act(async () => { resolveRefresh?.("second"); await refresh; });
+    await waitFor(() => expect(latest?.refreshing).toBe(false));
+    expect(latest?.data).toBe("second");
+  });
+
+  it("ignores an older refresh that resolves after a newer one", async () => {
+    installApi();
+    let resolveOlder: ((value: string) => void) | undefined;
+    let resolveNewer: ((value: string) => void) | undefined;
+    const older = new Promise<string>((resolve) => { resolveOlder = resolve; });
+    const newer = new Promise<string>((resolve) => { resolveNewer = resolve; });
+    const read = vi.fn()
+      .mockResolvedValueOnce("first")
+      .mockReturnValueOnce(older)
+      .mockReturnValueOnce(newer);
+    render(<Probe read={read} options={{ refreshOnFocus: true }} />);
+    await waitFor(() => expect(latest?.data).toBe("first"));
+
+    await act(async () => { window.dispatchEvent(new Event("focus")); await Promise.resolve(); });
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    await act(async () => { window.dispatchEvent(new Event("focus")); await Promise.resolve(); });
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(3));
+
+    await act(async () => { resolveNewer?.("newer"); await newer; });
+    await waitFor(() => expect(latest?.data).toBe("newer"));
+    await act(async () => { resolveOlder?.("older"); await older; });
+    expect(latest?.data).toBe("newer");
   });
 
   it("re-reads when the app becomes visible again, but not when it is hidden", async () => {

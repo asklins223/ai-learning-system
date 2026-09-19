@@ -222,6 +222,55 @@ export const recordLearningRunActivityLeaseRequestV2Schema = z.strictObject({
 });
 export type RecordLearningRunActivityLeaseRequestV2 = z.infer<typeof recordLearningRunActivityLeaseRequestV2Schema>;
 
+/**
+ * 答后反馈（2026-09-18）：结果页此前只有 outcome + facet 计数，用户答完看不到
+ * 「哪一条没说清、为什么」。rubric 逐项判定与 userFacingReason 本就是公开合同
+ * （AssessmentPublicV1，提示词明确要求「不含答案关键内容」），这里把它们随
+ * 结果载荷一起下发。canonicalAnswer / rubric criterion 仍不进公开边界。
+ */
+export const learningRunResultAssessmentV2Schema = z.strictObject({
+  source: z.enum(["assessment_critic", "deterministic_declared_unable", "deterministic_structured"]),
+  status: z.enum(["queued", "running", "completed", "not_assessable", "failed"]),
+  trustClass: z.string().nullable(),
+  rubricResults: z
+    .array(
+      z.strictObject({
+        rubricItemId: z.string(),
+        facet: taskIntentSchema,
+        verdict: z.enum(["covered", "partial", "missing", "contradicted", "not_assessable"]),
+        userFacingReason: z.string(),
+      }),
+    )
+    .max(50),
+});
+export type LearningRunResultAssessmentV2 = z.infer<typeof learningRunResultAssessmentV2Schema>;
+
+/**
+ * 答后揭示（2026-09-18）：run 形成可信结论后，学习者有权看到「这次到底想考什么」
+ * 的完整答案与教学支撑。数据取自冻结的 Target Snapshot（与卡片当前版本解耦），
+ * 并在 learning_exposures_v2 记一笔 answer_reveal —— 与卡片的 exposure-first
+ * 原则一致：答案可以看，但要记账。
+ */
+export const learningRunTargetRevealV2Schema = z.strictObject({
+  version: z.literal(2),
+  runId: z.string().uuid(),
+  snapshotId: z.string().uuid(),
+  objectiveId: z.string().uuid(),
+  objectiveRevision: z.number().int().min(1),
+  cardId: z.string().uuid().nullable(),
+  cardRevision: z.number().int().min(1).nullable(),
+  answerText: z.string().min(1).max(6000),
+  support: z.strictObject({
+    explanation: z.string().max(6000),
+    boundary: z.string().max(3000).optional(),
+    misconception: z.string().max(3000).optional(),
+    workedExample: z.string().max(6000).optional(),
+  }),
+  exposureId: z.string().uuid(),
+  exposedAt: z.string().datetime({ offset: true }),
+});
+export type LearningRunTargetRevealV2 = z.infer<typeof learningRunTargetRevealV2Schema>;
+
 const learningRunResultCoreV2Schema = z.strictObject({
   outcome: learningRunOutcomeSchema,
   demonstratedFacets: z.array(taskIntentSchema),
@@ -229,6 +278,7 @@ const learningRunResultCoreV2Schema = z.strictObject({
   scheduleImpact: learningRunScheduleImpactSchema,
   returnTargetV2: learningRunReturnTargetV2Schema,
   projection: learningRunProjectionSchema.optional(),
+  assessment: learningRunResultAssessmentV2Schema.optional(),
 });
 
 export const learningRunResultV2Schema = z.strictObject({

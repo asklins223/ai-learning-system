@@ -146,7 +146,6 @@
       "import": "./src/db-schema/validation-v2.ts",
       "default": "./src/db-schema/validation-v2.ts"
     },
-
     "./job-payload-contracts": {
       "types": "./src/job-payload-contracts.ts",
       "import": "./src/job-payload-contracts.ts",
@@ -156,6 +155,11 @@
       "types": "./src/card-generation-v2-pipeline/index.ts",
       "import": "./src/card-generation-v2-pipeline/index.ts",
       "default": "./src/card-generation-v2-pipeline/index.ts"
+    },
+    "./companion-agent-contracts": {
+      "types": "./src/companion-agent-contracts.ts",
+      "import": "./src/companion-agent-contracts.ts",
+      "default": "./src/companion-agent-contracts.ts"
     },
     "./companion-bridge-revision": {
       "types": "./src/companion-bridge-revision.ts",
@@ -191,6 +195,11 @@
       "types": "./src/companion-voice-contracts.ts",
       "import": "./src/companion-voice-contracts.ts",
       "default": "./src/companion-voice-contracts.ts"
+    },
+    "./companion-chat-desktop-contracts": {
+      "types": "./src/companion-chat-desktop-contracts.ts",
+      "import": "./src/companion-chat-desktop-contracts.ts",
+      "default": "./src/companion-chat-desktop-contracts.ts"
     },
     "./constants": {
       "types": "./src/constants.ts",

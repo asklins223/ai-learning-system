@@ -377,9 +377,22 @@ export function frontLeakageGate(
  * 可靠判定，保守放行）。
  */
 function frontContainsVerbatimFragment(frontText: string, unitRawText: string): boolean {
+  return frontLeaksAnswerVerbatimV2(frontText, unitRawText);
+}
+
+/**
+ * 泄题机械判定的公开入口：正面文本是否逐字照抄了答案文本。
+ *
+ * 与 frontLeakageGate 同一套压缩规则（小写 + 压缩全部非字母/数字/等号字符），
+ * 供发布侧（卡片激活、正面编辑）复用 —— 生成闸门与发布闸门必须判定一致，
+ * 否则会出现「gate 拦得住、发布放得行」的缝（2026-09-18 复盘：库中 34 张
+ * 已发布卡正面即答案，正是这条缝）。
+ */
+export function frontLeaksAnswerVerbatimV2(frontText: string, answerText: string): boolean {
   const compact = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}=]+/gu, "");
   const front = compact(frontText);
-  const unit = compact(unitRawText);
+  const unit = compact(answerText);
+  if (!front || !unit) return false;
   if (unit.length < 12) return unit.length >= 8 && front.includes(unit);
   for (let i = 0; i + 12 <= unit.length; i++) {
     if (front.includes(unit.slice(i, i + 12))) return true;
@@ -436,7 +449,7 @@ function sortIssues(issues: QualityIssue[]): QualityIssue[] {
   });
 }
 
-function extractAnswerText(answer: CanonicalAnswerV2): string {
+export function extractAnswerText(answer: CanonicalAnswerV2): string {
   switch (answer.kind) {
     case "text": return answer.unit.text;
     case "bullets": return answer.items.map((i) => i.text).join(" ");

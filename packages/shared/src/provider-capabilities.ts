@@ -49,6 +49,14 @@ export interface ChatOptions {
    *  系模型的 enable_thinking）。优先级高于平台配置/env——companion 日常
    *  对话用它换取首 token 速度（陪伴聊天快比准重要）。 */
   disableThinking?: boolean;
+  /**
+   * native tools 定义（2026-09-19 ④-b）。
+   *
+   * 只有流式 chat completion 需要它：带工具的一步也必须能把工具列表发给模型，
+   * 否则模型永远不会返回 tool_calls（与 executeAgentTurn 的 `tools` + `tool_choice`
+   * 同源，形状取自 AgentTurnRequest.tools）。
+   */
+  tools?: AgentTurnRequest["tools"];
 }
 
 /** Chat 调用结果 */

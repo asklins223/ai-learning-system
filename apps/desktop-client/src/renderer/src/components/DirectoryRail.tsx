@@ -508,7 +508,7 @@ export function DirectoryRail({ readOnly = false }: { readonly readOnly?: boolea
     if (surface === "study") return "today";
     if (surface.startsWith("source-")) return "sources";
     if (surface.startsWith("note")) return "notes";
-    if (surface.startsWith("objective") || surface === "card" || surface === "card-generation") return "goals";
+    if (surface.startsWith("objective") || surface === "card-generation") return "goals";
     if (surface === "graph") return "graph";
     if (surface === "review" || surface === "validation") return "review";
     if (surface === "search") return "search";

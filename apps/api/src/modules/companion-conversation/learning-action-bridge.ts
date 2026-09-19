@@ -42,6 +42,8 @@ import {
   confirmMemory,
   deleteMemory,
   getMemory,
+  upsertMemory,
+  type MemoryKindV2,
 } from "./memory-service.ts";
 
 function sanitizeText(value: string, max: number): string {
@@ -1213,6 +1215,51 @@ export async function decideCompanionProposal(args: {
         const deleted = await deleteMemory(tx, scope, memoryId);
         if (!deleted) throw new CompanionConversationError("NOT_FOUND", 404, "memory not found");
         return succeedSyncProposal(tx, args.workspaceId, args.userId, proposal, keyHash, memoryId, null, "记忆已删除");
+      }
+
+      // ── 2026-09-19：auto-set / auto-fill 工具（guided 档提案确认后的执行分支）──
+      // full 档不走这里：worker 侧 requiresConfirmation=false 直接执行
+      // （companion-agent-runtime.executeDirectTool）。两处执行口径保持一致：
+      // 记忆写入统一走 upsertMemory 的"用户明确陈述"路径。
+      if (kind === "save_memory" || kind === "set_pet_activeness") {
+        const actionScope = { workspaceId: args.workspaceId, userId: args.userId };
+        if (kind === "save_memory") {
+          const memoryKind = proposalPayload.memoryKind;
+          const content = proposalPayload.content;
+          if (
+            typeof memoryKind !== "string" ||
+            !(["preference", "goal", "learning_context", "interaction_note", "episodic"] as const).includes(memoryKind as MemoryKindV2) ||
+            typeof content !== "string" || content.length === 0
+          ) {
+            throw new CompanionConversationError("ACTION_STALE", 409, "memory payload is stale");
+          }
+          const saved = await upsertMemory(tx, actionScope, {
+            kind: memoryKind as MemoryKindV2,
+            content: content.slice(0, 200),
+            userStated: true,
+            candidate: false,
+            importance: 0.8,
+            confidence: 0.9,
+            scope: "workspace",
+            sourceType: "user_stated",
+          });
+          return succeedSyncProposal(tx, args.workspaceId, args.userId, proposal, keyHash, saved.memoryItemId, null, "已保存记忆");
+        }
+        const activeness = proposalPayload.activeness;
+        if (activeness !== "quiet" && activeness !== "moderate" && activeness !== "active") {
+          throw new CompanionConversationError("ACTION_STALE", 409, "activeness payload is stale");
+        }
+        const updated = await tx.execute<{ id: string }>(sql`
+          UPDATE pet_profiles
+          SET activeness = ${activeness}, revision = revision + 1, updated_at = now()
+          WHERE workspace_id = ${args.workspaceId}
+            AND user_id = ${args.userId}
+          RETURNING id
+        `);
+        if (updated.length === 0) {
+          throw new CompanionConversationError("NOT_FOUND", 404, "pet profile not found");
+        }
+        return succeedSyncProposal(tx, args.workspaceId, args.userId, proposal, keyHash, null, null, "已更新伴星活跃度");
       }
 
       throw new CompanionConversationError(

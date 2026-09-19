@@ -35,6 +35,8 @@ const DEFAULT_TIMEOUTS: Record<string, number> = {
   // 最重的一个：最多 200 次 embed + 每行 2 条写语句（BATCH_LIMIT=200）。
   // 取 clamp 上限（LEASE_TIMEOUT_MS - 10s），是 lease 约束下能给的唯一选择。
   companion_memory_embedding_rebuild: 110_000,
+  // 念头生成（0227）：素材收集 + 可选 LLM 批量/表达 + embedding 去重，多次外部往返。
+  companion_thought: 110_000,
 };
 
 const GLOBAL_DEFAULT_MS = 90_000;

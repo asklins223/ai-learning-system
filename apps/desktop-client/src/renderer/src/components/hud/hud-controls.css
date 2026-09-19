@@ -6,6 +6,11 @@
  * segmented plate, the ledger dropdown, the slider — are completed here. Every
  * rule is scoped to `.hud-surface` and inherits the HUD tokens, so night and the
  * compact viewport follow without a second set of styles.
+ *
+ * Focus: every control that is a real `<button>` or `<input>` takes the global
+ * ring (`3px solid var(--focus)`, offset 3px) and declares none of its own. Only
+ * the slider track needs one here, because it is a `div[role=slider]` and the
+ * global rule does not reach it.
  */
 
 /* ── Switch ──────────────────────────────────────────────────────────────── */
@@ -15,7 +20,6 @@
   flex: none;
   transition: background-color 180ms var(--hud-ease-out), box-shadow 180ms ease;
 }
-.hud-surface .switch:focus-visible { outline: 3px solid rgba(57, 103, 132, 0.42); outline-offset: 2px; }
 .hud-surface .switch:disabled { opacity: 0.5; cursor: not-allowed; }
 .hud-surface .switch:hover:not(:disabled):not(.on) { background: #c0ac8c; }
 .hud-surface .switch:hover:not(:disabled).on { background: #6c8569; }
@@ -86,7 +90,6 @@
 }
 .hud-surface .hud-segmented button.is-active { color: #43301f; }
 .hud-surface .hud-segmented button svg { width: 13px; height: 13px; flex: none; }
-.hud-surface .hud-segmented button:focus-visible { outline: 3px solid rgba(57, 103, 132, 0.42); outline-offset: 1px; }
 .hud-surface .hud-segmented button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 @media (prefers-reduced-motion: reduce) {
@@ -108,9 +111,6 @@
   cursor: pointer;
 }
 .hud-surface .hud-picker__trigger:disabled { opacity: 0.55; cursor: not-allowed; }
-/* The trigger is a control like the switch and the slider, so it wears the same
-   focus ring instead of the browser default. */
-.hud-surface .hud-picker__trigger:focus-visible { outline: 3px solid rgba(57, 103, 132, 0.42); outline-offset: 2px; }
 
 /* The chip-shaped trigger: the mockup's `.tag` in a command row, still opening
    the same drawn list. */
@@ -161,8 +161,11 @@
 .hud-surface .hud-picker[data-align="end"] .hud-picker__menu { right: 0; }
 .hud-surface .hud-picker[data-align="start"] .hud-picker__menu { left: 0; }
 .hud-surface .hud-picker__menu--up { top: auto; bottom: calc(100% + 6px); transform-origin: bottom center; }
+/* The list itself takes focus while it is open, and the rule above kills the
+   default ring for that programmatic focus — so keyboard users get the global
+   ring back here, stated at this selector's specificity. */
 .hud-surface .hud-picker__menu:focus { outline: none; }
-.hud-surface .hud-picker__menu:focus-visible { outline: 3px solid rgba(57, 103, 132, 0.42); outline-offset: 2px; }
+.hud-surface .hud-picker__menu:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
 /* The menu leaves the way it arrived; the component keeps it mounted for the
    length of this animation, then unmounts it. */
 .hud-surface .hud-picker__menu[data-closing="true"] {
@@ -215,7 +218,8 @@
   cursor: pointer;
   touch-action: none;
 }
-.hud-surface .hud-slider__track:focus-visible { outline: 3px solid rgba(57, 103, 132, 0.42); outline-offset: 3px; border-radius: 12px; }
+/* A `div[role=slider]` is the one control the global ring rule does not reach. */
+.hud-surface .hud-slider__track:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; border-radius: 12px; }
 
 .hud-surface .hud-slider__groove,
 .hud-surface .hud-slider__fill {

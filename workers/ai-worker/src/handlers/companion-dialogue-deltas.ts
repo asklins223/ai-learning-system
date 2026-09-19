@@ -78,7 +78,11 @@ export async function writeBatchedDeltas(args: BatchedDeltasArgs): Promise<boole
       },
     );
     if (!written) return false;
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // 节流只发生在批次之间：末批之后的 50ms 不服务任何目的，却直接压在
+    // 终态 assistant message 之前——客户端因此晚 50ms 看到回复。
+    if (i + DELTAS_PER_TX < streamDeltas.length) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
   }
   return true;
 }

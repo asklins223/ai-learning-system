@@ -77,12 +77,17 @@ export function HudSegmented<T extends string>({
   onChange,
   label,
   compact = false,
+  disabled = false,
 }: {
   readonly value: T;
   readonly options: ReadonlyArray<SegmentedOption<T>>;
   readonly onChange: (next: T) => void;
   readonly label: string;
   readonly compact?: boolean;
+  /** A write that is already in flight: the plate stays where it is and every
+   *  option is taken out of the tab order instead of accepting a click the
+   *  handler would drop. */
+  readonly disabled?: boolean;
 }) {
   const index = Math.max(0, options.findIndex(([optionValue]) => optionValue === value));
   const buttonRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -110,6 +115,8 @@ export function HudSegmented<T extends string>({
             type="button"
             role="radio"
             aria-checked={active}
+            aria-disabled={disabled || undefined}
+            disabled={disabled}
             tabIndex={active ? 0 : -1}
             className={active ? "is-active" : undefined}
             onClick={() => onChange(optionValue)}

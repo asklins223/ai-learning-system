@@ -44,7 +44,6 @@ html, body, #root {
 body {
   color: var(--ink);
   background: #211915;
-  user-select: none;
 }
 
 /* The mockup's own reset is one rule — `button, input, textarea { font: inherit;
@@ -837,11 +836,14 @@ button:disabled {
 }
 
 /* 唯一形态下的失败态说明（2026-09-16 裁决：不回退替身形象，就地说明）。
-   与 whisper 同一纸面语言，但不参与 GSAP 揭示、不遮挡任务内容。 */
+   与 whisper 同一纸面语言，但不参与 GSAP 揭示、不遮挡任务内容。
+   定位（2026-09-19 视觉审计修正）：原先 `right:76%; bottom:15%` 会落在任务页
+   纸面上盖住日志行/列表行。纸面底缘离窗口底 62px（`.content` 的 bottom），
+   把芯片放进这条房间背景条里（右下角），任何页面都不再压正文。 */
 .companion-unavailable-notice, .companion-restore-chip {
   position: absolute;
-  right: 76%;
-  bottom: 15%;
+  right: 20px;
+  bottom: 8px;
   display: flex;
   max-width: min(300px, 32vw);
   align-items: center;
@@ -2040,9 +2042,9 @@ button:disabled {
   inset: 0;
 }
 
-.desktop-app[data-surface-open="true"] .companion-presence[data-surface="review"] {
-  display: none;
-}
+/* （复习页伴星的无条件 display:none 已删：它是旧 review-ledger 时代的残留，
+   会把 2021 行"只在 ≤900px/≤660px 小窗隐藏"的新规则整个压死。队列页的伴星座位
+   由 hud-pages.ts 注册表声明（seat left + starter 文案），正常尺寸下应当在场。 */
 
 .task-surface--review {
   overflow: hidden;
@@ -2869,94 +2871,6 @@ html[data-surface-calibration-base="false"] :is(.room-depth-layer, [data-scene-s
     inset: auto;
     max-width: 100%;
     margin: 16px auto 0;
-  }
-}
-
-/* Approved task-surface companion seat. The room keeps its interactive
- * companion panel; task pages receive a quiet, fixed half-body Mao frame that
- * never covers the reading or editing field and never exposes drag affordances.
- *
- * The seat itself belongs to the page registry, which publishes `comp-left` on
- * `.desktop-app`. This block only covers the frame before the companion runtime
- * takes over, so its numbers must match `placeLegacyAnchor` exactly: one inset
- * per axis for both seats, measured from the window on the right and from the
- * 80px directory-rail column on the left.
- */
-.desktop-app[data-surface-open="true"] .companion-presence[data-surface]:not([data-surface="validation"]) {
-  display: block;
-  z-index: 23;
-  pointer-events: none;
-}
-
-.desktop-app[data-surface-open="true"] .companion-presence[data-surface="validation"] {
-  display: none;
-}
-
-.desktop-app[data-surface-open="true"] .companion-presence[data-surface]:not([data-surface="validation"]) .companion-scene-anchor {
-  top: auto;
-  left: auto;
-  right: clamp(12px, 1.5vw, 22px);
-  bottom: clamp(8px, 1.5vh, 16px);
-  width: clamp(260px, 21vw, 330px);
-  height: clamp(400px, 54vh, 540px);
-  pointer-events: none;
-  touch-action: none;
-}
-
-.desktop-app[data-surface-open="true"].comp-left .companion-presence[data-surface]:not([data-surface="validation"]) .companion-scene-anchor {
-  right: auto;
-  left: calc(80px + clamp(12px, 1.5vw, 22px));
-}
-
-/* Task-page companions are a fixed, display-only seat: the page registry owns
- * the side, the character never exposes a drag affordance, and the pointer
- * layer stays off so the seat can never capture clicks meant for the paper. */
-.desktop-app[data-surface-open="true"] .companion-presence[data-surface]:not([data-surface="validation"]) .companion-visual-shell {
-  pointer-events: none;
-}
-
-.desktop-app[data-surface-open="true"] .companion-presence[data-surface]:not([data-surface="validation"]) .companion-invite-label {
-  display: none;
-}
-
-.companion-surface-label {
-  position: absolute;
-  right: 8%;
-  bottom: 5%;
-  z-index: 3;
-  display: inline-flex;
-  align-items: center;
-  min-height: 24px;
-  padding: 4px 10px;
-  border: 1px solid rgba(255, 248, 233, 0.38);
-  border-radius: 999px;
-  background: rgba(48, 41, 34, 0.72);
-  color: rgba(255, 248, 233, 0.88);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  box-shadow: 0 8px 18px rgba(35, 21, 13, 0.2);
-  backdrop-filter: blur(12px);
-  pointer-events: none;
-}
-
-@media (max-width: 900px) {
-  .desktop-app[data-surface-open="true"] .companion-presence[data-surface]:not([data-surface="validation"]) .companion-scene-anchor {
-    right: 12px;
-    bottom: 12px;
-    width: 200px;
-    height: 320px;
-  }
-
-  .desktop-app[data-surface-open="true"].comp-left .companion-presence[data-surface]:not([data-surface="validation"]) .companion-scene-anchor {
-    left: 52px;
-  }
-
-  .companion-surface-label {
-    right: 0;
-    bottom: 0;
-    transform: scale(0.92);
-    transform-origin: right bottom;
   }
 }
 

@@ -16,6 +16,8 @@ import { randomUUID } from "node:crypto";
 import {
   executeAuthor,
   DeterministicAuthoringProvider,
+  extractAnswerText,
+  frontLeaksAnswerVerbatimV2,
 } from "@ailearn/shared/card-generation-v2-pipeline";
 import {
   deterministicGroundingPrecheck,
@@ -154,6 +156,19 @@ describe("C2: Author Service", () => {
     assert.equal(candidate.planObjectiveLocalId, "obj-1");
     assert.equal(candidate.objective.canonicalAnswer.kind, "text");
     assert.equal(candidate.presentation.strategy, "recall");
+    // 2026-09-18：确定性 fallback 不再把目标陈述整句贴进正面/摘要（「题面即答案」
+    // 的退化形态，库中 34 张已发布卡即此形态）。注意可达的不变量边界：当陈述本身
+    // 就是答案时，从陈述派生的概念标题仍可能是答案的逐字片段 —— 「无模型就出不了
+    // 正式卡」是本质，不是缺陷；发布侧 frontLeaksAnswerVerbatimV2 后闸兜底
+    // （拦下即不出卡，不出假卡）。
+    const statement = "定义：分布式共识是指多个节点对某个值达成一致的协议。";
+    assert.equal(candidate.objective.objectiveStatement, statement);
+    assert.notEqual(candidate.presentation.front.cue, statement.slice(0, 200));
+    assert.notEqual(candidate.presentation.front.prompt, `请回答：${statement}`);
+    assert.notEqual(candidate.objective.publicSummary, statement.slice(0, 200));
+    // 兜底闸必须拦得住退化形态：正面整句照抄答案时判定为泄漏。
+    const answerText = extractAnswerText(candidate.objective.canonicalAnswer);
+    assert.equal(frontLeaksAnswerVerbatimV2(`请回答：${answerText}`, answerText), true);
   });
 
   test("returns empty for no_cards_recommended plan", async () => {

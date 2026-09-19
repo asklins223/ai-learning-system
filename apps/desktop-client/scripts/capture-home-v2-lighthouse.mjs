@@ -14,6 +14,7 @@ const ignoredElectron = resolve(appRoot, "node_modules/.ignored/electron/dist/El
 const workspaceElectron = resolve(appRoot, "../desktop/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron");
 const executablePath = [installedElectron, ignoredElectron, workspaceElectron].find(existsSync);
 const credentialsAvailable = Boolean(process.env.OWNER_EMAIL?.trim() && process.env.OWNER_PASSWORD);
+const companionOnly = process.env.CAPTURE_COMPANION_ONLY === "1";
 const fixturePairingKeyId = "home-v2-capture-key";
 const fixturePairingSecret = Buffer.alloc(32, 17);
 const fixtureSchemaRevision = "home-v2-capture-domain-v1";
@@ -431,6 +432,106 @@ function assertWideContract(contract, expectedTime) {
   ) throw new Error(`Home V2 wide runtime contract failed: ${JSON.stringify(contract)}`);
 }
 
+async function captureCompanionInteraction(page, app) {
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.focus());
+  await page.bringToFront();
+  await page.waitForFunction(() => document.querySelector(".companion-presence")?.getAttribute("data-window-state") === "visible");
+  // 轻点角色只打开文字气泡；语音、文字、更多始终是身边三条独立入口。
+  await page.locator(".companion-presence .window-live2d > button").click();
+  await page.locator(".companion-hud__composer").waitFor({ state: "visible" });
+  const contract = await page.evaluate(() => {
+    const hud = document.querySelector(".companion-hud");
+    const composer = document.querySelector(".companion-hud__composer");
+    const actor = document.querySelector(".companion-visual-shell");
+    const controls = [...document.querySelectorAll(".companion-hud__controls > button")];
+    const labels = controls.map((button) => button.textContent?.trim() || button.getAttribute("aria-label"));
+    const input = composer?.querySelector("textarea");
+    const composerRect = composer?.getBoundingClientRect();
+    const actorRect = actor?.getBoundingClientRect();
+    return {
+      engaged: document.querySelector(".companion-presence")?.getAttribute("data-engaged") === "true",
+      mode: hud?.getAttribute("data-mode") ?? null,
+      composerVisible: composer instanceof HTMLElement && composer.getClientRects().length === 1,
+      inputVisible: input instanceof HTMLElement && input.getClientRects().length === 1,
+      controlCount: controls.length,
+      labels,
+      overlapsActor: Boolean(composerRect && actorRect
+        && composerRect.left < actorRect.right && composerRect.right > actorRect.left
+        && composerRect.top < actorRect.bottom && composerRect.bottom > actorRect.top),
+    };
+  });
+  if (
+    !contract.engaged
+    || contract.mode !== "conversation"
+    || !contract.composerVisible
+    || !contract.inputVisible
+    || contract.controlCount !== 3
+    || !contract.labels.includes("语音")
+    || !contract.labels.includes("文字")
+    || !contract.labels.includes("更多")
+    || contract.overlapsActor
+  ) {
+    throw new Error(`Home V2 companion interaction did not expose real controls: ${JSON.stringify(contract)}`);
+  }
+  await writeFile(resolve(reviewRoot, "home-v2-day-companion-interaction.json"), `${JSON.stringify(contract, null, 2)}\n`);
+  await page.screenshot({ path: resolve(reviewRoot, "home-v2-day-companion-interaction.png") });
+
+  await page.getByRole("button", { name: "更多功能", exact: true }).click();
+  await page.locator(".companion-hud__more").waitFor({ state: "visible" });
+  await page.getByRole("button", { name: /当前页快捷操作/ }).click();
+  const actionState = await page.evaluate(() => {
+    const presence = document.querySelector(".companion-presence");
+    const panel = document.querySelector(".companion-hud__more");
+    const actor = document.querySelector(".companion-visual-shell");
+    const rect = panel?.getBoundingClientRect();
+    const actorRect = actor?.getBoundingClientRect();
+    const overlapsActor = Boolean(rect && actorRect
+      && rect.left < actorRect.right && rect.right > actorRect.left
+      && rect.top < actorRect.bottom && rect.bottom > actorRect.top);
+    return {
+      visible: panel instanceof HTMLElement && panel.getClientRects().length === 1,
+      itemCount: panel?.querySelectorAll(".companion-hud__action-list > button").length ?? 0,
+      rect: rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : null,
+      overlapsActor,
+      presencePaused: presence?.getAttribute("data-presence-paused") ?? null,
+      externalModal: presence?.getAttribute("data-external-modal") ?? null,
+      homeModal: presence?.getAttribute("data-home-modal") ?? null,
+      windowState: presence?.getAttribute("data-window-state") ?? null,
+      policyMode: presence?.getAttribute("data-policy-mode") ?? null,
+    };
+  });
+  if (!actionState.visible || actionState.itemCount !== 3 || actionState.overlapsActor) {
+    throw new Error(`Home V2 companion quick action contract failed: ${JSON.stringify(actionState)}`);
+  }
+  await writeFile(resolve(reviewRoot, "home-v2-day-companion-functions.json"), `${JSON.stringify(actionState, null, 2)}\n`);
+  await page.screenshot({ path: resolve(reviewRoot, "home-v2-day-companion-functions.png") });
+  await page.keyboard.press("Escape");
+  await page.locator(".companion-hud__more").waitFor({ state: "detached" });
+
+  await page.getByRole("button", { name: "更多功能", exact: true }).click();
+  await page.getByRole("button", { name: /历史会话/ }).click();
+  await page.locator(".companion-history").waitFor({ state: "visible" });
+  const historyState = await page.evaluate(() => {
+    const drawer = document.querySelector(".companion-history");
+    const rect = drawer?.getBoundingClientRect();
+    return {
+      visible: drawer instanceof HTMLElement && drawer.getClientRects().length === 1,
+      composerVisible: document.querySelector(".companion-hud__composer") instanceof HTMLElement,
+      rect: rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : null,
+      viewport: { width: innerWidth, height: innerHeight },
+    };
+  });
+  if (!historyState.visible || historyState.composerVisible || !historyState.rect || historyState.rect.height < historyState.viewport.height * 0.9) {
+    throw new Error(`Home V2 companion history drawer contract failed: ${JSON.stringify(historyState)}`);
+  }
+  await writeFile(resolve(reviewRoot, "home-v2-day-companion-history.json"), `${JSON.stringify(historyState, null, 2)}\n`);
+  await page.screenshot({ path: resolve(reviewRoot, "home-v2-day-companion-history.png") });
+  await page.keyboard.press("Escape");
+  await page.locator(".companion-history").waitFor({ state: "detached" });
+  await page.getByRole("button", { name: "关闭更多功能" }).click();
+  await page.waitForFunction(() => document.querySelector(".companion-presence")?.getAttribute("data-engaged") !== "true");
+}
+
 async function captureTime(name, hour, minute, captureMatrix = false) {
   const userDataDir = await mkdtemp(resolve(tmpdir(), `ailearn-home-v2-${name}-`));
   const errors = [];
@@ -486,11 +587,18 @@ async function captureTime(name, hour, minute, captureMatrix = false) {
     await page.waitForTimeout(450);
 
     const primaryContract = await readContract(page);
-    assertWideContract(primaryContract, name);
+    if (!companionOnly) assertWideContract(primaryContract, name);
     await writeFile(resolve(reviewRoot, `home-v2-${name}-1672x941.json`), `${JSON.stringify(primaryContract, null, 2)}\n`);
     await page.screenshot({ path: resolve(reviewRoot, `home-v2-${name}-1672x941.png`) });
 
+    if (companionOnly) {
+      await captureCompanionInteraction(page, electronApp);
+      return;
+    }
+
     if (captureMatrix) {
+      await captureCompanionInteraction(page, electronApp);
+
       await page.locator(".home-v2-hud__trigger").click();
       await page.waitForTimeout(420);
       const expandedHudContract = await readContract(page);
@@ -698,9 +806,13 @@ async function captureTime(name, hour, minute, captureMatrix = false) {
 }
 
 try {
-  await captureTime("day", 10, 0, true);
-  await captureTime("dusk", 18, 30);
-  await captureTime("night", 23, 0);
+  if (companionOnly) {
+    await captureTime("day", 10, 0);
+  } else {
+    await captureTime("day", 10, 0, true);
+    await captureTime("dusk", 18, 30);
+    await captureTime("night", 23, 0);
+  }
   await writeFile(resolve(reviewRoot, "capture-fixture.json"), `${JSON.stringify({
     schemaVersion: 1,
     evidenceKind: "visual-runtime-fixture",

@@ -1,38 +1,38 @@
 /* Ported from the mature Web Understanding Universe, then re-themed onto the
    app's own visual world: the sky keeps the spec'd deep navy (DESIGN.md:
-   “理解星图使用深海军蓝背景 #172a3d”) while every plate, dock and label uses
-   the night-paper palette (--ink #eadbc5, warm lines, physical shadows) so the
-   star map reads as a page of the same study, not a cold glass dashboard. */
+   “理解星图使用深海军蓝背景 #172a3d”), its stars reuse the HUD cyan / gold /
+   mint / clay roles, and every instrument plate inherits the same cream paper,
+   warm ink and physical shadows as the other task surfaces. */
 .hud-surface .universe-page {
-  --color-text: #eadbc5;
-  --color-paper: #eadbc5;
-  --color-canvas-deep: #0e1b2a;
+  --color-text: #fff3df;
+  --color-paper: var(--hud-cream, #fff2cf);
   /* 浅青 / 暖金 / 陶红 — the state triad DESIGN.md reserves for the star map. */
-  --color-evidence: #93cfc9;
-  --color-evidence-soft: #1c3a3c;
-  --color-warning: #e8b563;
-  --color-highlight: #ffe3a6;
-  --color-running: #7ec8bd;
-  --color-danger: #d96d4f;
-  --color-success: #94ba79;
-  --color-text-tertiary: #9a8a75;
-  --color-action: #ef8b4c;
-  --color-on-action: #fff7e8;
-  --universe-void: #172a3d;
-  --universe-void-deep: #0e1b2a;
+  --color-evidence: var(--hud-star, #79cedc);
+  --color-evidence-soft: #183c4a;
+  --color-warning: var(--hud-gold, #e9c66f);
+  --color-highlight: #ffe4a3;
+  --color-running: #8fc7a7;
+  --color-danger: #df7657;
+  --color-success: #9fc28a;
+  --color-text-tertiary: #a89782;
+  --color-action: var(--hud-peach, #e89568);
+  --color-on-action: #3e2d22;
+  --universe-void-deep: #081827;
+  --universe-image-dimmer: rgba(3, 12, 24, 0.18);
   --universe-panel: #2b251d;
   --universe-glass: rgba(38, 32, 25, 0.9);
   --universe-glass-strong: rgba(38, 32, 25, 0.97);
   --universe-surface: rgba(38, 32, 25, 0.93);
   --universe-surface-raised: #383126;
-  --universe-ink: #eadbc5;
-  --universe-muted: rgba(234, 219, 197, 0.86);
-  --universe-faint: rgba(234, 219, 197, 0.66);
+  --universe-ink: #fff3df;
+  --universe-muted: rgba(214, 235, 235, 0.88);
+  --universe-faint: rgba(190, 216, 220, 0.76);
   /* Orbits, evidence tracks, cluster envelopes and cluster rings all read from
-     these. They were so faint the map looked like grey wireframe. */
-  --universe-line: rgba(244, 223, 192, 0.24);
-  --universe-line-strong: rgba(244, 223, 192, 0.42);
-  --universe-hairline: rgba(244, 223, 192, 0.14);
+     these. The cool tint keeps structural lines inside the observatory palette
+     instead of laying a beige-grey veil across the navy field. */
+  --universe-line: rgba(121, 206, 220, 0.2);
+  --universe-line-strong: rgba(121, 206, 220, 0.36);
+  --universe-hairline: rgba(121, 206, 220, 0.13);
   --universe-shadow: rgba(8, 5, 2, 0.6);
   --radius-pill: 999px;
   --ease-standard: cubic-bezier(0.22, 1, 0.36, 1);
@@ -100,6 +100,12 @@
   --universe-bar-left: calc(var(--universe-shell-left) + var(--universe-seat-gutter));
 }
 
+/* 伴星缺席（.companion-absent，companion 运行时发布）时左座位不再占位：
+   底部仪表面板退回 shell 左缘，与全局版心的动态化（hud-surface.css）同一机制。 */
+.hud-surface.page-19.companion-absent .universe-page {
+  --universe-seat-gutter: 0px;
+}
+
 .hud-surface .universe-page .universe-canvas-root {
   touch-action: none;
 }
@@ -115,37 +121,11 @@
 .universe-page {
   --universe-motion-feedback: 90ms;
   --universe-motion-panel: 150ms;
-  /* Below 1 the canvas sky lets the shell's observatory plate (the same
-     background the companion center uses) glow through. Keep it high: the plate
-     is a lit room with a photographed seascape in it, so at 0.78 the horizon,
-     the reef and the lighthouse were plainly legible under the star field —
-     a photograph competing with the map, which is what read as "out of focus".
-     0.9 leaves the plate as a warm glow with no legible structure, and puts the
-     field back on the design's own 深海军蓝 #172a3d. */
-  --universe-sky-alpha: 0.9;
-  --universe-space-top: var(--universe-void);
-  --universe-space-bottom: var(--universe-void-deep);
-  --universe-nebula-a: color-mix(in srgb, var(--color-evidence) 7%, transparent);
-  /* Two nebulae, and only two: the sky used to stack six soft radial gradients
-     (two here, two on `.universe-page`, two on `.universe-atmosphere`) at six
-     different centres. Measured on the bare canvas, that put the low-frequency
-     peak 30 luminance levels above the field median — a bright, directionless
-     dome over the whole map, which is what read as fog. One cool glow anchored
-     where the room's own light falls, plus a barely-there warm counterweight,
-     holds the sky at ~13 levels and reads as depth instead of haze. */
-  /* Kept low: a warm gold tint over the navy lifts red and green together and
-     collapses the sky's blue chroma, which is what read as "washed out grey". */
-  --universe-nebula-b: color-mix(in srgb, var(--color-warning) 4%, transparent);
-  /* The halo painted behind each knowledge cluster reads from these. It is the
-     same three colours as the sky, but a different job: the halo is local to
-     the graph, already scaled by its own draw alpha, and is what makes a
-     weakly-connected component look like a galaxy. Keep it at full strength
-     even when the sky nebulae are damped down. */
-  --universe-envelope-a: color-mix(in srgb, var(--color-evidence) 18%, transparent);
-  --universe-envelope-b: color-mix(in srgb, var(--color-warning) 10%, transparent);
-  /* Star dust is drawn in bulk, so a warm cream tint desaturates the whole sky.
-     Cool, pale point light keeps the field blue. */
-  --universe-dust: #cfe2f2;
+  /* The page host already owns the registered observatory-night image. The
+     canvas stays transparent and paints only graph content; these two colours
+     belong to local cluster envelopes, not to another page-sized sky layer. */
+  --universe-envelope-a: color-mix(in srgb, var(--color-evidence) 22%, transparent);
+  --universe-envelope-b: color-mix(in srgb, var(--color-warning) 12%, transparent);
   --universe-label: var(--universe-ink);
   --universe-label-muted: var(--universe-muted);
   --universe-label-backdrop: color-mix(in srgb, var(--universe-void-deep) 94%, transparent);
@@ -173,11 +153,7 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  /* No opaque base here: the night gradient is painted by the canvas at
-     --universe-sky-alpha, and the shell's observatory room plate shows
-     through beneath it. This layer paints nothing of its own — the two
-     radial tints that used to sit here duplicated the canvas nebulae at
-     (18%,10%) and (86%,78%), adding two more soft glows to the pile. */
+  /* The task surface's observatory image is the only page background. */
   background: none;
   color: var(--universe-ink);
   font-family: var(--font-ui);
@@ -189,17 +165,17 @@
   inset: 0;
   contain: strict;
   overflow: hidden;
-  /* One job only: frame the map. The two tints that used to live here were a
-     third and fourth copy of the canvas nebulae; the star field needs edges,
-     not more glow. */
-  background: none;
+  /* A flat exposure correction keeps labels readable without repainting the
+     image into a gradient or hiding its lighthouse, sea and Milky Way. */
+  background: var(--universe-image-dimmer);
   pointer-events: none;
 }
 
 .universe-atmosphere::after {
   position: absolute;
   inset: 0;
-  background: radial-gradient(ellipse at center, transparent 44%, color-mix(in srgb, var(--universe-void-deep) 58%, transparent) 100%);
+  background: none;
+  box-shadow: inset 0 0 120px rgba(0, 8, 20, 0.28);
   content: "";
 }
 
@@ -239,7 +215,7 @@
   flex: 0 0 auto;
   width: min(500px, 100%);
   min-width: 0;
-  height: 48px;
+  height: 52px;
   align-items: center;
   gap: 10px;
   border: 1px solid var(--universe-line);
@@ -310,9 +286,9 @@
 
 .universe-search-clear {
   display: grid;
-  width: 32px;
-  height: 32px;
-  flex: 0 0 32px;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
   place-items: center;
   border: 0;
   border-radius: 50%;
@@ -474,14 +450,14 @@
    The state filter used to be the lower-left plate of the bottom grid, which
    put the one control that decides *what the map is showing* at the opposite
    corner from the search that decides what is highlighted. It now rides in the
-   top row, right of the search plate, and is drawn as a peer of it: same 48px
+   top row, right of the search plate, and is drawn as a peer of it: same 52px
    plate height, so the two share one baseline. */
 
 .universe-filter-dock {
   display: flex;
   flex: 0 0 auto;
   min-width: 0;
-  height: 48px;
+  height: 52px;
   align-items: center;
   gap: 3px;
   border: 1px solid var(--universe-line);
@@ -536,7 +512,7 @@
   display: inline-grid;
   grid-template-columns: auto auto;
   min-width: 0;
-  height: 34px;
+  height: 42px;
   border: 0;
   border-radius: var(--radius-sm);
   padding: 0 9px;
@@ -585,7 +561,7 @@
 
 .universe-layer-toggle {
   display: inline-flex;
-  min-height: 38px;
+  min-height: 42px;
   align-items: center;
   gap: 6px;
   border: 1px solid transparent;
@@ -807,8 +783,8 @@
 
 .universe-canvas-control {
   display: grid;
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   place-items: center;
   border: 0;
   border-left: 1px solid var(--universe-line);
@@ -832,7 +808,7 @@
    class, so its two characters were set at 16px in a 40px box while `适配`
    beside it sat at 11px in 52px. */
 .universe-canvas-control-label {
-  width: 52px;
+  width: 56px;
   font-size: 11px;
 }
 
@@ -848,8 +824,8 @@
 
 .universe-canvas-readout {
   display: grid;
-  min-width: 54px;
-  height: 40px;
+  min-width: 56px;
+  height: 44px;
   place-items: center;
   border-left: 1px solid var(--universe-line);
   color: var(--universe-faint);
@@ -965,9 +941,9 @@
 
 .universe-detail-head > button {
   display: grid;
-  width: 40px;
-  height: 40px;
-  flex: 0 0 40px;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
   place-items: center;
   border: 1px solid transparent;
   border-radius: 50%;
@@ -1061,23 +1037,37 @@
 }
 
 .universe-detail-timing {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 12px;
-  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(76px, 1fr));
+  gap: 10px;
+  margin: 18px 0 0;
+  border-block: 1px solid var(--universe-hairline);
+  padding: 12px 0;
+}
+
+.universe-detail-timing > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.universe-detail-timing :is(dt, dd) {
+  margin: 0;
+}
+
+.universe-detail-timing dt {
   color: var(--universe-faint);
-  font-size: 10.5px;
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
 }
 
-.universe-detail-timing > span {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-
-.universe-detail-timing strong {
-  color: var(--universe-muted);
+.universe-detail-timing dd {
+  overflow: hidden;
+  color: var(--universe-ink);
+  font-size: 11.5px;
   font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .universe-detail-relations {
@@ -1213,7 +1203,7 @@
     transform var(--universe-motion-feedback) var(--ease-standard);
 }
 
-.universe-detail-actions > a,
+.universe-detail-actions > .is-primary,
 .universe-detail-actions > :first-child:last-child {
   border-color: var(--color-action);
   background: var(--color-action);
@@ -1225,7 +1215,7 @@
   color: var(--universe-ink);
 }
 
-.universe-detail-actions > a:hover,
+.universe-detail-actions > .is-primary:hover,
 .universe-detail-actions > :first-child:last-child:hover {
   border-color: var(--color-action-hover);
   background: var(--color-action-hover);
@@ -1374,7 +1364,7 @@
 .universe-detail-head > button:focus-visible,
 .universe-detail-actions > :is(button, a):focus-visible,
 .universe-status-card > :is(button, a):focus-visible {
-  outline: 2px solid var(--color-focus-ring);
+  outline: 3px solid var(--color-focus-ring);
   outline-offset: 2px;
 }
 
@@ -1421,10 +1411,20 @@
     font-size: 10px;
   }
 
-  /* The row now shares its line with the island, so it also has to give the
-     island back its width while the detail panel is open. */
+  /* The drawer replaces the room-control island's right-hand lane rather than
+     adding another full 384px reservation to it. Reserving both made the HUD
+     only 132px wide at 1280px: search and filters wrapped onto the title card.
+     Keep a 12px gap before the 370px drawer, then let the search absorb the
+     remaining width so the entire instrument row stays on one line. */
   .universe-page[data-detail-open="true"] .universe-top-hud {
-    right: calc(var(--universe-shell-right, 22px) + 302px + 384px);
+    right: 396px;
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+  }
+
+  .universe-page[data-detail-open="true"] .universe-search-shell {
+    min-width: 0;
+    flex-basis: 160px;
   }
 }
 
@@ -1695,15 +1695,6 @@
     padding: 18px;
   }
 
-  .universe-detail-metrics {
-    grid-template-columns: 70px minmax(0, 1fr);
-  }
-
-  .universe-detail-ring {
-    width: 58px;
-    height: 58px;
-  }
-
   .universe-status-overlay {
     padding: 88px 14px calc(var(--mobile-nav-inset) + 60px);
   }
@@ -1834,14 +1825,35 @@
  */
 
 @media (min-width: 640px) and (max-width: 760px) {
+  .hud-surface.page-19 .universe-page {
+    --universe-shell-top: 8px;
+    --universe-top-lane-left: 10px;
+  }
+
+  /* At 200% system scaling the shell has already collapsed to its compact
+     720×405 composition. Keep search and status on one top instrument row;
+     stacking them in the middle of the canvas left barely one node-height for
+     the actual map. */
+  .universe-top-hud {
+    right: 10px;
+    left: 10px;
+    flex-wrap: nowrap;
+    gap: 8px;
+  }
+
+  .universe-search-shell {
+    width: auto;
+    min-width: 180px;
+    max-width: none;
+    flex: 1 1 260px;
+  }
+
   .universe-legend {
     display: none;
   }
 
   .universe-layer-dock {
-    /* Back on the lower baseline now that the state filter has left the bottom
-       strip for the top row. */
-    right: calc(var(--universe-shell-right, 22px) + 58px);
+    right: var(--universe-shell-right, 22px);
     bottom: 10px;
     left: 10px;
     max-width: none;
@@ -1855,51 +1867,42 @@
 
   .universe-layer-toggle {
     flex: 0 0 auto;
+    gap: 4px;
+    padding-right: 6px;
+    padding-left: 6px;
+    font-size: 9.5px;
   }
 
   .universe-layer-readout {
     display: none;
   }
 
-  /* This band stacks the state filter under the search, so the band ends at
-     in-page 214 and the note clears it at 222 like the rail band — the top band
-     is positioned in page coordinates, so the compact shell's 42px page inset
-     does not move it. (It used to ask for 272px, which put the note's line
-     straight on the layer dock: the dock starts at 271 here.)
-
-     It joins the top row's own lane rather than the shell gutter: the companion
-     holds the left seat at this width too, and her box ends at in-page 223, so
-     the shell gutter parked the note 127px into her. The right reserve is the
-     58px the camera strip and the layer dock already step past. */
   .universe-data-note {
-    top: 222px;
-    left: var(--universe-top-lane-left, 230px);
-    max-width: calc(100% - var(--universe-top-lane-left, 230px) - 80px);
+    top: 68px;
+    left: 210px;
+    max-width: calc(100% - 430px);
   }
 
-  /* The top row has no room for the filter beside the search at this width, so
-     the plate takes the whole second line and its chips go edge to edge — the
-     same four-column strip the phone band draws. */
   .universe-filter-dock {
-    display: grid;
-    width: 100%;
-    height: auto;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    display: flex;
+    width: auto;
+    height: 52px;
+    flex: 0 0 auto;
     border-radius: 4px 16px 4px 4px;
     gap: 3px;
     padding: 4px;
   }
 
   .universe-filter {
-    width: 100%;
+    width: auto;
     min-width: 0;
-    grid-template-columns: minmax(0, auto) auto;
+    grid-template-columns: auto auto;
     justify-content: center;
-    height: auto;
+    height: 42px;
     min-height: 42px;
-    gap: 5px;
-    padding: 0 6px;
-    font-size: 10.5px;
+    gap: 4px;
+    padding: 0 5px;
+    font-size: 9.5px;
   }
 
   .universe-filter > span {
@@ -1910,24 +1913,19 @@
   }
 
   /* The companion stands in front of the sky on page 19; in the compact shell
-     her seat is narrower than the 340px desktop gutter, so the bottom docks
-     clear her at 250px instead.
-
-     The right strip is one column at every size: the zoom stack owns it, and
-     the strip's 58px (48px plate + 10px column gap) is what the layer dock
-     steps past so the two plates in the same strip keep one right edge per
-     column. Before this the rows ran to `right: 10px` while the top row used
-     the 22px gutter, and two plates in the same strip claimed two right
-     edges. */
+     her seat and action rail end just before this 250px inset. */
   .hud-surface.page-19.comp-left .universe-layer-dock {
     left: 250px;
-    right: calc(var(--universe-shell-right, 22px) + 58px);
+    right: var(--universe-shell-right, 22px);
   }
 
-  /* The zoom stack is the right column of the shelf in this band: it shares the
-     lower row's baseline with the layer dock. Its readout steps aside — it only
-     restates the zoom the map already draws, and the 42px it costs is what
-     keeps the stack inside its column at the 720px floor. */
+  /* 伴星缺席时同一断点退回基础 left:10px——座位不再占位。 */
+  .hud-surface.page-19.comp-left.companion-absent .universe-layer-dock {
+    left: 10px;
+  }
+
+  /* Above the minimum-height breakpoint this remains a compact right column.
+     Its readout steps aside because it only restates the visible zoom. */
   .universe-canvas-controls {
     top: auto;
     right: var(--universe-shell-right, 22px);
@@ -1938,9 +1936,9 @@
   }
 
   .universe-canvas-control {
-    width: 40px;
-    min-width: 40px;
-    height: 40px;
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
     border-top: 1px solid var(--universe-line);
     border-left: 0;
   }
@@ -1967,24 +1965,27 @@
     bottom: 10px;
     width: min(340px, calc(100% - 20px));
   }
+
+  /* The generic shell puts the return pill inside the companion's compact
+     feet. Page 19 has a free lower-right corner once the camera row moves up. */
+  .hud-surface.page-19.comp-left .return-home,
+  .hud-surface.nav-collapsed.page-19.comp-left .return-home {
+    top: auto;
+    right: 10px;
+    bottom: 10px;
+    left: auto;
+  }
 }
 
 /* ── The shell's floor: 720x405 ──────────────────────────────────
-   At the shell's minimum height the page box is 335px tall. The two-line top
-   band ends at in-page 214 and the bottom shelf starts at 271, which leaves a
-   57px strip — and the camera stack is a 166px column. Pinned to the shelf it
-   reached up to 159 and painted straight over the state filter's own line
-   (measured 46x55px at 720x405, which only appeared once the filter moved up
-   here). Turning the column into a row in that strip is what keeps every
-   control at its 40px target and the four-up filter strip at its full width:
-   shrinking the controls or the strip's chips to fit the column's height was
-   the alternative, and both cost more than the camera stack's shape. */
+   Turn the camera controls into a row above the lower layer shelf. This keeps
+   every control at 44px without taking a full-height column from the map. */
 
 @media (min-width: 640px) and (max-width: 760px) and (max-height: 460px) {
   .universe-canvas-controls {
-    top: 222px;
+    top: auto;
     right: var(--universe-shell-right, 22px);
-    bottom: auto;
+    bottom: 67px;
     flex-direction: row;
   }
 
@@ -2000,9 +2001,7 @@
   }
 
   .universe-data-note {
-    /* Shares the strip with the camera row: four 40px controls, their three
-       dividers and the 12px gap between the two plates. */
-    max-width: calc(100% - var(--universe-top-lane-left, 230px) - 22px - 178px);
+    max-width: calc(100% - 410px);
   }
 }
 
@@ -2022,10 +2021,8 @@
 .hud-surface .universe-canvas-controls,
 .hud-surface .universe-detail-panel,
 .hud-surface .universe-canvas-tooltip,
-.hud-surface .universe-toast,
 .hud-surface .universe-data-note,
-.hud-surface .universe-status-card,
-.hud-surface .universe-action {
+.hud-surface .universe-status-card {
   /* Re-theme every descendant that reads --universe-* / --color-* onto
      warm paper, so inner rules (relations, timing, scrollbar, dots) adapt
      without being redeclared. Canvas colors are read from .universe-page
@@ -2034,15 +2031,15 @@
      ancestor from the cream ink, so the plate text inherited light-on-light.
      State the property here too, resolved against this element's own ink. */
   color: var(--universe-ink);
-  --universe-ink: #30231a;
-  --universe-muted: rgba(48, 35, 26, 0.84);
-  --universe-faint: rgba(48, 35, 26, 0.72);
-  --universe-line: rgba(73, 47, 29, 0.24);
-  --universe-line-strong: rgba(66, 41, 25, 0.42);
+  --universe-ink: var(--hud-ink, #30231a);
+  --universe-muted: var(--hud-soft, #705d4d);
+  --universe-faint: var(--hud-soft, #705d4d);
+  --universe-line: var(--hud-line, rgba(73, 47, 29, 0.22));
+  --universe-line-strong: var(--hud-line-strong, rgba(66, 41, 25, 0.46));
   --universe-hairline: rgba(73, 47, 29, 0.14);
-  --universe-panel: #fff9e8;
-  --universe-surface: #fff9e8;
-  --universe-surface-raised: #fff9e8;
+  --universe-panel: var(--hud-cream, #fff2cf);
+  --universe-surface: var(--hud-cream, #fff2cf);
+  --universe-surface-raised: var(--hud-paper-light, #fff9eb);
   --universe-shadow: rgba(43, 27, 17, 0.24);
   /* State hues darkened for cream paper (canvas keeps the night triad). */
   --color-highlight: #a85432;
@@ -2051,11 +2048,14 @@
   --color-evidence: #3f7d84;
   --color-danger: #b34a32;
   --color-success: #5d7a52;
+  --color-action: var(--hud-peach, #e89568);
+  --color-action-hover: color-mix(in srgb, var(--hud-peach, #e89568) 82%, #ffffff);
+  --color-on-action: #3e2d22;
   /* Warm rust focus on paper (DESIGN.md day focus rule). */
   --color-focus-ring: #8f3518;
   --universe-ac-shadow: 0 12px 28px rgba(43, 27, 17, 0.22), 0 3px 8px rgba(43, 27, 17, 0.14);
-  --universe-ac-plate: #fff9e8;
-  --universe-ac-plate-deep: #fff2cf;
+  --universe-ac-plate: var(--hud-cream, #fff2cf);
+  --universe-ac-plate-deep: var(--hud-paper-deep, #e8d4b1);
   --universe-ac-border: rgba(255, 252, 235, 0.78);
   --universe-ac-border-strong: rgba(255, 252, 235, 0.9);
 }
@@ -2072,7 +2072,7 @@
 
 .hud-surface .universe-search-shell:focus-within {
   border-color: var(--universe-ac-border-strong);
-  background: #fffdf4;
+  background: var(--hud-paper-light, #fff9eb);
   box-shadow:
     0 0 0 3px color-mix(in srgb, var(--color-focus-ring) 20%, transparent),
     var(--universe-ac-shadow);
@@ -2100,7 +2100,7 @@
 }
 
 .hud-surface .universe-search-result[aria-selected="true"] {
-  background: #f3d678;
+  background: var(--hud-butter, #f3d678);
   color: #49372a;
   box-shadow: 0 4px 10px rgba(0, 12, 24, 0.2);
 }
@@ -2132,13 +2132,23 @@
 
 .hud-surface .universe-filter.is-active,
 .hud-surface .universe-filter[aria-pressed="true"] {
-  background: #f3d678;
+  background: var(--hud-butter, #f3d678);
   box-shadow: inset 0 0 0 1px rgba(96, 60, 35, 0.15), 0 4px 10px rgba(0, 12, 24, 0.2);
   color: #49372a;
 }
 
 .hud-surface .universe-filter > small {
   background: rgba(73, 47, 29, 0.08);
+}
+
+.hud-surface .universe-layer-toggle:has(input:checked) {
+  border-color: rgba(66, 91, 66, 0.28);
+  background: color-mix(in srgb, var(--hud-mint, #b9d3ad) 72%, var(--universe-ac-plate));
+  color: #3f523f;
+}
+
+.hud-surface .universe-layer-toggle > input {
+  accent-color: var(--hud-green, #66816a);
 }
 
 .hud-surface .universe-layer-readout {

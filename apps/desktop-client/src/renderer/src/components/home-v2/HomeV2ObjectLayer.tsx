@@ -26,12 +26,14 @@ type ObjectZone = Exclude<HomeV2Zone, "wide">;
 const REGION_COPY: Readonly<Record<ObjectZone, Readonly<{
   id: string;
   label: string;
+  /* 详情必须与 home-feature-registry 里该区域真实可进的条目一一对应，
+     不写尚无页面的规划项——用户会把这行文案当成「点进去有什么」。 */
   detail: string;
   icon: LucideIcon;
 }>>> = Object.freeze({
-  desk: { id: "desk-book", label: "书桌", detail: "今日行动、复习与快速收录", icon: BookOpenText },
-  shelf: { id: "magic-catalog", label: "书架", detail: "研究册、资料、学习卡与搜索", icon: Search },
-  window: { id: "window-stars", label: "星窗", detail: "目标、理解星图与学习动态", icon: Orbit },
+  desk: { id: "desk-book", label: "书桌", detail: "今日下一步与今日复习", icon: BookOpenText },
+  shelf: { id: "magic-catalog", label: "书架", detail: "研究册、笔记、资料与搜索", icon: Search },
+  window: { id: "window-stars", label: "星窗", detail: "学习目标与理解星图", icon: Orbit },
   rest: { id: "rest-cushion", label: "休息角", detail: "伴星、日记、人格与记忆", icon: MessageCircle },
 });
 
@@ -205,7 +207,7 @@ export function HomeV2ObjectLayer() {
       runFeature("continue");
       return;
     }
-    if (home.primaryIntent === "open-card") {
+    if (home.primaryIntent === "open-objective") {
       runFeature("current-target");
       return;
     }

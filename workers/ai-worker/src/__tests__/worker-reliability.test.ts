@@ -38,6 +38,7 @@ const claimedJobFixture: ClaimedJob = {
   requestedBy: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
   attempts: 0,
   leaseToken: "lease-token-1",
+  resourceClass: "card_foreground",
 };
 
 function queueExecutorWithRows(rows: Record<string, unknown>[]): QueueSqlExecutor {
@@ -56,15 +57,17 @@ test("queue claim maps database rows to trusted worker jobs", async () => {
       requested_by: "actor-1",
       attempts: 2,
       lease_token: "lease-1",
+      resource_class: "card_foreground",
     },
     {
       id: "job-2",
-      type: "parse_source",
+      type: "companion_agent",
       payload: null,
       workspace_id: "workspace-2",
       requested_by: null,
       attempts: null,
       lease_token: "lease-2",
+      resource_class: "interactive_ai",
     },
   ]));
 
@@ -77,15 +80,17 @@ test("queue claim maps database rows to trusted worker jobs", async () => {
       requestedBy: "actor-1",
       attempts: 2,
       leaseToken: "lease-1",
+      resourceClass: "card_foreground",
     },
     {
       id: "job-2",
-      type: "parse_source",
+      type: "companion_agent",
       payload: {},
       workspaceId: "workspace-2",
       requestedBy: null,
       attempts: 0,
       leaseToken: "lease-2",
+      resourceClass: "interactive_ai",
     },
   ]);
 });

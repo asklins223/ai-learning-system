@@ -1,5 +1,5 @@
 import { sql, type SQL } from "drizzle-orm";
-import { parseQueueConcurrency } from "./lib/worker-concurrency.ts";
+import { parseQueueConcurrency, type ClaimLimits } from "./lib/worker-concurrency.ts";
 import {
   db,
   type WorkerWorkspaceTransactionContext,
@@ -29,6 +29,11 @@ export type ClaimedJob = {
   attempts: number;
   /** Immutable token assigned by the claim transaction. */
   leaseToken: string;
+  /**
+   * 队列资源类（JobResourceClass）。worker 用它区分交互车道与后台：
+   * claim 的名额分配（见 lib/worker-concurrency.ts）按这个值计数。
+   */
+  resourceClass: string;
 };
 
 export type ClaimedJobRow = {
@@ -39,6 +44,7 @@ export type ClaimedJobRow = {
   requested_by: string | null;
   attempts: number | null;
   lease_token: string;
+  resource_class: string;
 };
 
 export type ReapedJobRow = {
@@ -105,19 +111,22 @@ export function mapClaimedJobRow(row: ClaimedJobRow): ClaimedJob {
     requestedBy: row.requested_by,
     attempts: row.attempts ?? 0,
     leaseToken: row.lease_token,
+    resourceClass: row.resource_class,
   };
 }
 
 export async function claimJobs(
   executor: QueueSqlExecutor = defaultSqlExecutor,
-  concurrency = QUEUE_CONCURRENCY,
+  limits: ClaimLimits = { interactiveLimit: QUEUE_CONCURRENCY, backgroundLimit: QUEUE_CONCURRENCY },
   maxAttempts = MAX_ATTEMPTS,
 ): Promise<ClaimedJob[]> {
   // Claim/reap are the only intentional cross-workspace queue operations. The
   // fixed SECURITY DEFINER function owns locking and assigns a token per row.
+  // 2026-09-19：函数按类别限流——`p_background_limit` 之外的交互 job 不受限，
+  // 后台 job 拿不到超过该名额的位置（交互车道保留，见 lib/worker-concurrency.ts）。
   const rows = await executor.execute<ClaimedJobRow>(sql`
-    SELECT id, type, payload, workspace_id, requested_by, attempts, lease_token
-    FROM public.ailearn_claim_jobs(${concurrency}, ${maxAttempts})
+    SELECT id, type, payload, workspace_id, requested_by, attempts, lease_token, resource_class
+    FROM public.ailearn_claim_jobs(${limits.interactiveLimit}, ${limits.backgroundLimit}, ${maxAttempts})
   `);
   return rows.map(mapClaimedJobRow);
 }

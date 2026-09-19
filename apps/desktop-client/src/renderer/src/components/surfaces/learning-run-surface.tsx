@@ -28,6 +28,7 @@ import type {
   LearningRunAllowedActionV2,
   LearningRunPublicSnapshotV2,
   LearningRunReturnContractV2,
+  LearningRunTargetRevealV2,
 } from "@ailearn/shared/learning-run-v2-contracts";
 import type { DesktopLearningRunActionRequestV2, DesktopRouteV1 } from "@ailearn/shared/desktop-ipc-contracts";
 import {
@@ -71,6 +72,12 @@ type ResultState =
   | { kind: "pending"; phase: Extract<GetLearningRunResultResponseV2, { status: "pending" }>["phase"] }
   | { kind: "result"; value: Extract<GetLearningRunResultResponseV2, { status: "learning_result" }> }
   | { kind: "terminal"; value: Extract<GetLearningRunResultResponseV2, { status: "terminal_without_result" }> };
+
+type TargetRevealState =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "ready"; reveal: LearningRunTargetRevealV2 }
+  | { kind: "unavailable"; message: string };
 
 type PlayerFailure = {
   readonly message: string;
@@ -141,6 +148,14 @@ const facetLabels: Record<string, string> = {
   procedure: "步骤",
   relate: "关联",
   repair: "修补",
+};
+
+const verdictLabels: Record<string, string> = {
+  covered: "说清了",
+  partial: "只说清了一部分",
+  missing: "没说到",
+  contradicted: "说反了",
+  not_assessable: "无法判定",
 };
 
 const scheduleReasonLabels: Record<string, string> = {
@@ -646,6 +661,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   const [draftWriteBlocked, setDraftWriteBlocked] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
   const [resultState, setResultState] = useState<ResultState>({ kind: "idle" });
+  const [targetReveal, setTargetReveal] = useState<TargetRevealState>({ kind: "idle" });
   const [returnContract, setReturnContract] = useState<LearningRunReturnContractV2 | null>(null);
   const [hint, setHint] = useState<string | null>(null);
   const [failure, setFailure] = useState<PlayerFailure | null>(null);
@@ -1475,6 +1491,18 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   const activeTask = snapshot.activeTask;
   const result = resultState.kind === "result" ? resultState.value.result : null;
   const terminal = resultState.kind === "terminal" ? resultState.value : null;
+
+  const loadTargetReveal = () => {
+    if (targetReveal.kind === "loading" || targetReveal.kind === "ready") return;
+    setTargetReveal({ kind: "loading" });
+    void window.ailearn.learningRun.revealTarget({ meta: createRequestMeta(epochRef.current), runId })
+      .then((response) => {
+        setTargetReveal({ kind: "ready", reveal: unwrapGatewayResult(response) });
+      })
+      .catch((error: unknown) => {
+        setTargetReveal({ kind: "unavailable", message: gatewayErrorMessage(error) });
+      });
+  };
   const unresolvedResultFailure = resultState.kind === "idle"
     && snapshotRequiresResolvedLearningResult(snapshot.phase)
     ? resultQueryFailure
@@ -1556,15 +1584,59 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
                 <p>{terminalCopy[terminal!.reasonCode]}</p>
               </div>
             )}
+            {result?.assessment?.rubricResults.length ? (
+              <div className="learning-run-result-rubric">
+                <b>逐条判定</b>
+                <ul>
+                  {result.assessment.rubricResults.map((item) => (
+                    <li key={item.rubricItemId} data-verdict={item.verdict}>
+                      <span className="learning-run-result-rubric__head">
+                        {facetLabels[item.facet] ?? item.facet} · {verdictLabels[item.verdict] ?? item.verdict}
+                      </span>
+                      <p>{item.userFacingReason}</p>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {result ? (
+              <div className="learning-run-result-reveal">
+                {targetReveal.kind === "idle" ? (
+                  <button type="button" className="button" onClick={loadTargetReveal}>
+                    看这次的答案与解释
+                  </button>
+                ) : null}
+                {targetReveal.kind === "loading" ? <p className="small">正在读取答案…</p> : null}
+                {targetReveal.kind === "ready" ? (
+                  <div className="learning-run-result-reveal__body">
+                    <h3 className="serif">这次想考的是</h3>
+                    <p className="learning-run-result-reveal__answer">{targetReveal.reveal.answerText}</p>
+                    {targetReveal.reveal.support.explanation ? <p>{targetReveal.reveal.support.explanation}</p> : null}
+                    {targetReveal.reveal.support.boundary ? <p><b>边界</b>　{targetReveal.reveal.support.boundary}</p> : null}
+                    {targetReveal.reveal.support.misconception ? <p><b>常见误解</b>　{targetReveal.reveal.support.misconception}</p> : null}
+                    {targetReveal.reveal.support.workedExample ? <p><b>示例</b>　{targetReveal.reveal.support.workedExample}</p> : null}
+                  </div>
+                ) : null}
+                {targetReveal.kind === "unavailable" ? <p className="small">{targetReveal.message}</p> : null}
+              </div>
+            ) : null}
             <section className="learning-run-next-step">
               <span>接下来</span>
-              <strong>{result && result.gapFacets.length ? `先补上「${facetText(result.gapFacets.slice(0, 1), "")}」` : returnTargetLabel(returnTarget)}</strong>
+              <strong>{
+                result?.outcome === "declared_unable"
+                  ? "先回研究册把这条看懂，再回来验证"
+                  : result && result.gapFacets.length
+                    ? `先补上「${facetText(result.gapFacets.slice(0, 1), "")}」`
+                    : returnTargetLabel(returnTarget)
+              }</strong>
               <p>
-                {returnContract?.status === "projection_pending"
-                  ? "复习记录正在同步；返回后会继续刷新真实进度。"
-                  : returnContract?.status === "ready"
-                    ? "复习记录已经就绪，可以沿着当前路径继续。"
-                    : "返回后会按服务端给出的真实目标继续。"}
+                {result?.outcome === "declared_unable"
+                  ? "说不会不扣任何东西：这条已排到最近的复习。回研究册看懂之后再来一次，就当第一次见。"
+                  : returnContract?.status === "projection_pending"
+                    ? "复习记录正在同步；返回后会继续刷新真实进度。"
+                    : returnContract?.status === "ready"
+                      ? "复习记录已经就绪，可以沿着当前路径继续。"
+                      : "返回后会按服务端给出的真实目标继续。"}
               </p>
             </section>
             <div className="actions learning-run-result-actions">

@@ -321,8 +321,8 @@ test("keeps Worker queue claims, leases, reaping, and pool context atomic on Pos
       perWorkerLimit: number,
     ): Promise<{ claimsA: ClaimedJob[]; claimsB: ClaimedJob[]; all: ClaimedJob[] }> => {
       const [claimsA, claimsB] = await Promise.all([
-        queue.claimJobs(executorA, perWorkerLimit, queue.MAX_ATTEMPTS),
-        queue.claimJobs(executorB, perWorkerLimit, queue.MAX_ATTEMPTS),
+        queue.claimJobs(executorA, { interactiveLimit: perWorkerLimit, backgroundLimit: perWorkerLimit }, queue.MAX_ATTEMPTS),
+        queue.claimJobs(executorB, { interactiveLimit: perWorkerLimit, backgroundLimit: perWorkerLimit }, queue.MAX_ATTEMPTS),
       ]);
       const all = [...claimsA, ...claimsB];
       assert.deepEqual(
@@ -424,7 +424,7 @@ test("keeps Worker queue claims, leases, reaping, and pool context atomic on Pos
 
     await t.test("a stale lease cannot finish after reap and a new claim", async () => {
       const jobId = await insertPendingJob(workspaceA, userA, "queue_stale_lease");
-      const [oldClaim] = await queue.claimJobs(executorA, 1, queue.MAX_ATTEMPTS);
+      const [oldClaim] = await queue.claimJobs(executorA, { interactiveLimit: 1, backgroundLimit: 1 }, queue.MAX_ATTEMPTS);
       assert.equal(oldClaim?.id, jobId);
       assert.ok(oldClaim);
 
@@ -443,7 +443,7 @@ test("keeps Worker queue claims, leases, reaping, and pool context atomic on Pos
         SET scheduled_at = clock_timestamp() - interval '1 second'
         WHERE id = ${jobId}
       `;
-      const [newClaim] = await queue.claimJobs(executorB, 1, queue.MAX_ATTEMPTS);
+      const [newClaim] = await queue.claimJobs(executorB, { interactiveLimit: 1, backgroundLimit: 1 }, queue.MAX_ATTEMPTS);
       assert.equal(newClaim?.id, jobId);
       assert.ok(newClaim);
       assert.notEqual(newClaim.leaseToken, oldClaim.leaseToken);

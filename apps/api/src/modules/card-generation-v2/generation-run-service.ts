@@ -212,6 +212,10 @@ export async function createGenerationRunV2(
         // 可用证据 ID 列表（worker prompts.ts CARD_GENERATION_V2_PROMPT_VERSION 同步）。
         // 2026-09-18：v19 —— 三个类级修复（作者不得补充证据未陈述的内容 /
         // front 短术语泄漏的逐词自检 + pedagogy 扩判 / 零卡单一判据）。
+        // 2026-09-18（晚）：v20 —— 作者提示词开放 canonicalAnswer 五种形态
+        // （ordered_steps/mapping/comparison 此前从未被教过，导致排序/关系练习题
+        // 零生成）+ preferredTaskIntents 按知识形态选择（此前模板硬编码 recall）+
+        // rubric 覆盖整组答案单元。
         stageRuntimes: [
           {
             stage: "planner" as const,
@@ -219,7 +223,7 @@ export async function createGenerationRunV2(
             modelSnapshot: "v1",
             deploymentId: "local",
             capabilityFingerprint: "basic",
-            promptVersion: "v19",
+            promptVersion: "v20",
             sampling: { temperature: 0 },
             outputSchemaVersion: "v2",
           },
@@ -229,7 +233,7 @@ export async function createGenerationRunV2(
             modelSnapshot: "v1",
             deploymentId: "local",
             capabilityFingerprint: "basic",
-            promptVersion: "v19",
+            promptVersion: "v20",
             sampling: { temperature: 0 },
             outputSchemaVersion: "v2",
           },
@@ -239,7 +243,7 @@ export async function createGenerationRunV2(
             modelSnapshot: "v1",
             deploymentId: "local",
             capabilityFingerprint: "basic",
-            promptVersion: "v19",
+            promptVersion: "v20",
             sampling: { temperature: 0 },
             outputSchemaVersion: "v2",
           },
@@ -249,7 +253,7 @@ export async function createGenerationRunV2(
             modelSnapshot: "v1",
             deploymentId: "local",
             capabilityFingerprint: "basic",
-            promptVersion: "v19",
+            promptVersion: "v20",
             sampling: { temperature: 0 },
             outputSchemaVersion: "v2",
           },

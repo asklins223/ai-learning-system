@@ -91,7 +91,7 @@ export function homePresentation(projection: RoomProjectionV1 | null, loading: b
     title = focusTitle;
     detail = actionAvailable ? "服务端已确认下一步，可以从这里继续" : "当前目标可以查看，下一步暂不可执行";
     primaryLabel = primaryActionLabel(projection) ?? "查看当前目标";
-    primaryIntent = actionAvailable ? "continue" : "open-card";
+    primaryIntent = actionAvailable ? "continue" : "open-objective";
   } else {
     title = "从一份真正想弄懂的材料开始";
     detail = "书房目录已经把学习路径和全部功能整理好了";

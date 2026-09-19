@@ -412,7 +412,7 @@ test("installs fail-closed SEC-01 policies without making this an HTTP or M1 gat
         )::integer AS api_execute_count
       FROM pg_catalog.pg_proc AS procedure
       WHERE procedure.oid IN (
-        'public.ailearn_claim_jobs(integer,integer)'::regprocedure,
+        'public.ailearn_claim_jobs(integer,integer,integer)'::regprocedure,
         'public.ailearn_reap_stale_jobs(integer,integer)'::regprocedure,
         'public.ailearn_renew_job_lease(uuid,uuid,text)'::regprocedure,
         'public.ailearn_finish_job(uuid,uuid,text)'::regprocedure,
@@ -752,8 +752,10 @@ test("installs fail-closed SEC-01 policies without making this an HTTP or M1 gat
       `,
     ));
 
+    // 0228：签名变为 (limit, background_limit, max_attempts)；两个 fixture job 都是
+    // maintenance 类，后台名额给满 2 才能同时认领。
     const claimed = await worker<{ id: string }[]>`
-      SELECT id FROM public.ailearn_claim_jobs(2, 3)
+      SELECT id FROM public.ailearn_claim_jobs(2, 2, 3)
       WHERE id IN (${jobA}, ${jobB})
       ORDER BY id
     `;

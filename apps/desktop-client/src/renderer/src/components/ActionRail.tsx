@@ -67,8 +67,7 @@ export function ActionRail() {
   const surface = useRoomStore((state) => state.surface);
   const onboardingOpen = useRoomStore((state) => state.onboardingOpen);
   const setActiveNoteRef = useRoomStore((state) => state.setActiveNoteRef);
-  const toggleCompanion = useRoomStore((state) => state.toggleCompanion);
-  const companionOpen = useRoomStore((state) => state.companionOpen);
+  const setActiveObjectiveId = useRoomStore((state) => state.setActiveObjectiveId);
   const motionPreference = useRoomStore((state) => state.motionMode);
   const reducedMotion = useRoomStore((state) => state.reducedMotion);
   const motionMode = resolveSceneMotionMode(motionPreference, reducedMotion);
@@ -200,8 +199,8 @@ export function ActionRail() {
   };
   const openCompanion = () => {
     setCatalogOpen(false);
-    if (!companionOpen) toggleCompanion();
-    window.requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(".window-live2d button")?.focus({ preventScroll: true }));
+    window.dispatchEvent(new CustomEvent("ailearn:companion-open"));
+    window.requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>(".companion-hud__composer textarea")?.focus({ preventScroll: true }));
   };
   const openNote = () => {
     if (!home.note || !enabledRoutes.has("note.detail")) {
@@ -223,7 +222,15 @@ export function ActionRail() {
       showPending("当前还没有学习目标", "先从研究册或来源资料形成目标，服务端确认后会出现在这里。");
       return;
     }
-    invoke("open-card");
+    const objectiveId = projection?.primaryFocus.state === "data"
+      ? projection.primaryFocus.data.objective.objectiveId
+      : null;
+    if (!objectiveId) {
+      invoke("open-objectives");
+      return;
+    }
+    setActiveObjectiveId(objectiveId);
+    invoke("open-objective");
   };
   const runPrimary = () => {
     if (loading) return;
@@ -233,6 +240,10 @@ export function ActionRail() {
     }
     if (home.primaryIntent === "open-notebook") {
       openNote();
+      return;
+    }
+    if (home.primaryIntent === "open-objective") {
+      openCurrentTarget();
       return;
     }
     if (home.primaryIntent) {

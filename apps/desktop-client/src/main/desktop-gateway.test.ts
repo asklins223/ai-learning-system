@@ -33,7 +33,7 @@ import {
   sourceImageGetResultV1Schema,
 } from "@ailearn/shared/source-image-contracts";
 import type { GatewayErrorCode } from "@ailearn/shared/desktop-ipc-contracts";
-import { DesktopGateway, DesktopGatewayFailure } from "./desktop-gateway";
+import { DesktopGateway, DesktopGatewayFailure, parseCompanionSseFrame } from "./desktop-gateway";
 
 const pairingSecret = Buffer.alloc(32, 9);
 const pairingSecretEncoded = pairingSecret.toString("base64url");
@@ -322,6 +322,53 @@ const COMPANION_ROOM_PATCH = companionRoomProfilePatchV1Schema.parse({
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe("parseCompanionSseFrame（伴星 SSE 帧的过桥门槛）", () => {
+  const frame = (payload: Record<string, unknown>, seq = 7): string =>
+    `id: 2de8a3e9-f127-4089-80d5-ede6dd980d53:${seq}\nevent: companion\ndata: ${JSON.stringify({
+      version: 1,
+      eventId: `2de8a3e9-f127-4089-80d5-ede6dd980d53:${seq}`,
+      seq,
+      workspaceId: "97550966-adf4-47fa-8d91-f83eae9ebfc0",
+      conversationId: "2de8a3e9-f127-4089-80d5-ede6dd980d53",
+      runId: "f3bb3bf9-e241-4360-8b0f-faee864032c0",
+      generation: 1,
+      accountEpoch: 0,
+      createdAt: "2026-09-19T03:30:10.000Z",
+      ...payload,
+    })}\n\n`;
+
+  it("合法帧投影成最小形状（seq/runId/generation/事件类型/payload）", () => {
+    const parsed = parseCompanionSseFrame(frame({ type: "assistant.delta", payload: { appendFrom: 0, textDelta: "你好" } }));
+    expect(parsed).toEqual({
+      seq: 7,
+      runId: "f3bb3bf9-e241-4360-8b0f-faee864032c0",
+      generation: 1,
+      eventType: "assistant.delta",
+      payload: { appendFrom: 0, textDelta: "你好" },
+    });
+  });
+
+  it("心跳注释帧与空帧直接丢弃", () => {
+    expect(parseCompanionSseFrame(": heartbeat 1789788618000\n\n")).toBeNull();
+    expect(parseCompanionSseFrame("")).toBeNull();
+  });
+
+  it("畸形 JSON / 缺字段 / payload 非对象一律丢弃（不透传原始帧）", () => {
+    expect(parseCompanionSseFrame("data: {not json}\n\n")).toBeNull();
+    // 事件类型缺失同样丢弃（没有类型的帧渲染层无从处理）；payload 内部字段由渲染层收窄。
+    expect(parseCompanionSseFrame(frame({ payload: { textDelta: "x" } }))).toBeNull();
+    expect(parseCompanionSseFrame(frame({ type: "assistant.delta", payload: { textDelta: "x" } }))?.seq).toBe(7);
+    expect(parseCompanionSseFrame('data: {"seq":1}\n\n')).toBeNull();
+    expect(parseCompanionSseFrame(frame({ type: "assistant.delta", payload: "不是对象" }))).toBeNull();
+    expect(parseCompanionSseFrame(frame({ type: "assistant.delta", payload: null }))).toBeNull();
+  });
+
+  it("payload 超过 16KB 的异常帧被拦下", () => {
+    const huge = { type: "assistant.delta", payload: { appendFrom: 0, textDelta: "甲".repeat(20_000) } };
+    expect(parseCompanionSseFrame(frame(huge))).toBeNull();
+  });
 });
 
 describe("DesktopGateway", () => {
@@ -1502,6 +1549,92 @@ describe("DesktopGateway", () => {
         .rejects.toMatchObject({ code: "forbidden" } satisfies Partial<DesktopGatewayFailure>);
     });
   });
+
+  describe("companion learning-run context bridge", () => {
+    const runId = "00000000-0000-4000-8000-000000000301";
+    const snapshotId = "00000000-0000-4000-8000-000000000302";
+    const taskId = "00000000-0000-4000-8000-000000000303";
+    const pageInstanceId = "00000000-0000-4000-8000-000000000304";
+    const contextRevision = "a".repeat(64);
+    const context = {
+      version: 1,
+      pageKind: "learning_run",
+      sharing: "page_registered",
+      runId,
+      snapshotId,
+      taskId,
+      requestedCapability: "none",
+      contextRevision,
+      groundedTutorGrant: null,
+    } as const;
+    const grant = {
+      version: 1,
+      grantId: "00000000-0000-4000-8000-000000000305",
+      userId: "00000000-0000-4000-8000-000000000306",
+      workspaceId: "00000000-0000-4000-8000-000000000307",
+      pageInstanceId,
+      pageKind: "learning_run",
+      capability: "grounded_tutor",
+      runId,
+      snapshotId,
+      taskId,
+      contextRevision,
+      permissionSnapshotHash: "b".repeat(64),
+      issuedAt: "2026-09-18T08:00:00.000Z",
+      expiresAt: "2026-09-18T08:05:00.000Z",
+      signature: "c".repeat(64),
+    } as const;
+
+    it("reuses the existing context and single-use grant HTTP routes without changing their bodies", async () => {
+      const calls: Array<{ url: string; method: string; body?: unknown }> = [];
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/challenge")) return trustResponse(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        if (url.endsWith("/health")) return healthResponse();
+        if (url.endsWith(`/learning-runs/${runId}/companion-context`)) {
+          calls.push({ url, method: init?.method ?? "GET" });
+          return new Response(JSON.stringify(context), { status: 200 });
+        }
+        if (url.endsWith(`/learning-runs/${runId}/companion-context-grants`)) {
+          calls.push({ url, method: init?.method ?? "GET", body: JSON.parse(String(init?.body)) });
+          return new Response(JSON.stringify(grant), { status: 200 });
+        }
+        throw new Error(`unexpected URL ${url}`);
+      });
+
+      const gateway = new DesktopGateway(environment());
+      await gateway.connect();
+      await expect(gateway.getCompanionLearningRunContext(runId)).resolves.toEqual(context);
+      await expect(gateway.createCompanionLearningRunContextGrant(runId, {
+        version: 1,
+        pageInstanceId,
+        taskId,
+        contextRevision,
+      })).resolves.toEqual(grant);
+      expect(calls).toEqual([
+        { url: `http://127.0.0.1:4000/learning-runs/${runId}/companion-context`, method: "GET" },
+        {
+          url: `http://127.0.0.1:4000/learning-runs/${runId}/companion-context-grants`,
+          method: "POST",
+          body: { version: 1, pageInstanceId, taskId, contextRevision },
+        },
+      ]);
+    });
+
+    it("fails closed when a context response does not match the shared schema", async () => {
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/challenge")) return trustResponse(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        if (url.endsWith("/health")) return healthResponse();
+        return new Response(JSON.stringify({ ...context, requestedCapability: "grounded_tutor" }), { status: 200 });
+      });
+
+      const gateway = new DesktopGateway(environment());
+      await gateway.connect();
+      await expect(gateway.getCompanionLearningRunContext(runId))
+        .rejects.toMatchObject({ code: "unsupported_contract" } satisfies Partial<DesktopGatewayFailure>);
+    });
+  });
 });
 
 /**
@@ -1624,13 +1757,14 @@ describe("workspace AI settings", () => {
     await gateway.connect();
     const projection = await gateway.getCapabilities();
 
-    // 剪贴板通道已经实现（clipboardReadLinks），其余仍没有对应通道——
-    // 答案来自通道注册表，而不是服务端。
+    // 剪贴板与 ASR 通道已经实现（clipboardReadLinks / companionVoiceTranscribe，
+    // 后者 2026-09-18 接线：本地 SenseVoice 优先、云 `/voice/transcribe` 兜底），
+    // 其余仍没有对应通道——答案来自通道注册表，而不是服务端。
     expect(projection.nativeCapabilities).toEqual({
       filePicker: "unavailable",
       clipboard: "available",
       notifications: "unavailable",
-      asr: "unavailable",
+      asr: "available",
       updates: "unavailable",
       live2d: "unavailable",
     });

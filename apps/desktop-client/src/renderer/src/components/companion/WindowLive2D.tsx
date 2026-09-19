@@ -31,6 +31,11 @@ export interface WindowLive2DProps {
   readonly onStatus?: (status: WindowLive2DStatus) => void;
   /** Increment this value to request a one-shot invite motion from the parent. */
   readonly inviteTrigger?: number;
+  /**
+   * 不递增的计数器：每次 `agent.tool` 进入 executing 时由父组件递增，请求一次
+   * 极小幅「看向手边」。这是纯参数层的冲量，不触发 motion（方案 §5 第 9 项）。
+   */
+  readonly toolAttentionTrigger?: number;
   /** Click/keyboard intent only; the parent remains owner of state transitions. */
   readonly onInviteRequest?: () => void;
   readonly onPointerDown?: PointerEventHandler<HTMLButtonElement>;
@@ -65,6 +70,7 @@ export function WindowLive2D({
   style,
   onStatus,
   inviteTrigger = 0,
+  toolAttentionTrigger = 0,
   onInviteRequest,
   onPointerDown,
   onPointerMove,
@@ -79,6 +85,7 @@ export function WindowLive2D({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const driverRef = useRef<WindowLive2DDriver | null>(null);
   const lastInviteTriggerRef = useRef(inviteTrigger);
+  const lastToolAttentionTriggerRef = useRef(toolAttentionTrigger);
   const [reducedMotion, setReducedMotion] = useState(prefersReducedMotion);
   const runtimePaused = paused || motionMode !== "full" || reducedMotion;
   const pausedRef = useRef(runtimePaused);
@@ -106,11 +113,17 @@ export function WindowLive2D({
     }
 
     let cancelled = false;
+    let settled = false;
+    let bootTimer = 0;
     const driver = new WindowLive2DDriver({
       canvas,
       container,
       onStatus: (nextStatus) => {
         if (cancelled) return;
+        if (nextStatus === "ready" || nextStatus === "failed") {
+          settled = true;
+          window.clearTimeout(bootTimer);
+        }
         setStatus(nextStatus === "failed" ? "unavailable" : nextStatus);
       },
     });
@@ -122,6 +135,12 @@ export function WindowLive2D({
     const syncPaused = () => driver.setPaused(pausedRef.current || document.hidden || !document.hasFocus());
     syncPaused();
     void driver.init();
+    bootTimer = window.setTimeout(() => {
+      if (cancelled || settled) return;
+      settled = true;
+      setStatus("unavailable");
+      driver.destroy();
+    }, 15_000);
 
     document.addEventListener("visibilitychange", syncPaused);
     window.addEventListener("focus", syncPaused);
@@ -129,6 +148,7 @@ export function WindowLive2D({
 
     return () => {
       cancelled = true;
+      window.clearTimeout(bootTimer);
       document.removeEventListener("visibilitychange", syncPaused);
       window.removeEventListener("focus", syncPaused);
       window.removeEventListener("blur", syncPaused);
@@ -177,6 +197,17 @@ export function WindowLive2D({
     driverRef.current?.playInviteOnce();
   }, [inviteTrigger, status]);
 
+  // 「看向手边」（方案 §5 第 9 项）：lite / off / 减少动效下 ticker 已经停住，
+  // 参数冲量不会落笔，所以这里直接跳过（与方案「off / 减少动效：跳过」一致），
+  // 且不推进 ref —— 用户切回 full 时那次动作仍会被补上。
+  useEffect(() => {
+    if (toolAttentionTrigger === lastToolAttentionTriggerRef.current) return;
+    if (runtimePaused || status !== "ready") return;
+
+    lastToolAttentionTriggerRef.current = toolAttentionTrigger;
+    driverRef.current?.pushToolAttention();
+  }, [toolAttentionTrigger, runtimePaused, status]);
+
   const effectiveStatus: WindowLive2DStatus = status;
   const rootClassName = ["window-live2d", className].filter(Boolean).join(" ");
 
@@ -216,12 +247,12 @@ export function WindowLive2D({
           width: "100%",
           height: "100%",
           opacity: effectiveStatus === "ready" ? 1 : 0,
-          transition: motionMode === "off" || reducedMotion ? "none" : "opacity 160ms ease-out",
+          transition: motionMode === "off" || reducedMotion ? "none" : "opacity 160ms var(--hud-ease-out, cubic-bezier(0.22, 1, 0.36, 1))",
           pointerEvents: "none",
         }}
       />
 
-      {(onInviteRequest || onPointerDown) ? (
+      {effectiveStatus === "ready" && (onInviteRequest || onPointerDown) ? (
         <button
           type="button"
           aria-label={onInviteRequest ? `与${ariaLabel}互动` : `拖动${ariaLabel}`}

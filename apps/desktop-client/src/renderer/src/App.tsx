@@ -6,7 +6,8 @@ import { SceneStatus } from "./components/SceneStatus";
 import { TaskSurface } from "./components/TaskSurface";
 import { SourceIntakeHost } from "./components/SourceIntake";
 import { RunRecoveryNotice } from "./components/RunRecoveryNotice";
-import { CompanionPresence } from "./components/companion/CompanionPresence";
+import { CompanionRoot } from "./components/companion/CompanionPresence";
+import { CompanionFeedMenu } from "./components/companion/CompanionFeedMenu";
 import { DesktopAccessGate } from "./components/DesktopAccessGate";
 import { useRoomStore } from "./app/room-store";
 import { resolveSceneMotionMode } from "./scene/scene-motion";
@@ -69,10 +70,9 @@ export function RoomExperience() {
   const surface = useRoomStore((state) => state.surface);
   const invoke = useRoomStore((state) => state.invoke);
   const setActiveNoteRef = useRoomStore((state) => state.setActiveNoteRef);
+  const setActiveObjectiveId = useRoomStore((state) => state.setActiveObjectiveId);
   const setInputFocused = useRoomStore((state) => state.setInputFocused);
   const onboardingOpen = useRoomStore((state) => state.onboardingOpen);
-  const companionOpen = useRoomStore((state) => state.companionOpen);
-  const closeCompanion = useRoomStore((state) => state.closeCompanion);
   const returnTarget = useRoomStore((state) => state.returnTarget);
 
   useEffect(() => {
@@ -97,12 +97,9 @@ export function RoomExperience() {
         modalOpen: hasOpenModal(),
       })) return;
       if (event.key === "Escape") {
+        if (document.querySelector('.companion-hud:not([data-mode="closed"])')) return;
         event.preventDefault();
-        if (companionOpen) {
-          closeCompanion();
-        } else if (surface) {
-          invoke("home");
-        }
+        if (surface) invoke("home");
         return;
       }
       if (HOME_V2_ENABLED) {
@@ -126,6 +123,16 @@ export function RoomExperience() {
             } else {
               showUnavailable("研究册尚未开放", "当前桌面合同还没有签发可用的研究册路由。");
             }
+          } else if (home.primaryIntent === "open-objective") {
+            const objectiveId = projection?.primaryFocus.state === "data"
+              ? projection.primaryFocus.data.objective.objectiveId
+              : null;
+            if (objectiveId) {
+              setActiveObjectiveId(objectiveId);
+              invoke("open-objective");
+            } else {
+              invoke("open-objectives");
+            }
           } else if (home.primaryIntent) invoke(home.primaryIntent);
         }
       } else if (!event.altKey && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
@@ -142,7 +149,7 @@ export function RoomExperience() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [closeCompanion, companionOpen, invoke, onboardingOpen, surface, home.blockingLoading, home.retry, home.primaryIntent, home.note, reload, setActiveNoteRef]);
+  }, [invoke, onboardingOpen, projection, surface, home.blockingLoading, home.retry, home.primaryIntent, home.note, reload, setActiveNoteRef, setActiveObjectiveId]);
 
   const room = (
     <>
@@ -154,7 +161,8 @@ export function RoomExperience() {
       >
         <RoomStage />
       </div>
-      <CompanionPresence />
+      <CompanionRoot />
+      <CompanionFeedMenu />
       <DirectoryRail />
       {HOME_V2_ENABLED ? null : <RunRecoveryNotice />}
       <HudRoomControl />

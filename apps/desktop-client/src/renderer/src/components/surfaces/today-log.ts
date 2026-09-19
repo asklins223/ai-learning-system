@@ -23,7 +23,7 @@ const KIND_LABELS: Readonly<Record<ActivityEventV1["kind"], string>> = {
   objective: "理解目标",
   learning_run: "学习旅程",
   card_generation: "卡片生成",
-  job: "后台任务",
+  job: "系统活动",
   page: "页面",
 };
 
@@ -48,7 +48,7 @@ export const ANOMALY_STATUS_LABELS: Readonly<Record<string, string>> = {
   stale: "已过期",
   pending: "等待中",
   running: "运行中",
-  dead: "重试耗尽",
+  dead: "多次重试失败",
   preparing: "准备中",
   active: "进行中",
   assessing: "评估中",
@@ -95,6 +95,12 @@ export type TodayLogRow = {
   readonly kindLabel: string;
   readonly action: string;
   readonly title: string;
+  /**
+   * 主行文案：动作 + 事件名，但服务端 title 常常已把动作说了一遍
+   * （实机数据："后台任务 · 伴星对话"、"为《X》发起卡片生成"），再前置
+   * 动词就是"后台任务 · 后台任务 · 伴星对话"。title 里已有这句话时只说 title。
+   */
+  readonly headline: string;
   readonly detail: string | null;
   readonly target: ActivityTargetV1 | null;
 };
@@ -113,25 +119,33 @@ export function formatLogTime(iso: string): string {
 
 /** 日志流主行序：服务端已按时间倒序排好，这里保持原序（稳定、可直接渲染）。 */
 export function buildTodayLogRows(events: readonly ActivityEventV1[]): readonly TodayLogRow[] {
-  return events.map((event) => ({
-    id: event.id,
-    time: formatLogTime(event.at),
-    at: event.at,
-    kind: event.kind,
-    kindLabel: KIND_LABELS[event.kind] ?? event.kind,
-    action: VERB_LABELS[event.verb] ?? event.verb,
-    title: event.title,
-    detail: event.detail,
-    target: event.target,
-  }));
+  return events.map((event) => {
+    const action = VERB_LABELS[event.verb] ?? event.verb;
+    // job 是用户动作触发的派生处理，在“系统活动”分组里再前缀
+    // “后台任务”只会重复容器语义；主行直接说它在做什么。
+    const headline = event.kind === "job"
+      ? event.title
+      : event.title.includes(action) ? event.title : `${action} · ${event.title}`;
+    return {
+      id: event.id,
+      time: formatLogTime(event.at),
+      at: event.at,
+      kind: event.kind,
+      kindLabel: KIND_LABELS[event.kind] ?? event.kind,
+      action,
+      title: event.title,
+      headline,
+      detail: event.detail,
+      target: event.target,
+    };
+  });
 }
 
 /**
- * 同一件事的重复异常会被并成一组。
+ * 同一目标上的重复异常会被并成一组。
  *
- * 真实数据里 26 条异常只有 4 个不同标题 —— 22 条是《无标题笔记》的重复项，标题
- * 又被省略号截断，读者看到的是一堵**长得分毫不差**的墙，只能靠看不见的 id 区分。
- * 归并后一行说清"同一件事 × N"，跳转取最近的那一条（同组本来就是同一个笔记/来源）。
+ * 标题相同不代表是同一件事：不同生成 run、不同来源必须保留各自跳转。只有目标种类、
+ * id、状态与处置语都一致时才合并，一行说清"同类记录 × N"。
  */
 export type TodayAnomalyGroup = {
   /** 组内最新一条的 id，同时充当 React key。 */
@@ -142,18 +156,51 @@ export type TodayAnomalyGroup = {
   readonly phase: AnomalyPhase;
   readonly title: string;
   readonly detail: string | null;
-  /** 同一件事被记了几条；> 1 时页面要显示 ×N，不能假装只发生了一次。 */
+  /** 同一实体与处置状态下的同类记录数。 */
   readonly count: number;
   readonly target: ActivityTargetV1 | null;
+  /** 没有业务实体可跳时，仍可以给出真实的设置恢复路径。 */
+  readonly recovery: "ai_consent" | null;
 };
+
+const AI_CONSENT_ERROR = /AIConsentRequired|AI_CONSENT_REQUIRED|ai_consent_required/i;
+const MACHINE_ERROR = /(?:^|[:._-])(?:operational_error|configuration|error)(?:[:._-]|$)|[A-Z][A-Za-z]+Error(?::|$)/;
+
+export function anomalyRecovery(anomaly: Pick<ActivityAnomalyV1, "kind" | "detail">): TodayAnomalyGroup["recovery"] {
+  return anomaly.kind === "job" && AI_CONSENT_ERROR.test(anomaly.detail ?? "") ? "ai_consent" : null;
+}
+
+/**
+ * 后台错误可以进入诊断日志，但不能直接当作学习者界面文案。
+ * 已知错误翻成可执行语言，未知机器串使用诚实但不泄漏实现的兜底。
+ */
+export function readableAnomalyDetail(anomaly: Pick<ActivityAnomalyV1, "kind" | "detail" | "target">): string | null {
+  const detail = anomaly.detail?.trim() || null;
+  if (anomaly.kind !== "job" || !detail) return detail;
+  if (AI_CONSENT_ERROR.test(detail)) {
+    return "需要先完成工作区的 AI 使用同意，伴星才能继续回应。";
+  }
+  if (MACHINE_ERROR.test(detail)) {
+    return anomaly.target
+      ? "这次处理没有完成，打开来源后可以重新解析或更换材料。"
+      : "这次系统处理没有完成，可以稍后重试。";
+  }
+  return detail;
+}
 
 export function buildTodayAnomalyGroups(
   anomalies: readonly ActivityAnomalyV1[],
 ): readonly TodayAnomalyGroup[] {
   const groups = new Map<string, TodayAnomalyGroup>();
   for (const anomaly of anomalies) {
-    // 服务端已按时间倒序排好，所以第一次见到的就是组内最新的一条。
-    const key = `${anomaly.kind}|${anomaly.title}`;
+    const detail = readableAnomalyDetail(anomaly);
+    const recovery = anomalyRecovery(anomaly);
+    // 有可跳转目标时必须按真实实体分组：两个同名笔记的生成 run
+    // 不是“同一件事”，更不能只保留其中一个 target。无实体的 job
+    // 才按同一状态、标题和安全处置语合并为同类系统记录。
+    const key = anomaly.target
+      ? `${anomaly.kind}|${anomaly.status}|${anomaly.target.kind}|${anomaly.target.id}|${anomaly.title}|${detail ?? ""}`
+      : `${anomaly.kind}|${anomaly.status}|${anomaly.title}|${detail ?? ""}|${recovery ?? ""}`;
     const existing = groups.get(key);
     if (existing) {
       groups.set(key, { ...existing, count: existing.count + 1 });
@@ -166,9 +213,10 @@ export function buildTodayAnomalyGroups(
       statusLabel: ANOMALY_STATUS_LABELS[anomaly.status] ?? anomaly.status,
       phase: anomalyPhase(anomaly),
       title: anomaly.title,
-      detail: anomaly.detail,
+      detail,
       count: 1,
       target: anomaly.target,
+      recovery,
     });
   }
   return [...groups.values()];
@@ -180,15 +228,16 @@ export function anomalyStep(group: TodayAnomalyGroup): string {
 }
 
 /**
- * 分诊顺序：最厚的一摞排最前。
+ * 分诊顺序：能处理的在前，同等情况下最厚的一摞在前。
  *
- * 归并重复项的全部意义就在那个 ×N —— 同一件事被记了 10 条，处理一次能清掉 10 条。
- * 服务端给的是时间倒序，于是最厚的一摞常常排在最后（实机截图里 ×10 那组正是第三
- * 行），读者要先看完两件零星的才会碰到收益最大的那件。次数相同时保持服务端原序
- * （Array.prototype.sort 是稳定的）。
+ * 没有跳转或恢复路径的记录不能挡在真正可处理的事务前面；可执行性相同时，再让重复
+ * 记录最多的一组优先。次数相同则保持服务端原序（Array.prototype.sort 是稳定的）。
  */
 export function sortAnomalyGroups(groups: readonly TodayAnomalyGroup[]): readonly TodayAnomalyGroup[] {
-  return [...groups].sort((a, b) => b.count - a.count);
+  return [...groups].sort((a, b) => {
+    const actionable = Number(Boolean(b.target || b.recovery)) - Number(Boolean(a.target || a.recovery));
+    return actionable || b.count - a.count;
+  });
 }
 
 /**
@@ -260,7 +309,9 @@ const SUMMARY_KIND_ORDER: readonly ActivityEventV1["kind"][] = [
  * 只有一个时刻时不画成区间（"09:05 – 09:05" 是噪声）。
  */
 export function todaySpan(activity: Pick<TodayActivityV1, "events">): string | null {
-  const marks = activity.events
+  const learningEvents = activity.events.filter((event) => event.kind !== "job");
+  const spanEvents = learningEvents.length > 0 ? learningEvents : activity.events;
+  const marks = spanEvents
     .map((event) => new Date(event.at))
     .filter((date) => Number.isFinite(date.valueOf()))
     .sort((a, b) => a.valueOf() - b.valueOf());
@@ -275,20 +326,31 @@ export function buildTodayVerdict(
   activity: Pick<TodayActivityV1, "events" | "anomalies" | "truncated">,
 ): TodayVerdict {
   const total = activity.events.length;
+  const learningEvents = activity.events.filter((event) => event.kind !== "job");
+  const systemTotal = total - learningEvents.length;
   const pending = activity.anomalies.length;
-  // 触顶时 total 只是"这一页装下的条数"，加号是因为不能让读者把这当成全天的总量。
-  const counted = activity.truncated ? `${total}+` : `${total}`;
+  const leadingEvents = learningEvents.length > 0 ? learningEvents : activity.events;
+  const leadingCount = leadingEvents.length;
+  // 单类来源到 100 才会触发服务端截断。后台任务触顶不应把“学习记录 1”
+  // 误标为 1+；它的加号留在系统活动摘要里。
+  const leadingTruncated = activity.truncated
+    && !(learningEvents.length > 0 && systemTotal >= 100 && learningEvents.length < 100);
+  const counted = leadingTruncated ? `${leadingCount}+` : `${leadingCount}`;
 
   const counts = new Map<ActivityEventV1["kind"], number>();
-  for (const event of activity.events) {
+  for (const event of learningEvents) {
     counts.set(event.kind, (counts.get(event.kind) ?? 0) + 1);
   }
-  const countsLine = SUMMARY_KIND_ORDER.map((kind) => {
+  const learningCountsLine = SUMMARY_KIND_ORDER.map((kind) => {
     const count = counts.get(kind) ?? 0;
     return count > 0 ? `${KIND_LABELS[kind]} ${count}` : null;
   })
     .filter((value): value is string => value !== null)
     .join(" · ");
+  const systemCountLabel = systemTotal > 0
+    ? `系统活动 ${systemTotal}${activity.truncated && systemTotal >= 100 ? "+" : ""}`
+    : null;
+  const countsLine = [learningCountsLine || null, systemCountLabel].filter(Boolean).join(" · ");
 
   const span = todaySpan(activity);
 
@@ -301,7 +363,15 @@ export function buildTodayVerdict(
     };
   }
 
-  const metrics: TodayMetric[] = [{ key: "events", label: "记录", value: counted, alarm: false }];
+  const metrics: TodayMetric[] = [];
+  if (total > 0) {
+    metrics.push({
+      key: "events",
+      label: learningEvents.length > 0 ? "学习记录" : "系统活动",
+      value: counted,
+      alarm: false,
+    });
+  }
   if (pending > 0) metrics.push({ key: "pending", label: "待处理", value: `${pending}`, alarm: true });
   if (span) metrics.push({ key: "span", label: "时段", value: span, alarm: false });
 
@@ -311,22 +381,22 @@ export function buildTodayVerdict(
   if (total === 0) {
     return {
       headline: "今天的操作还没起步",
-      detail: "先把卡住的事务处理掉，新的操作会按时间排在这里。",
+      detail: "先把卡住的事情处理掉，新的记录会按时间排在这里。",
       pending,
       metrics,
     };
   }
-  return { headline: "有事务停在半路，处理完就能继续推进", detail: countsLine, pending, metrics };
+  return { headline: "有几件事卡在半路，处理完就能继续推进", detail: countsLine, pending, metrics };
 }
 
 /** 记录栏底部的诚实声明：触顶就说这不是完整账本，与旧账本栏同一原则。 */
 export function todayLogTruncationNote(activity: Pick<TodayActivityV1, "truncated" | "events">): string | null {
   if (!activity.truncated) return null;
-  return `今天的事超过了单页上限，这里只显示最近的 ${activity.events.length} 条；更早的记录请到各自的资料库查看。`;
+  return `今天的记录超过了一页，这里只显示最近的 ${activity.events.length} 条；更早的到笔记、来源等页面可以找到。`;
 }
 
 /** 异常区被封顶时同样要说出来：没列出的异常不会自己消失。 */
 export function todayAnomalyTruncationNote(activity: Pick<TodayActivityV1, "anomaliesTruncated">): string | null {
   if (!activity.anomaliesTruncated) return null;
-  return "异常事务太多，这里只列最近的一部分；处理完这些后会看到剩下的。";
+  return "需要处理的事情太多，这里只列最近的一部分；处理完这些就能看到剩下的。";
 }

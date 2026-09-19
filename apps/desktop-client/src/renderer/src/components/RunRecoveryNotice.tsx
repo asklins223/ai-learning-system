@@ -67,7 +67,6 @@ function generationRecoveryActionLabel(generation: CardGenerationActiveSummaryV1
 export function RunRecoveryNotice() {
   const surface = useRoomStore((state) => state.surface);
   const onboardingOpen = useRoomStore((state) => state.onboardingOpen);
-  const companionOpen = useRoomStore((state) => state.companionOpen);
   const invoke = useRoomStore((state) => state.invoke);
   const setActiveRunId = useRoomStore((state) => state.setActiveRunId);
   const setActiveCardGenerationRunId = useRoomStore((state) => state.setActiveCardGenerationRunId);
@@ -90,7 +89,7 @@ export function RunRecoveryNotice() {
   // The compact companion panel and recovery notice are both persistent overlays.
   // Keep the focused companion interaction unobstructed without discarding the
   // trusted recovery state; the notice returns when the companion closes.
-  if (surface || onboardingOpen || companionOpen || (runs.length === 0 && !generation && !recoveryFailure)) return null;
+  if (surface || onboardingOpen || (runs.length === 0 && !generation && !recoveryFailure)) return null;
 
   const recover = (run: ActiveRunItem) => {
     setActiveRunId(run.runId);

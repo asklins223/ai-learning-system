@@ -75,11 +75,8 @@ const HOME_V2_REGION_TRIGGER_IDS: Readonly<Record<Exclude<HomeV2Zone, "wide">, s
 const HOME_PROJECTION_FEATURE_IDS = new Set<HomeFeatureId>([
   "continue",
   "today-review",
-  "quick-capture",
   "current-notebook",
-  "learning-cards",
   "current-target",
-  "learning-activity",
 ]);
 
 const DEFAULT_CONTEXT: HomeV2ContextValue = {
@@ -133,8 +130,6 @@ export function HomeV2Provider({ children }: { readonly children: ReactNode }) {
   const invoke = useRoomStore((state) => state.invoke);
   const onboardingOpen = useRoomStore((state) => state.onboardingOpen);
   const finishOnboarding = useRoomStore((state) => state.finishOnboarding);
-  const toggleCompanion = useRoomStore((state) => state.toggleCompanion);
-  const companionOpen = useRoomStore((state) => state.companionOpen);
   const setActiveNoteRef = useRoomStore((state) => state.setActiveNoteRef);
   const setActiveSourceId = useRoomStore((state) => state.setActiveSourceId);
   const setActiveObjectiveId = useRoomStore((state) => state.setActiveObjectiveId);
@@ -284,31 +279,20 @@ export function HomeV2Provider({ children }: { readonly children: ReactNode }) {
         detail = home.reviewLabel;
         meta = home.dueCount === null ? "数量 —" : `${home.dueCount} 项待复习`;
         break;
-      case "quick-capture":
-        meta = home.captureState === "enabled" ? "后端已允许" : "等待授权";
-        break;
       case "current-notebook":
         detail = home.note?.title ?? "尚无服务端确认的研究册书签";
         meta = home.noteCount === null ? "数量 —" : `${home.noteCount} 本`;
-        break;
-      case "learning-cards":
-        meta = home.generationActive ? "有生成任务待恢复" : "打开理解目标";
         break;
       case "current-target":
         detail = home.hasFocus ? "服务端已确认当前主目标" : "等待服务端确认主目标";
         meta = home.objectiveCount === null ? "数量 —" : `${home.objectiveCount} 个目标`;
         break;
-      case "companion":
+      case "companion-center":
         detail = companionHome.projection?.profileSummary.name
-          ? `打开 ${companionHome.projection.profileSummary.name} 的对话面板`
+          ? `打开 ${companionHome.projection.profileSummary.name} 的对话、日记、人格与记忆`
           : definition.purpose;
-        meta = companionOpen ? "对话已打开" : "小屋可用";
+        meta = "小屋可用";
         break;
-      case "companion-memory": {
-        const count = companionHome.projection?.memorySummary.confirmedCount;
-        meta = typeof count === "number" ? `${count} 条已确认` : "数量 —";
-        break;
-      }
       default:
         break;
     }
@@ -322,7 +306,7 @@ export function HomeV2Provider({ children }: { readonly children: ReactNode }) {
     }
 
     return { definition, title: definition.title, detail, state, meta };
-  }, [companionHome.projection, companionOpen, failure, home]);
+  }, [companionHome.projection, failure, home]);
 
   const openFeatureNotice = useCallback((featureId: HomeFeatureId) => {
     featureTriggerRef.current = document.activeElement instanceof HTMLElement
@@ -348,12 +332,8 @@ export function HomeV2Provider({ children }: { readonly children: ReactNode }) {
       openCatalog();
       return;
     }
-    if (feature.id === "companion") {
-      if (!companionOpen) toggleCompanion();
-      return;
-    }
-    if (feature.id === "quick-capture" || feature.id === "learning-activity") {
-      openFeatureNotice(feature.id);
+    if (feature.id === "companion-center") {
+      invoke("open-companion-center");
       return;
     }
     if (feature.id === "today-review") {
@@ -378,11 +358,7 @@ export function HomeV2Provider({ children }: { readonly children: ReactNode }) {
       invoke("open-sources");
       return;
     }
-    if (feature.id === "learning-cards") {
-      invoke("open-objectives");
-      return;
-    }
-    if (feature.id === "room-search" || feature.id === "global-search") {
+    if (feature.id === "global-search") {
       invoke("search");
       return;
     }
@@ -400,16 +376,12 @@ export function HomeV2Provider({ children }: { readonly children: ReactNode }) {
       invoke("graph");
       return;
     }
-    if (feature.id === "companion-diary" || feature.id === "companion-persona" || feature.id === "companion-memory" || feature.id === "memory-graph") {
-      invoke("open-companion-center");
-      return;
-    }
-    if (feature.id === "personal-center" || feature.id === "settings") {
+    if (feature.id === "settings") {
       invoke("open-settings");
       return;
     }
     openFeatureNotice(feature.id);
-  }, [companionOpen, home.note, introVisible, invoke, markIntroSeen, openCatalog, openFeatureNotice, projection, setActiveNoteRef, setActiveObjectiveId, setActiveSourceId, toggleCompanion]);
+  }, [home.note, introVisible, invoke, markIntroSeen, openCatalog, openFeatureNotice, projection, setActiveNoteRef, setActiveObjectiveId, setActiveSourceId]);
 
   const showAllFeatures = useCallback(() => {
     const alreadyOpen = catalogOpen;
@@ -423,8 +395,12 @@ export function HomeV2Provider({ children }: { readonly children: ReactNode }) {
     setSelectedFeatureId(null);
     catalogTriggerRef.current = null;
     featureTriggerRef.current = null;
+    // 离开书房去页面时，已聚焦的区域也要一起退：目录与功能说明都在这里收，
+    // 唯独漏了区域，于是回到书房还挂着一条区域功能签条——既像残留，又压住
+    // 左下角承载「今日下一步」的任务岛。
+    exitRegion();
     markIntroSeen();
-  }, [markIntroSeen, surface]);
+  }, [exitRegion, markIntroSeen, surface]);
 
   useEffect(() => {
     const runRequestedFeature = (event: Event) => {
@@ -579,7 +555,8 @@ function HomeV2Catalog({ open, notice, onNotice, onClose }: { readonly open: boo
 
   const runCatalogFeature = (featureId: HomeFeatureId) => {
     runFeature(featureId);
-    if (featureId === "companion") onClose(false);
+    // companion-center 会打开 surface，surface 变化的 effect 会替目录收起，
+    // 这里不再需要按条目特判关闭。
   };
 
   const toggleDecor = async (decorId: CompanionDecorIdV1) => {

@@ -9,7 +9,7 @@
 import type { ApiTransaction } from "../../db/client.ts";
 import { resolveAssessmentCriticConfig } from "../../lib/assessment-critic-config.ts";
 import { sql } from "drizzle-orm";
-import { evaluateProactivePolicy } from "./proactive-policy.ts";
+import { evaluateDismissalFeedback, evaluateProactivePolicy } from "./proactive-policy.ts";
 import { deliver } from "./delivery-service.ts";
 
 // PERF-WN: Intl.DateTimeFormat 构造带时区数据，开销可观且每次调用都重建。
@@ -289,7 +289,7 @@ export async function hookProactiveOnRunCompleted(
   // 避免在结算路径上串行 4 个 DB 往返（PERF round-5）。
   const { userCompanionAccountState } = await import("@ailearn/shared/db-schema/companion");
   const { eq } = await import("drizzle-orm");
-  const [accountRows, pageRows, shownRows, lastRows] = await Promise.all([
+  const [accountRows, pageRows, shownRows, lastRows, feedbackRows] = await Promise.all([
     tx
       .select({
         presence: userCompanionAccountState.presence,
@@ -323,6 +323,16 @@ export async function hookProactiveOnRunCompleted(
         AND kind = 'system_event'
       ORDER BY created_at DESC LIMIT 1
     `),
+    // 展示反馈（念头管线切片①，2026-09-18）：最近送达过用户的 delivery 状态
+    //（未读的 queued/delivered 不构成反馈）。
+    tx.execute<{ state: string }>(sql`
+      SELECT state FROM assistant_deliveries
+      WHERE workspace_id = ${scope.workspaceId} AND user_id = ${scope.userId}
+        AND kind = 'system_event'
+        AND state IN ('displayed', 'acted', 'dismissed')
+        AND created_at > now() - interval '24 hours'
+      ORDER BY created_at DESC LIMIT 3
+    `),
   ]);
   const presence = accountRows[0]?.presence as { presence?: "online" | "dnd" | "offline" } | null;
   const availability = presence?.presence ?? "online";
@@ -332,6 +342,11 @@ export async function hookProactiveOnRunCompleted(
   // 静默时段（账号级；按 IANA 时区计算本地时间）：时段内抑制全部主动 cue。
   const quietHours = accountRows[0]?.quietHours;
   if (quietHours && isWithinQuietHours(quietHours, now)) {
+    return null;
+  }
+  // 展示反馈进生成（被忽略→降权）：最近 3 条送达的主动提示里 dismiss ≥2 → 本轮沉默。
+  const feedbackStates = (Array.isArray(feedbackRows) ? feedbackRows : []).map((row) => row.state);
+  if (evaluateDismissalFeedback(feedbackStates).suppress) {
     return null;
   }
   const interventionLevel = accountRows[0]?.interventionLevel ?? "moderate";

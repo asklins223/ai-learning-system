@@ -5,7 +5,8 @@ import { safeSseWrite, safeWriteWithBackpressure } from "../../lib/safe-sse-writ
 import { CompanionConversationError, createCompanionTurn, createCompanionConversation } from "./turn-service.ts";
 import { createCompanionLearningRunContextGrantRequestV1Schema, createMenuProposalRequestV1Schema, createToolProposalRequestV1Schema, proposalDecisionRequestV1Schema } from "@ailearn/shared";
 import { cancelCompanionRun } from "./companion-cancel.ts";
-import { openCompanionEventStream } from "./companion-events.ts";
+import { openCompanionEventStream, listCompanionAgentRoutes, listCompanionRunNodes } from "./companion-events.ts";
+import { openCompanionThought } from "./thought-service.ts";
 import {
   ensureCompanionInbox,
   getCompanionConversationSnapshot,
@@ -23,6 +24,7 @@ import {
   resolveCompanionLearningContext,
 } from "./learning-action-bridge.ts";
 import { createCompanionTurnRequestV1Schema } from "@ailearn/shared";
+import { allowedMainRouteV2Schema } from "@ailearn/shared";
 import { exportCompanionDataStream } from "./companion-export.ts";
 import {
   COMPANION_RATE_LIMITS,
@@ -402,6 +404,162 @@ export async function companionConversationRoutes(app: FastifyInstance) {
       }
       result.stream.start();
       return reply;
+    },
+  );
+
+  // GET /companion/conversations/:id/agent-routes — 2026-09-18 桌面轮询窗口。
+  // 只读投影：agent.tool 事件里带 route 的 succeeded 形态（导航类工具结果），
+  // 供无 SSE 消费者的桌面聊天抽屉按 seq 游标拉取。UI 提示用途，不做 SSE 的
+  // 连续 replay 校验；route 形状不合 V2 的事件跳过，不整单失败。
+  app.get<{ Params: { id: string }; Querystring: { after?: string } }>(
+    "/companion/conversations/:id/agent-routes",
+    { preHandler: [requireSession, requireCompanionDialogue] },
+    async (req, reply) => {
+      if (!rateLimited(reply, req.id, `${req.session.workspaceId}:${req.session.userId}:read`, COMPANION_RATE_LIMITS.readQueriesPerMinute.limit, COMPANION_RATE_LIMITS.readQueriesPerMinute.windowMs)) return;
+      const afterRaw = typeof req.query?.after === "string" ? req.query.after : "0";
+      const after = Number(afterRaw);
+      if (!Number.isInteger(after) || after < 0) {
+        return reply.code(400).send({
+          version: 1,
+          error: "INVALID_REQUEST",
+          message: "after must be a non-negative integer",
+          recoverable: false,
+          requestId: req.id,
+        });
+      }
+      try {
+        const result = await listCompanionAgentRoutes({
+          workspaceId: req.session.workspaceId,
+          userId: req.session.userId,
+          conversationId: req.params.id,
+          after,
+        });
+        if (!result.ok) {
+          return reply.code(result.statusCode).header("cache-control", "no-store").send({
+            version: 1,
+            error: result.code,
+            message: result.statusCode >= 500 ? "服务器内部错误" : result.message,
+            recoverable: true,
+            requestId: req.id,
+          });
+        }
+        const items = result.items.flatMap((item) => {
+          const parsed = allowedMainRouteV2Schema.safeParse(item.route);
+          if (!parsed.success) return [];
+          return [{
+            version: 1 as const,
+            seq: item.seq,
+            tool: item.tool,
+            safeSummary: item.safeSummary,
+            route: parsed.data,
+            ...(item.autoExecute ? { autoExecute: true as const } : {}),
+          }];
+        });
+        return reply.code(200).header("cache-control", "no-store").send({
+          version: 1,
+          items,
+          latestSeq: result.latestSeq,
+        });
+      } catch (err) {
+        if (err instanceof CompanionConversationError) {
+          return reply.code(err.statusCode).send({ version: 1, error: err.code, message: err.statusCode >= 500 ? "服务器内部错误" : err.message, recoverable: true, requestId: req.id });
+        }
+        throw err;
+      }
+    },
+  );
+
+  // GET /companion/conversations/:id/run-nodes — 2026-09-19 过程留痕只读窗口。
+  // 与 agent-routes 同形状（seq 游标 + latestSeq）：节点事件原样透传，由桌面端复用
+  // 实时链路那个收敛函数折成节点，避免"实时的过程"和"翻历史的过程"两套口径。
+  // 另外按 run 返回步数/工具次数摘要与当前仍可读的节点条数——后者是"过程记录已过期"
+  // 的唯一诚实判据（消息不随 TTL 消失，事件会）。
+  app.get<{ Params: { id: string }; Querystring: { after?: string } }>(
+    "/companion/conversations/:id/run-nodes",
+    { preHandler: [requireSession, requireCompanionDialogue] },
+    async (req, reply) => {
+      if (!rateLimited(reply, req.id, `${req.session.workspaceId}:${req.session.userId}:read`, COMPANION_RATE_LIMITS.readQueriesPerMinute.limit, COMPANION_RATE_LIMITS.readQueriesPerMinute.windowMs)) return;
+      const afterRaw = typeof req.query?.after === "string" ? req.query.after : "0";
+      const after = Number(afterRaw);
+      if (!Number.isInteger(after) || after < 0) {
+        return reply.code(400).send({
+          version: 1,
+          error: "INVALID_REQUEST",
+          message: "after must be a non-negative integer",
+          recoverable: false,
+          requestId: req.id,
+        });
+      }
+      try {
+        const result = await listCompanionRunNodes({
+          workspaceId: req.session.workspaceId,
+          userId: req.session.userId,
+          conversationId: req.params.id,
+          after,
+        });
+        if (!result.ok) {
+          return reply.code(result.statusCode).header("cache-control", "no-store").send({
+            version: 1,
+            error: result.code,
+            message: result.message,
+            recoverable: true,
+            requestId: req.id,
+          });
+        }
+        return reply.code(200).header("cache-control", "no-store").send({
+          version: 1,
+          items: result.items.map((item) => ({
+            version: 1 as const,
+            seq: item.seq,
+            runId: item.runId,
+            type: item.type,
+            payload: item.payload,
+          })),
+          runs: result.runs.map((run) => ({
+            version: 1 as const,
+            runId: run.runId,
+            status: run.status,
+            generation: run.generation,
+            mode: run.mode === "single_step" ? ("single_step" as const) : ("hybrid" as const),
+            stepCount: run.stepCount,
+            toolCallCount: run.toolCallCount,
+            maxSteps: run.maxSteps,
+            maxToolCalls: run.maxToolCalls,
+            assistantMessageId: run.assistantMessageId,
+            nodeCount: run.nodeCount,
+          })),
+          latestSeq: result.latestSeq,
+        });
+      } catch (err) {
+        if (err instanceof CompanionConversationError) {
+          return reply.code(err.statusCode).send({ version: 1, error: err.code, message: err.statusCode >= 500 ? "服务器内部错误" : err.message, recoverable: true, requestId: req.id });
+        }
+        throw err;
+      }
+    },
+  );
+
+  // POST /companion/thoughts/:id/open — 念头管线切片④（2026-09-18）。
+  // 气泡点击主动开场：念头的表达落为 kind='proactive' 的 assistant 开场消息，
+  // 念头 delivered → spent（不可重复点开）。
+  app.post<{ Params: { id: string } }>(
+    "/companion/thoughts/:id/open",
+    { preHandler: [requireSession, requireCompanionDialogue] },
+    async (req, reply) => {
+      if (!rateLimited(reply, req.id, `${req.session.workspaceId}:${req.session.userId}:read`, COMPANION_RATE_LIMITS.readQueriesPerMinute.limit, COMPANION_RATE_LIMITS.readQueriesPerMinute.windowMs)) return;
+      try {
+        const result = await openCompanionThought({
+          workspaceId: req.session.workspaceId,
+          userId: req.session.userId,
+          thoughtId: req.params.id,
+        });
+        return reply.code(result.statusCode).header("cache-control", "no-store").send(result.body);
+      } catch (err) {
+        if (err instanceof CompanionConversationError) {
+          return reply.code(err.statusCode).send({ version: 1, error: err.code, message: err.statusCode >= 500 ? "服务器内部错误" : err.message, recoverable: true, requestId: req.id });
+        }
+        throw err;
+      }
     },
   );
 

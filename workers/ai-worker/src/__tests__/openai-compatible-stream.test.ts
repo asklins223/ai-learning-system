@@ -149,6 +149,93 @@ test("chatCompletionStream：responseFormat=text 不强制 JSON mode", async () 
   });
 });
 
+test("chatCompletionStream（④-b）：发出 tools/tool_choice，并把分片 tool_calls 归并成完整调用", async () => {
+  // 带工具的一步走流式的前提：**工具定义要发出去**（否则模型永远不返回 tool_calls），
+  // 且 `delta.tool_calls` 是按 index 分片到达的——`arguments` 必须拼完整串再解析。
+  await withFetchMock(async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    assert.equal(body.stream, true);
+    assert.equal(body.tools.length, 1);
+    assert.equal(body.tools[0].function.name, "companion_open_review");
+    assert.equal(body.tool_choice, "auto");
+    assert.equal("response_format" in body, false, "带工具的一步同样不强制 JSON mode");
+    return sseResponse([
+      sseLine(JSON.stringify({ choices: [{ delta: { content: "好，这就带你过去。" } }] })),
+      sseLine(JSON.stringify({
+        choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: "companion_open_review", arguments: "{\"card" } }] } }],
+      })),
+      sseLine(JSON.stringify({
+        choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "Id\": \"abc\"}" } }] }, finish_reason: "tool_calls" }],
+      })),
+      "data: [DONE]\n\n",
+    ]);
+  }, async () => {
+    const deltas: string[] = [];
+    const result = await makeProvider(undefined, fetchStreamingRequester()).chatCompletionStream(
+      CHAT_MESSAGES,
+      {
+        responseFormat: "text",
+        tools: [{
+          name: "companion_open_review",
+          description: "打开复习页面。",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+        }],
+      },
+      undefined,
+      (d) => deltas.push(d),
+    );
+    assert.equal(result.content, "好，这就带你过去。");
+    assert.deepEqual(deltas, ["好，这就带你过去。"]);
+    assert.deepEqual(result.toolCalls, [
+      { id: "call_1", name: "companion_open_review", arguments: { cardId: "abc" } },
+    ]);
+    assert.equal(result.finishReason, "tool_calls");
+  });
+});
+
+test("chatCompletionStream（④-b）：只回 tool_calls、一个字都不说的那一步不算空输出", async () => {
+  // 旧判据只看 `content`，于是"模型决定直接发起调用"的那一步会被误判成
+  // stream_empty 并抛错 → 白白退化成整段取回（那一步就永远不流式）。
+  await withFetchMock(async () => sseResponse([
+    sseLine(JSON.stringify({
+      choices: [{ delta: { tool_calls: [{ index: 0, id: "call_9", function: { name: "companion_read_context", arguments: "{}" } }] } }],
+    })),
+    "data: [DONE]\n\n",
+  ]), async () => {
+    const result = await makeProvider(undefined, fetchStreamingRequester()).chatCompletionStream(
+      CHAT_MESSAGES,
+      { responseFormat: "text" },
+      undefined,
+      () => undefined,
+    );
+    assert.equal(result.content, "");
+    assert.deepEqual(result.toolCalls, [
+      { id: "call_9", name: "companion_read_context", arguments: {} },
+    ]);
+  });
+});
+
+test("chatCompletionStream（④-b）：arguments 是坏 JSON 时不当作「空参数成功调用」", async () => {
+  // 截断/损坏的调用必须留下可见痕迹：arguments 保持空对象，由上层 schema 校验
+  // 拒绝并记审计——绝不静默执行一个模型没真正提出的调用。
+  await withFetchMock(async () => sseResponse([
+    sseLine(JSON.stringify({
+      choices: [{ delta: { tool_calls: [{ index: 0, id: "call_bad", function: { name: "companion_open_card", arguments: "{\"cardId\":" } }] } }],
+    })),
+    "data: [DONE]\n\n",
+  ]), async () => {
+    const result = await makeProvider(undefined, fetchStreamingRequester()).chatCompletionStream(
+      CHAT_MESSAGES,
+      { responseFormat: "text" },
+      undefined,
+      () => undefined,
+    );
+    assert.deepEqual(result.toolCalls, [
+      { id: "call_bad", name: "companion_open_card", arguments: {} },
+    ]);
+  });
+});
+
 test("chatCompletion：responseFormat=text 在非流式 fallback 也不强制 JSON mode", async () => {
   await withFetchMock(async (_url, init) => {
     const body = JSON.parse(String(init?.body));

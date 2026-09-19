@@ -272,13 +272,18 @@ export class DeterministicAuthoringProvider implements AuthoringProvider {
     const rubric: ObjectiveRubricV2 = { ...rubricWithoutHash, rubricHash };
 
     // Build objective draft
+    // 确定性 fallback 没有模型做「教学转换」，正面/摘要只能从目标陈述派生；
+    // 而陈述本身就是答案（canonicalAnswer 由同一命题派生）。整句贴进正面或
+    // 摘要会产出「题面即答案」的卡（2026-09-18 复盘：库中 34 张已发布卡均此
+    // 形态）。因此这里只保留派生概念标题，句子本体留给 canonicalAnswer 与
+    // 验证 rubric —— 概念标签足够定位一张卡，又不把答案送到读者眼前。
+    const conceptLabel = deriveConceptLabel({
+      objectiveStatement: planObjective.objectiveStatement,
+    }) || "未命名知识点";
     const objective: LearningObjectiveDraftV2 = {
       objectiveStatement: planObjective.objectiveStatement,
-      publicSummary: planObjective.objectiveStatement.slice(0, 200),
-      // W1-05：确定性 fallback 用派生标题（仅测试/precheck 路径，发布前仍过 Critic）。
-      conceptLabel: deriveConceptLabel({
-        objectiveStatement: planObjective.objectiveStatement,
-      }),
+      publicSummary: conceptLabel,
+      conceptLabel,
       knowledgeForm: planObjective.knowledgeForm,
       preferredTaskIntents: ["recall"],
       canonicalAnswer,
@@ -298,8 +303,8 @@ export class DeterministicAuthoringProvider implements AuthoringProvider {
       strategy,
       transformationKind,
       front: {
-        cue: planObjective.objectiveStatement.slice(0, 200),
-        prompt: `请回答：${planObjective.objectiveStatement}`,
+        cue: conceptLabel,
+        prompt: `请回忆并说明「${conceptLabel}」的关键内容`,
       },
       estimatedReviewSeconds: planObjective.estimatedReviewCostSeconds,
     };

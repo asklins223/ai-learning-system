@@ -410,7 +410,7 @@ test("executeAgentTurn: 工具历史回放为 function_call + function_call_outp
   ]);
 });
 
-test("executeAgentTurn: 无工具时回退 JSON 模式（structured_action 由 content 解析）", async () => {
+test("executeAgentTurn: 无工具轮保持自然文本（不写 text.format；structured_action 由 content 解析）", async () => {
   const { request, calls } = recordingRequester(ok(completionResponse({
     output: [{
       type: "message",
@@ -421,7 +421,9 @@ test("executeAgentTurn: 无工具时回退 JSON 模式（structured_action 由 c
   })));
   const provider = makeProvider({ request });
   const result = await provider.executeAgentTurn(agentTurnRequest({ tools: [] }));
-  assert.deepEqual(calls[0].body.text, { format: { type: "json_object" } });
+  // 根因二（2026-09-19）：无工具轮不再强制 json_object——伴星终答要自然文本，
+  // 信封模型按 JSON 输出是 json_envelope_leak 的直接来源。
+  assert.equal(calls[0].body.text, undefined);
   assert.equal(calls[0].body.tools, undefined);
   assert.deepEqual(result.toolCalls, [{ id: "c1", name: "noop", arguments: {} }]);
 });

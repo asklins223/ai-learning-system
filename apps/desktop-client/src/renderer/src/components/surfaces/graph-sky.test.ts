@@ -137,14 +137,14 @@ describe("labels", () => {
  * 只显示「笔记 · fresh」。这一组把四种节点的分发钉死。
  */
 describe("graphNodeSummary · 四族各报各的事实", () => {
-  it("目标报状态与公开主张，而不是笔记行", () => {
+  it("目标只报公开主张，状态交给详情元数据呈现", () => {
     const objective = objectiveNode({ publicSummary: "关于提取练习的主张" });
-    expect(graphNodeSummary(objective)).toBe("学习中 · 关于提取练习的主张");
+    expect(graphNodeSummary(objective)).toBe("关于提取练习的主张");
   });
 
-  it("目标 state 变化如实反映", () => {
+  it("目标 state 变化不会污染公开主张", () => {
     const attention = objectiveNode({ personal: personalState("due_review") });
-    expect(graphNodeSummary(attention)).toBe("到期复习 · 关于提取练习的主张");
+    expect(graphNodeSummary(attention)).toBe("关于提取练习的主张");
   });
 
   it("来源只报中文介质，不重复卡片标题里已有的名字", () => {

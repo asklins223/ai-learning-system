@@ -11,6 +11,7 @@ import {
   companionStreamEventV1Schema,
   companionErrorV1Schema,
   createCompanionTurnResponseV1Schema,
+  createCompanionTurnRequestV1Schema,
   proposedLearningActionPayloadV1Schema,
   proposalDecisionResponseV1Schema,
   companionMenuCandidateIdV1Schema,
@@ -637,4 +638,36 @@ test("proposalDecisionResponseV1Schema：route 接受 §18 V2 导航 kind（lens
     proposalDecisionResponseV1Schema.safeParse({ ...base, route: { kind: "conversation", conversationId: "923e4567-e89b-12d3-a456-426614174000" } }).success,
     false,
   );
+});
+
+test("划选投喂：turn 请求可携带 selection（user_selected），仍强制单 text block", () => {
+  const ok = createCompanionTurnRequestV1Schema.safeParse({
+    version: 1,
+    clientMessageId: UUID,
+    inputKind: "text",
+    blocks: [{ type: "text", text: "这段在讲什么？" }],
+    sourceSurface: "pet",
+    selection: { text: "光的折射定律：入射角等于反射角。", sharing: "user_selected" },
+  });
+  assert.equal(ok.success, true);
+  // 超长选区拒绝
+  const tooLong = createCompanionTurnRequestV1Schema.safeParse({
+    version: 1,
+    clientMessageId: UUID,
+    inputKind: "text",
+    blocks: [{ type: "text", text: "问题" }],
+    sourceSurface: "pet",
+    selection: { text: "x".repeat(2001), sharing: "user_selected" },
+  });
+  assert.equal(tooLong.success, false);
+  // sharing 只认 user_selected
+  const wrongSharing = createCompanionTurnRequestV1Schema.safeParse({
+    version: 1,
+    clientMessageId: UUID,
+    inputKind: "text",
+    blocks: [{ type: "text", text: "问题" }],
+    sourceSurface: "pet",
+    selection: { text: "一段话", sharing: "page_registered" },
+  });
+  assert.equal(wrongSharing.success, false);
 });

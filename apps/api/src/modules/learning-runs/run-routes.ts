@@ -31,6 +31,7 @@ import {
   getLearningRunPublicSnapshotV2FromView,
   recordActivityLease,
   putDraft,
+  revealRunTargetV2,
   submitArtifact,
 } from "./run-service.ts";
 import { createLearningRunV2RequestSchema } from "@ailearn/shared";
@@ -293,6 +294,31 @@ export async function learningRunRoutes(app: FastifyInstance) {
           }),
         );
         return reply.code(result.httpStatus).header("Cache-Control", "no-store").send(result);
+      } catch (err) {
+        if (err instanceof LearningRunServiceError) {
+          return reply.code(err.statusCode).send({ error: err.code, message: err.message });
+        }
+        throw err;
+      }
+    },
+  );
+
+  // POST /learning-runs/:runId/reveal/v2 —— 答后揭示（2026-09-18）
+  app.post<{ Params: { runId: string } }>(
+    "/learning-runs/:runId/reveal/v2",
+    { preHandler: [requireSession] },
+    async (req, reply) => {
+      const params = runParamsSchema.safeParse(req.params);
+      if (!params.success) throw app.httpErrors.badRequest("runId 非法");
+      try {
+        const reveal = await withWorkspaceTransaction(scopeOf(req), (tx) =>
+          revealRunTargetV2(tx, {
+            workspaceId: req.session.workspaceId,
+            userId: req.session.userId,
+            runId: params.data.runId,
+          }),
+        );
+        return reply.code(200).header("Cache-Control", "no-store").send(reveal);
       } catch (err) {
         if (err instanceof LearningRunServiceError) {
           return reply.code(err.statusCode).send({ error: err.code, message: err.message });

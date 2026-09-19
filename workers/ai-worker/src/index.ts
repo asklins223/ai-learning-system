@@ -9,7 +9,9 @@ import { runCompanionMemoryExtract } from "./handlers/companion-memory-extractor
 import { runCompanionSummarizer } from "./handlers/companion-summarizer.ts";
 import { runCompanionMemoryEmbeddingRebuild } from "./handlers/companion-memory-embedding.ts";
 import { runCompanionDailySummary } from "./handlers/companion-daily-summary.ts";
+import { runCompanionThought } from "./handlers/companion-thought.ts";
 import { tickCompanionDailySummaryScheduler } from "./handlers/companion-daily-summary-scheduler.ts";
+import { tickCompanionThoughtScheduler } from "./handlers/companion-thought-scheduler.ts";
 import { tickCompanionMemoryMaintenance } from "./handlers/companion-memory-maintenance.ts";
 import { tickCompanionProposalExpiry } from "./handlers/companion-proposal-expiry-scheduler.ts";
 import {
@@ -23,7 +25,8 @@ import { runWithAbortTimeout } from "./lib/handler-timeout.ts";
 import { resolveHandlerTimeout, RESOLVED_TIMEOUT_INFO } from "./lib/handler-timeout-config.ts";
 import { isNonRetryableError } from "./lib/non-retryable-errors.ts";
 import { createPollWakeSignal } from "./lib/poll-wakeup.ts";
-import { readJobPayloadString, safeErrorMessage, sanitizeOperationalError } from "@ailearn/shared";
+import { JobResourceClass, readJobPayloadString, safeErrorMessage, sanitizeOperationalError } from "@ailearn/shared";
+import { computeClaimLimits } from "./lib/worker-concurrency.ts";
 import {
   claimJobs,
   markJobDead,
@@ -57,6 +60,8 @@ const HANDLERS = {
   companion_summarizer: runCompanionSummarizer,
   companion_memory_embedding_rebuild: runCompanionMemoryEmbeddingRebuild,
   companion_daily_summary: runCompanionDailySummary,
+  // 念头管线切片②（2026-09-18）：候选念头生成 + 表达 + 送达。
+  companion_thought: runCompanionThought,
 } as const;
 
 const POLL_MS = 500;
@@ -365,7 +370,14 @@ function isMemoryAvailable(): boolean {
   return true;
 }
 
-const inflight = new Set<Promise<void>>();
+/**
+ * 在途 job：promise → 队列资源类（`JobResourceClass`）。
+ *
+ * 记录类别是为了给下一次 claim 算名额：后台（maintenance / card_foreground）
+ * 最多占用 `并发 - INTERACTIVE_RESERVE_SLOTS` 个槽位，交互车道永远留一个空位
+ * （见 lib/worker-concurrency.ts 的 computeClaimLimits）。
+ */
+const inflight = new Map<Promise<void>, string>();
 
 async function refreshQueueMetrics(nowMs = Date.now()): Promise<void> {
   if (nowMs - lastQueueMetricsRefreshAt < QUEUE_METRICS_REFRESH_MS) return;
@@ -442,6 +454,8 @@ export async function tick(): Promise<void> {
   // 22 方案：桌宠日记每日 01:00 调度 + 记忆衰减维护（内部 throttle）。
   await tickCompanionDailySummaryScheduler();
   await tickCompanionMemoryMaintenance();
+  // 念头管线切片②（2026-09-18）：念头生成调度（4h 桶幂等，内部 15min 节流）。
+  await tickCompanionThoughtScheduler();
   // Agent 方案 §5：过期/世代失效的确认兜底回收（内部 throttle）。
   // 不放在 claim 之后——被锁死的 conversation 没有 job 可 claim，必须在每轮
   // tick 都尝试终结，否则 run 会永久停在 waiting_for_confirmation。
@@ -449,8 +463,19 @@ export async function tick(): Promise<void> {
 
   // 只 claim 需要补充的 job 数量，每个 job 独立处理（fire-and-forget）。
   // AI 模型调用是网络 IO，并行处理可让多个 job 的模型调用同时进行。
-  const available = QUEUE_CONCURRENCY - inflight.size;
-  if (available <= 0) return;
+  // 交互车道保留：后台 job（maintenance / card_foreground）拿不到超过
+  // `并发 - INTERACTIVE_RESERVE_SLOTS` 的位置，最后一个空槽只对 interactive_ai
+  // 开放（见 lib/worker-concurrency.ts 的 computeClaimLimits）。
+  let inflightBackground = 0;
+  for (const resourceClass of inflight.values()) {
+    if (resourceClass !== JobResourceClass.INTERACTIVE_AI) inflightBackground += 1;
+  }
+  const claimLimits = computeClaimLimits({
+    concurrency: QUEUE_CONCURRENCY,
+    inflightTotal: inflight.size,
+    inflightBackground,
+  });
+  if (claimLimits.interactiveLimit <= 0) return;
 
   // 2026-08-11：DB 错误退避——tick 顶层 DB 调用（refreshQueueMetrics/reap/
   // claimJobs）抛错时，若不做退避会以 POLL_MS 紧循环重试（DB 抖动时放大负载）。
@@ -458,7 +483,7 @@ export async function tick(): Promise<void> {
   // reap/refresh 抛错经 671 行 tick 的 catch 记录，仍按当前档位重试）。
   let candidates: ClaimedJob[] = [];
   try {
-    candidates = await claimJobs(undefined, available);
+    candidates = await claimJobs(undefined, claimLimits);
   } catch (error) {
     // 2026-08-11：DB 错误退避——tick 顶层 DB 调用抛错时若不退避会以
     // POLL_MS 紧循环重试（DB 抖动放大负载）。复用 adaptive 机制指数退避。
@@ -489,7 +514,7 @@ export async function tick(): Promise<void> {
       );
       return undefined; // 确保返回一个 resolved promise，finally 会执行
     });
-    inflight.add(promise);
+    inflight.set(promise, job.resourceClass);
     // BUG-10 修复：使用 .then().catch().finally() 链确保 inflight.delete 总是执行
     promise.then(() => inflight.delete(promise)).catch(() => inflight.delete(promise));
   }
@@ -607,7 +632,7 @@ export async function main() {
           });
           await Promise.race([
             Promise.all([
-              Promise.allSettled([...inflight]),
+              Promise.allSettled([...inflight.keys()]),
               waitForV2OutboxDrain(drainTimeoutMs),
             ]),
             drainDeadline,

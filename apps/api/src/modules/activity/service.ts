@@ -84,7 +84,7 @@ const JOB_STATUS_LABELS: Record<string, string> = {
   running: "进行中",
   succeeded: "已完成",
   failed: "失败",
-  dead: "重试耗尽",
+  dead: "多次重试失败",
 };
 
 const RUN_PHASE_LABELS: Record<string, string> = {
@@ -396,7 +396,7 @@ export async function getTodayActivity(
       ? "这次生成没有产出可用候选卡，可以重新发起"
       : row.status === "stale"
         ? "笔记内容已经变化，候选卡需要重新对齐证据"
-        : "服务端要求你先判断，再继续这次生成";
+        : "等你确认之后，这次生成才能继续";
     anomalies.push({
       id: `anomaly.card_generation:${row.id}`,
       kind: "card_generation",
@@ -415,7 +415,9 @@ export async function getTodayActivity(
       id: `anomaly.job:${row.id}`,
       kind: "job",
       status: row.status,
-      title: `${label(JOB_TYPE_LABELS, row.type)}${row.status === "dead" ? "重试耗尽" : "失败"}`,
+      // 状态已由 `status` 单独表达，标题只负责说明“哪一种处理”。把“失败”
+      // 再拼进标题会在客户端读成“伴星对话多次重试失败 / 多次重试失败 · …”。
+      title: label(JOB_TYPE_LABELS, row.type),
       detail: row.lastError?.slice(0, 200) ?? (target ? "打开来源可以重新解析或换一份材料。" : null),
       // 用真实的调度时刻兜底，而不是拿窗口起点造一个时间戳。
       occurredAt: (row.finishedAt ?? row.scheduledAt).toISOString(),
@@ -430,7 +432,9 @@ export async function getTodayActivity(
       title: `${RUN_GOAL_LABELS[row.goal] ?? row.goal}学习旅程超过 24 小时没有进展`,
       detail: `停在${label(RUN_PHASE_LABELS, row.phase)}阶段，可以放弃后重新发起`,
       occurredAt: row.updatedAt.toISOString(),
-      target: { kind: "review", id: row.id, noteVersionId: null },
+      // 这是一次学习旅程，不是某张到期复习卡。传真实 run id，
+      // renderer 才能回到这一次旅程；伪装成 review 只会打开无关的通用队列。
+      target: { kind: "learning_run", id: row.id, noteVersionId: null },
     });
   }
   anomalies.sort((left, right) =>

@@ -104,7 +104,7 @@ export interface PlannedPrivateClosure {
 export interface PlannedRun {
   tasks: PlannedTaskInput[];
   primaryVariant: PlannedVariant;
-  alternativeVariant: PlannedVariant;
+  alternativeVariants: PlannedVariant[];
   closures: {
     [variantId: string]: PlannedPrivateClosure;
   };
@@ -291,12 +291,12 @@ export function planRun(target: RunPlannerTargetInput, options: PlannerOptions):
   }
 
   const primaryVariant = primaryFamily === "voice" ? voiceVariant : textVariant;
-  const alternativeVariant = primaryFamily === "voice" ? textVariant : voiceVariant;
+  const alternativeVariants = [primaryFamily === "voice" ? textVariant : voiceVariant];
 
   return {
     tasks: [task],
     primaryVariant,
-    alternativeVariant,
+    alternativeVariants,
     closures,
     runPlanHash,
     plannedActiveSeconds: Math.min(estSeconds, options.timeBudgetSeconds),
@@ -385,7 +385,7 @@ function planStructuredRun(target: RunPlannerTargetInput, options: PlannerOption
   return {
     tasks: [task],
     primaryVariant: structuredVariant,
-    alternativeVariant: textVariant,
+    alternativeVariants: [textVariant],
     closures,
     runPlanHash,
     plannedActiveSeconds: Math.min(estSeconds, options.timeBudgetSeconds),
@@ -429,18 +429,27 @@ function planV2Run(target: RunPlannerTargetInput, options: PlannerOptions): Plan
   const targetSummary = v2.publicSummary.slice(0, 160);
   const estSeconds = 60;
 
-  // 结构化：优先从 CanonicalAnswerV2 显式结构生成；无足够结构则不生成结构题，
-  // Planner 换 open text/voice（§16.5）。
+  // 结构化：主位结构题仅在用户显式要 structured 时生成（此时整题降为
+  // practice，见下）；备位结构题（2026-09-18）在 adaptive 下同样尝试生成，
+  // 作为「换一种方式」的练习备选。安全性依据：评估层按 payload.kind 把
+  // 结构化提交固定路由到 deterministic_structured（migration 0123：只产
+  // verdicts 绝不产 canonical），所以挂在 formal 任务上不会打开掌握后门。
+  // 判断不足返回 null（绝不为 UI 丰富度伪造片段/关系）。
   const wantsStructured = options.responsePreference === "structured";
-  const structured = wantsStructured
+  const structuredPrimary = wantsStructured
     ? generateStructuredFromSnapshot(v2.canonicalAnswer, v2.relations)
     : null;
+  const structuredAlternative = structuredPrimary
+    ? null
+    : generateStructuredFromSnapshot(v2.canonicalAnswer, v2.relations);
   const practiceOnly = v2.publishedTargetEligibility === "practice_only"
     || v2.publishedTargetEligibility === "blocked";
   // V2 的结构题目前只验证一个可机械比对的答案结构（例如步骤顺序或关系边）。
   // 它尚不能逐一证明冻结 rubric 的全部 required 能力，故不得以一次结构题
   // 通过换取 canonical/schedule；保留为可用的练习与反馈入口。
-  const structuredPracticeOnly = structured !== null;
+  // 注意：该降级只作用于「主位」结构题 —— 备位结构题不改变任务的 formal
+  // 属性，其练习性由评估层的 deterministic_structured 路由保证。
+  const structuredPracticeOnly = structuredPrimary !== null;
   const purpose = practiceOnly || structuredPracticeOnly ? "practice" as const : "formal" as const;
   const ceiling = practiceOnly || structuredPracticeOnly ? "practice_only" as const : "mastery_eligible" as const;
 
@@ -462,29 +471,32 @@ function planV2Run(target: RunPlannerTargetInput, options: PlannerOptions): Plan
   const closures: Record<string, PlannedPrivateClosure> = {};
   let structuredSolution: PrivateTaskSolutionV1 | undefined;
 
-  if (structured) {
-    structuredSolution = structured.solution as unknown as PrivateTaskSolutionV1;
-    const structuredInteraction = buildStructuredInteraction(structured);
-    primaryVariant = {
-      variantId: crypto.randomUUID(),
-      interaction: structuredInteraction,
-      publicPayloadHash: variantPublicPayloadHash(structuredInteraction, task.prompt),
-      inputSchemaHash: sha256Hex(`input:structured:v2`),
-      disclosureProfileHash: sha256Hex(
-        `disclosure:${JSON.stringify(["interaction", "prompt", "targetSummary"])}:hidden:solution`,
-      ),
-    };
+  if (structuredPrimary) {
+    structuredSolution = structuredPrimary.solution as unknown as PrivateTaskSolutionV1;
+    primaryVariant = buildStructuredPlannedVariant(structuredPrimary, task.prompt);
   } else {
     primaryVariant = buildVariant(runId, taskId, "text", estSeconds, target, task);
   }
 
   const voiceVariant = buildVariant(runId, taskId, "voice", estSeconds, target, task);
+
+  // 备位结构变体（练习通道）：与口述并列进「换一种方式」。
+  let structuredAlternativeVariant: PlannedVariant | null = null;
+  let structuredAlternativeSolution: PrivateTaskSolutionV1 | undefined;
+  if (structuredAlternative) {
+    structuredAlternativeSolution = structuredAlternative.solution as unknown as PrivateTaskSolutionV1;
+    structuredAlternativeVariant = buildStructuredPlannedVariant(structuredAlternative, task.prompt);
+  }
+
   const runPlanHash = sha256Hex([
     `run:${runId}`,
     `task:${task.taskId}:${task.sequence}:${task.intent}:${task.purpose}:${task.templateTrustCeiling}`,
     `prompt:${sha256Hex(task.prompt)}`,
     `variant:${primaryVariant.variantId}:${primaryVariant.publicPayloadHash}`,
     `variant:${voiceVariant.variantId}:${voiceVariant.publicPayloadHash}`,
+    ...(structuredAlternativeVariant
+      ? [`variant:${structuredAlternativeVariant.variantId}:${structuredAlternativeVariant.publicPayloadHash}`]
+      : []),
   ].join("\n"));
 
   closures[primaryVariant.variantId] = buildClosure(
@@ -494,14 +506,39 @@ function planV2Run(target: RunPlannerTargetInput, options: PlannerOptions): Plan
   closures[voiceVariant.variantId] = buildClosure(runId, taskId, voiceVariant, target, task, runPlanHash,
     undefined, requiredRubricTargetIds,
   );
+  if (structuredAlternativeVariant) {
+    closures[structuredAlternativeVariant.variantId] = buildClosure(
+      runId, taskId, structuredAlternativeVariant, target, task, runPlanHash,
+      structuredAlternativeSolution, requiredRubricTargetIds,
+    );
+  }
 
   return {
     tasks: [task],
     primaryVariant,
-    alternativeVariant: voiceVariant,
+    alternativeVariants: structuredAlternativeVariant
+      ? [structuredAlternativeVariant, voiceVariant]
+      : [voiceVariant],
     closures,
     runPlanHash,
     plannedActiveSeconds: Math.min(estSeconds, options.timeBudgetSeconds),
+  };
+}
+
+/** 结构化载荷 → PlannedVariant（主位/备位共用同一装配）。 */
+function buildStructuredPlannedVariant(
+  structured: StructuredTaskPayload | StructuredBundlePayload,
+  prompt: string,
+): PlannedVariant {
+  const structuredInteraction = buildStructuredInteraction(structured);
+  return {
+    variantId: crypto.randomUUID(),
+    interaction: structuredInteraction,
+    publicPayloadHash: variantPublicPayloadHash(structuredInteraction, prompt),
+    inputSchemaHash: sha256Hex(`input:structured:v2`),
+    disclosureProfileHash: sha256Hex(
+      `disclosure:${JSON.stringify(["interaction", "prompt", "targetSummary"])}:hidden:solution`,
+    ),
   };
 }
 

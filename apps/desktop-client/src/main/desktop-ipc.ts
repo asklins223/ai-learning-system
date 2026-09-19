@@ -67,6 +67,18 @@ import {
   aiDataPolicyV1Schema,
   workspaceAiSettingsV1Schema,
   workspaceExportResultV1Schema,
+  // 旧版设置页回补（2026-09-18）。
+  AVATAR_MAX_BYTES,
+  authProfileResultV1Schema,
+  avatarObjectKeySchema,
+  avatarUploadResultV1Schema,
+  inviteCreatedV1Schema,
+  inviteListResultV1Schema,
+  markdownImportResultV1Schema,
+  memberListResultV1Schema,
+  renameWorkspaceResultV1Schema,
+  searchDriftResultV1Schema,
+  searchReindexResultV1Schema,
   type DesktopRouteKindM2,
 } from "@ailearn/shared/desktop-ipc-contracts";
 import {
@@ -88,6 +100,7 @@ import { understandingTopologySnapshotV3Schema } from "@ailearn/shared/understan
 import { todayActivityV1Schema } from "@ailearn/shared/activity-surface-contracts";
 import {
   getLearningRunResultResponseV2Schema,
+  learningRunTargetRevealV2Schema,
   learningRunActionResponseV2Schema,
   learningRunPublicSnapshotV2Schema,
   learningRunReturnContractV2Schema,
@@ -100,6 +113,7 @@ import { roomProjectionV1Schema } from "@ailearn/shared/room-projection-contract
 import {
   companionAccountPatchSchema,
   companionAccountStateV1Schema,
+  companionAnswerModePreferenceV1Schema,
   companionOverviewSchema,
 } from "@ailearn/shared/companion-shell-contracts";
 import {
@@ -110,7 +124,35 @@ import {
 import {
   companionVoiceSpeakRequestV1Schema,
   companionVoiceSpeakResultV1Schema,
+  companionVoiceTranscribeRequestV1Schema,
+  companionVoiceTranscribeResultV1Schema,
 } from "@ailearn/shared/companion-voice-contracts";
+// 伴星聊天发送链路（2026-09-18）：建/复用 dialogue、发 turn、拉消息。
+import {
+  companionChatEnsureRequestV1Schema,
+  companionChatEnsureResultV1Schema,
+  companionChatListMessagesRequestV1Schema,
+  companionChatListMessagesResultV1Schema,
+  companionChatSendTurnRequestV1Schema,
+  companionChatSendTurnResultV1Schema,
+  companionChatProposalGetRequestV1Schema,
+  companionChatProposalGetResultV1Schema,
+  companionChatProposalDecideRequestV1Schema,
+  companionChatProposalDecideResultV1Schema,
+  companionAgentRoutesListRequestV1Schema,
+  companionAgentRoutesListResultV1Schema,
+  companionChatOpenThoughtRequestV1Schema,
+  companionChatOpenThoughtResultV1Schema,
+  companionChatCancelRunRequestV1Schema,
+  companionChatCancelRunResultV1Schema,
+  companionRunNodesListRequestV1Schema,
+  companionRunNodesListResultV1Schema,
+} from "@ailearn/shared/companion-chat-desktop-contracts";
+import {
+  companionGroundedTutorGrantV1Schema,
+  companionLearningRunContextV1Schema,
+  createCompanionLearningRunContextGrantRequestV1Schema,
+} from "@ailearn/shared/companion-conversation-contracts";
 // 站内图片字节通道：来源正文里的 `/api/uploads/…` 由 main 代取，
 // 渲染层只拿 base64 转 blob URL（它的 origin 够不到 API 源）。
 import {
@@ -225,6 +267,58 @@ const companionRoomPatchInputSchema = z.strictObject({
 const companionVoiceSpeakInputSchema = z.strictObject({
   ...m1InputBase,
   request: companionVoiceSpeakRequestV1Schema,
+});
+// 语音转文本 + 聊天链路的入参（2026-09-18）。转写的音频 base64 上限在 schema
+// 与 main 侧字节解码后双重收口（10MB，与 API multipart 全局上限一致）。
+const companionVoiceTranscribeInputSchema = z.strictObject({
+  ...m1InputBase,
+  request: companionVoiceTranscribeRequestV1Schema,
+});
+const companionChatEnsureInputSchema = z.strictObject({
+  ...m1InputBase,
+  request: companionChatEnsureRequestV1Schema,
+});
+const companionChatSendTurnInputSchema = z.strictObject({
+  ...m1InputBase,
+  request: companionChatSendTurnRequestV1Schema,
+});
+const companionChatListMessagesInputSchema = z.strictObject({
+  ...m1InputBase,
+  request: companionChatListMessagesRequestV1Schema,
+});
+// 提案确认 + agent 导航 route 轮询（2026-09-18 补接线）。
+const companionChatProposalGetInputSchema = z.strictObject({
+  ...m1InputBase,
+  request: companionChatProposalGetRequestV1Schema,
+});
+const companionChatProposalDecideInputSchema = z.strictObject({
+  ...m1InputBase,
+  request: companionChatProposalDecideRequestV1Schema,
+});
+const companionChatAgentRoutesInputSchema = z.strictObject({
+  ...m1InputBase,
+  request: companionAgentRoutesListRequestV1Schema,
+});
+const companionChatRunNodesInputSchema = z.strictObject({
+  ...m1InputBase,
+  request: companionRunNodesListRequestV1Schema,
+});
+const companionChatOpenThoughtInputSchema = z.strictObject({
+  ...m1InputBase,
+  request: companionChatOpenThoughtRequestV1Schema,
+});
+const companionChatCancelRunInputSchema = z.strictObject({
+  ...m1InputBase,
+  request: companionChatCancelRunRequestV1Schema,
+});
+const companionLearningRunContextInputSchema = z.strictObject({
+  ...m1InputBase,
+  runId: uuidSchema,
+});
+const companionLearningRunContextGrantInputSchema = z.strictObject({
+  ...m1InputBase,
+  runId: uuidSchema,
+  request: createCompanionLearningRunContextGrantRequestV1Schema,
 });
 const companionAccountPatchInputSchema = z.strictObject({
   ...m1InputBase,
@@ -372,6 +466,58 @@ const learningRunSubmitInputSchema = z.strictObject({ ...m1InputBase, commandId:
 const learningRunActionInputSchema = z.strictObject({ ...m1InputBase, commandId: commandIdSchema, runId: uuidSchema, request: desktopLearningRunActionRequestV2Schema });
 const learningRunLeaseInputSchema = z.strictObject({ ...m1InputBase, runId: uuidSchema, request: desktopRecordLearningRunActivityLeaseRequestV2Schema });
 const learningRunAbandonInputSchema = z.strictObject({ ...m1InputBase, commandId: commandIdSchema, runId: uuidSchema, request: desktopLearningRunAbandonRequestV2Schema });
+
+// ─── 旧版设置页回补（2026-09-18）的入参与回执 ─────────────────────────
+// 档案与头像：服务端 PUT /auth/profile 自己做截断；这里只收形状，头像字节上限
+// 与 /uploads/avatars 的 2MB 对齐（base64 按 4/3 膨胀留余量）。
+const authUpdateProfileInputSchema = z.strictObject({
+  ...m1InputBase,
+  displayName: z.string().trim().min(1).max(32).nullable().optional(),
+  avatarUrl: z.string().trim().max(500).nullable().optional(),
+});
+const authAvatarUploadInputSchema = z.strictObject({
+  ...m1InputBase,
+  request: z.strictObject({
+    version: z.literal(1),
+    fileName: z.string().min(1).max(255),
+    mimeType: z.enum(["image/png", "image/jpeg", "image/gif", "image/webp"]),
+    bytesBase64: z.string().min(1).max(Math.ceil(AVATAR_MAX_BYTES / 3) * 4 + 8),
+  }),
+});
+const authAvatarGetInputSchema = z.strictObject({
+  ...m1InputBase,
+  request: z.strictObject({ version: z.literal(1), objectKey: avatarObjectKeySchema }),
+});
+// 工作区退出/改名 + Owner 的邀请与成员管理。
+const authLeaveWorkspaceInputSchema = z.strictObject({ ...m1InputBase, workspaceId: uuidSchema });
+const workspaceRenameInputSchema = z.strictObject({
+  ...m1InputBase,
+  workspaceId: uuidSchema,
+  name: z.string().trim().min(1).max(50),
+});
+const inviteCreateInputSchema = z.strictObject({
+  ...m1InputBase,
+  role: z.enum(["member", "owner"]),
+  expiresInHours: z.number().int().min(1).max(168).optional(),
+});
+const inviteRevokeInputSchema = z.strictObject({ ...m1InputBase, inviteId: uuidSchema });
+const memberRemoveInputSchema = z.strictObject({ ...m1InputBase, userId: uuidSchema });
+// Markdown 导入：内容是 UTF-8 文本（渲染层 File.text()），单篇 500KB、最多 100 篇。
+const markdownImportInputSchema = z.strictObject({
+  ...m1InputBase,
+  items: z.array(z.strictObject({
+    title: z.string().max(200).optional(),
+    content: z.string().min(1).max(500_000),
+  })).min(1).max(100),
+  importId: z.string().min(1).max(100),
+});
+// 作答模态偏好（任务 14）。
+const answerModePatchInputSchema = z.strictObject({
+  ...m1InputBase,
+  preference: z.enum(["voice", "silent", "text", "any"]),
+});
+const revokeOutputSchema = z.strictObject({ revoked: z.literal(true) });
+const memberRemoveOutputSchema = z.strictObject({ removed: z.literal(true) });
 
 type InputSchema<T> = z.ZodType<T>;
 type ParsedMeta = { readonly meta: RequestMetaV1 };
@@ -657,6 +803,8 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
   const learningRunStreams = new Map<string, () => void>();
   const trackedCardGenerationRunIds = new Set<string>();
   const cardGenerationStreams = new Map<string, () => void>();
+  /** 伴星会话事件流：conversationId → 停止函数（每个会话至多一条）。 */
+  const companionChatStreams = new Map<string, () => void>();
   const windowLifecycleBound = new WeakSet<BrowserWindow>();
 
   const clearSubscriptionsForWindow = (window: BrowserWindow): void => {
@@ -689,6 +837,26 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     cardGenerationStreams.clear();
   };
 
+  const hasCompanionChatSubscription = (conversationId?: string): boolean => {
+    for (const subscription of subscriptions.values()) {
+      if (subscription.topic.kind !== "companionChat") continue;
+      if (conversationId === undefined || subscription.topic.conversationId === conversationId) return true;
+    }
+    return false;
+  };
+
+  const stopCompanionChatStreams = (): void => {
+    for (const stop of companionChatStreams.values()) stop();
+    companionChatStreams.clear();
+  };
+
+  const stopCompanionChatStream = (conversationId: string): void => {
+    const stop = companionChatStreams.get(conversationId);
+    if (!stop) return;
+    companionChatStreams.delete(conversationId);
+    stop();
+  };
+
   const releaseSubscriptionsForWindow = (window: BrowserWindow): void => {
     // Window destruction is a hard sensitivity boundary. Do not let a
     // main-owned formal-assessment state survive the renderer that held the
@@ -697,6 +865,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     clearSubscriptionsForWindow(window);
     if (!hasLearningRunSubscription()) stopLearningRunStreams();
     if (!hasCardGenerationSubscription()) stopCardGenerationStreams();
+    if (!hasCompanionChatSubscription()) stopCompanionChatStreams();
   };
 
   const bindWindowLifecycle = (window: BrowserWindow): void => {
@@ -781,10 +950,37 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     for (const runId of trackedCardGenerationRunIds) ensureCardGenerationStream(runId);
   };
 
+  /**
+   * 伴星会话 SSE（§5.3）：每个会话维持一条流，事件逐帧转发给订阅方。
+   *
+   * `eventCursor` 来自回合响应（turn.accepted 的 seq），只收本轮之后的事件；
+   * 同一会话已有流时不重复建连——先建的那条游标最旧，续传最完整。流的停止由
+   * 订阅生命周期负责（最后一个订阅消失、窗口销毁、登出、切工作区）。
+   */
+  const ensureCompanionChatStream = (conversationId: string, eventCursor: number): void => {
+    if (!hasCompanionChatSubscription(conversationId) || companionChatStreams.has(conversationId)) return;
+    const streamWorkspaceEpoch = activeWorkspaceEpoch;
+    void gateway.watchCompanionConversationEvents(
+      conversationId,
+      eventCursor,
+      (event) => {
+        if (streamWorkspaceEpoch !== activeWorkspaceEpoch) return;
+        emit("companionChat", { kind: "companion_chat_event", conversationId, event }, activeWorkspaceEpoch);
+      },
+    ).then((stop) => {
+      if (!hasCompanionChatSubscription(conversationId) || streamWorkspaceEpoch !== activeWorkspaceEpoch) {
+        stop();
+        return;
+      }
+      companionChatStreams.set(conversationId, stop);
+    }).catch(() => undefined);
+  };
+
   const subscriptionMatchesPayload = (topic: SubscriptionTopicM2, topicKind: SubscriptionTopicM2["kind"], payload: M2SubscriptionEvent): boolean => {
     if (topic.kind !== topicKind) return false;
     if (topic.kind === "learningRun") return payload.kind === "learning_run_changed" && topic.runId === payload.runId;
     if (topic.kind === "cardGeneration") return payload.kind === "card_generation_changed" && topic.runId === payload.runId;
+    if (topic.kind === "companionChat") return payload.kind === "companion_chat_event" && topic.conversationId === payload.conversationId;
     return true;
   };
 
@@ -1039,6 +1235,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
       trackedLearningRunIds.clear();
       stopCardGenerationStreams();
       trackedCardGenerationRunIds.clear();
+      stopCompanionChatStreams();
       activeWorkspaceEpoch = 0;
       if (activeSubjectId) await pendingReturnMarkerStore.clearSubject(activeSubjectId);
       activeSubjectId = null;
@@ -1053,6 +1250,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
       trackedLearningRunIds.clear();
       stopCardGenerationStreams();
       trackedCardGenerationRunIds.clear();
+      stopCompanionChatStreams();
       if (activeSubjectId) await pendingReturnMarkerStore.clearSubject(activeSubjectId);
       activeSubjectId = null;
       activeWorkspaceId = null;
@@ -1090,6 +1288,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     trackedLearningRunIds.clear();
     stopCardGenerationStreams();
     trackedCardGenerationRunIds.clear();
+    stopCompanionChatStreams();
     if (activeSubjectId && activeWorkspaceId) await pendingReturnMarkerStore.clear(activeSubjectId, activeWorkspaceId);
     const session = await gateway.switchWorkspace(input.workspaceId, input.meta.requestId);
     activeWorkspaceEpoch = session.workspaceEpoch;
@@ -1164,6 +1363,120 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
       bytes: Buffer.byteLength(text, "utf8"),
     };
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, workspaceExportResultV1Schema);
+
+  // ─── 旧版设置页回补（2026-09-18）────────────────────────────────────
+  // 档案与头像（用户级，Member 也可用；服务端各自收口归属与限流）。
+  installHandler(DESKTOP_IPC_CHANNELS.authProfileGet, runtimeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.getProfile(input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, authProfileResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.authUpdateProfile, authUpdateProfileInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.updateProfile(
+      { displayName: input.displayName, avatarUrl: input.avatarUrl },
+      input.meta.requestId,
+    );
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, authProfileResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.authUploadAvatar, authAvatarUploadInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.uploadAvatar(input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, avatarUploadResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.authAvatarGet, authAvatarGetInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.getAvatar(input.request.objectKey, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, sourceImageGetResultV1Schema);
+
+  // 退出协作工作区是空间边界变化：回执是重读后的会话，与 joinWorkspace 同构。
+  installHandler(DESKTOP_IPC_CHANNELS.authLeaveWorkspace, authLeaveWorkspaceInputSchema, options, async (_event, _window, input) => {
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    const session = await gateway.leaveWorkspace(input.workspaceId, input.meta.requestId);
+    activeWorkspaceEpoch = session.workspaceEpoch;
+    rememberSession(session);
+    emit("workspace", { kind: "snapshot_invalidated", scope: "workspace" }, activeWorkspaceEpoch);
+    return session;
+  }, (output) => safeWorkspaceEpoch(output), sessionContextSchema);
+
+  // 个人工作区改名：改的是会话里的当前空间名，顺带丢掉会话缓存。
+  installHandler(DESKTOP_IPC_CHANNELS.workspaceRename, workspaceRenameInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.renameWorkspace(input.workspaceId, input.name, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, renameWorkspaceResultV1Schema);
+
+  // Owner 的邀请发出与成员管理。写入全部由服务端 requireOwner 收口，
+  // 这里不再复制一份角色判断，Member 调用只会得到 forbidden。
+  installHandler(DESKTOP_IPC_CHANNELS.inviteCreate, inviteCreateInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.createInvite(
+      { role: input.role, expiresInHours: input.expiresInHours },
+      input.meta.requestId,
+    );
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, inviteCreatedV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.inviteList, runtimeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.listInvites(input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, inviteListResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.inviteRevoke, inviteRevokeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.revokeInvite(input.inviteId, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, revokeOutputSchema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.memberList, runtimeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.listMembers(input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, memberListResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.memberRemove, memberRemoveInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.removeMember(input.userId, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, memberRemoveOutputSchema);
+
+  // Markdown 批量导入（F-033 幂等，Owner）。
+  installHandler(DESKTOP_IPC_CHANNELS.settingsMarkdownImport, markdownImportInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.importMarkdown(input.items, input.importId, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, markdownImportResultV1Schema);
+
+  // 搜索索引维护（F-025 / F-011，Owner）。
+  installHandler(DESKTOP_IPC_CHANNELS.searchDriftGet, runtimeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.getSearchDrift(input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, searchDriftResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.searchReindex, runtimeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.reindexSearch(input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, searchReindexResultV1Schema);
+
+  // 作答模态偏好（任务 14，账号级跨设备）。
+  installHandler(DESKTOP_IPC_CHANNELS.companionAnswerModeGet, runtimeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.getAnswerModePreference(input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionAnswerModePreferenceV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionAnswerModePatch, answerModePatchInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.setAnswerModePreference(input.preference, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionAnswerModePreferenceV1Schema);
 
   installHandler(DESKTOP_IPC_CHANNELS.roomGetProjection, runtimeInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "room.home");
@@ -1285,6 +1598,83 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     assertEpoch(input.meta, activeWorkspaceEpoch);
     return gateway.speakCompanionVoice(input.request, input.meta.requestId);
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionVoiceSpeakResultV1Schema);
+
+  // 语音转文本 + 聊天发送链路（2026-09-18）：与其余伴星通道同一路由门控。
+  installHandler(DESKTOP_IPC_CHANNELS.companionVoiceTranscribe, companionVoiceTranscribeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.transcribeCompanionVoice(input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionVoiceTranscribeResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionChatEnsureConversation, companionChatEnsureInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.ensureCompanionConversation(input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionChatEnsureResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionChatSendTurn, companionChatSendTurnInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.sendCompanionTurn(input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionChatSendTurnResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionChatListMessages, companionChatListMessagesInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.listCompanionChatMessages(input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionChatListMessagesResultV1Schema);
+
+  // 提案确认 + agent 导航 route 轮询（2026-09-18）：与其余伴星通道同一路由门控。
+  installHandler(DESKTOP_IPC_CHANNELS.companionChatProposalGet, companionChatProposalGetInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.getCompanionChatProposal(input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionChatProposalGetResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionChatProposalDecide, companionChatProposalDecideInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.decideCompanionChatProposal(input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionChatProposalDecideResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionChatAgentRoutes, companionChatAgentRoutesInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.listCompanionAgentRoutes(input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionAgentRoutesListResultV1Schema);
+
+  // 过程节点留痕（2026-09-19）：与其余伴星只读通道同一路由门控，形状照 agent-routes。
+  installHandler(DESKTOP_IPC_CHANNELS.companionChatRunNodes, companionChatRunNodesInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.listCompanionRunNodes(input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionRunNodesListResultV1Schema);
+
+  // 念头主动开场（切片④，2026-09-18）：与其余伴星通道同一路由门控。
+  installHandler(DESKTOP_IPC_CHANNELS.companionChatOpenThought, companionChatOpenThoughtInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.openCompanionThought(input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionChatOpenThoughtResultV1Schema);
+
+  // 停止本轮（2026-09-19）：与其余伴星通道同一路由门控。202 / 200 幂等同形状。
+  installHandler(DESKTOP_IPC_CHANNELS.companionChatCancelRun, companionChatCancelRunInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.cancelCompanionChatRun(input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionChatCancelRunResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionLearningRunGetContext, companionLearningRunContextInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "learningRun.detail");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.getCompanionLearningRunContext(input.runId, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionLearningRunContextV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionLearningRunCreateContextGrant, companionLearningRunContextGrantInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "learningRun.detail");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.createCompanionLearningRunContextGrant(input.runId, input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionGroundedTutorGrantV1Schema);
 
   // 伴星中心（页 20）的共同记录。与其余伴星通道同一路由门控：这些都是"书房"
   // 内的呈现，不新增导航目标，也不把记忆正文写进路由或快照。
@@ -1618,6 +2008,11 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
       ensureCardGenerationStream(input.topic.runId);
       ensureTrackedCardGenerationStreams();
     }
+    if (input.topic.kind === "companionChat") {
+      // eventCursor 缺省 0（无回合游标的降级路径）：主进程从头重放，渲染层
+      // 按 runId/generation 过滤，不会把历史帧渲染成本轮回复。
+      ensureCompanionChatStream(input.topic.conversationId, input.topic.eventCursor ?? 0);
+    }
     return { subscriptionId };
   }, undefined, subscriptionOutputSchema);
 
@@ -1627,6 +2022,9 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     subscriptions.delete(input.subscriptionId);
     if (!hasLearningRunSubscription()) stopLearningRunStreams();
     if (!hasCardGenerationSubscription()) stopCardGenerationStreams();
+    if (subscription.topic.kind === "companionChat" && !hasCompanionChatSubscription(subscription.topic.conversationId)) {
+      stopCompanionChatStream(subscription.topic.conversationId);
+    }
     return { closed: true as const };
   }, undefined, closedSubscriptionOutputSchema);
 
@@ -1738,6 +2136,12 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     emit("learningRun", { kind: "learning_run_changed", runId: result.runId, revision: result.status === "pending" ? result.runRevision : 0 }, activeWorkspaceEpoch);
     return result;
   }, undefined, getLearningRunResultResponseV2Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.learningRunRevealTarget, learningRunGetInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "learningRun.detail");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.revealLearningRunTarget(input.runId, input.meta.requestId);
+  }, undefined, learningRunTargetRevealV2Schema);
 
   installHandler(DESKTOP_IPC_CHANNELS.learningRunGetReturnContract, learningRunGetInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "learningRun.detail");

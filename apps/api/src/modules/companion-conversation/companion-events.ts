@@ -10,11 +10,15 @@
  * - latest-generation fence 由 Worker 写侧保证（cancel/supersede 后迟到输出零写入）。
  */
 
-import { eq, and, gt, gte, lte, sql } from "drizzle-orm";
-import { companionConversations, companionStreamEvents } from "./turn-service.ts";
+import { eq, and, gt, gte, lte, sql, inArray, desc } from "drizzle-orm";
+import { companionConversations, companionStreamEvents, companionTurnRuns } from "./turn-service.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
 import { subscribeCompanionEvents } from "./companion-notify.ts";
 import { logger } from "../../lib/logger.ts";
+import {
+  COMPANION_AGENT_MAX_STEPS,
+  COMPANION_AGENT_MAX_TOOL_CALLS,
+} from "@ailearn/shared/companion-agent-contracts";
 
 // ─── 连接限制 ────────────────────────────────────────────────────────────
 // M4（审计修复·部署标注）：连接计数与 companion-rate-limit 同属单进程内存态
@@ -75,6 +79,233 @@ export function resolveCompanionCursor(args: {
     after = after == null ? n : Math.max(after, n);
   }
   return { ok: true, after: after ?? 0 };
+}
+
+// ─── Agent 导航 route 轮询（2026-09-18 补接线，只读） ─────────────────────
+//
+// 桌面端没有 SSE 消费者；导航类工具的 route 只经 `agent.tool` 事件下发。
+// 这里提供一个 JSON 轮询窗口（seq > after，最多 20 条，仅含带 route 的
+// succeeded 工具事件），供聊天抽屉在既有 messages 轮询节奏上顺带拉取。
+// 不做 SSE 那套连续性校验：这是 UI 提示用的只读投影，丢一条下轮不再补。
+
+export interface CompanionAgentRouteRow {
+  seq: number;
+  tool: string;
+  safeSummary: string;
+  route: unknown;
+  /** 用户预授权（permissionLevel=full）：客户端应直接执行跳转，不等「前往」。 */
+  autoExecute: boolean;
+}
+
+export async function listCompanionAgentRoutes(args: {
+  workspaceId: string;
+  userId: string;
+  conversationId: string;
+  after: number;
+}): Promise<
+  | { ok: true; items: CompanionAgentRouteRow[]; latestSeq: number }
+  | { ok: false; statusCode: 404; code: "NOT_FOUND"; message: string }
+> {
+  return withWorkspaceTransaction({ workspaceId: args.workspaceId, userId: args.userId }, async (tx) => {
+    // 显式带 workspace_id，不让正确性依赖 RLS 是否真的生效（见 listCompanionRunNodes 的说明）。
+    const conv = await tx
+      .select({ nextEventSeq: companionConversations.nextEventSeq })
+      .from(companionConversations)
+      .where(and(
+        eq(companionConversations.id, args.conversationId),
+        eq(companionConversations.workspaceId, args.workspaceId),
+      ))
+      .limit(1);
+    if (!conv[0]) {
+      return { ok: false as const, statusCode: 404, code: "NOT_FOUND" as const, message: "conversation not found" };
+    }
+    const latestSeq = Math.max(0, Number(conv[0].nextEventSeq) - 1);
+    const rows = await tx
+      .select({ seq: companionStreamEvents.seq, payload: companionStreamEvents.payload })
+      .from(companionStreamEvents)
+      .where(and(
+        eq(companionStreamEvents.conversationId, args.conversationId),
+        gt(companionStreamEvents.seq, args.after),
+        eq(companionStreamEvents.type, "agent.tool"),
+        gt(companionStreamEvents.expiresAt, new Date()),
+      ))
+      .orderBy(companionStreamEvents.seq)
+      .limit(20);
+    const items: CompanionAgentRouteRow[] = [];
+    for (const row of rows) {
+      // agent.tool 事件的 payload 是判别联合；这里只消费带 route 的 succeeded 形态。
+      const tool = (row.payload as unknown as { tool?: { name?: unknown; safeSummary?: unknown; route?: unknown; status?: unknown; autoExecute?: unknown } }).tool;
+      if (!tool || tool.status !== "succeeded" || typeof tool.route !== "object" || tool.route === null) continue;
+      if (typeof tool.name !== "string" || typeof tool.safeSummary !== "string") continue;
+      // autoExecute 原样透传：授权判定在 worker，这里不做二次推断。
+      const autoExecute = tool.autoExecute === true;
+      items.push({ seq: Number(row.seq), tool: tool.name, safeSummary: tool.safeSummary, route: tool.route, autoExecute });
+    }
+    return { ok: true as const, items, latestSeq };
+  });
+}
+
+// ─── Agent 过程节点轮询（2026-09-19，只读） ──────────────────────────────
+//
+// 方案 §1 第三层：抽屉里每条 assistant 消息下方要有一行「过程 N 步 · 调用 M 次工具」，
+// 点开是完整节点列表。SSE 是实时通道、不是历史通道（事件还有 TTL），所以这里补一个
+// 与 agent-routes 同形状的只读窗口：seq > after 的节点事件 + 会话最近的 run 摘要。
+//
+// 两个刻意的选择：
+//   1. **payload 原样透传**，不在服务端把事件折成节点。桌面端已经有一个收敛函数
+//      （`companion-agent-nodes.ts`）在实时链路上跑，历史链路复用同一个函数才不会出现
+//      "实时看的和翻历史看到的不是一回事"。
+//   2. **每个 run 带上 nodeCount**：事件会被 TTL 清掉，而消息不会。`stepCount > 0` 但
+//      `nodeCount === 0` 就是"过程记录已过期"的确凿判据——UI 据此显示说明，而不是留白
+//      或伪造占位（方案 §1 明确要求区分这两种情况）。
+
+/** 折进"过程"的事件类型。与桌面端 companion-agent-nodes 认的三个 type 一致。 */
+const COMPANION_NODE_EVENT_TYPES = ["assistant.status", "agent.skill", "agent.tool"] as const;
+const COMPANION_NODE_EVENT_BATCH = 200;
+const COMPANION_RUN_SUMMARY_LIMIT = 20;
+
+export interface CompanionRunNodeRow {
+  seq: number;
+  runId: string | null;
+  type: string;
+  payload: unknown;
+}
+
+export interface CompanionRunSummaryRow {
+  runId: string;
+  status: string;
+  /** 客户端"接着说话"要用的 CAS 值（见 desktop 合同的 generation 字段）。 */
+  generation: number;
+  mode: string;
+  stepCount: number;
+  toolCallCount: number;
+  /** 本 run 冻结的预算（`budget_snapshot`），缺失时退回合同上限。 */
+  maxSteps: number;
+  maxToolCalls: number;
+  assistantMessageId: string | null;
+  nodeCount: number;
+}
+
+export async function listCompanionRunNodes(args: {
+  workspaceId: string;
+  userId: string;
+  conversationId: string;
+  after: number;
+}): Promise<
+  | { ok: true; items: CompanionRunNodeRow[]; runs: CompanionRunSummaryRow[]; latestSeq: number }
+  | { ok: false; statusCode: 404; code: "NOT_FOUND"; message: string }
+> {
+  return withWorkspaceTransaction({ workspaceId: args.workspaceId, userId: args.userId }, async (tx) => {
+    /**
+     * 显式带 `workspace_id`（2026-09-19 回审补）。
+     *
+     * 这个模块原先只靠 RLS 一层兜越权，而开发/本地连接的 `ailearn` 角色是
+     * `rolsuper = t AND rolbypassrls = t`——超级用户**绕过 FORCE ROW LEVEL SECURITY**，
+     * 于是 RLS 在这套环境里实际不生效，"只按 id 查"等于把别人的会话交出去。
+     * 仓库里其它伴随查询（turn-service、conversations-service、companion-export）都显式
+     * 带 workspace 条件，这里补齐，让正确性不依赖连接角色的属性。同文件另两处会话存在性
+     * 检查（`listCompanionAgentRoutes`、`validateCompanionCursor`）一并补上。
+     */
+    const conv = await tx
+      .select({ nextEventSeq: companionConversations.nextEventSeq })
+      .from(companionConversations)
+      .where(and(
+        eq(companionConversations.id, args.conversationId),
+        eq(companionConversations.workspaceId, args.workspaceId),
+      ))
+      .limit(1);
+    if (!conv[0]) {
+      return { ok: false as const, statusCode: 404, code: "NOT_FOUND" as const, message: "conversation not found" };
+    }
+    const latestSeq = Math.max(0, Number(conv[0].nextEventSeq) - 1);
+    /**
+     * 取**最新**的一批，不是最早的一批。
+     *
+     * 这个窗口是给 UI 看"最近几轮她做了什么"的，`runs` 摘要同样是最近 20 轮
+     * （`createdAt desc`）。按 seq 正序 limit 会拿到会话**最早**的 200 条：会话累计
+     * 超过 200 条节点事件后（一轮 agent 约 5–15 条，事件 TTL 24h），最近几轮的过程
+     * 会在历史里凭空消失，而摘要还在——两边口径相反。
+     *
+     * `after` 因此是"下界"而不是翻页游标：`seq > after` 里最新的那 200 条。折叠依赖
+     * 时间顺序（`appendCompanionAgentNode` 按序累加），所以倒序取回后翻正。
+     */
+    const rows = await tx
+      .select({
+        seq: companionStreamEvents.seq,
+        runId: companionStreamEvents.runId,
+        type: companionStreamEvents.type,
+        payload: companionStreamEvents.payload,
+      })
+      .from(companionStreamEvents)
+      .where(and(
+        eq(companionStreamEvents.conversationId, args.conversationId),
+        gt(companionStreamEvents.seq, args.after),
+        inArray(companionStreamEvents.type, [...COMPANION_NODE_EVENT_TYPES]),
+        gt(companionStreamEvents.expiresAt, new Date()),
+      ))
+      .orderBy(desc(companionStreamEvents.seq))
+      .limit(COMPANION_NODE_EVENT_BATCH);
+    rows.reverse();
+
+    const runRows = await tx
+      .select({
+        runId: companionTurnRuns.id,
+        status: companionTurnRuns.status,
+        generation: companionTurnRuns.generation,
+        mode: companionTurnRuns.agentMode,
+        stepCount: companionTurnRuns.stepCount,
+        toolCallCount: companionTurnRuns.toolCallCount,
+        budgetSnapshot: companionTurnRuns.budgetSnapshot,
+        assistantMessageId: companionTurnRuns.assistantMessageId,
+      })
+      .from(companionTurnRuns)
+      .where(eq(companionTurnRuns.conversationId, args.conversationId))
+      .orderBy(desc(companionTurnRuns.createdAt))
+      .limit(COMPANION_RUN_SUMMARY_LIMIT);
+
+    // 每个 run 当前还剩多少条可读节点事件（TTL 清理后归零 → UI 显式说明"已过期"）。
+    const countRows = await tx
+      .select({ runId: companionStreamEvents.runId, count: sql<string>`count(*)::int` })
+      .from(companionStreamEvents)
+      .where(and(
+        eq(companionStreamEvents.conversationId, args.conversationId),
+        inArray(companionStreamEvents.type, [...COMPANION_NODE_EVENT_TYPES]),
+        gt(companionStreamEvents.expiresAt, new Date()),
+      ))
+      .groupBy(companionStreamEvents.runId);
+    const nodeCounts = new Map<string, number>();
+    for (const row of countRows) {
+      if (row.runId) nodeCounts.set(row.runId, Number(row.count));
+    }
+
+    return {
+      ok: true as const,
+      items: rows.map((row) => ({
+        seq: Number(row.seq),
+        runId: row.runId,
+        type: row.type,
+        payload: row.payload,
+      })),
+      runs: runRows.map((row) => {
+        // 预算取 run 冻结的 budget_snapshot：技能的 maxSteps 可能小于全局上限，
+        // 用全局 8 当分母会把 3/4 说成 3/8。缺失才退回合同常量。
+        const budget = row.budgetSnapshot as { maxSteps?: unknown; maxToolCalls?: unknown } | null;
+        return {
+          runId: row.runId,
+          status: row.status,
+          generation: row.generation,
+          mode: row.mode,
+          stepCount: row.stepCount,
+          toolCallCount: row.toolCallCount,
+          maxSteps: typeof budget?.maxSteps === "number" ? budget.maxSteps : COMPANION_AGENT_MAX_STEPS,
+          maxToolCalls: typeof budget?.maxToolCalls === "number" ? budget.maxToolCalls : COMPANION_AGENT_MAX_TOOL_CALLS,
+          assistantMessageId: row.assistantMessageId,
+          nodeCount: nodeCounts.get(row.runId) ?? 0,
+        };
+      }),
+      latestSeq,
+    };
+  });
 }
 
 // ─── SSE 格式化 ───────────────────────────────────────────────────────────
@@ -185,7 +416,10 @@ async function validateCompanionCursor(
     const conv = await tx
       .select({ nextEventSeq: companionConversations.nextEventSeq })
       .from(companionConversations)
-      .where(eq(companionConversations.id, conversationId))
+      .where(and(
+        eq(companionConversations.id, conversationId),
+        eq(companionConversations.workspaceId, workspaceId),
+      ))
       .limit(1);
     if (!conv[0]) {
       return { ok: false, statusCode: 404, code: "NOT_FOUND", message: "conversation not found" };

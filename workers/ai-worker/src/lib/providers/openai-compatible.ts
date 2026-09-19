@@ -82,6 +82,11 @@ export class OpenAICompatibleProvider implements AIProvider {
   readonly modelId: string;
   readonly visionModelId: string;
   readonly embeddingModelId: string;
+  /**
+   * 本实现解析 `delta.tool_calls`（2026-09-19 ④-b），因此带工具的一步也能走流式。
+   * 见 AIProvider.chatCompletionStreamToolCalls。
+   */
+  readonly chatCompletionStreamToolCalls = true;
   private readonly endpoint: string;
   private readonly embeddingEndpoint: string;
   private readonly apiKey: string;
@@ -136,7 +141,7 @@ export class OpenAICompatibleProvider implements AIProvider {
     options: ChatOptions,
     signal: AbortSignal | undefined,
     onDelta: (deltaText: string) => void,
-  ): Promise<{ content: string }> {
+  ): Promise<{ content: string; toolCalls: AgentTurnResult["toolCalls"]; finishReason: string }> {
     if (signal?.aborted) throw abortError(signal, "before request");
     const maxTokens = options.maxTokens ?? 4096;
     const temperature = options.temperature ?? 0.2;
@@ -154,6 +159,17 @@ export class OpenAICompatibleProvider implements AIProvider {
       ...(options.responseFormat === "text"
         ? {}
         : { response_format: { type: "json_object" as const } }),
+      // native tools（2026-09-19 ④-b）：与 executeAgentTurn 的 body 同形——带工具
+      // 的一步必须把工具列表发出去，否则模型永远不会返回 tool_calls。
+      ...(options.tools && options.tools.length > 0
+        ? {
+            tools: options.tools.map((t) => ({
+              type: "function" as const,
+              function: { name: t.name, description: t.description, parameters: t.parameters },
+            })),
+            tool_choice: "auto",
+          }
+        : {}),
       ...((options.disableThinking
         || this.platformOptions?.disableThinking)
         ? { enable_thinking: false }
@@ -193,17 +209,106 @@ export class OpenAICompatibleProvider implements AIProvider {
     const decoder = new TextDecoder();
     let buffer = "";
     let content = "";
+    let finishReason = "stop";
     let responseBytes = 0;
+    /** 分片到达的 native tool_calls（按 index 归并，见 consumeData）。 */
+    const streamToolCalls: Array<{ id: string; name: string; argsText: string }> = [];
+    /**
+     * 本轮流式是否有可用载荷（2026-09-19 ④-b）。
+     *
+     * **不能只看 content**：带工具的一步可能一个字都不说、只回 tool_calls
+     * （模型决定直接发起调用时就是这样）——按旧判据会误判成"空输出"并抛
+     * `stream_empty`，白白退化成整段取回，用户看到的那一步就永远不流式。
+     */
+    const hasStreamPayload = (): boolean =>
+      content.trim().length > 0 || streamToolCalls.some((call) => call && call.name.length > 0);
+    /**
+     * 归并后的 tool_calls：`arguments` 必须**先拼完整串再解析**（分片直接 JSON.parse
+     * 必然失败）。解析失败不静默降级成"空参数成功调用"——保留空对象交给上层的
+     * 参数 schema 校验拒绝并记审计，与 parseAgentTurnToolCalls 的
+     * `argumentsMalformed` 同一语义（截断的调用永远不许被执行）。
+     */
+    const collectToolCalls = (): AgentTurnResult["toolCalls"] => {
+      const out: AgentTurnResult["toolCalls"] = [];
+      for (const slot of streamToolCalls) {
+        if (!slot || slot.name.length === 0) continue;
+        let args: Record<string, unknown> = {};
+        try {
+          const parsed: unknown = JSON.parse(slot.argsText.length > 0 ? slot.argsText : "{}");
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            args = parsed as Record<string, unknown>;
+          }
+        } catch {
+          args = {};
+        }
+        out.push({ id: slot.id, name: slot.name, arguments: args });
+      }
+      return out;
+    };
+    const streamResult = (): {
+      content: string;
+      toolCalls: AgentTurnResult["toolCalls"];
+      finishReason: string;
+    } => ({
+      content,
+      toolCalls: collectToolCalls(),
+      finishReason,
+    });
+    /**
+     * 流式失败带机器码（2026-09-19 ④ 修复补充）。
+     *
+     * 此前这三个抛点都是**裸 Error**：进日志只保留 `{category,name,code}`，于是
+     * "响应体不是 SSE / 无任何增量"与"响应体超 8MB"在运维侧完全无法区分——
+     * 实测形态是网关偶发返回 HTTP 200 但正文不是 SSE（同一形态直连压测 10 次
+     * 撞到 1 次上游故障），流式路径一次即抛、回退到缓冲轮（缓冲轮有空输出重试，
+     * 所以用户最终仍拿到正确答复，只是那一轮不流式）。给抛点补上有界 code
+     * 后，日志里的 `code` 字段即可直接指向失败点。行为不变：仍是普通 Error，
+     * `isNonRetryableError` 只看消息文本与结构化 `status`，不看 `code`。
+     */
+    const streamFailure = (code: string, message: string): Error => {
+      const error = new Error(message);
+      (error as Error & { code?: string }).code = code;
+      return error;
+    };
     const consumeData = (data: string): boolean => {
       if (data === "[DONE]") return true;
       try {
         const parsed = JSON.parse(data) as {
-          choices?: Array<{ delta?: { content?: unknown } }>
+          choices?: Array<{
+            delta?: {
+              content?: unknown;
+              tool_calls?: Array<{
+                index?: unknown;
+                id?: unknown;
+                function?: { name?: unknown; arguments?: unknown };
+              }>;
+            };
+            finish_reason?: unknown;
+          }>;
         };
-        const delta = parsed.choices?.[0]?.delta?.content;
+        const choice = parsed.choices?.[0];
+        if (choice && typeof choice.finish_reason === "string" && choice.finish_reason.length > 0) {
+          finishReason = choice.finish_reason;
+        }
+        const delta = choice?.delta?.content;
         if (typeof delta === "string" && delta.length > 0) {
           content += delta;
           onDelta(delta);
+        }
+        // tool_calls 是**分片**到达的（2026-09-19 ④-b）：`id`/`name` 通常只在第一片
+        // 出现，`arguments` 按 index 逐片拼接（模型边想边吐 JSON）。这里按 index 归并，
+        // 与 parseAgentTurnToolCalls 对整包 body 的处理保持同一份形状。
+        for (const call of choice?.delta?.tool_calls ?? []) {
+          const index = typeof call.index === "number" && call.index >= 0
+            ? call.index
+            : streamToolCalls.length;
+          const slot = streamToolCalls[index] ?? { id: "", name: "", argsText: "" };
+          streamToolCalls[index] = slot;
+          if (typeof call.id === "string" && call.id.length > 0 && slot.id.length === 0) {
+            slot.id = call.id;
+          }
+          if (typeof call.function?.name === "string") slot.name += call.function.name;
+          if (typeof call.function?.arguments === "string") slot.argsText += call.function.arguments;
         }
       } catch {
         // 忽略无法解析的 SSE 行（部分网关会插入空行/注释）
@@ -219,7 +324,7 @@ export class OpenAICompatibleProvider implements AIProvider {
         responseBytes += value.byteLength;
         if (responseBytes > 8 * 1024 * 1024) {
           response.cancel();
-          throw new Error(`${this.id} streaming response exceeded 8388608 bytes (${model})`);
+          throw streamFailure("stream_too_large", `${this.id} streaming response exceeded 8388608 bytes (${model})`);
         }
         buffer += decoder.decode(value, { stream: true });
         // PERF: 用 consumed 游标扫描本 chunk 内完整行，仅在末尾一次性截取未处理尾部，
@@ -234,10 +339,10 @@ export class OpenAICompatibleProvider implements AIProvider {
           const data = trimmed.slice(5).trim();
           if (consumeData(data)) {
             response.cancel();
-            if (!content.trim()) {
-              throw new Error(`${this.id} returned empty streaming output (${model})`);
+            if (!hasStreamPayload()) {
+              throw streamFailure("stream_empty", `${this.id} returned empty streaming output (${model})`);
             }
-            return { content };
+            return streamResult();
           }
         }
         // 保留未处理的尾部（可能包含不完整的行），等待下个 chunk 补全。
@@ -249,19 +354,19 @@ export class OpenAICompatibleProvider implements AIProvider {
       buffer += decoder.decode();
       const trailing = buffer.trim();
       if (trailing.startsWith("data:") && consumeData(trailing.slice(5).trim())) {
-        if (!content.trim()) {
-          throw new Error(`${this.id} returned empty streaming output (${model})`);
+        if (!hasStreamPayload()) {
+          throw streamFailure("stream_empty", `${this.id} returned empty streaming output (${model})`);
         }
-        return { content };
+        return streamResult();
       }
     } finally {
       signal?.removeEventListener("abort", abortListener);
     }
     if (signal?.aborted) throw abortError(signal, "after stream");
-    if (!content.trim()) {
-      throw new Error(`${this.id} returned empty streaming output (${model})`);
+    if (!hasStreamPayload()) {
+      throw streamFailure("stream_empty", `${this.id} returned empty streaming output (${model})`);
     }
-    return { content };
+    return streamResult();
   }
 
   constructor(options: {
@@ -500,9 +605,14 @@ export class OpenAICompatibleProvider implements AIProvider {
     if (hasTools) {
       requestBody.tools = tools;
       requestBody.tool_choice = "auto";
-    } else {
-      requestBody.response_format = { type: "json_object" as const };
     }
+    // 无工具轮不再强制 json_object（根因二 2026-09-19）：executeAgentTurn 当前唯一
+    // 调用方是 companion agent runtime，其无工具轮全是「要自然文本」的终答/闲聊步；
+    // 强制 JSON 曾是 json_envelope_leak 的直接来源（模型按信封形状输出 → 白名单外
+    // 的键解包失败 → 整轮失败）。structured_action fallback 由 parseAgentTurnToolCalls
+    // 对 content 做 JSON 解析承担：模型真的回 {"toolCalls":[…]} 时仍会被解析，
+    // 自然文本则原样返回。需要 JSON 的调用方（记忆抽取/念头/V2）走 chatCompletion，
+    // 那条路径的 responseFormat 契约不变。
 
     // B2（计划 §2.5）：prompt cache 控制。
     // 当 feature flag 开启且 provider 在白名单中时，添加缓存标记。

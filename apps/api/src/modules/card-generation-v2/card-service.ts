@@ -33,6 +33,7 @@ import {
 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { noteVersions, noteBlocks } from "@ailearn/shared/db-schema/note";
 import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
+import { frontLeaksAnswerVerbatimV2 } from "@ailearn/shared/card-generation-v2-pipeline";
 import {
   parseLearningCardRevealV2,
   parsePublicLearningCardV2,
@@ -340,17 +341,9 @@ export async function updateCardPresentationV2(
       prompt: patch.front?.prompt ?? currentFront.prompt ?? "",
     };
     const answerText = extractAnswerText(revision.canonicalAnswer);
-    if (answerText && front.prompt) {
-      const compact = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}=]+/gu, "");
-      const compactFront = compact(`${front.cue} ${front.prompt}`);
-      const compactUnit = compact(answerText);
-      const leaksVerbatim = compactUnit.length >= 12
-        ? Array.from({ length: compactUnit.length - 11 }, (_, i) => i)
-            .some((i) => compactFront.includes(compactUnit.slice(i, i + 12)))
-        : compactUnit.length >= 8 && compactFront.includes(compactUnit);
-      if (leaksVerbatim) {
-        throw new CardGenerationV2ServiceError("front_leaks_answer", 409, "正面内容逐字照抄了答案，请修改");
-      }
+    if (answerText && front.prompt
+        && frontLeaksAnswerVerbatimV2(`${front.cue} ${front.prompt}`, answerText)) {
+      throw new CardGenerationV2ServiceError("front_leaks_answer", 409, "正面内容逐字照抄了答案，请修改");
     }
 
     const newCardRevision = card.cardRevision + 1;

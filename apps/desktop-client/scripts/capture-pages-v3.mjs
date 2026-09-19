@@ -283,7 +283,7 @@ try {
   if (should('21')) {
     await clickNav(window, '设置')
     await shot(window, '21', 'settings', 'settings centre opened over the system plate')
-    for (const [section, name] of [['成员与邀请', 'settings-members'], ['主题与无障碍', 'settings-appearance'], ['语音与伴星', 'settings-companion'], ['AI 数据同意', 'settings-data'], ['数据管理', 'settings-management']]) {
+    for (const [section, name] of [['成员与邀请', 'settings-members'], ['主题与动效', 'settings-appearance'], ['语音与伴星', 'settings-companion'], ['AI 数据同意', 'settings-data'], ['数据与维护', 'settings-management']]) {
       await window.locator('.settings-menu button', { hasText: section }).first().click()
       await settle(window, 700)
       await shot(window, '21', name, `settings centre, ${section} section`)

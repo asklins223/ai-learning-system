@@ -55,12 +55,15 @@ export const COMPANION_AGENT_SKILLS: readonly CompanionAgentSkillManifestV1[] = 
   companionAgentSkillManifestV1Schema.parse({
     version: COMPANION_AGENT_CONTRACT_VERSION,
     id: "companion-memory",
-    skillVersion: "1.0.0",
+    skillVersion: "1.0.1",
     name: "伴星记忆",
-    description: "读取对话记忆和伴星资料，并在允许时管理记忆。",
-    triggerHints: ["记得", "记忆", "历史", "我的资料"],
-    systemPrompt: "你是伴星记忆助手。区分用户明确保存的记忆与系统建议，最小化暴露个人信息，不把推测当成记忆事实。",
-    toolNames: ["companion_read_history", "companion_read_memory"],
+    description: "读取对话记忆和伴星资料，并在允许时保存记忆、调整伴星活跃度。",
+    triggerHints: ["记得", "记忆", "历史", "我的资料", "记住我", "帮我记住", "记一下", "保存记忆", "活跃度", "安静一点", "活跃一点"],
+    systemPrompt:
+      "你是伴星记忆与个性化助手。区分用户明确保存的记忆与系统建议，最小化暴露个人信息，不把推测当成记忆事实。" +
+      "用户明确要求记住某件事时调用 companion_save_memory（只保存用户原话明确表达的内容，kind 按语义选择）；" +
+      "用户要求调整伴星活跃度时调用 companion_set_activeness。",
+    toolNames: ["companion_read_history", "companion_read_memory", "companion_save_memory", "companion_set_activeness"],
     maxSteps: 4,
     outputMaxChars: 20_000,
   }),
@@ -96,6 +99,11 @@ export const COMPANION_AGENT_TOOL_DEFINITIONS: readonly CompanionAgentToolDefini
   tool("companion_switch_task_variant", "切换当前任务的题目变体。", ["learning-planner"], "consequential", true, { type: "object", properties: { runId: { type: "string", minLength: 1, maxLength: 120 }, taskId: { type: "string", minLength: 1, maxLength: 120 }, alternativeId: { type: "string", minLength: 1, maxLength: 120 } }, required: ["runId", "taskId", "alternativeId"], additionalProperties: false }),
   tool("companion_defer_review", "延期当前复习提醒。", ["learning-planner"], "consequential", true, { type: "object", properties: { scheduleId: { type: "string", format: "uuid" }, scheduleGeneration: { type: "integer", minimum: 0 }, deferredUntil: { type: "string", format: "date-time" }, reasonCode: { type: "string", enum: ["user_requested", "temporary_unavailable"] } }, required: ["scheduleId", "scheduleGeneration", "deferredUntil", "reasonCode"], additionalProperties: false }),
   tool("companion_plan_route", "规划一条学习理解路线。", ["learning-planner"], "consequential", true, { type: "object", properties: { request: { type: "object" } }, required: ["request"], additionalProperties: false }),
+  // auto-set / auto-fill（2026-09-19 权限分级对齐原设计）：可逆的低风险写入。
+  // requiresConfirmation=true 使 guided 档仍走提案确认；full 档视用户预授权直接执行
+  // （canUseCompanionAgentTool full 分支），read_only 档被权限门禁直接阻止。
+  tool("companion_save_memory", "把用户明确要求记住的内容保存为伴星记忆。", ["companion-memory"], "reversible_low", true, { type: "object", properties: { kind: { type: "string", enum: ["preference", "goal", "learning_context", "interaction_note", "episodic"] }, content: { type: "string", minLength: 1, maxLength: 200 } }, required: ["kind", "content"], additionalProperties: false }),
+  tool("companion_set_activeness", "设置伴星的活跃度（quiet=安静 / moderate=适中 / active=活跃）。", ["companion-memory"], "reversible_low", true, { type: "object", properties: { activeness: { type: "string", enum: ["quiet", "moderate", "active"] } }, required: ["activeness"], additionalProperties: false }),
 ];
 
 function tool(
@@ -166,6 +174,9 @@ const companionAgentToolArgumentSchemas: Record<string, z.ZodType<Record<string,
   companion_switch_task_variant: z.object({ runId: uuid, taskId: uuid, alternativeId: boundedId }).strict(),
   companion_defer_review: z.object({ scheduleId: uuid, scheduleGeneration: z.number().int().nonnegative(), deferredUntil: z.string().datetime(), reasonCode: z.enum(["user_requested", "temporary_unavailable"]) }).strict(),
   companion_plan_route: z.object({ request: z.record(z.unknown()) }).strict(),
+  // kind 枚举与 assistant_memory_items.kind 的 DB CHECK 约束同源（见迁移）。
+  companion_save_memory: z.object({ kind: z.enum(["preference", "goal", "learning_context", "interaction_note", "episodic"]), content: z.string().min(1).max(200) }).strict(),
+  companion_set_activeness: z.object({ activeness: z.enum(["quiet", "moderate", "active"]) }).strict(),
 };
 
 export function validateCompanionAgentToolArguments(

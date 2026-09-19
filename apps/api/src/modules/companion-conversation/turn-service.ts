@@ -65,22 +65,29 @@ function textOfBlocks(blocks: CreateCompanionTurnRequestV1["blocks"]): string {
 
 /** 计算持久化 page context：只保存 grant 的 opaque 元数据，不保存签名。 */
 function sanitizeContext(request: CreateCompanionTurnRequestV1): unknown {
-  if (!request.context) return null;
+  if (!request.context && !request.selection) return null;
+  // 划选/拖拽投喂（2026-09-18）：selection 与 context 同 jsonb 持久化，
+  // worker parsePageContext 读取后以 <selection_data> 注入 prompt。
+  const selection = request.selection
+    ? { text: request.selection.text, sharing: request.selection.sharing }
+    : null;
+  if (!request.context) return { version: 1, context: null, selection };
   const ctx = request.context;
   const base = {
     pageKind: ctx.pageKind,
     sharing: ctx.sharing,
-    contextRevision: ctx.contextRevision,
+    // 非学习运行页渲染层不携带 revision（契约 optional），落库存 null。
+    contextRevision: ctx.contextRevision ?? null,
   };
   switch (ctx.pageKind) {
     case "today":
-      return { version: 1, context: { ...base } };
+      return { version: 1, context: { ...base }, ...(selection ? { selection } : {}) };
     case "review":
-      return { version: 1, context: { ...base, cardId: ctx.cardId ?? null, keyPointId: ctx.keyPointId ?? null } };
+      return { version: 1, context: { ...base, cardId: ctx.cardId ?? null, keyPointId: ctx.keyPointId ?? null }, ...(selection ? { selection } : {}) };
     case "card":
-      return { version: 1, context: { ...base, cardId: ctx.cardId, keyPointId: ctx.keyPointId ?? null } };
+      return { version: 1, context: { ...base, cardId: ctx.cardId, keyPointId: ctx.keyPointId ?? null }, ...(selection ? { selection } : {}) };
     case "star_map":
-      return { version: 1, context: { ...base, keyPointId: ctx.keyPointId ?? null } };
+      return { version: 1, context: { ...base, keyPointId: ctx.keyPointId ?? null }, ...(selection ? { selection } : {}) };
     case "learning_run":
       return {
         version: 1,
@@ -98,6 +105,7 @@ function sanitizeContext(request: CreateCompanionTurnRequestV1): unknown {
               expiresAt: ctx.groundedTutorGrant.expiresAt,
             },
         },
+        ...(selection ? { selection } : {}),
       };
   }
 }

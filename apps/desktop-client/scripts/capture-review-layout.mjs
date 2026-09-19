@@ -190,7 +190,7 @@ const installFixture = async (window, fixtureCase) => {
     const boundaryMarkup = boundary
       ? `<div class="deck-card front" data-depth="0"><section class="pinboard surface-data-state surface-data-state--${boundary}" role="${boundary === 'error' ? 'alert' : 'status'}">
            <strong class="title">${boundaryCopy.title}</strong><p class="sub">${boundaryCopy.detail}</p>
-           ${boundary === 'empty' ? '<div class="actions"><button type="button" class="button">回到今日学习</button><button type="button" class="button">继续写笔记</button></div>' : ''}
+           ${boundary === 'empty' ? `<div class="actions"><button type="button" class="button primary">回到今日学习${arrowIcon('<path d="M5 12h14"/><path d="m13 6 6 6-6 6"/>')}</button><button type="button" class="button">继续写笔记</button></div>` : ''}
            ${boundary === 'error' ? '<button type="button" class="button primary">重新读取</button>' : ''}
          </section></div>`
       : ''
@@ -238,10 +238,10 @@ const installFixture = async (window, fixtureCase) => {
     const slipRows = config.loaded > 0 && !boundary
       ? `<p>已超过 3 天 · 同一理解目标还有 1 张到期卡，所以它排在队首。</p>
          <div class="rule"></div>
-         <p>到期：已超过 3 天<br />同一理解目标：2 张到期卡<br />已载入队列覆盖：3 个理解目标</p>
+         <p>到期：已超过 3 天<br />同一理解目标：2 张到期卡</p>
          <div class="rule"></div>
          <p class="small queue-reason__order">后续顺序：<button type="button">间隔效应</button> → <button type="button">认知负荷</button> → <button type="button">反馈设计</button></p>
-         <p class="small">已载入 ${config.loaded} / ${cardTotal} 项</p>
+         <p class="small">已载入 ${config.loaded} / ${cardTotal} 项<br />覆盖 3 个理解目标</p>
          ${hasMore ? '<p class="small"><button type="button" class="queue-reason__more">继续读取更多到期项</button></p>' : ''}`
       : `<p>${boundary === 'error' ? '这一页没有读到真实的到期队列，因此不给理由。' : '今天没有到期项，理由条也随之留空。'}</p>`
 
@@ -264,7 +264,7 @@ const installFixture = async (window, fixtureCase) => {
                   ${deck}
                 </section>
                 <aside class="queue-reason" aria-label="这张卡为什么排在最前">
-                  <span class="tag${boundary ? '' : ' red'}">${boundary === 'error' ? '读取失败' : boundary ? '队列' : '排在最前'}</span>
+                  ${boundary === 'error' ? '<span class="tag red">读取失败</span>' : boundary ? '' : '<span class="tag red">排在最前</span>'}
                   <h3>为什么现在复习它</h3>
                   ${slipRows}
                 </aside>

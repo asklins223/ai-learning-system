@@ -262,12 +262,13 @@ export class WindowLive2DDriver {
   private framing: WindowLive2DFraming = "full";
   private contentBox: Live2DContentBox | null = null;
   private voiceLevel = 0;
+  private toolAttentionAtMs: number | null = null;
   private readonly emotionController = new Live2DEmotionController();
 
   private readonly handleContextLost = (event: Event): void => {
     event.preventDefault();
     if (this.disposed) return;
-    console.warn("[WindowLive2D] WebGL context lost; using static companion fallback");
+    console.warn("[WindowLive2D] WebGL context lost; disabling the companion canvas");
     this.onStatus?.("failed");
     this.destroy();
   };
@@ -287,11 +288,12 @@ export class WindowLive2DDriver {
         nowMs,
         voiceLevel: this.voiceLevel,
         emotion,
+        toolAttentionAtMs: this.toolAttentionAtMs ?? undefined,
       })) {
         setParameter.call(coreModel, parameter, value);
       }
     } catch (error) {
-      console.warn("[WindowLive2D] parameter update failed; using static fallback", error);
+      console.warn("[WindowLive2D] parameter update failed; disabling the companion canvas", error);
       this.onStatus?.("failed");
       this.destroy();
     }
@@ -387,8 +389,7 @@ export class WindowLive2DDriver {
       this.fitModel();
       app.ticker?.add(this.handleTicker);
       // Never report ready until the backing canvas contains a real model
-      // frame. Otherwise React can remove the orb before the ticker's first
-      // asynchronous render and expose a transparent flash.
+      // frame. This keeps the reserved seat stable until the actor is visible.
       this.renderCurrentFrame();
       if (this.paused) {
         app.ticker?.stop?.();
@@ -405,7 +406,7 @@ export class WindowLive2DDriver {
       this.applyPresentation(this.presentation);
     } catch (error) {
       if (!this.disposed) {
-        console.warn("[WindowLive2D] bootstrap failed; using static fallback", error);
+        console.warn("[WindowLive2D] bootstrap failed; disabling the companion canvas", error);
         this.onStatus?.("failed");
       }
       this.destroy();
@@ -439,6 +440,16 @@ export class WindowLive2DDriver {
     const intensity = clampLive2DEmotionIntensity(event.intensity);
     this.emotionController.push({ ...event, intensity, at: nowMs }, nowMs);
     this.playEmotionMotion(event.emotion, intensity, nowMs);
+  }
+
+  /**
+   * 「看向手边」（方案 §5 第 9 项）：工具开始执行时给一次极小幅侧身。
+   * 只记下起点时间，形状由 `parameterValuesForWindowLive2D` 的 `gaze` 层算，
+   * 所以暂停 / 隐藏时不会留下半截参数。
+   */
+  pushToolAttention(): void {
+    if (this.disposed) return;
+    this.toolAttentionAtMs = typeof performance === "undefined" ? Date.now() : performance.now();
   }
 
   playInviteOnce(): void {

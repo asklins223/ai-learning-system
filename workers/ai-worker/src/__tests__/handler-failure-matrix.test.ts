@@ -47,6 +47,7 @@ const baseJob: ClaimedJob = {
   requestedBy: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
   attempts: 0,
   leaseToken: "lease-token-original",
+  resourceClass: "card_foreground",
 };
 
 /**
@@ -346,7 +347,7 @@ test("故障矩阵：claim 返回未知 job 类型 — 不影响其他 job 的 c
     },
   ]);
 
-  const jobs = await claimJobs(executor, 2, MAX_ATTEMPTS);
+  const jobs = await claimJobs(executor, { interactiveLimit: 2, backgroundLimit: 2 }, MAX_ATTEMPTS);
 
   assert.equal(jobs.length, 2);
   assert.equal(jobs[0].type, "parse_source");
@@ -359,7 +360,7 @@ test("故障矩阵：claim 返回未知 job 类型 — 不影响其他 job 的 c
 
 test("故障矩阵：空队列 claim 返回空数组，不报错", async () => {
   const executor = executorWithRows([]);
-  const jobs = await claimJobs(executor, 1, MAX_ATTEMPTS);
+  const jobs = await claimJobs(executor, { interactiveLimit: 1, backgroundLimit: 1 }, MAX_ATTEMPTS);
   assert.deepEqual(jobs, []);
 });
 

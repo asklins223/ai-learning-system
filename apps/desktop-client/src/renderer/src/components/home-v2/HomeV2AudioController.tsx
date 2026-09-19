@@ -8,6 +8,11 @@ import {
 import { useHomeProjectionInvalidation } from "../../app/home-projection";
 import { shouldRunHomeV2Ambient } from "./home-v2";
 import { setHomeV2VoiceLevel } from "../../app/companion-voice-level";
+import {
+  isCompanionSpeechActive,
+  setCompanionVoiceHost,
+  stopCompanionSpeech,
+} from "../../app/companion-voice-playback";
 
 type HomeV2SoundKind = "page" | "footstep" | "magic";
 
@@ -76,8 +81,10 @@ type HomeV2AudioGraph = {
 type VoicePlayback = {
   readonly source: AudioBufferSourceNode;
   readonly analyser: AnalyserNode;
-  frame: number;
   readonly samples: Float32Array;
+  frame: number;
+  /** 播完或被 stopVoicePlayback 打断时收尾，让等待这次播放的人一定拿到结果。 */
+  readonly settle: () => void;
 };
 
 function whiteNoise(context: AudioContext, seconds: number): AudioBuffer {
@@ -263,7 +270,58 @@ export function HomeV2AudioController() {
     playback.source.disconnect();
     playback.analyser.disconnect();
     setHomeV2VoiceLevel(0);
+    // 等待这次播放的人必须拿到结果，否则它会一直以为自己还在播。
+    playback.settle();
   }, []);
+
+  /**
+   * 播一段已经解码好的语音，按帧回报进度。
+   *
+   * 这是全应用唯一的语音播放出口：环境音、界面音效、伴星台词都走同一个
+   * AudioContext 和同一条振幅通道。喊停永远由 stopVoicePlayback 统一处理，
+   * 所以 cue 与对话台词天然互斥——谁抢到谁播，被抢的那个立刻拿到 resolve。
+   */
+  const playVoiceBuffer = useCallback((
+    buffer: AudioBuffer,
+    onProgress: (fraction: number) => void,
+  ): Promise<void> => new Promise<void>((resolve) => {
+    const graph = graphRef.current;
+    if (!graph || !userInitiatedAudibleRef.current) {
+      resolve();
+      return;
+    }
+    stopVoicePlayback();
+    const source = graph.context.createBufferSource();
+    const analyser = graph.context.createAnalyser();
+    const tuning = HOME_V2_AUDIO_TUNING.voice;
+    analyser.fftSize = tuning.analyserFftSize;
+    analyser.smoothingTimeConstant = tuning.analyserSmoothing;
+    source.buffer = buffer;
+    source.connect(analyser).connect(graph.context.destination);
+    const samples = new Float32Array(analyser.fftSize);
+    const startedAt = graph.context.currentTime;
+    const playback: VoicePlayback = { source, analyser, samples, frame: 0, settle: () => resolve() };
+    const meter = () => {
+      if (voiceRef.current !== playback) return;
+      analyser.getFloatTimeDomainData(samples);
+      let peak = 0;
+      for (let index = 0; index < samples.length; index += 1) {
+        const value = Math.abs(samples[index]);
+        if (value > peak) peak = value;
+      }
+      setHomeV2VoiceLevel(peak);
+      const elapsed = graph.context.currentTime - startedAt;
+      onProgress(buffer.duration > 0 ? Math.min(1, elapsed / buffer.duration) : 1);
+      playback.frame = requestAnimationFrame(meter);
+    };
+    playback.frame = requestAnimationFrame(meter);
+    source.onended = () => {
+      if (voiceRef.current !== playback) return;
+      stopVoicePlayback();
+    };
+    voiceRef.current = playback;
+    source.start();
+  }), [stopVoicePlayback]);
 
   useEffect(() => {
     const unlock = (event: Event) => {
@@ -297,6 +355,44 @@ export function HomeV2AudioController() {
     windowVisible: windowState === "visible" && !document.hidden,
   });
   audibleRef.current = audible;
+
+  /**
+   * 用户主动发起的对话语音走独立闸门：同样的解锁/静音/可见性条件，但**不含**
+   * `surfaceOpen`。任务页静音是为了不让环境音打扰专注；而用户点一下亲口问出来的
+   * 回复是他主动要的反馈，不是"主动输出"——这与 §2026-09-16 裁决 3 里"按页静音只
+   * 抑制主动输出、不阻断用户主动触发的互动"是同一条线。
+   */
+  const userInitiatedAudible = shouldRunHomeV2Ambient({
+    unlocked,
+    masterMuted,
+    surfaceOpen: false,
+    windowVisible: windowState === "visible" && !document.hidden,
+  });
+  const userInitiatedAudibleRef = useRef(false);
+  userInitiatedAudibleRef.current = userInitiatedAudible;
+
+  const synthesizeVoice = useCallback(async (text: string): Promise<AudioBuffer> => {
+    const speakApi = window.ailearn?.companion?.voice?.speak;
+    const graph = graphRef.current;
+    if (!speakApi || !graph) throw new Error("语音通道还没准备好");
+    const response = await speakApi.call(window.ailearn.companion.voice, {
+      meta: createRequestMeta(workspaceEpochRef.current ?? undefined),
+      request: { version: 1, text },
+    });
+    return decodeBase64Audio(graph.context, unwrapGatewayResult(response).audioBase64);
+  }, []);
+
+  // 把音频出口交给伴星台词播放服务：它只管排队与计时，解码、播放、振幅仍在这里，
+  // 全应用因此只有一个 AudioContext 和一条嘴型通道。
+  useEffect(() => {
+    setCompanionVoiceHost({
+      audible: () => userInitiatedAudibleRef.current,
+      synthesize: synthesizeVoice,
+      play: playVoiceBuffer,
+      stop: stopVoicePlayback,
+    });
+    return () => setCompanionVoiceHost(null);
+  }, [playVoiceBuffer, stopVoicePlayback, synthesizeVoice]);
 
   useEffect(() => {
     const graph = graphRef.current;
@@ -348,8 +444,14 @@ export function HomeV2AudioController() {
       if (voiceFailureAtRef.current && now - voiceFailureAtRef.current < tuning.failureBackoffMs) return;
       const previous = lastVoiceRef.current;
       if (previous.text === text && now - previous.at < tuning.cooldownMs) return;
+      // 回复朗读优先（2026-09-19）：用户主动问出来的那条回复是他要的反馈，提示音是背景。
+      // 背景抢掉正在念的回复，听感上就是"气泡回来了却没发音"——所以正在念的时候，
+      // 这次提示音直接丢弃（不排队、也不打断），连请求都不发。
+      if (isCompanionSpeechActive()) return;
       const requestGeneration = ++voiceRequestGenerationRef.current;
+      // 提示音和对话台词共用同一路音频：没有回复在念时，提示音先到就先占住。
       stopVoicePlayback();
+      stopCompanionSpeech();
       lastVoiceRef.current = { text, at: now };
 
       const speakApi = window.ailearn?.companion?.voice?.speak;
@@ -369,32 +471,7 @@ export function HomeV2AudioController() {
             || graphRef.current !== active
             || !audibleRef.current
           ) return;
-          const source = active.context.createBufferSource();
-          const analyser = active.context.createAnalyser();
-          analyser.fftSize = tuning.analyserFftSize;
-          analyser.smoothingTimeConstant = tuning.analyserSmoothing;
-          source.buffer = buffer;
-          source.connect(analyser).connect(active.context.destination);
-          const samples = new Float32Array(analyser.fftSize);
-          const playback: VoicePlayback = { source, analyser, samples, frame: 0 };
-          const meter = () => {
-            if (voiceRef.current !== playback) return;
-            analyser.getFloatTimeDomainData(samples);
-            let peak = 0;
-            for (let index = 0; index < samples.length; index += 1) {
-              const value = Math.abs(samples[index]);
-              if (value > peak) peak = value;
-            }
-            setHomeV2VoiceLevel(peak);
-            playback.frame = requestAnimationFrame(meter);
-          };
-          playback.frame = requestAnimationFrame(meter);
-          source.onended = () => {
-            if (voiceRef.current !== playback) return;
-            stopVoicePlayback();
-          };
-          voiceRef.current = playback;
-          source.start();
+          await playVoiceBuffer(buffer, () => undefined);
         })
         .catch((error: unknown) => {
           if (requestGeneration !== voiceRequestGenerationRef.current) return;
@@ -412,7 +489,7 @@ export function HomeV2AudioController() {
       voiceRequestGenerationRef.current += 1;
       stopVoicePlayback();
     };
-  }, [stopVoicePlayback]);
+  }, [playVoiceBuffer, stopVoicePlayback]);
 
   return null;
 }

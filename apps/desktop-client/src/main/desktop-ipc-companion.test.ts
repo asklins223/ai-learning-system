@@ -126,6 +126,43 @@ const voiceResult = companionVoiceSpeakResultV1Schema.parse({
   voice: "zh-CN-XiaoxiaoNeural",
 });
 
+const learningRunContext = {
+  version: 1 as const,
+  pageKind: "learning_run" as const,
+  sharing: "page_registered" as const,
+  runId: "00000000-0000-4000-8000-000000000301",
+  snapshotId: "00000000-0000-4000-8000-000000000302",
+  taskId: "00000000-0000-4000-8000-000000000303",
+  requestedCapability: "none" as const,
+  contextRevision: "a".repeat(64),
+  groundedTutorGrant: null,
+};
+
+const learningRunGrantRequest = {
+  version: 1 as const,
+  pageInstanceId: "00000000-0000-4000-8000-000000000304",
+  taskId: learningRunContext.taskId,
+  contextRevision: learningRunContext.contextRevision,
+};
+
+const learningRunGrant = {
+  version: 1 as const,
+  grantId: "00000000-0000-4000-8000-000000000305",
+  userId: "00000000-0000-4000-8000-000000000306",
+  workspaceId: "00000000-0000-4000-8000-000000000307",
+  pageInstanceId: learningRunGrantRequest.pageInstanceId,
+  pageKind: "learning_run" as const,
+  capability: "grounded_tutor" as const,
+  runId: learningRunContext.runId,
+  snapshotId: learningRunContext.snapshotId,
+  taskId: learningRunContext.taskId,
+  contextRevision: learningRunContext.contextRevision,
+  permissionSnapshotHash: "b".repeat(64),
+  issuedAt: "2026-09-18T08:00:00.000Z",
+  expiresAt: "2026-09-18T08:05:00.000Z",
+  signature: "c".repeat(64),
+};
+
 function requiredHandler(channel: string): InvokeHandler {
   const handler = electronMock.handlers.get(channel);
   if (!handler) throw new Error(`missing IPC handler for ${channel}`);
@@ -140,6 +177,8 @@ describe("companion home desktop IPC", () => {
     const speakVoice = vi.fn().mockResolvedValue(voiceResult);
     const getAccountOverview = vi.fn().mockResolvedValue(accountOverview);
     const patchAccountState = vi.fn().mockResolvedValue(accountState);
+    const getCompanionLearningRunContext = vi.fn().mockResolvedValue(learningRunContext);
+    const createCompanionLearningRunContextGrant = vi.fn().mockResolvedValue(learningRunGrant);
     const gateway = {
       getDeploymentConfig: () => undefined,
       getSession: vi.fn().mockResolvedValue({
@@ -169,6 +208,8 @@ describe("companion home desktop IPC", () => {
       speakCompanionVoice: speakVoice,
       getCompanionAccountOverview: getAccountOverview,
       patchCompanionAccountState: patchAccountState,
+      getCompanionLearningRunContext,
+      createCompanionLearningRunContextGrant,
     } as unknown as DesktopGateway;
     const fakeWindow = {} as never;
 
@@ -255,6 +296,37 @@ describe("companion home desktop IPC", () => {
     );
     expect(unknownPatchKey).toMatchObject({ ok: false, error: { code: "invalid_request" } });
     expect(patchAccountState).toHaveBeenCalledTimes(1);
+
+    // 正式测评上下文通过现有 LearningRun 路由读取；每次提问的 grant 请求
+    // 原样交给服务端签发，main 只做共享 schema 与 workspace epoch 边界。
+    const learningContextResult = await requiredHandler(DESKTOP_IPC_CHANNELS.companionLearningRunGetContext)(
+      event,
+      { meta: scopedMeta, runId: learningRunContext.runId },
+    );
+    expect(learningContextResult).toMatchObject({ ok: true, data: learningRunContext, workspaceEpoch: 9 });
+    expect(getCompanionLearningRunContext).toHaveBeenCalledWith(learningRunContext.runId, meta.requestId);
+
+    const learningGrantResult = await requiredHandler(DESKTOP_IPC_CHANNELS.companionLearningRunCreateContextGrant)(
+      event,
+      { meta: scopedMeta, runId: learningRunContext.runId, request: learningRunGrantRequest },
+    );
+    expect(learningGrantResult).toMatchObject({ ok: true, data: learningRunGrant, workspaceEpoch: 9 });
+    expect(createCompanionLearningRunContextGrant).toHaveBeenCalledWith(
+      learningRunContext.runId,
+      learningRunGrantRequest,
+      meta.requestId,
+    );
+
+    const invalidLearningGrant = await requiredHandler(DESKTOP_IPC_CHANNELS.companionLearningRunCreateContextGrant)(
+      event,
+      {
+        meta: scopedMeta,
+        runId: learningRunContext.runId,
+        request: { ...learningRunGrantRequest, contextRevision: "stale" },
+      },
+    );
+    expect(invalidLearningGrant).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    expect(createCompanionLearningRunContextGrant).toHaveBeenCalledTimes(1);
 
     getHomeProjection.mockResolvedValueOnce({ ...homeProjection, rawMemoryText: "must stay main-only" });
     const unsafeOutput = await requiredHandler(DESKTOP_IPC_CHANNELS.companionHomeGetProjection)(event, { meta: scopedMeta });

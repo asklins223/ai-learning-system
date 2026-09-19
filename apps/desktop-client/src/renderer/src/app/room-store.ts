@@ -31,7 +31,7 @@ export type ActiveHomeCompletion = PendingHomeCompletion & { readonly started: b
 export type CompanionHomeZone = "desk" | "shelf" | "window" | "rest";
 export const DEFAULT_COMPANION_POSITION: CompanionPosition = { x: 0, y: 0 };
 export const DEFAULT_COMPANION_HOME_ZONE: CompanionHomeZone = "rest";
-export const DEFAULT_COMPANION_SCALE = 1;
+export const DEFAULT_COMPANION_SCALE = 1.2;
 export const MIN_COMPANION_SCALE = 0.6;
 export const MAX_COMPANION_SCALE = 1.4;
 
@@ -119,6 +119,14 @@ type RoomStore = {
   activeSourceId: string | null;
   activeObjectiveId: string | null;
   settingsSection: string;
+  /**
+   * 一次性注意力目标（2026-09-19）：设置页里需要立刻被看到的那张卡。
+   *
+   * 伴星因缺少工作区 AI 同意而不能工作时，会打设置页 + 留下目标卡 id
+   * （当前只有 `"ai-consent"`），设置页滚到它、闪一下，再清空——只引导一次，
+   * 不是常驻状态，因此不持久化。
+   */
+  settingsAttention: string | null;
   activeReviewTarget: ReviewTargetRef | null;
   /** 当前页面在 desktop-pages-v3 mockup 中的编号，由页面自身发布。 */
   hudPage: HudPageId;
@@ -131,7 +139,6 @@ type RoomStore = {
   masterMuted: boolean;
   onboardingSeen: boolean;
   onboardingOpen: boolean;
-  companionOpen: boolean;
   companionMoment: CompanionMoment;
   pendingHomeCompletion: PendingHomeCompletion | null;
   activeHomeCompletion: ActiveHomeCompletion | null;
@@ -183,6 +190,8 @@ type RoomStore = {
    * 加载只有渲染层知道，所以设置页读这里而不是读服务端的能力投影。
    */
   live2dStatus: Live2dStatus;
+  /** Increments whenever auth/workspace ownership changes; never persisted. */
+  workspaceScopeRevision: number;
   resetWorkspaceScope: () => void;
   /**
    * `options.returnTo` is for pages a reader can reach from more than one
@@ -212,6 +221,7 @@ type RoomStore = {
   setActiveSourceId: (sourceId: string | null) => void;
   setActiveObjectiveId: (objectiveId: string | null) => void;
   setSettingsSection: (section: string) => void;
+  setSettingsAttention: (target: string | null) => void;
   setActiveReviewTarget: (target: ReviewTargetRef | null) => void;
   setReviewQueueResume: (resume: {
     readonly workspaceEpoch: number | null;
@@ -225,8 +235,6 @@ type RoomStore = {
   setMasterMuted: (muted: boolean) => void;
   openOnboarding: () => void;
   finishOnboarding: () => void;
-  toggleCompanion: () => void;
-  closeCompanion: () => void;
   setCompanionMoment: (moment: CompanionMoment) => void;
   queueHomeCompletion: (id: string) => void;
   beginPendingHomeCompletion: (id: string) => void;
@@ -273,6 +281,7 @@ export const useRoomStore = create<RoomStore>()(
       activeSourceId: null,
       activeObjectiveId: null,
       settingsSection: "account",
+      settingsAttention: null,
       activeReviewTarget: null,
       hudPage: "home",
       hudSpaceEntry: null,
@@ -280,7 +289,6 @@ export const useRoomStore = create<RoomStore>()(
       masterMuted: false,
       onboardingSeen: false,
       onboardingOpen: false,
-      companionOpen: false,
       companionMoment: "idle",
       pendingHomeCompletion: null,
       activeHomeCompletion: null,
@@ -302,6 +310,7 @@ export const useRoomStore = create<RoomStore>()(
       searchWeakOnly: false,
       reviewQueueResume: null,
       live2dStatus: "loading",
+      workspaceScopeRevision: 0,
       /**
        * 工作区/会话边界重置。
        *
@@ -318,7 +327,7 @@ export const useRoomStore = create<RoomStore>()(
        * `onboardingSeen` / `companionScale` / `theme` 一直不在重置列表里，这里是
        * 把同一规则补全，不是新规则。
        */
-      resetWorkspaceScope: () => set({
+      resetWorkspaceScope: () => set((state) => ({
         ...initialViewState,
         scenePhase: "idle",
         phase: "booting",
@@ -331,11 +340,11 @@ export const useRoomStore = create<RoomStore>()(
         activeSourceId: null,
         activeObjectiveId: null,
         settingsSection: "account",
+        settingsAttention: null,
         activeReviewTarget: null,
         hudPage: "home",
         hudSpaceEntry: null,
         onboardingOpen: false,
-        companionOpen: false,
         companionMoment: "idle",
         pendingHomeCompletion: null,
         activeHomeCompletion: null,
@@ -356,7 +365,8 @@ export const useRoomStore = create<RoomStore>()(
         // 阅读位置属于当前工作区的队列：换空间后不能把上一空间的第 40 张
         // 当成这一空间的第 40 张。
         reviewQueueResume: null,
-      }),
+        workspaceScopeRevision: state.workspaceScopeRevision + 1,
+      })),
       invoke: (intent, options) => {
         const state = get();
         if (state.navigationGuard) {
@@ -385,7 +395,6 @@ export const useRoomStore = create<RoomStore>()(
           returnTarget: options?.returnTo ?? null,
           onboardingOpen: false,
           onboardingSeen: get().onboardingSeen || intent !== "home",
-          companionOpen: false,
           companionMoment: "idle",
         });
       },
@@ -444,6 +453,7 @@ export const useRoomStore = create<RoomStore>()(
       setActiveSourceId: (activeSourceId) => set({ activeSourceId }),
       setActiveObjectiveId: (activeObjectiveId) => set({ activeObjectiveId }),
       setSettingsSection: (settingsSection) => set({ settingsSection }),
+      setSettingsAttention: (settingsAttention) => set({ settingsAttention }),
       setActiveReviewTarget: (activeReviewTarget) => set({ activeReviewTarget }),
       setReviewQueueResume: (reviewQueueResume) => set({ reviewQueueResume }),
       setHudPage: (hudPage, hudSpaceEntry) => set({
@@ -454,20 +464,12 @@ export const useRoomStore = create<RoomStore>()(
         set((state) => ({
           ambientRequested: !state.ambientRequested,
           masterMuted: state.ambientRequested ? state.masterMuted : false,
-          companionOpen: true,
           companionMoment: "ambient",
         })),
       toggleMasterMuted: () => set((state) => ({ masterMuted: !state.masterMuted })),
       setMasterMuted: (masterMuted) => set({ masterMuted }),
       openOnboarding: () => set({ onboardingOpen: true }),
       finishOnboarding: () => set({ onboardingOpen: false, onboardingSeen: true }),
-      toggleCompanion: () => set((state) => ({
-        companionOpen: !state.companionOpen,
-        companionMoment: state.companionOpen ? "idle" : state.companionMoment,
-        // 任何"唤醒伴星"入口都同时解除临时隐藏——否则用户点了唤醒却看不到任何变化。
-        companionTemporarilyHidden: false,
-      })),
-      closeCompanion: () => set({ companionOpen: false, companionMoment: "idle" }),
       setCompanionMoment: (companionMoment) => set({ companionMoment }),
       queueHomeCompletion: (id) => {
         const normalizedId = id.trim();
@@ -566,8 +568,7 @@ export const useRoomStore = create<RoomStore>()(
       setCompanionFocusUntilTaskEnd: (companionFocusUntilTaskEnd) => set({ companionFocusUntilTaskEnd }),
       setCompanionTemporarilyHidden: (companionTemporarilyHidden) => set({
         companionTemporarilyHidden,
-        // 隐藏伴星时同时收起面板，避免留下一个"看不见的主人的面板"。
-        ...(companionTemporarilyHidden ? { companionOpen: false, companionMoment: "idle" as const } : {}),
+        ...(companionTemporarilyHidden ? { companionMoment: "idle" as const } : {}),
       }),
       resetCompanionPosition: () => set({
         companionHomeZone: DEFAULT_COMPANION_HOME_ZONE,

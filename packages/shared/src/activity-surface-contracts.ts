@@ -30,10 +30,10 @@ export type ActivityEventKindV1 = z.infer<typeof activityEventKindSchema>;
  * 日志条目的跳转目标。renderer 把 kind 映射到 RoomIntent：
  * note → open-notebook, objective → open-objective,
  * card_generation → open-card-generation, source → open-source,
- * review → review。`null` 表示只展示、不可跳转。
+ * learning_run → 该学习旅程。`null` 表示只展示、不可跳转。
  */
 export const activityTargetV1Schema = z.strictObject({
-  kind: z.enum(["note", "objective", "card_generation", "review", "source"]),
+  kind: z.enum(["note", "objective", "card_generation", "learning_run", "source"]),
   id: uuidSchema,
   noteVersionId: uuidSchema.nullable(),
 });

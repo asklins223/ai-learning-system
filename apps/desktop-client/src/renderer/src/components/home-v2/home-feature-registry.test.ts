@@ -30,25 +30,18 @@ describe("HomeFeatureRegistryV1", () => {
 
   it("keeps every implemented surface executable and leaves write-only features pending", () => {
     expect(getHomeFeature("catalog").availability).toBe("native");
-    expect(getHomeFeature("companion").availability).toBe("native");
+    expect(getHomeFeature("companion-center").availability).toBe("native");
     expect(HOME_FEATURE_REGISTRY_V1.filter((feature) => feature.availability === "native").map((feature) => feature.id)).toEqual([
       "continue",
       "today-review",
       "current-notebook",
       "all-notes",
       "sources",
-      "learning-cards",
-      "room-search",
       "global-search",
       "catalog",
       "current-target",
       "understanding-graph",
-      "companion",
-      "companion-diary",
-      "companion-persona",
-      "companion-memory",
-      "memory-graph",
-      "personal-center",
+      "companion-center",
       "settings",
     ]);
     for (const feature of HOME_FEATURE_REGISTRY_V1.filter((candidate) => candidate.availability === "pending")) {

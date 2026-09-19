@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { RotateCcw, Sparkles, X } from "lucide-react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { X } from "lucide-react";
 import gsap from "gsap";
 import { useGSAP } from "@gsap/react";
 import {
@@ -10,13 +10,7 @@ import {
   type CompanionPosition,
 } from "../../app/room-store";
 import type { CompanionAccountPatch, CompanionAccountStateV1 } from "@ailearn/shared/companion-shell-contracts";
-import {
-  COMPANION_INTERVENTION_OPTIONS,
-  COMPANION_PRESENCE_OPTIONS,
-  companionAccountDisabled as isCompanionAccountDisabled,
-  quietHoursPatch,
-  quietHoursWithBoundary,
-} from "./companion-account-presence";
+import { companionAccountDisabled as isCompanionAccountDisabled } from "./companion-account-presence";
 import {
   createRequestMeta,
   gatewayErrorMessage,
@@ -49,13 +43,27 @@ import {
   type CompanionCuePriority,
 } from "./companion-home-placement";
 import { WindowLive2D, type WindowLive2DStatus } from "./WindowLive2D";
+import { CompanionBubble } from "./CompanionBubble";
+import { CompanionHud, type CompanionHudAction } from "./CompanionHud";
+import { CompanionChatProvider, useCompanionChat } from "../../app/companion-chat-session";
+import { HOME_FEATURE_ICONS } from "../home-v2/home-feature-icons";
+import { getHomeFeature, type HomeFeatureId } from "../home-v2/home-feature-registry";
+import { SurfaceDataState } from "../surfaces/surface-data";
 import type { Live2DEmotionEvent } from "./live2d-emotion";
+import "./companion-root.css";
 
 gsap.registerPlugin(useGSAP);
 
 // Owner-approved in-window Live2D runtime. It never creates an external pet
-// window and still falls back to the orb if WebGL or an asset is unavailable.
+// window and never invents an orb or static character fallback.
 const LIVE2D_RUNTIME_ALLOWED = true;
+
+/**
+ * 「被叫醒的中介帧」的入场节拍（方案 §5 第 4 项）。只等气泡落位这一下：
+ * 头顶的「嗯？」是 180ms 入场的，交互台跟在它后面出现即可读出"她转过头来"，
+ * 等她 900ms 的整个寿命再展开会把点击反馈拖成卡顿。
+ */
+const COMPANION_WAKE_BEAT_MS = 180;
 const HOME_V2_FLOOR_POLYGON = normalizedHomeFloorPolygon();
 
 /**
@@ -63,186 +71,49 @@ const HOME_V2_FLOOR_POLYGON = normalizedHomeFloorPolygon();
  * in `App`, never remounted by page switches. The home scene is the only
  * draggable context — a full-body free drag inside the viewport safe area that
  * commits a user-owned world anchor (persisted across restarts by the room
- * store). Task pages receive a fixed registry seat (`HUD_PAGES[*].seat`) that
- * is display-only; the seat's side and position are tracked in a ref that
- * survives page switches, so navigating never re-initializes the resident and
- * a side change travels there with a smooth hop instead of teleporting.
+ * store). Task pages receive a fixed registry seat (`HUD_PAGES[*].seat`) with
+ * on-demand interaction; the seat's side and position are tracked in a ref
+ * that survives page switches. Side changes crossfade in place so the actor
+ * never travels across the page's reading or answer content.
  */
-const SCENE_COPY = {
-  room: {
-    kicker: "一直在桌边",
-    title: "现在想从哪里继续？",
-    body: "翻开桌上的研究册，接着想一想。也可以先温习学过的内容。",
-    primary: "陪我继续",
-    primaryIntent: "continue" as const,
-    secondary: "先去复习",
-    secondaryIntent: "review" as const,
-  },
-  study: {
-    kicker: "研究进行中",
-    title: "慢一点也没关系",
-    body: "我会留在台灯旁。先把证据和自己的判断分开写，卡住时再点我。",
-    primary: "验证这段理解",
-    primaryIntent: "validate" as const,
-    secondary: "看看星图",
-    secondaryIntent: "graph" as const,
-  },
-  notebook: {
-    kicker: "笔记展开了",
-    title: "先留下真正改变判断的句子",
-    body: "选中一段证据，就能把它折成一张以后会再遇见的学习卡。",
-    primary: "继续研究",
-    primaryIntent: "continue" as const,
-    secondary: "查看星图",
-    secondaryIntent: "graph" as const,
-  },
-  card: {
-    kicker: "卡片正在成形",
-    title: "问题要能让未来的你重新想一遍",
-    body: "别只抄结论，把当时依赖的证据也留在背面。",
-    primary: "回研究册",
-    primaryIntent: "continue" as const,
-    secondary: "今日复习",
-    secondaryIntent: "review" as const,
-  },
-  "card-generation": {
-    kicker: "候选正在整理",
-    title: "先审核问题，再决定留下什么",
-    body: "公开候选只负责让你判断是否值得复习；答案和激活回执仍由服务端控制。",
-    primary: "回研究册",
-    primaryIntent: "open-notebook" as const,
-    secondary: "回到书房",
-    secondaryIntent: "home" as const,
-  },
-  review: {
-    kicker: "安静陪练",
-    title: "先回忆，再翻面",
-    body: "不会也没关系。真实标记模糊和不会，下一次出现的节奏才会更合适。",
-    primary: "回到研究册",
-    primaryIntent: "continue" as const,
-    secondary: "查看星图",
-    secondaryIntent: "graph" as const,
-  },
-  search: {
-    kicker: "在资料边等你",
-    title: "搜索的是证据，不只是关键词",
-    body: "打开结果后，看看它来自笔记、学习卡还是原始来源。",
-    primary: "回到研究册",
-    primaryIntent: "continue" as const,
-    secondary: "看看星图",
-    secondaryIntent: "graph" as const,
-  },
-  graph: {
-    kicker: "一起看见关系",
-    title: "亮点之间的线，才是理解",
-    body: "先找最孤单的概念；它通常就是下一步值得补证据的地方。",
-    primary: "回到研究册",
-    primaryIntent: "continue" as const,
-    secondary: "查找证据",
-    secondaryIntent: "search" as const,
-  },
-  validation: {
-    kicker: "正在听你的解释",
-    title: "先说清为什么，再说答案",
-    body: "如果证据能支持因果链，我会和你一起把这次理解收好。",
-    primary: "继续研究",
-    primaryIntent: "continue" as const,
-    secondary: "查看星图",
-    secondaryIntent: "graph" as const,
-  },
-  "source-library": {
-    kicker: "资料在这里",
-    title: "先把来源收进来",
-    body: "解析状态、来源类型和关联笔记都会来自当前工作区的服务端列表。",
-    primary: "回到书房",
-    primaryIntent: "home" as const,
-    secondary: "打开笔记库",
-    secondaryIntent: "open-notes" as const,
-  },
-  "source-detail": {
-    kicker: "来源已展开",
-    title: "从原文找到证据",
-    body: "先看解析片段，再决定要不要开始写研究册。",
-    primary: "打开笔记库",
-    primaryIntent: "open-notes" as const,
-    secondary: "回到来源库",
-    secondaryIntent: "open-sources" as const,
-  },
-  "note-library": {
-    kicker: "研究册架",
-    title: "继续最近编辑的笔记",
-    body: "这里列出当前工作区的真实笔记，不会用本机示例补齐。",
-    primary: "回到书房",
-    primaryIntent: "home" as const,
-    secondary: "看看理解目标",
-    secondaryIntent: "open-objectives" as const,
-  },
-  "objective-library": {
-    kicker: "理解目标",
-    title: "把结论变成可以验证的目标",
-    body: "目标状态、来源血缘与下一步动作都由服务端 projection 决定。",
-    primary: "回到书房",
-    primaryIntent: "home" as const,
-    secondary: "打开理解星图",
-    secondaryIntent: "graph" as const,
-  },
-  "objective-detail": {
-    kicker: "目标详情",
-    title: "看清这条理解从哪里来",
-    body: "公开摘要、来源和验证入口保持在同一个目标上下文里。",
-    primary: "开始学习",
-    primaryIntent: "continue" as const,
-    secondary: "回到目标库",
-    secondaryIntent: "open-objectives" as const,
-  },
-  "companion-center": {
-    kicker: "伴星中心",
-    title: "Mao 会在这里等你",
-    body: "伴星停在呈现层：形象、真实档案摘要与存在感控制都可用；对话、记忆与提议不在伴星接入范围。",
-    primary: "回到书房",
-    primaryIntent: "home" as const,
-    secondary: "打开设置",
-    secondaryIntent: "open-settings" as const,
-  },
-  settings: {
-    kicker: "书房设置",
-    title: "把学习空间调成你的节奏",
-    body: "账户、工作区、主题、无障碍和伴星偏好会在这里逐步接入。",
-    primary: "回到书房",
-    primaryIntent: "home" as const,
-    secondary: "伴星中心",
-    secondaryIntent: "open-companion-center" as const,
-  },
-} as const;
-
 function durationFor(mode: "full" | "lite" | "off", full: number) {
   return mode === "off" ? 0 : mode === "lite" ? full * 0.55 : full;
 }
 
-function speakHomeV2Cue(text: string, reason: "cue" | "touch"): void {
+function speakHomeV2Cue(text: string): void {
   window.dispatchEvent(new CustomEvent("ailearn:home-v2-speak", {
-    detail: { text, reason },
+    detail: { text, reason: "cue" },
   }));
 }
 
 const COMPANION_FIXED_POSE = Object.freeze({ x: 0, y: 0, rotation: 0, scaleX: 1 } as const);
 
-export function CompanionPresence() {
+/**
+ * 伴星的全部呈现：whisper 面板、历史手记、交互台、功能夹、Live2D 形象。
+ *
+ * 外层只做一件事——把对话状态（CompanionChatProvider）供给同时消费它的气泡坞与
+ * 历史抽屉。里面那棵大树保持原来的写法与动画，不因为多了一层 Provider 而重新挂载。
+ */
+export function CompanionRoot() {
+  return (
+    <CompanionChatProvider>
+      <CompanionPresenceView />
+    </CompanionChatProvider>
+  );
+}
+
+function CompanionPresenceView() {
   const surface = useRoomStore((state) => state.surface);
-  const theme = useRoomStore((state) => state.theme);
   const motionPreference = useRoomStore((state) => state.motionMode);
   const reducedMotion = useRoomStore((state) => state.reducedMotion);
   const motionMode = resolveSceneMotionMode(motionPreference, reducedMotion);
   const onboardingOpen = useRoomStore((state) => state.onboardingOpen);
-  const companionOpen = useRoomStore((state) => state.companionOpen);
   const companionMoment = useRoomStore((state) => state.companionMoment);
   const companionPosition = useRoomStore((state) => state.companionPosition);
   const companionHomeZone = useRoomStore((state) => state.companionHomeZone);
   const companionPlacementOwner = useRoomStore((state) => state.companionPlacementOwner);
   const companionUserAnchor = useRoomStore((state) => state.companionUserAnchor);
   const companionScale = useRoomStore((state) => state.companionScale);
-  const toggleCompanion = useRoomStore((state) => state.toggleCompanion);
-  const closeCompanion = useRoomStore((state) => state.closeCompanion);
   const setCompanionPosition = useRoomStore((state) => state.setCompanionPosition);
   const setCompanionHomePlacement = useRoomStore((state) => state.setCompanionHomePlacement);
   const mutedCompanionSceneKeys = useRoomStore((state) => state.mutedCompanionSceneKeys);
@@ -255,7 +126,6 @@ export function CompanionPresence() {
   const setCompanionScale = useRoomStore((state) => state.setCompanionScale);
   const setCompanionMoment = useRoomStore((state) => state.setCompanionMoment);
   const resetCompanionPosition = useRoomStore((state) => state.resetCompanionPosition);
-  const invoke = useRoomStore((state) => state.invoke);
   const {
     runFeature: runHomeV2Feature,
     introVisible: homeV2IntroVisible,
@@ -271,8 +141,6 @@ export function CompanionPresence() {
   const anchorRef = useRef<HTMLDivElement>(null);
   const visualRef = useRef<HTMLDivElement>(null);
   const characterMotionRef = useRef<HTMLDivElement>(null);
-  const panelRef = useRef<HTMLElement>(null);
-  const panelFrameRef = useRef(0);
   const dragRef = useRef<{
     pointerId: number;
     startX: number;
@@ -295,8 +163,8 @@ export function CompanionPresence() {
    * so this ref — not component state, not a per-page cache — is what makes
    * the seat (side, coordinates) survive page switches without any
    * re-initialization. `key` guards the animation: a same-side page switch
-   * reuses the exact current position (zero movement), while a side change
-   * travels through `seatTravelRef`.
+   * reuses the exact current position, while a side change crossfades through
+   * `seatTravelRef` without moving across the reading surface.
    */
   const seatPlacementRef = useRef<{ key: string; x: number; y: number } | null>(null);
   const seatTravelRef = useRef<gsap.core.Timeline | null>(null);
@@ -316,39 +184,96 @@ export function CompanionPresence() {
   const [status, setStatus] = useState<WindowLive2DStatus>(() => (
     live2dRuntimeAllowed ? "loading" : "unavailable"
   ));
+  const [live2dAttempt, setLive2dAttempt] = useState(0);
   // 设置页的「半身形象」读的是模型是否真的加载成功，只有这里知道，
   // 所以把状态同时发布到 room store，而不是让页面去猜或读服务端占位。
   const setLive2dStatus = useRoomStore((state) => state.setLive2dStatus);
   useEffect(() => { setLive2dStatus(status); }, [setLive2dStatus, status]);
   const [unavailableNoticeDismissed, setUnavailableNoticeDismissed] = useState(false);
   const [inviteTrigger, setInviteTrigger] = useState(0);
+  /** 工具开始执行的次数（方案 §5 第 9 项）：递增即请求一次「看向手边」参数冲量。 */
+  const [toolAttentionTrigger, setToolAttentionTrigger] = useState(0);
+  /**
+   * 「被叫醒的中介帧」（方案 §5 第 4 项）：点头顶先冒一个 0.9s 的「嗯？」，
+   * 交互台才是随后展开的。现在没有这一下，交互台像被"点开"而不是"她转过头来"。
+   */
+  const [awakening, setAwakening] = useState(false);
+  useEffect(() => {
+    if (!awakening) return;
+    const timer = window.setTimeout(() => setAwakening(false), 900);
+    return () => window.clearTimeout(timer);
+  }, [awakening]);
+  /** 中介帧的展开节拍；卸载时清掉，避免 setState 落在已卸载的树上。 */
+  const wakeTimerRef = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (wakeTimerRef.current !== null) window.clearTimeout(wakeTimerRef.current);
+  }, []);
   const [touchKind, setTouchKind] = useState<"head" | "body" | null>(null);
   const [homeCue, setHomeCue] = useState<string | null>(null);
+  /** 当前气泡若源自念头（切片④），可点击让她主动开场。 */
+  const [homeCueThoughtId, setHomeCueThoughtId] = useState<string | null>(null);
+  const [externalModalOpen, setExternalModalOpen] = useState(false);
+  const { mode, setMode, assistantEmotion, liveReply, phase: chatPhase } = useCompanionChat();
+  const engaged = mode !== "closed";
+  /** 聊天回复的情绪（2026-09-18 情绪接表情）：20s 内驱动 Live2D 表情。 */
+  const [chatEmotion, setChatEmotion] = useState<{ emotion: string; at: number } | null>(null);
+  useEffect(() => {
+    if (!assistantEmotion) return;
+    setChatEmotion({ emotion: assistantEmotion, at: Date.now() });
+    const timer = window.setTimeout(() => setChatEmotion(null), 20_000);
+    return () => window.clearTimeout(timer);
+  }, [assistantEmotion]);
   // 账号级 presence（2026-09-16 裁决 3）：跨设备同步，写入走 revision CAS。
   const [accountState, setAccountState] = useState<CompanionAccountStateV1 | null>(null);
   const [accountFailure, setAccountFailure] = useState<string | null>(null);
   const [accountSaving, setAccountSaving] = useState(false);
+  const workspaceScopeRevision = useRoomStore((state) => state.workspaceScopeRevision);
   const targetWorldAnchor = companionPlacementOwner === "user" && companionUserAnchor
     ? companionUserAnchor
     : COMPANION_HOME_ANCHORS[companionHomeZone];
   const hudPage = useRoomStore((state) => state.hudPage);
+  const companionPolicy = HUD_PAGES[hudPage].companion;
+  const homeMode = companionPolicy.mode === "home";
   const sceneKey = surface ?? "room";
-  const copy = SCENE_COPY[sceneKey];
-  const formalAssessmentSilent = surface === "validation";
-  // Ordinary task pages keep a quiet, fixed companion seat. Only formal
-  // assessment stays completely silent so the answer field remains the sole
-  // focus. The full whisper/actions panel remains a room-only affordance.
-  const companionVisualOnly = Boolean(surface) && !formalAssessmentSilent;
-  const taskSurfaceQuiet = formalAssessmentSilent;
+  const assessmentMode = companionPolicy.mode === "assessment";
+  const companionVisualOnly = companionPolicy.mode === "ambient" || assessmentMode;
+  const taskSurfaceQuiet = companionVisualOnly && !engaged;
   // 页面级存在感（2026-09-16 裁决 3）：按页静音只抑制**主动**输出（气泡/提示音/
   // 提示语音），不阻断用户主动点击触发的互动；专注模式在任务面关闭时自动结束。
   const pageMuted = mutedCompanionSceneKeys.includes(sceneKey);
   const companionSilenced = pageMuted || companionFocusUntilTaskEnd;
   // globalEnabled=false 是账号级关闭：形象不出现，但用户可以在同一处重新开启。
   const companionAccountDisabled = isCompanionAccountDisabled(accountState);
-  const presenceHidden = onboardingOpen || formalAssessmentSilent || companionTemporarilyHidden || companionAccountDisabled;
-  const presencePaused = presenceHidden || homeV2ModalOpen || windowState !== "visible";
+  const presenceHidden = companionPolicy.mode === "hidden" || onboardingOpen || companionTemporarilyHidden || companionAccountDisabled;
+  const presencePaused = presenceHidden || homeV2ModalOpen || externalModalOpen || windowState !== "visible";
   presencePausedRef.current = presencePaused;
+
+  useEffect(() => {
+    setMode("closed");
+  }, [hudPage, setMode]);
+
+  useEffect(() => {
+    const sync = () => {
+      const open = Array.from(document.querySelectorAll<HTMLElement>(
+        "dialog[open], [role='dialog'][aria-modal='true'], [role='alertdialog'][aria-modal='true']",
+      )).some((element) => !element.classList.contains("companion-chat") && !element.closest(".companion-presence"));
+      setExternalModalOpen(open);
+    };
+    sync();
+    const observer = new MutationObserver(sync);
+    observer.observe(document.body, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ["open", "aria-modal"],
+    });
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!externalModalOpen) return;
+    setMode("closed");
+  }, [externalModalOpen, setMode]);
 
   const loadCompanionAccount = useCallback(async () => {
     try {
@@ -371,8 +296,10 @@ export function CompanionPresence() {
   }, []);
 
   useEffect(() => {
+    setAccountState(null);
+    setAccountFailure(null);
     void loadCompanionAccount();
-  }, [loadCompanionAccount]);
+  }, [loadCompanionAccount, workspaceScopeRevision]);
 
   const patchCompanionAccount = useCallback(async (patch: Omit<CompanionAccountPatch, "revision">) => {
     if (accountSaving || !accountState) return;
@@ -422,51 +349,22 @@ export function CompanionPresence() {
     readonly text: string;
     readonly zone: "desk" | "shelf" | "window" | "rest";
     readonly key: string;
+    readonly thoughtId: string | null;
   } | null => {
     if (!HOME_V2_ENABLED || companionProjection.loading || companionProjection.failure) return null;
     const proactive = companionProjection.projection?.proactiveCue;
     if (!proactive) return null;
-    return { priority: "ordinary", text: proactive.text, zone: "rest", key: `ordinary:${proactive.revision}` };
+    return {
+      priority: "ordinary",
+      text: proactive.text,
+      zone: "rest",
+      key: `ordinary:${proactive.revision}`,
+      thoughtId: proactive.thoughtId ?? null,
+    };
   }, [companionProjection.failure, companionProjection.loading, companionProjection.projection]);
 
-  const positionPanel = useCallback(() => {
-    if (panelFrameRef.current) return;
-    panelFrameRef.current = window.requestAnimationFrame(() => {
-      panelFrameRef.current = 0;
-      const root = rootRef.current;
-      const visual = visualRef.current;
-      const panel = panelRef.current;
-      if (!root || !visual || !panel) return;
-      const rootRect = root.getBoundingClientRect();
-      const visualRect = visual.getBoundingClientRect();
-      const panelWidth = panel.offsetWidth;
-      const panelHeight = panel.offsetHeight;
-      if (rootRect.width <= 0 || rootRect.height <= 0 || panelWidth <= 0 || panelHeight <= 0) return;
-
-      const safe = companionSafeInset(rootRect);
-      const gap = rootRect.width < 440 ? 8 : 12;
-      const leftSpace = visualRect.left - rootRect.left;
-      const rightSpace = rootRect.right - visualRect.right;
-      const side = leftSpace >= panelWidth + gap || leftSpace >= rightSpace ? "left" : "right";
-      const unclampedLeft = side === "left"
-        ? visualRect.left - rootRect.left - panelWidth - gap
-        : visualRect.right - rootRect.left + gap;
-      const maxLeft = Math.max(safe, rootRect.width - panelWidth - safe);
-      const left = Math.min(maxLeft, Math.max(safe, unclampedLeft));
-      const desiredTop = visualRect.top - rootRect.top + Math.min(28, visualRect.height * 0.14);
-      const maxTop = Math.max(safe, rootRect.height - panelHeight - safe);
-      const top = Math.min(maxTop, Math.max(safe, desiredTop));
-
-      panel.dataset.panelSide = side;
-      panel.style.left = `${Math.round(left)}px`;
-      panel.style.top = `${Math.round(top)}px`;
-      panel.style.right = "auto";
-      panel.style.bottom = "auto";
-    });
-  }, []);
-
   const projectCompanionIntoCamera = useCallback(() => {
-    if (!HOME_V2_ENABLED || surface || dragRef.current) return;
+    if (!HOME_V2_ENABLED || !homeMode || dragRef.current) return;
     const root = rootRef.current;
     const anchor = anchorRef.current;
     const visual = visualRef.current;
@@ -531,8 +429,7 @@ export function CompanionPresence() {
     root.dataset.worldAnchor = `${worldAnchorRef.current.x},${worldAnchorRef.current.y}`;
     root.dataset.cameraScale = String(cameraScale);
     root.dataset.projectionState = "tracking";
-    positionPanel();
-  }, [companionScale, positionPanel, surface]);
+  }, [companionScale, homeMode]);
   projectCompanionRef.current = projectCompanionIntoCamera;
 
   const commitCurrentUserPlacement = useCallback(() => {
@@ -565,10 +462,7 @@ export function CompanionPresence() {
     // delta with a stale semantic-zone correction. The same protection applies
     // while a seat travel is walking: the tween's own onUpdate owns the anchor
     // until it lands on the seat.
-    if (dragRef.current || seatTravelRef.current) {
-      positionPanel();
-      return;
-    }
+    if (dragRef.current || seatTravelRef.current) return;
     const rootRect = root.getBoundingClientRect();
     const visualRect = visual.getBoundingClientRect();
     if (rootRect.width <= 0 || rootRect.height <= 0 || visualRect.width <= 0 || visualRect.height <= 0) return;
@@ -582,10 +476,9 @@ export function CompanionPresence() {
       // V2's viewport correction is projection-only. Saving this correction as
       // a room coordinate is the old magnetic-snap bug: each camera crop would
       // slowly rewrite the user's placement. Legacy scenes retain their offset.
-      if (!HOME_V2_ENABLED || surface) setCompanionPosition(next);
+      if (!HOME_V2_ENABLED || !homeMode) setCompanionPosition(next);
     }
-    positionPanel();
-  }, [positionPanel, setCompanionPosition, surface]);
+  }, [homeMode, setCompanionPosition]);
 
   useEffect(() => {
     if (!presencePaused) return;
@@ -606,7 +499,7 @@ export function CompanionPresence() {
     if (companionMoment !== "lamp") return;
     const settle = gsap.delayedCall(1.35, () => setCompanionMoment("idle"));
     return () => { settle.kill(); };
-  }, [companionMoment, setCompanionMoment, theme]);
+  }, [companionMoment, setCompanionMoment]);
 
   useEffect(() => {
     if (companionMoment !== "confirm" || surface) return;
@@ -619,6 +512,7 @@ export function CompanionPresence() {
     const settle = gsap.delayedCall(1.85, () => {
       setTouchKind(null);
       setHomeCue(null);
+      setHomeCueThoughtId(null);
     });
     return () => { settle.kill(); };
   }, [touchKind]);
@@ -644,7 +538,10 @@ export function CompanionPresence() {
       })) return;
     }
     const revealAt = prioritizedCue.priority === "ordinary" ? 3.2 : 1.05;
-    const hideAt = prioritizedCue.priority === "ordinary" ? 7.4 : 5;
+    // 念头气泡（切片④）停留更久，给用户点开主动开场的时间。
+    const hideAt = prioritizedCue.priority === "ordinary"
+      ? (prioritizedCue.thoughtId ? 30 : 7.4)
+      : 5;
     const cueTimeline = gsap.timeline();
     cueTimeline.call(() => {
       shownCueRef.current = prioritizedCue.key;
@@ -654,8 +551,9 @@ export function CompanionPresence() {
         setCompanionHomePlacement(prioritizedCue.zone);
       }
       setHomeCue(prioritizedCue.text);
+      setHomeCueThoughtId(prioritizedCue.thoughtId);
       if (prioritizedCue.priority !== "ordinary") {
-        speakHomeV2Cue(prioritizedCue.text, "cue");
+        speakHomeV2Cue(prioritizedCue.text);
       }
       window.dispatchEvent(new CustomEvent("ailearn:home-v2-sound", { detail: { kind: "footstep" } }));
       if (prioritizedCue.priority === "ordinary") {
@@ -668,6 +566,7 @@ export function CompanionPresence() {
     }, undefined, revealAt);
     cueTimeline.call(() => {
       setHomeCue(null);
+      setHomeCueThoughtId(null);
     }, undefined, hideAt);
     return () => {
       cueTimeline.kill();
@@ -676,6 +575,7 @@ export function CompanionPresence() {
       // pinned indefinitely after its timeline has been destroyed, and return a
       // borrowed position immediately.
       setHomeCue(null);
+      setHomeCueThoughtId(null);
     };
   }, [companionProjection.projection, companionSilenced, homeV2IntroVisible, presencePaused, prioritizedCue, setCompanionHomePlacement]);
 
@@ -691,7 +591,7 @@ export function CompanionPresence() {
       frame = window.requestAnimationFrame(projectCompanionIntoCamera);
     };
 
-    if (HOME_V2_ENABLED && !surface) {
+    if (HOME_V2_ENABLED && homeMode) {
       if (!anchorInitializedRef.current) {
         worldAnchorRef.current = { ...targetWorldAnchor };
         anchorInitializedRef.current = true;
@@ -742,7 +642,7 @@ export function CompanionPresence() {
       seatTravelRef.current?.kill();
       seatTravelRef.current = null;
       // Legacy (v1) home: a hand-placed user anchor wins over the zone seat.
-      if (!surface && !HOME_V2_ENABLED
+      if (homeMode && !HOME_V2_ENABLED
         && companionPlacementOwner === "user"
         && companionUserAnchor) {
         const pos = companionPositionForNormalizedFootAnchor(
@@ -766,8 +666,8 @@ export function CompanionPresence() {
       // Mao on the left so the paper owns the right, working pages the reverse.
       // Every surface publishes its own hudPage, so the registry alone decides
       // the seat and no surface list may shadow it here. Task pages are fixed,
-      // display-only seats: nothing here reads user drag state.
-      const seat = HUD_PAGES[hudPage].seat;
+      // fixed seats: nothing here reads user drag state.
+      const seat = companionPolicy.seat;
       const seatKey = `${surface ?? "room"}:${hudPage}`;
       // Pages that declare no seat (wide formal pages) fade the resident out
       // instead of pinning it to a side.
@@ -790,18 +690,17 @@ export function CompanionPresence() {
         { width: anchor.offsetWidth, height: anchor.offsetHeight },
       );
       // One rule for every path — page switch, first entry from home, resize,
-      // or a placement re-run that arrives while a travel is already walking:
-      // if the resident is not standing on the seat, it travels there. Nothing
-      // in this branch may teleport a visibly displaced character, so a killed
-      // or superseded tween can only ever be continued, never flashed.
+      // or a placement re-run. Page switches crossfade between seats so the
+      // actor never walks over reading or answer content; viewport corrections
+      // may use a short positional nudge because they do not change context.
       const startX = Number(gsap.getProperty(anchor, "x")) || 0;
       const startY = Number(gsap.getProperty(anchor, "y")) || 0;
       const distance = Math.hypot(target.x - startX, target.y - startY);
       const previous = seatPlacementRef.current;
       // A null record is the first-ever surface entry (leaving home): it is a
-      // real page switch and earns the full travel window and hop.
+      // real page switch and therefore uses the same seat crossfade.
       const pageSwitched = (previous === null || previous.key !== seatKey)
-        && Boolean(surface);
+        && !homeMode;
       const canAnimate = distance > 3
         && motionModeRef.current !== "off"
         && !presencePausedRef.current;
@@ -839,8 +738,6 @@ export function CompanionPresence() {
         clampVisibleCompanion();
         return;
       }
-      // A page switch that changes the seat side must travel, never teleport:
-      // a short hop carries the resident across the gutter.
       gsap.set(anchor, {
         left: 0,
         top: 0,
@@ -850,9 +747,30 @@ export function CompanionPresence() {
         force3D: true,
       });
       const fullDuration = companionSemanticTravelDuration(distance, motionModeRef.current);
-      // Resizes and placement re-runs only ever need a short nudge; the long
-      // cinematic window is reserved for real page switches.
-      const duration = pageSwitched ? fullDuration : Math.min(fullDuration, 0.3);
+      if (pageSwitched) {
+        const travel = gsap.timeline({
+          onComplete: () => {
+            seatTravelRef.current = null;
+            clampVisibleCompanion();
+          },
+        });
+        seatTravelRef.current = travel;
+        travel.to(anchor, {
+          autoAlpha: 0,
+          duration: 0.1,
+          ease: "power2.out",
+          overwrite: "auto",
+        });
+        travel.set(anchor, { x: target.x, y: target.y, force3D: true });
+        travel.to(anchor, {
+          autoAlpha: 1,
+          duration: 0.16,
+          ease: "power2.out",
+        });
+        seatPlacementRef.current = { key: seatKey, x: target.x, y: target.y };
+        return;
+      }
+      const duration = Math.min(fullDuration, 0.3);
       const proxy = { x: startX, y: startY };
       const travel = gsap.timeline({
         onComplete: () => { seatTravelRef.current = null; },
@@ -868,28 +786,6 @@ export function CompanionPresence() {
           gsap.set(anchor, { x: proxy.x, y: proxy.y, force3D: true });
         },
       }, 0);
-      const pose = characterMotionRef.current;
-      if (pose && pageSwitched && distance > 60) {
-        travel.to(pose, {
-          y: -6,
-          scaleY: 1.025,
-          transformOrigin: "50% 100%",
-          duration: Math.min(0.18, duration * 0.34),
-          ease: "power2.out",
-        }, 0);
-        travel.to(pose, {
-          y: 2,
-          scaleY: 0.92,
-          duration: 0.08,
-          ease: "power2.in",
-        }, Math.max(0, duration - 0.1));
-        travel.to(pose, {
-          y: 0,
-          scaleY: 1,
-          duration: 0.16,
-          ease: "back.out(1.4)",
-        });
-      }
       seatPlacementRef.current = { key: seatKey, x: target.x, y: target.y };
     };
     const observer = new ResizeObserver(() => {
@@ -903,10 +799,10 @@ export function CompanionPresence() {
       window.cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [clampVisibleCompanion, companionPosition.x, companionPosition.y, hudPage, projectCompanionIntoCamera, surface, targetWorldAnchor]);
+  }, [clampVisibleCompanion, companionPolicy.seat, companionPosition.x, companionPosition.y, homeMode, hudPage, projectCompanionIntoCamera, surface, targetWorldAnchor]);
 
   useGSAP(() => {
-    if (!HOME_V2_ENABLED || surface) return;
+    if (!HOME_V2_ENABLED || !homeMode) return;
     const root = rootRef.current;
     const pose = characterMotionRef.current;
     if (!root || !pose || dragRef.current) return;
@@ -1032,71 +928,33 @@ export function CompanionPresence() {
       motionMode,
       presencePaused,
       projectCompanionIntoCamera,
-      surface,
+      homeMode,
       targetWorldAnchor.x,
       targetWorldAnchor.y,
     ],
   });
 
-  useEffect(() => {
-    const root = rootRef.current;
-    const visual = visualRef.current;
-    const panel = panelRef.current;
-    if (!root || !visual || !panel) return;
-    const observer = new ResizeObserver(positionPanel);
-    observer.observe(root);
-    observer.observe(visual);
-    observer.observe(panel);
-    window.addEventListener("resize", positionPanel);
-    window.visualViewport?.addEventListener("resize", positionPanel);
-    window.visualViewport?.addEventListener("scroll", positionPanel);
-    positionPanel();
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", positionPanel);
-      window.visualViewport?.removeEventListener("resize", positionPanel);
-      window.visualViewport?.removeEventListener("scroll", positionPanel);
-      window.cancelAnimationFrame(panelFrameRef.current);
-      panelFrameRef.current = 0;
-    };
-  }, [companionOpen, companionScale, positionPanel, surface]);
-
   useGSAP(() => {
     const visual = visualRef.current;
     if (!visual) return;
-    if (HOME_V2_ENABLED && !surface) {
+    if (HOME_V2_ENABLED && homeMode) {
       projectCompanionIntoCamera();
       return;
     }
     gsap.to(visual, {
-      scale: companionScale * (surface ? 0.95 : 0.9),
+      scale: companionScale * (homeMode ? 0.9 : 0.78),
       duration: durationFor(motionMode, 0.16),
       ease: motionMode === "off" ? "none" : "power2.out",
       overwrite: "auto",
       transformOrigin: "50% 100%",
       force3D: true,
-      onUpdate: positionPanel,
       onComplete: clampVisibleCompanion,
     });
-  }, { scope: rootRef, dependencies: [surface, motionMode, companionScale, clampVisibleCompanion, positionPanel, projectCompanionIntoCamera] });
-
-  useGSAP(() => {
-    const panel = panelRef.current;
-    if (!panel) return;
-    gsap.to(panel, {
-      autoAlpha: companionOpen ? 1 : 0,
-      y: companionOpen ? 0 : 12,
-      scale: companionOpen ? 1 : 0.97,
-      duration: durationFor(motionMode, 0.36),
-      ease: companionOpen ? "power3.out" : "power2.in",
-      overwrite: "auto",
-      transformOrigin: "82% 100%",
-    });
-  }, { scope: rootRef, dependencies: [companionOpen, motionMode] });
+  }, { scope: rootRef, dependencies: [homeMode, motionMode, companionScale, clampVisibleCompanion, projectCompanionIntoCamera] });
 
   const beginDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    // Only the home scene is draggable. Task pages hold a fixed, display-only
-    // registry seat; the handlers are not even wired there (see WindowLive2D),
+    // Only the home scene is draggable. Task pages hold a fixed, on-demand
+    // registry seat; drag handlers are not wired there (see WindowLive2D),
     // so this guard is a second line of defence, not the gate itself.
     if (surface) return;
     if (!event.isPrimary || event.button !== 0) return;
@@ -1218,7 +1076,6 @@ export function CompanionPresence() {
       rootRef.current.dataset.worldAnchor = `${worldAnchorRef.current.x},${worldAnchorRef.current.y}`;
       rootRef.current.dataset.projectionState = "dragging";
     }
-    positionPanel();
   };
 
   const endDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -1288,17 +1145,67 @@ export function CompanionPresence() {
       return;
     }
 
-    if (HOME_V2_ENABLED && !surface) {
+    // 一次没有跨过拖拽阈值的 pointerup 就是普通轻点。旧实现会在这里播放
+    // 固定触摸音频并把随后真正负责打开业务入口的 click 吞掉，结果角色看起来
+    // 永远只是个播放器。这里只记录触摸部位给 Live2D 表情，click 继续进入统一
+    // 的 engaged 状态机；真实拖拽仍由上面的 shouldCommit 分支独占。
+    if (HOME_V2_ENABLED && homeMode) {
       const targetBounds = event.currentTarget.getBoundingClientRect();
       const kind = companionTouchKindAt(event.clientY, targetBounds.top, targetBounds.height);
-      suppressInviteRef.current = true;
       setTouchKind(kind);
-      const text = kind === "head" ? "嗯？我听见你啦。" : "要一起开始学习吗？";
-      setHomeCue(text);
-      setInviteTrigger((value) => value + 1);
-      speakHomeV2Cue(text, "touch");
     }
+    suppressInviteRef.current = false;
   };
+
+  // 只提供当前场景最可能需要的真实入口；完整功能目录仍由房间物件承担。
+  const actionItems = useMemo<readonly CompanionHudAction[]>(() => (
+    [
+      "continue",
+      "today-review",
+      "current-notebook",
+    ].map((id) => {
+      const feature = getHomeFeature(id as HomeFeatureId);
+      return {
+        id: feature.id,
+        title: feature.title,
+        purpose: feature.purpose,
+        icon: HOME_FEATURE_ICONS[feature.icon],
+      };
+    })
+  ), []);
+
+  // 念头气泡点击（切片④）：她的开场消息落进会话并打开聊天抽屉。
+  const openThoughtCue = useCallback(async (thoughtId: string) => {
+    try {
+      await window.ailearn.companion.chat.openThought({
+        meta: createRequestMeta(),
+        request: { version: 1, thoughtId },
+      });
+      setHomeCue(null);
+      setHomeCueThoughtId(null);
+      setMode("history");
+    } catch {
+      // 打不开（已点过/过期）就静默，气泡按自身时间线消失。
+    }
+  }, [setMode]);
+
+  const runActionItem = useCallback((id: string) => {
+    setMode("closed");
+    runHomeV2Feature(id as HomeFeatureId);
+  }, [runHomeV2Feature, setMode]);
+
+  /**
+   * 「看向手边」（方案 §5 第 9 项）：会话层在 HUD 里、角色层是它的兄弟节点，所以由 HUD
+   * 回调把"有工具开始执行"这件事提上来，再转成 `WindowLive2D` 的一次参数冲量。
+   * 用 `useCallback` 固定身份，HUD 侧那个 effect 才不会每帧重跑（虽然按节点 key 记账
+   * 本身是幂等的，但没必要让它反复扫描）。
+   */
+  const handleAgentToolExecuting = useCallback(() => {
+    setToolAttentionTrigger((value) => value + 1);
+  }, []);
+
+  // 功能夹是首页弹层：暂停（弹窗/窗口隐藏）、进入任务页或伴星不可用时收起。
+  // （放在 companionUnavailable 声明之后，见该常量定义处。）
 
   const completionCue = companionMoment === "confirm" ? "这次学习已经收好，新的理解正回到小屋里。" : null;
   const visibleHomeCue = completionCue ?? (homeV2IntroVisible ? null : homeCue);
@@ -1308,16 +1215,18 @@ export function CompanionPresence() {
       ? "think"
       : companionMoment === "lamp" || companionMoment === "confirm"
         ? "celebrate"
-        : companionOpen
+        : engaged
           ? "invite"
           : "idle";
   const presentationEmotion: Live2DEmotionEvent | null = touchKind === "head"
     ? { emotion: "happy", intensity: 0.9 }
     : touchKind === "body"
       ? { emotion: "curious", intensity: 0.65 }
-      : companionMoment === "lamp" || companionMoment === "confirm"
+      : chatEmotion
+        ? { emotion: chatEmotion.emotion, intensity: 0.5 }
+        : companionMoment === "lamp" || companionMoment === "confirm"
         ? { emotion: "happy", intensity: 0.85 }
-        : companionOpen
+        : engaged
           ? { emotion: "curious", intensity: 0.4 }
           : null;
 
@@ -1329,222 +1238,122 @@ export function CompanionPresence() {
       : "Live2D 不可用";
   const companionUnavailable = !live2dRuntimeAllowed || status === "unavailable";
 
-  const interactionCopy = companionMoment === "confirm"
-    ? "服务端结果已经确认。这次学习已安全写入，可以回到复习队列继续。"
-    : companionMoment === "lamp"
-    ? theme === "night"
-      ? "台灯亮了。光只落在桌面上，我们可以安静地继续。"
-      : "窗边的自然光回来了，眼睛也能松一点。"
-    : companionMoment === "ambient"
-      ? "窗外的声音会在你进入任务时自动安静下来。"
-      : copy.body;
-  const runCompanionAction = (kind: "primary" | "secondary") => {
-    if (HOME_V2_ENABLED && !surface) {
-      runHomeV2Feature(kind === "primary" ? "continue" : "today-review");
-      return;
-    }
-    invoke(kind === "primary" ? copy.primaryIntent : copy.secondaryIntent);
-  };
+  /**
+   * 「事件型暂停」= 失焦 + 弹窗。它与「持续条件」必须分开判：**只有发生的那一刻**才收起
+   * 已经打开的那一层。
+   *
+   * 为什么不能当持续条件（2026-09-19 实机复核发现）：失焦的判据住在主进程
+   * （`shared/window-state.ts` 要「可见且聚焦」才算 visible），经 IPC 异步送到渲染层。
+   * 而"把窗口从后台点回前台"的那一下点击，本身就会带着 `windowState === "hidden"` 的旧
+   * 快照进到点击处理器——按持续条件处理时，冷点击唤起的交互台会在同一帧被撤销：用户看到
+   * 「嗯？」冒出来又消失，得点第二次才开。full 动效因为中间隔了 180ms 节拍侥幸躲过，
+   * lite / off / 减少动效下必现。
+   */
+  const eventPaused = homeV2ModalOpen || externalModalOpen || windowState !== "visible";
+  const eventPausedRef = useRef(eventPaused);
+  useEffect(() => {
+    const onset = eventPaused && !eventPausedRef.current;
+    eventPausedRef.current = eventPaused;
+    if (mode === "closed" || !onset) return;
+    setMode("closed");
+  }, [eventPaused, mode, setMode]);
 
-  // The mockup gives each page one short line of Mao narration. It is a HUD
-  // label, not a second conversation surface, so it yields to the whisper panel.
-  const hudBubble = companionVisualOnly || formalAssessmentSilent ? null : HUD_PAGES[hudPage].bubble ?? null;
+  // 持续条件：页面不可见 / 账号关闭 / Live2D 不可用——只要成立就不允许交互层存在。
+  useEffect(() => {
+    if (mode === "closed") return;
+    if (presenceHidden || companionUnavailable) setMode("closed");
+  }, [companionUnavailable, mode, presenceHidden, setMode]);
+
+  // 布局联动（2026-09-19，全任务界面）：版心是否为伴星座位让出空间，取决于
+  // 伴星此刻**是否真的在场**。把运行时的缺席状态（临时隐藏 / 账号关闭 /
+  // Live2D 不可用 / 注册表 hidden）发布到 `.desktop-app` 上，hud-surface.css
+  // 的「动态伴星座位」段据此收窄或恢复各页版心（右侧 245px / 左侧 365px /
+  // wide 版心 245px / 星图 seat-gutter 340px）——伴星在场时不压正文，缺席后
+  // 版心恢复无伴星几何，不再固定占位。
+  useEffect(() => {
+    const app = document.querySelector<HTMLElement>(".desktop-app");
+    if (!app) return undefined;
+    app.classList.toggle("companion-absent", presenceHidden || companionUnavailable);
+    return () => app.classList.remove("companion-absent");
+  }, [companionUnavailable, presenceHidden]);
+
+  // 分层 Escape：历史先返回更多，其余交互返回关闭态。
+  useEffect(() => {
+    if (mode === "closed") return;
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (mode === "history") {
+        event.preventDefault();
+        setMode("actions");
+      } else {
+        event.preventDefault();
+        setMode("closed");
+        window.requestAnimationFrame(() => {
+          anchorRef.current?.querySelector<HTMLButtonElement>(".window-live2d button")?.focus({ preventScroll: true });
+        });
+      }
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [mode, setMode]);
+
+  // 回复/发送占用交互台；页面 starter 只作为交互台里的上下文提示，绝不再单独
+  // 漂浮成一张会遮正文的页面气泡。
+  const hudOccupied = Boolean(liveReply) || chatPhase === "sending";
 
   return (
-    <div
+    <Fragment>
+      {/* 存在层（aria-hidden 时整层可被 display:none）只承载角色与交互台；
+          恢复类芯片必须放在层外，见组件尾部说明。 */}
+      <div
       ref={rootRef}
       className="companion-presence"
-      data-open={companionOpen}
+      data-open={engaged || undefined}
       data-companion-unavailable={companionUnavailable || undefined}
       data-live2d-available={LIVE2D_RUNTIME_ALLOWED}
       data-surface={sceneKey}
-      data-home-zone={HOME_V2_ENABLED && !surface ? companionHomeZone : undefined}
-      data-placement-owner={HOME_V2_ENABLED && !surface ? companionPlacementOwner : undefined}
-      data-user-anchor={HOME_V2_ENABLED && !surface && companionUserAnchor
+      data-home-zone={HOME_V2_ENABLED && homeMode ? companionHomeZone : undefined}
+      data-placement-owner={HOME_V2_ENABLED && homeMode ? companionPlacementOwner : undefined}
+      data-user-anchor={HOME_V2_ENABLED && homeMode && companionUserAnchor
         ? `${companionUserAnchor.x},${companionUserAnchor.y}`
         : undefined}
-      data-world-anchor={HOME_V2_ENABLED && !surface
+      data-world-anchor={HOME_V2_ENABLED && homeMode
         ? `${targetWorldAnchor.x},${targetWorldAnchor.y}`
         : undefined}
-      data-projection-state={HOME_V2_ENABLED && !surface ? (dragging ? "dragging" : "tracking") : undefined}
-      data-context-zone={HOME_V2_ENABLED && !surface ? homeV2Zone : undefined}
+      data-projection-state={HOME_V2_ENABLED && homeMode ? (dragging ? "dragging" : "tracking") : undefined}
+      data-context-zone={HOME_V2_ENABLED && homeMode ? homeV2Zone : undefined}
       data-touch-kind={touchKind ?? undefined}
-      data-formal-silent={formalAssessmentSilent || undefined}
+      data-formal-silent={assessmentMode || undefined}
+      data-policy-mode={companionPolicy.mode}
+      data-engaged={engaged || undefined}
       data-task-surface-quiet={taskSurfaceQuiet || undefined}
+      data-presence-paused={presencePaused || undefined}
+      data-external-modal={externalModalOpen || undefined}
+      data-home-modal={homeV2ModalOpen || undefined}
+      data-window-state={windowState}
       aria-hidden={presenceHidden || undefined}
     >
-      {!companionVisualOnly ? <aside
-        ref={panelRef}
-        className="companion-whisper"
-        aria-label="AI 伴星建议"
-        aria-hidden={!companionOpen}
-        inert={!companionOpen}
-      >
-        <button className="companion-whisper__close" type="button" onClick={closeCompanion} aria-label="收起伴星">
-          <X size={15} aria-hidden="true" />
-        </button>
-        <span className="companion-whisper__kicker"><Sparkles size={13} aria-hidden="true" />{copy.kicker}</span>
-        <h2>{copy.title}</h2>
-        <p>{interactionCopy}</p>
-        <div className="companion-whisper__actions">
-          <button type="button" className="companion-action companion-action--primary" onClick={() => runCompanionAction("primary")}>{copy.primary}</button>
-          <button type="button" className="companion-action" onClick={() => runCompanionAction("secondary")}>{copy.secondary}</button>
-        </div>
-        <details className="companion-whisper__settings">
-          <summary>大小 <small>{rendererLabel}</small></summary>
-          <label className="companion-scale-control">
-            <span>伴星大小 <output>{Math.round(companionScale * 100)}%</output></span>
-            <input
-              type="range"
-              min={MIN_COMPANION_SCALE}
-              max={MAX_COMPANION_SCALE}
-              step="0.01"
-              value={companionScale}
-              onChange={(event) => setCompanionScale(Number(event.currentTarget.value))}
-              aria-label="调整伴星大小"
-            />
-          </label>
-          <div className="companion-presence-controls" role="group" aria-label="伴星打扰控制">
-            <button
-              type="button"
-              aria-pressed={pageMuted}
-              onClick={() => setCompanionSceneMuted(sceneKey, !pageMuted)}
-            >
-              {pageMuted ? "恢复本页提示" : "在此页保持安静"}
-            </button>
-            {surface ? (
-              <button
-                type="button"
-                aria-pressed={companionFocusUntilTaskEnd}
-                onClick={() => setCompanionFocusUntilTaskEnd(!companionFocusUntilTaskEnd)}
-              >
-                {companionFocusUntilTaskEnd ? "结束专注静音" : "专注到本次任务结束"}
-              </button>
-            ) : null}
-            <button type="button" onClick={() => setCompanionTemporarilyHidden(true)}>
-              暂时隐藏伴星
-            </button>
-          </div>
-          <div className="companion-account-controls" role="group" aria-label="账号级伴星设置">
-            <span className="companion-account-controls__title">
-              账号设置
-              <small>
-                {accountFailure ? "读取失败" : !accountState ? "读取中…" : `修订 ${accountState.revision}${accountSaving ? " · 保存中" : ""}`}
-              </small>
-            </span>
-            <div className="companion-presence-controls" role="group" aria-label="在线状态">
-              {COMPANION_PRESENCE_OPTIONS.map(([value, label]) => (
-                <button
-                  key={value}
-                  type="button"
-                  aria-pressed={accountState?.presence?.presence === value}
-                  disabled={!accountState || accountSaving}
-                  onClick={() => void patchCompanionAccount({ presence: { presence: value } })}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-            <div className="companion-presence-controls" role="group" aria-label="主动介入强度">
-              {COMPANION_INTERVENTION_OPTIONS.map(([value, label]) => (
-                <button
-                  key={value}
-                  type="button"
-                  aria-pressed={accountState?.interventionLevel === value}
-                  disabled={!accountState || accountSaving}
-                  onClick={() => void patchCompanionAccount({ interventionLevel: value })}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-            <div className="companion-quiet-hours">
-              <label>
-                <input
-                  type="checkbox"
-                  checked={Boolean(accountState?.quietHours)}
-                  disabled={!accountState || accountSaving}
-                  onChange={(event) => {
-                    const enabled = event.currentTarget.checked;
-                    void patchCompanionAccount({
-                      quietHours: quietHoursPatch(
-                        enabled,
-                        Intl.DateTimeFormat().resolvedOptions().timeZone,
-                      ),
-                    });
-                  }}
-                />
-                <span>静默时段</span>
-              </label>
-              {accountState?.quietHours ? (
-                <>
-                  <input
-                    type="time"
-                    value={accountState.quietHours.startLocal}
-                    disabled={accountSaving}
-                    aria-label="静默时段开始"
-                    onChange={(event) => {
-                      const next = quietHoursWithBoundary(accountState.quietHours!, "startLocal", event.currentTarget.value);
-                      if (next) void patchCompanionAccount({ quietHours: next });
-                    }}
-                  />
-                  <span aria-hidden="true">→</span>
-                  <input
-                    type="time"
-                    value={accountState.quietHours.endLocal}
-                    disabled={accountSaving}
-                    aria-label="静默时段结束"
-                    onChange={(event) => {
-                      const next = quietHoursWithBoundary(accountState.quietHours!, "endLocal", event.currentTarget.value);
-                      if (next) void patchCompanionAccount({ quietHours: next });
-                    }}
-                  />
-                </>
-              ) : null}
-            </div>
-            {accountState ? (
-              <div className="companion-presence-controls" role="group" aria-label="账号级开关">
-                <button
-                  type="button"
-                  aria-pressed={!accountState.globalEnabled}
-                  disabled={accountSaving}
-                  onClick={() => void patchCompanionAccount({ globalEnabled: !accountState.globalEnabled })}
-                >
-                  {accountState.globalEnabled ? "关闭伴星（账号级）" : "开启伴星（账号级）"}
-                </button>
-              </div>
-            ) : null}
-            {accountFailure ? <p className="companion-account-controls__failure" role="status">{accountFailure}</p> : null}
-          </div>
-          <div className="companion-whisper__footer">
-            <span>直接拖动角色 · 大小自动保存</span>
-            <button
-              type="button"
-              className="companion-reset-position"
-              onClick={() => {
-                resetCompanionPosition();
-              }}
-            >
-              <RotateCcw size={12} aria-hidden="true" />重置位置
-            </button>
-          </div>
-        </details>
-      </aside> : null}
-
       <div ref={anchorRef} className="companion-scene-anchor">
-        {hudBubble && !companionOpen && !presenceHidden && !companionUnavailable ? (
-          <div className="speech" role="status">
-            <b>MAO · 页面联动</b>
-            {hudBubble}
-          </div>
-        ) : null}
         <div
           ref={visualRef}
           className={`companion-visual-shell${dragging ? " companion-visual-shell--dragging" : ""}`}
           data-companion-live2d-target="true"
         >
+          {/* 静息时只有影子在动（方案 §5 第 3 项）。挂在**外壳**里而不是锚点里：
+              房间座位上外壳是 `min(220px,20vw) × min(270px,35vh)` 且右下对齐，比锚点
+              窄——影子若按锚点对中，会比她偏右几个像素。外壳才是驱动 `fitModel()`
+              用来取景的那个盒。放在角色之前，所以她画在影子上面。
+              只在全身取景下出现：半身取景裁掉了腿，「脚下」不在画面里。 */}
+          {status === "ready" && companionPolicy.framing === "full" && !presenceHidden && !companionUnavailable ? (
+            <span
+              className="companion-contact-shadow"
+              data-alive={motionMode === "full" && chatPhase !== "sending" && !liveReply ? true : undefined}
+              aria-hidden="true"
+            />
+          ) : null}
           <div ref={characterMotionRef} className="companion-character-motion">
             <WindowLive2D
+              key={live2dAttempt}
               active={!presenceHidden && !companionUnavailable}
               // 2026-09-16 追加裁决：任务页保留原地动作（低幅呼吸与眨眼，不位移、
               // 不出气泡），不再冻结当前帧。真正停止 ticker 的只有隐藏/弹窗/窗口不可见
@@ -1554,42 +1363,153 @@ export function CompanionPresence() {
               presentation={presentation}
               emotion={presentationEmotion}
               inviteTrigger={inviteTrigger}
+              toolAttentionTrigger={toolAttentionTrigger}
               onStatus={setStatus}
               // 首页全身取景；任务页半身取景（头与上半身充满容器，腿部裁出）。
-              framing={surface ? "bust" : "full"}
+              framing={companionPolicy.framing}
               // 只有首页可拖：首页落点写入用户世界锚点（重启后保留）。任务页
-              // 是固定座位，不接任何指针处理器——WindowLive2D 在没有处理器时
-              // 也不会渲染可交互按钮层，拖拽暗示随 UI 一起消失。
-              onPointerDown={surface ? undefined : beginDrag}
-              onPointerMove={surface ? undefined : moveDrag}
-              onPointerUp={surface ? undefined : endDrag}
-              onPointerCancel={surface ? undefined : endDrag}
-              onLostPointerCapture={surface ? undefined : endDrag}
-              onInviteRequest={companionVisualOnly ? undefined : () => {
+              // 是固定座位，只接轻点唤起，不接任何拖拽指针处理器。
+              onPointerDown={companionPolicy.draggable ? beginDrag : undefined}
+              onPointerMove={companionPolicy.draggable ? moveDrag : undefined}
+              onPointerUp={companionPolicy.draggable ? endDrag : undefined}
+              onPointerCancel={companionPolicy.draggable ? endDrag : undefined}
+              onLostPointerCapture={companionPolicy.draggable ? endDrag : undefined}
+              onInviteRequest={companionPolicy.interaction === "none" ? undefined : () => {
                 if (suppressInviteRef.current) {
                   suppressInviteRef.current = false;
                   return;
                 }
-                if (companionOpen) {
-                  setInviteTrigger((value) => value + 1);
-                  if (HOME_V2_ENABLED && !surface) speakHomeV2Cue("我在这儿，想从哪里开始？", "touch");
-                } else {
-                  toggleCompanion();
-                  if (HOME_V2_ENABLED && !surface) speakHomeV2Cue("我在这儿，想从哪里开始？", "touch");
+                setInviteTrigger((value) => value + 1);
+                const next = mode === "closed" ? "conversation" : "closed";
+                // 「被叫醒的中介帧」（方案 §5 第 4 项）：先让她在头顶冒一个「嗯？」，
+                // 交互台晚一个身位再展开。只等 180ms（气泡入场落位），不等它 900ms 的
+                // 全部寿命——把输入区压在动画后面近一秒会直接变成"卡"。lite / off /
+                // 减少动效下按方案直接展开，不排队。
+                if (next === "conversation" && motionMode === "full") {
+                  setAwakening(true);
+                  // 连点两次时后一次必须撤掉前一次的节拍，否则两个定时器都会
+                  // `setMode("conversation")`——第二次点击等于没生效。
+                  if (wakeTimerRef.current !== null) window.clearTimeout(wakeTimerRef.current);
+                  wakeTimerRef.current = window.setTimeout(() => {
+                    wakeTimerRef.current = null;
+                    setMode("conversation");
+                    window.requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>(".companion-hud__composer textarea")?.focus({ preventScroll: true }));
+                  }, COMPANION_WAKE_BEAT_MS);
+                  return;
+                }
+                setMode(next);
+                if (next === "conversation") {
+                  window.requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>(".companion-hud__composer textarea")?.focus({ preventScroll: true }));
                 }
               }}
               ariaLabel="书桌上的 AI 伴星"
             />
           </div>
-          {companionVisualOnly ? <span className="companion-surface-label" aria-hidden="true">Mao · 伴星</span> : null}
-          {HOME_V2_ENABLED && visibleHomeCue ? <span className="companion-home-cue" role="status">{visibleHomeCue}</span> : null}
-          {!HOME_V2_ENABLED && !companionOpen ? <span className="companion-invite-label" aria-hidden="true">我在这里</span> : null}
+          {status === "loading" && !presenceHidden ? (
+            <span className="companion-loading-state" role="status">Mao 正在来到书桌边…</span>
+          ) : null}
+          {companionVisualOnly && status === "ready" ? (
+            <span className="companion-surface-label" aria-hidden="true">
+              {assessmentMode ? "需要提示？" : "Mao · 伴星"}
+            </span>
+          ) : null}
+          {!HOME_V2_ENABLED && !engaged ? <span className="companion-invite-label" aria-hidden="true">我在这里</span> : null}
+          {/* 「被叫醒的中介帧」（方案 §5 第 4 项）：她"转过头来"的那一下。纯装饰，
+              交互台自己会播报状态，所以这里不对读屏发第二遍。 */}
+          {awakening ? <span className="companion-wake-bubble" aria-hidden="true">嗯？</span> : null}
         </div>
+
+        {!presenceHidden && !companionUnavailable && companionPolicy.interaction !== "none" ? (
+          <CompanionHud
+            motionMode={motionMode}
+            voiceEnabled={!assessmentMode}
+            contextHint={companionPolicy.starter ?? null}
+            actions={homeMode ? actionItems : []}
+            onRunAction={runActionItem}
+            onAgentToolExecuting={handleAgentToolExecuting}
+            settings={{
+              scale: companionScale,
+              scaleMin: MIN_COMPANION_SCALE,
+              scaleMax: MAX_COMPANION_SCALE,
+              rendererLabel,
+              pageMuted,
+              taskActive: Boolean(surface),
+              focusUntilTaskEnd: companionFocusUntilTaskEnd,
+              accountState,
+              accountSaving,
+              accountFailure,
+              onScale: setCompanionScale,
+              onTogglePageMuted: () => setCompanionSceneMuted(sceneKey, !pageMuted),
+              onToggleFocus: () => setCompanionFocusUntilTaskEnd(!companionFocusUntilTaskEnd),
+              onHide: () => {
+                setMode("closed");
+                setCompanionTemporarilyHidden(true);
+              },
+              onResetPosition: resetCompanionPosition,
+              onPatchAccount: (patch) => { void patchCompanionAccount(patch); },
+            }}
+          />
+        ) : null}
+        {/* 主动提示气泡与回复气泡共用头顶通道，同样不能放进裁切画布。 */}
+        {HOME_V2_ENABLED && companionPolicy.proactive === "allow" && visibleHomeCue && !hudOccupied && !engaged ? (
+          homeCueThoughtId ? (
+            <button
+              type="button"
+              className="companion-cue-open"
+              onClick={() => void openThoughtCue(homeCueThoughtId)}
+              aria-label={`${visibleHomeCue}——点开和她聊`}
+            >
+              <CompanionBubble
+                text={visibleHomeCue}
+                tone={completionCue ? "touch" : "cue"}
+                motionMode={motionMode}
+              />
+            </button>
+          ) : (
+            <CompanionBubble
+              text={visibleHomeCue}
+              tone={completionCue ? "touch" : "cue"}
+              motionMode={motionMode}
+            />
+          )
+        ) : null}
       </div>
 
-      {/* 唯一形态下的失败态：隐藏形象 + 就地一句可关闭说明（2026-09-16 裁决）。
-          不回退光球或替身立绘；关闭后本次会话不再重复提示。 */}
-      {companionTemporarilyHidden && !formalAssessmentSilent ? (
+      {/* 唯一形态下的失败态：Live2D 失败 + 就地一句可关闭说明（2026-09-16 裁决）。
+          只在伴星在场时渲染（presenceHidden 时本就不出现），留在存在层内。 */}
+      {companionUnavailable && !unavailableNoticeDismissed && !presenceHidden ? (
+        <div className="companion-unavailable-notice">
+          <SurfaceDataState
+            kind="error"
+            message="伴星暂时不可用"
+            detail="学习功能不受影响。可以重新加载 Live2D，或先收起这张提示。"
+            onRetry={() => {
+              setUnavailableNoticeDismissed(false);
+              setStatus("loading");
+              setLive2dAttempt((attempt) => attempt + 1);
+            }}
+            action={(
+            <button
+              type="button"
+              className="button"
+              onClick={() => setUnavailableNoticeDismissed(true)}
+              aria-label="关闭伴星不可用提示"
+            >
+              <X size={13} aria-hidden="true" />知道了
+            </button>
+            )}
+          />
+        </div>
+      ) : null}
+      </div>
+
+      {/* 恢复芯片必须挂在存在层**之外**（2026-09-19 逐页审计发现）：伴星隐藏时
+          `.companion-presence` 自身 aria-hidden，首页 V2 场景上该层被
+          `.companion-presence[aria-hidden="true"]{display:none}` 整层收起，
+          芯片在层内会变成 0×0 死元素——用户在首页隐藏伴星后就地无法唤回。
+          挂到同一父级（`.desktop-app`）下保持原 bottom-right 锚位，且不被层
+          的显隐连带。 */}
+      {companionTemporarilyHidden ? (
         <p className="companion-restore-chip" role="status">
           <span>伴星已隐藏。</span>
           <button type="button" onClick={() => setCompanionTemporarilyHidden(false)}>
@@ -1598,7 +1518,7 @@ export function CompanionPresence() {
         </p>
       ) : null}
 
-      {companionAccountDisabled && !formalAssessmentSilent ? (
+      {companionAccountDisabled ? (
         <p className="companion-restore-chip" role="status">
           <span>伴星已按账号设置关闭。</span>
           <button type="button" disabled={accountSaving} onClick={() => void patchCompanionAccount({ globalEnabled: true })}>
@@ -1606,19 +1526,6 @@ export function CompanionPresence() {
           </button>
         </p>
       ) : null}
-
-      {companionUnavailable && !unavailableNoticeDismissed && !presenceHidden ? (
-        <p className="companion-unavailable-notice" role="status">
-          <span>伴星暂时不可用，学习功能不受影响。</span>
-          <button
-            type="button"
-            onClick={() => setUnavailableNoticeDismissed(true)}
-            aria-label="关闭伴星不可用提示"
-          >
-            <X size={13} aria-hidden="true" />知道了
-          </button>
-        </p>
-      ) : null}
-    </div>
+    </Fragment>
   );
 }

@@ -1,18 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
-import {
-  ArrowLeft,
-  ArrowRight,
-  BookOpenText,
-  CornerDownLeft,
-  FileSearch,
-  RotateCcw,
-  Search,
-  Sparkles,
-} from "lucide-react";
 import { useRoomStore } from "../app/room-store";
-import { createRequestMeta, gatewayErrorMessage, RendererGatewayError, unwrapGatewayResult } from "../app/desktop-client";
+import { createRequestMeta, unwrapGatewayResult } from "../app/desktop-client";
 import { CardGenerationSurface } from "./CardGenerationSurface";
 import { GraphSurface } from "./surfaces/graph-surface";
 import { ReviewSurface } from "./surfaces/ReviewSurface";
@@ -31,14 +21,7 @@ import { SettingsSurface } from "./surfaces/settings-surface";
 import { SourceDetailSurface } from "./surfaces/source-detail-surface";
 import { SourceLibrarySurface } from "./surfaces/source-library-surface";
 import { resolveSceneMotionMode, sceneMotionDuration } from "../scene/scene-motion";
-import {
-  roomActionReasonLabel,
-  studyActionDescription,
-  studyActionLabel,
-  studyStatusLabel,
-} from "./surfaces/room-primary-action-presentation";
 import type { DesktopRouteV1 } from "@ailearn/shared/desktop-ipc-contracts";
-import type { RoomProjectionV1 } from "@ailearn/shared/room-projection-contracts";
 
 gsap.registerPlugin(useGSAP);
 
@@ -48,22 +31,6 @@ function useResolvedMotionMode(): ResolvedMotionMode {
   const motionPreference = useRoomStore((state) => state.motionMode);
   const reducedMotion = useRoomStore((state) => state.reducedMotion);
   return resolveSceneMotionMode(motionPreference, reducedMotion);
-}
-
-function PanelHeader({ title, detail }: { title: string; detail: string }) {
-  const invoke = useRoomStore((state) => state.invoke);
-  return (
-    <header className="task-surface__header task-artifact task-artifact--header">
-      <div className="task-surface__header-copy">
-        <h2>{title}</h2>
-        <p>{detail}</p>
-      </div>
-      <button className="surface-close" type="button" onClick={() => invoke("home")} aria-label="关闭任务面并返回房间" data-surface-initial-focus="true">
-        <ArrowLeft size={17} aria-hidden="true" />
-        <span>返回书房</span>
-      </button>
-    </header>
-  );
 }
 
 async function navigateThroughMainResolver(route: DesktopRouteV1, learningRunId?: string): Promise<DesktopRouteV1> {
@@ -84,107 +51,6 @@ async function navigateThroughMainResolver(route: DesktopRouteV1, learningRunId?
   const navigated = unwrapGatewayResult(goResponse);
   if (navigated.current.scope !== "workspace") throw new Error("navigation did not commit to the current workspace");
   return navigated.current.route;
-}
-
-function LearningCardSurface() {
-  const invoke = useRoomStore((state) => state.invoke);
-  const epochRef = useRef<number | undefined>(undefined);
-  const [projection, setProjection] = useState<RoomProjectionV1 | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [failure, setFailure] = useState<string | null>(null);
-
-  const loadProjection = useCallback(async () => {
-    if (!window.ailearn) throw new Error("桌面端 API 不可用，无法读取真实学习目标。");
-    const sessionResponse = await window.ailearn.auth.getState({ meta: createRequestMeta(epochRef.current) });
-    if (sessionResponse.workspaceEpoch) epochRef.current = sessionResponse.workspaceEpoch;
-    const session = unwrapGatewayResult(sessionResponse);
-    if (session.status !== "authenticated" || !session.workspace) {
-      throw new RendererGatewayError({ code: "auth_required", safeMessageKey: "error.auth_required", retry: "user_action" });
-    }
-    const projectionResponse = await window.ailearn.room.getProjection({ meta: createRequestMeta(session.workspaceEpoch) });
-    if (projectionResponse.workspaceEpoch) epochRef.current = projectionResponse.workspaceEpoch;
-    setProjection(unwrapGatewayResult(projectionResponse));
-    setFailure(null);
-  }, []);
-
-  useEffect(() => {
-    let active = true;
-    setLoading(true);
-    void loadProjection()
-      .catch((error) => active && setFailure(gatewayErrorMessage(error)))
-      .finally(() => active && setLoading(false));
-    return () => { active = false; };
-  }, [loadProjection]);
-
-  const focus = projection?.primaryFocus.state === "data" ? projection.primaryFocus.data : null;
-  const objective = focus?.objective ?? null;
-  const action = focus?.action ?? null;
-  const title = objective?.content.conceptLabel ?? objective?.sources.primaryNote?.title ?? "学习目标详情";
-  const sourceLabel = objective?.content.sourceLabel ?? objective?.sources.primaryNote?.title ?? "来源标签未公开";
-  const lifecycleLabel = objective ? {
-    active: "活跃",
-    archived: "已归档",
-    superseded: "已被替代",
-    blocked_content_upgrade: "等待内容更新",
-  }[objective.lifecycle.status] : null;
-  const knowledgeFormLabel = objective ? {
-    fact: "事实",
-    definition: "定义",
-    relationship: "关系",
-    comparison: "比较",
-    sequence: "顺序",
-    procedure: "步骤",
-    causal_model: "因果模型",
-    boundary: "边界",
-    application_rule: "应用规则",
-  }[objective.content.knowledgeForm] ?? objective.content.knowledgeForm : null;
-
-  const reload = () => {
-    setLoading(true);
-    void loadProjection().catch((error) => setFailure(gatewayErrorMessage(error))).finally(() => setLoading(false));
-  };
-
-  return (
-    <>
-      <PanelHeader title={title} detail={objective ? `服务端 Objective · ${studyStatusLabel(objective)}` : "读取服务端 Objective projection"} />
-      <div className="card-editor objective-detail task-artifact task-artifact--objective">
-        <div className="objective-detail__content">
-          {loading ? <div className="objective-detail__state" role="status"><BookOpenText size={26} aria-hidden="true" /><strong>正在读取真实学习目标…</strong><p>先确认身份、工作区与主焦点。</p></div> : null}
-          {!loading && failure ? <div className="objective-detail__state objective-detail__state--error" role="alert"><BookOpenText size={26} aria-hidden="true" /><strong>学习目标暂时不可用</strong><p>{failure}</p><button type="button" className="surface-primary" onClick={reload}><RotateCcw size={16} aria-hidden="true" />重新读取</button></div> : null}
-          {!loading && !failure && projection?.primaryFocus.state === "empty" ? <div className="objective-detail__state" role="status"><BookOpenText size={26} aria-hidden="true" /><strong>当前没有服务端主焦点</strong><p>桌面不会用本机草稿填充学习目标详情。</p><button type="button" className="surface-primary" onClick={reload}>重新读取</button></div> : null}
-          {!loading && !failure && projection?.primaryFocus.state === "error" ? <div className="objective-detail__state objective-detail__state--error" role="alert"><BookOpenText size={26} aria-hidden="true" /><strong>主焦点读取未完成</strong><p>服务端 projection 暂时不可用，请稍后重试。</p><button type="button" className="surface-primary" onClick={reload}>重新读取</button></div> : null}
-          {!loading && !failure && objective && action && lifecycleLabel && knowledgeFormLabel ? (
-            <>
-              <div className="objective-detail__main">
-                <h3>{title}</h3>
-                <p className="objective-detail__summary">{objective.content.publicSummary}</p>
-                <blockquote>
-                  <strong>服务端主行动</strong>
-                  <span>{studyActionLabel(action.action)}</span>
-                  <small>{studyActionDescription(action.action)}</small>
-                </blockquote>
-              </div>
-              <aside className="objective-detail__facts" aria-label="学习目标公开信息">
-                <dl>
-                  <div><dt>来源</dt><dd>{sourceLabel}</dd></div>
-                  <div><dt>知识形态</dt><dd>{knowledgeFormLabel}</dd></div>
-                  <div><dt>生命周期</dt><dd>{lifecycleLabel}</dd></div>
-                  <div><dt>目标状态</dt><dd>服务端已确认</dd></div>
-                </dl>
-                {roomActionReasonLabel(action) ? <p className="objective-detail__unavailable">{roomActionReasonLabel(action)}</p> : null}
-                <div className="surface-action-pair">
-                  <button type="button" className="surface-primary" disabled={action.availability !== "available"} onClick={() => invoke("continue")}>{studyActionLabel(action.action)}<ArrowRight size={16} aria-hidden="true" /></button>
-                  {objective.sources.primaryNote ? <button type="button" className="surface-secondary" onClick={() => invoke("open-notebook")}><BookOpenText size={16} aria-hidden="true" />回研究册</button> : null}
-                  {action.action.kind === "refresh" ? <button type="button" className="text-action" onClick={reload}>重新读取 projection</button> : null}
-                </div>
-              </aside>
-            </>
-          ) : null}
-        </div>
-      </div>
-      <p className="prototype-note task-artifact task-artifact--provenance">详情只显示服务端公开 Objective projection；canonical answer、rubric 与完整证据不会进入桌面渲染边界。</p>
-    </>
-  );
 }
 
 function ValidationSurface() {
@@ -481,7 +347,6 @@ export function TaskSurface() {
       <div className="surface-content task-surface__spatial-layer" key={renderedSurface}>
         {renderedSurface === "study" ? <StudySurface /> : null}
         {renderedSurface === "notebook" ? <NotebookSurface /> : null}
-        {renderedSurface === "card" ? <LearningCardSurface /> : null}
         {renderedSurface === "card-generation" ? <CardGenerationSurface /> : null}
         {renderedSurface === "review" ? <ReviewSurface /> : null}
         {renderedSurface === "search" ? <SearchSurface /> : null}

@@ -14,7 +14,6 @@ describe("scene camera contract", () => {
       "room",
       "study",
       "notebook",
-      "card",
       "card-generation",
       "review",
       "search",

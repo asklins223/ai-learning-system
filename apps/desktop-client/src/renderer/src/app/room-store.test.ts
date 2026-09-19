@@ -79,6 +79,7 @@ describe("workspace boundary reset", () => {
    * 这台设备上"。这三项都跟工作区无关：房间是同一个房间，伴星是同一个伴星。
    */
   it("clears workspace-scoped activity without discarding desktop preferences", () => {
+    const previousScopeRevision = useRoomStore.getState().workspaceScopeRevision;
     useRoomStore.setState({
       theme: "night",
       themeMode: "manual",
@@ -96,7 +97,6 @@ describe("workspace boundary reset", () => {
       activeReviewTarget: { scheduleId: "schedule-1", objectiveId: "objective-1" },
       ambientRequested: true,
       onboardingOpen: true,
-      companionOpen: true,
       companionMoment: "confirm",
       pendingHomeCompletion: { id: "learning-result:run-1:snapshot-1:demonstrated" },
       consumedHomeCompletionIds: ["learning-result:older"],
@@ -129,12 +129,12 @@ describe("workspace boundary reset", () => {
       activeNoteRef: null,
       activeReviewTarget: null,
       onboardingOpen: false,
-      companionOpen: false,
       companionMoment: "idle",
       pendingHomeCompletion: null,
       activeHomeCompletion: null,
       consumedHomeCompletionIds: [],
       navigationGuard: null,
+      workspaceScopeRevision: previousScopeRevision + 1,
     });
 
     // 保留 themeMode 的实际意义：时钟不能再改写读者选过的主题。
@@ -233,14 +233,13 @@ describe("companion home placement", () => {
 });
 
 describe("room light interaction", () => {
-  it("switches the room light without opening a companion panel over the scene", () => {
-    useRoomStore.setState({ theme: "day", companionOpen: false, companionMoment: "idle" });
+  it("switches the room light without mutating companion interaction state", () => {
+    useRoomStore.setState({ theme: "day", companionMoment: "idle" });
 
     useRoomStore.getState().toggleTheme();
 
     expect(useRoomStore.getState()).toMatchObject({
       theme: "night",
-      companionOpen: false,
       companionMoment: "lamp",
     });
   });
@@ -442,7 +441,6 @@ describe("页面级存在感控制（2026-09-16 裁决 3）", () => {
       mutedCompanionSceneKeys: [],
       companionFocusUntilTaskEnd: false,
       companionTemporarilyHidden: false,
-      companionOpen: false,
       companionMoment: "idle",
     });
   });
@@ -458,16 +456,14 @@ describe("页面级存在感控制（2026-09-16 裁决 3）", () => {
     expect(useRoomStore.getState().mutedCompanionSceneKeys).toEqual(["review"]);
   });
 
-  it("暂时隐藏会同时收起面板，唤醒时自动解除隐藏", () => {
-    useRoomStore.setState({ companionOpen: true, companionMoment: "confirm" });
+  it("暂时隐藏会结束一次性表现，恢复时保留统一 HUD 自己的开合状态", () => {
+    useRoomStore.setState({ companionMoment: "confirm" });
     useRoomStore.getState().setCompanionTemporarilyHidden(true);
     expect(useRoomStore.getState().companionTemporarilyHidden).toBe(true);
-    expect(useRoomStore.getState().companionOpen).toBe(false);
     expect(useRoomStore.getState().companionMoment).toBe("idle");
 
-    useRoomStore.getState().toggleCompanion();
+    useRoomStore.getState().setCompanionTemporarilyHidden(false);
     expect(useRoomStore.getState().companionTemporarilyHidden).toBe(false);
-    expect(useRoomStore.getState().companionOpen).toBe(true);
   });
 
   it("切工作区时页面级状态回到默认（不会把上一个工作区的静音带过去）", () => {
@@ -596,5 +592,6 @@ describe("设置页与搜索页的会话级状态", () => {
     const raw = persistedStorage.entries.get("ailearn.desktop-room.v2");
     const payload = JSON.parse(raw as string) as { state: Record<string, unknown> };
     expect(payload.state).not.toHaveProperty("live2dStatus");
+    expect(payload.state).not.toHaveProperty("workspaceScopeRevision");
   });
 });

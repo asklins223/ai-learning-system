@@ -1,0 +1,37 @@
+/* 划选投喂浮层菜单（与 CompanionFeedMenu.tsx 配套，2026-09-18）。 */
+
+.companion-feed-menu {
+  position: fixed;
+  z-index: 400;
+  min-width: 148px;
+  padding: 4px;
+  background: var(--paper, #fbf6ea);
+  border: 1px solid var(--paper-line, #d8c9a8);
+  border-radius: 10px 3px 10px 10px;
+  box-shadow: 0 6px 18px rgba(59, 48, 32, 0.18);
+}
+
+.companion-feed-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  border: none;
+  background: none;
+  padding: 7px 10px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  color: var(--ink, #3b3020);
+  cursor: pointer;
+}
+
+.companion-feed-menu__item:hover {
+  background: var(--paper-raised, #f7f1e5);
+}
+
+.companion-feed-menu__count {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--ink-soft, #8a7969);
+  font-variant-numeric: tabular-nums;
+}

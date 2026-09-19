@@ -83,7 +83,13 @@ const desktopApi: AILearnDesktopApiM2 = {
     logout: (input) => invoke(DESKTOP_IPC_CHANNELS.authLogout, input),
     reauthenticate: (input) => invoke(DESKTOP_IPC_CHANNELS.authReauthenticate, input),
     changePassword: (input) => invoke(DESKTOP_IPC_CHANNELS.authChangePassword, input),
-    joinWorkspace: (input) => invoke(DESKTOP_IPC_CHANNELS.authJoinWorkspace, input)
+    joinWorkspace: (input) => invoke(DESKTOP_IPC_CHANNELS.authJoinWorkspace, input),
+    // 旧版设置页回补（2026-09-18）：档案、头像与退出协作工作区。
+    getProfile: (input) => invoke(DESKTOP_IPC_CHANNELS.authProfileGet, input),
+    updateProfile: (input) => invoke(DESKTOP_IPC_CHANNELS.authUpdateProfile, input),
+    uploadAvatar: (input) => invoke(DESKTOP_IPC_CHANNELS.authUploadAvatar, input),
+    getAvatar: (input) => invoke(DESKTOP_IPC_CHANNELS.authAvatarGet, input),
+    leaveWorkspace: (input) => invoke(DESKTOP_IPC_CHANNELS.authLeaveWorkspace, input)
   },
   workspace: {
     list: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceList, input),
@@ -92,7 +98,21 @@ const desktopApi: AILearnDesktopApiM2 = {
     getAiSettings: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceAiSettingsGet, input),
     updateAiConsent: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceAiConsentUpdate, input),
     updateAiDataPolicy: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceAiDataPolicyUpdate, input),
-    export: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceExport, input)
+    export: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceExport, input),
+    rename: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceRename, input)
+  },
+  // SEC-02 / ADR-0009：Owner 的邀请发出与成员管理。
+  invites: {
+    create: (input) => invoke(DESKTOP_IPC_CHANNELS.inviteCreate, input),
+    list: (input) => invoke(DESKTOP_IPC_CHANNELS.inviteList, input),
+    revoke: (input) => invoke(DESKTOP_IPC_CHANNELS.inviteRevoke, input)
+  },
+  members: {
+    list: (input) => invoke(DESKTOP_IPC_CHANNELS.memberList, input),
+    remove: (input) => invoke(DESKTOP_IPC_CHANNELS.memberRemove, input)
+  },
+  markdownImport: {
+    run: (input) => invoke(DESKTOP_IPC_CHANNELS.settingsMarkdownImport, input)
   },
   capabilities: {
     get: (input) => invoke(DESKTOP_IPC_CHANNELS.capabilitiesGet, input)
@@ -132,7 +152,29 @@ const desktopApi: AILearnDesktopApiM2 = {
       patchProfile: (input) => invoke(DESKTOP_IPC_CHANNELS.companionRoomPatchProfile, input)
     },
     voice: {
-      speak: (input) => invoke(DESKTOP_IPC_CHANNELS.companionVoiceSpeak, input)
+      speak: (input) => invoke(DESKTOP_IPC_CHANNELS.companionVoiceSpeak, input),
+      // 语音转文本（2026-09-18）：本地 SenseVoice 优先，这条云通道是兜底。
+      transcribe: (input) => invoke(DESKTOP_IPC_CHANNELS.companionVoiceTranscribe, input)
+    },
+    // 聊天发送链路（2026-09-18）：建/复用 dialogue → 发 turn → 轮询消息。
+    chat: {
+      ensureConversation: (input) => invoke(DESKTOP_IPC_CHANNELS.companionChatEnsureConversation, input),
+      sendTurn: (input) => invoke(DESKTOP_IPC_CHANNELS.companionChatSendTurn, input),
+      listMessages: (input) => invoke(DESKTOP_IPC_CHANNELS.companionChatListMessages, input),
+      // 提案确认 + agent 导航 route 轮询（2026-09-18 补接线）。
+      getProposal: (input) => invoke(DESKTOP_IPC_CHANNELS.companionChatProposalGet, input),
+      decideProposal: (input) => invoke(DESKTOP_IPC_CHANNELS.companionChatProposalDecide, input),
+      listAgentRoutes: (input) => invoke(DESKTOP_IPC_CHANNELS.companionChatAgentRoutes, input),
+      // 过程节点留痕（2026-09-19）：抽屉里的「过程 N 步 · 调用 M 次工具」。
+      listRunNodes: (input) => invoke(DESKTOP_IPC_CHANNELS.companionChatRunNodes, input),
+      // 念头主动开场（切片④）：点击念头气泡，她先开口。
+      openThought: (input) => invoke(DESKTOP_IPC_CHANNELS.companionChatOpenThought, input),
+      // 停止本轮（2026-09-19）：服务端原子取消 + 已输出文本留档。
+      cancelRun: (input) => invoke(DESKTOP_IPC_CHANNELS.companionChatCancelRun, input)
+    },
+    learningRun: {
+      getContext: (input) => invoke(DESKTOP_IPC_CHANNELS.companionLearningRunGetContext, input),
+      createContextGrant: (input) => invoke(DESKTOP_IPC_CHANNELS.companionLearningRunCreateContextGrant, input)
     },
     account: {
       getState: (input) => invoke(DESKTOP_IPC_CHANNELS.companionAccountGetState, input),
@@ -159,6 +201,11 @@ const desktopApi: AILearnDesktopApiM2 = {
     },
     conversations: {
       list: (input) => invoke(DESKTOP_IPC_CHANNELS.companionConversationsList, input)
+    },
+    // 任务 14：作答模态偏好（账号级跨设备）。
+    answerMode: {
+      get: (input) => invoke(DESKTOP_IPC_CHANNELS.companionAnswerModeGet, input),
+      patch: (input) => invoke(DESKTOP_IPC_CHANNELS.companionAnswerModePatch, input)
     }
   },
   note: {
@@ -195,7 +242,9 @@ const desktopApi: AILearnDesktopApiM2 = {
     getTopology: (input) => invoke(DESKTOP_IPC_CHANNELS.understandingGetTopology, input)
   },
   search: {
-    global: (input) => invoke(DESKTOP_IPC_CHANNELS.searchGlobal, input)
+    global: (input) => invoke(DESKTOP_IPC_CHANNELS.searchGlobal, input),
+    drift: (input) => invoke(DESKTOP_IPC_CHANNELS.searchDriftGet, input),
+    reindex: (input) => invoke(DESKTOP_IPC_CHANNELS.searchReindex, input)
   },
   subscriptions: {
     subscribe: (input) => invoke(DESKTOP_IPC_CHANNELS.subscriptionsSubscribe, input),
@@ -227,6 +276,7 @@ const desktopApi: AILearnDesktopApiM2 = {
     submit: (input) => invoke(DESKTOP_IPC_CHANNELS.learningRunSubmit, input),
     action: (input) => invoke(DESKTOP_IPC_CHANNELS.learningRunAction, input),
     getResult: (input) => invoke(DESKTOP_IPC_CHANNELS.learningRunGetResult, input),
+    revealTarget: (input) => invoke(DESKTOP_IPC_CHANNELS.learningRunRevealTarget, input),
     getReturnContract: (input) => invoke(DESKTOP_IPC_CHANNELS.learningRunGetReturnContract, input),
     recordActivityLease: (input) => invoke(DESKTOP_IPC_CHANNELS.learningRunRecordActivityLease, input),
     abandon: (input) => invoke(DESKTOP_IPC_CHANNELS.learningRunAbandon, input)

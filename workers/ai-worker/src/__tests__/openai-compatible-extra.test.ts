@@ -178,3 +178,27 @@ test("OpenAICompatibleProvider.executeAgentTurn: valid tool calls are returned",
   });
   assert.equal(result.finishReason, "tool_calls");
 });
+
+test("OpenAICompatibleProvider.executeAgentTurn: no-tool turn stays natural text (no response_format)", async () => {
+  // 根因二（2026-09-19）：无工具轮不再强制 json_object——伴星终答/闲聊要自然文本，
+  // 强制 JSON 是 json_envelope_leak 的直接来源；structured_action fallback 由
+  // content 的 JSON 解析承担，不依赖 response_format。
+  const captured: Record<string, unknown>[] = [];
+  const provider = createProvider(async (_url, _headers, body) => {
+    captured.push(body as Record<string, unknown>);
+    return {
+      status: 200,
+      statusText: "OK",
+      body: { choices: [{ message: { content: "你好呀，今天想学点什么？" }, finish_reason: "stop" }] },
+    } as PublicJsonResponse;
+  });
+
+  const result = await provider.executeAgentTurn({
+    ...agentTurnRequest,
+    tools: [],
+  } as never);
+  assert.equal(result.content, "你好呀，今天想学点什么？");
+  assert.deepEqual(result.toolCalls, []);
+  assert.equal(captured[0].response_format, undefined);
+  assert.equal(captured[0].tools, undefined);
+});

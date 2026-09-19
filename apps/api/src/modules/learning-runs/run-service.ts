@@ -42,7 +42,9 @@ import {
 import {
   evidenceEligibilityStatesV2,
   learningCardsV2,
+  learningExposuresV2,
   learningObjectivesV2,
+  learningTargetSnapshotsV2,
 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
 import { validationAssistanceExposures } from "@ailearn/shared/db-schema/validation-v2";
@@ -54,7 +56,9 @@ import type {
   LearningRunOriginV2,
   LearningRunPublicSnapshotV2,
   LearningRunPublicV1,
+  LearningRunResultAssessmentV2,
   LearningRunTargetPublicV2,
+  LearningRunTargetRevealV2,
   LearningRunReturnContractV2,
   LearningRunResultV1,
   LearningRunResultV2,
@@ -67,6 +71,7 @@ import {
   getLearningRunResultResponseV2Schema,
   learningRunOriginV2Schema,
   learningRunPublicSnapshotV2Schema,
+  learningRunResultAssessmentV2Schema,
   learningRunResultSchema,
   learningRunResultV2Schema,
   learningRunPhaseV2Schema,
@@ -74,7 +79,10 @@ import {
   learningRunReturnContractV2Schema,
   learningRunReturnTargetV2Schema,
   learningRunTargetPublicV2Schema,
+  learningRunTargetRevealV2Schema,
 } from "@ailearn/shared";
+import { computeExposureScopeIdV2 } from "@ailearn/shared/card-generation-v2-hashing";
+import { extractAnswerText } from "@ailearn/shared/card-generation-v2-pipeline";
 import {
   computeRunContractHash,
   planRun,
@@ -770,7 +778,7 @@ export async function createRunV2(
 
   const task = plan.tasks[0];
   const primaryVariant = plan.primaryVariant;
-  const alternativeVariant = plan.alternativeVariant;
+  const alternativeVariants = plan.alternativeVariants;
   const createdAt = now();
 
   // 骨架行在 freeze 前已插入（lts_v2_run_fk）；此处 UPDATE 为 plan 后的最终值。
@@ -839,7 +847,7 @@ export async function createRunV2(
   // PERF-A#13：在变体循环前一次性 IN 查询两个 variant 的 disclosure profile
   // 存在性，避免每个 variant 在 PREPARE 热路径各加一次 SELECT 往返。
   const disclosureHashesV2 = Array.from(new Set(
-    [primaryVariant, alternativeVariant]
+    [primaryVariant, ...alternativeVariants]
       .map((v) => v.disclosureProfileHash)
       .filter((h): h is string => Boolean(h)),
   ));
@@ -854,7 +862,7 @@ export async function createRunV2(
       ));
     for (const r of existingDisclosureRowsV2) existingDisclosureHashesV2.add(r.profileHash);
   }
-  for (const [index, variant] of [primaryVariant, alternativeVariant].entries()) {
+  for (const [index, variant] of [primaryVariant, ...alternativeVariants].entries()) {
     const closure = plan.closures[variant.variantId];
     await tx.insert(learningTaskVariants).values({
       id: variant.variantId,
@@ -1267,6 +1275,7 @@ export async function getLearningRunPublicSnapshotV2FromView(
 function projectLearningRunResultV2(
   context: V2RunContext,
   rawResult: unknown,
+  assessment?: LearningRunResultAssessmentV2,
 ): LearningRunResultV2 {
   const parsed = learningRunResultSchema.safeParse(rawResult);
   if (!parsed.success) throw unsupportedV2Contract("V2 result 的 nested result 不是 canonical 结果");
@@ -1281,6 +1290,127 @@ function projectLearningRunResultV2(
     scheduleImpact: parsed.data.scheduleImpact,
     returnTargetV2: context.returnTargetV2,
     ...(parsed.data.projection ? { projection: parsed.data.projection } : {}),
+    ...(assessment ? { assessment } : {}),
+  });
+}
+
+/**
+ * 答后反馈（2026-09-18）：取本次 run 最新一次已出结论的评估，随结果载荷下发
+ * 逐 rubric 判定与给用户看的一句说明。老 run / 尚未评估的 run 没有这份数据，
+ * 字段保持可选，不阻断结果读取。
+ */
+async function loadResultAssessmentV2(
+  tx: ApiTransaction,
+  runId: string,
+): Promise<LearningRunResultAssessmentV2 | undefined> {
+  const rows = await tx
+    .select({
+      source: learningAssessments.source,
+      status: learningAssessments.status,
+      trustClass: learningAssessments.trustClass,
+      rubricResults: learningAssessments.rubricResults,
+    })
+    .from(learningAssessments)
+    .where(and(
+      eq(learningAssessments.runId, runId),
+      inArray(learningAssessments.status, ["completed", "not_assessable"]),
+    ))
+    .orderBy(desc(learningAssessments.createdAt))
+    .limit(1);
+  const row = rows[0];
+  if (!row) return undefined;
+  const parsed = learningRunResultAssessmentV2Schema.safeParse({
+    source: row.source,
+    status: row.status,
+    trustClass: row.trustClass,
+    rubricResults: row.rubricResults ?? [],
+  });
+  return parsed.success ? parsed.data : undefined;
+}
+
+/**
+ * 答后揭示（2026-09-18）：旅程形成可信结论后，学习者有权看到这次到底想考什么
+ * 的完整答案与教学支撑。数据取自冻结的 Target Snapshot（与卡片当前版本解耦，
+ * 不需要 CAS），并在 learning_exposures_v2 记一笔 answer_reveal —— 答案可以看，
+ * 但要记账，未来的验证规划依旧能看到「同一提示最近被揭示过」。
+ * 前提是 run.result 已存在：没有可信结论就不揭示，否则等于让答案绕过提取练习。
+ */
+export async function revealRunTargetV2(
+  tx: ApiTransaction,
+  input: RunScope & { runId: string },
+): Promise<LearningRunTargetRevealV2> {
+  const runRows = await tx
+    .select({
+      id: learningRuns.id,
+      workspaceId: learningRuns.workspaceId,
+      userId: learningRuns.userId,
+      result: learningRuns.result,
+    })
+    .from(learningRuns)
+    .where(and(eq(learningRuns.id, input.runId), eq(learningRuns.workspaceId, input.workspaceId)))
+    .limit(1);
+  const run = runRows[0];
+  if (!run) throw new LearningRunServiceError("run_not_found", "学习旅程不存在", 404);
+  if (!run.result) {
+    throw new LearningRunServiceError("reveal_not_available", "这次旅程还没有形成可信结果，暂不能揭示答案", 409);
+  }
+
+  const snapshotRows = await tx
+    .select()
+    .from(learningTargetSnapshotsV2)
+    .where(and(
+      eq(learningTargetSnapshotsV2.runId, run.id),
+      eq(learningTargetSnapshotsV2.workspaceId, input.workspaceId),
+    ))
+    .orderBy(desc(learningTargetSnapshotsV2.frozenAt))
+    .limit(1);
+  const snapshot = snapshotRows[0];
+  if (!snapshot) throw new LearningRunServiceError("reveal_not_available", "这次旅程没有冻结的目标快照", 404);
+
+  const target = snapshot.target as {
+    canonicalAnswer?: unknown;
+    learningSupport?: { explanation?: string; boundary?: string; misconception?: string; workedExample?: string };
+  };
+  const answerText = target.canonicalAnswer
+    ? extractAnswerText(target.canonicalAnswer as never).trim()
+    : "";
+  if (!answerText) {
+    throw new LearningRunServiceError("reveal_not_available", "这次旅程的目标没有可揭示的文字答案", 409);
+  }
+  const support = {
+    explanation: (target.learningSupport?.explanation ?? "").trim(),
+    ...(target.learningSupport?.boundary?.trim() ? { boundary: target.learningSupport.boundary.trim() } : {}),
+    ...(target.learningSupport?.misconception?.trim() ? { misconception: target.learningSupport.misconception.trim() } : {}),
+    ...(target.learningSupport?.workedExample?.trim() ? { workedExample: target.learningSupport.workedExample.trim() } : {}),
+  };
+
+  const exposureId = crypto.randomUUID();
+  await tx.insert(learningExposuresV2).values({
+    workspaceId: input.workspaceId,
+    exposureId,
+    userId: run.userId,
+    objectiveId: snapshot.objectiveId,
+    objectiveRevision: snapshot.objectiveRevision,
+    cardId: snapshot.cardId,
+    cardRevision: snapshot.cardRevision,
+    exposureKind: "answer_reveal",
+    contextHash: computeExposureScopeIdV2({ workspaceId: input.workspaceId, objectiveId: snapshot.objectiveId }),
+    // 同一 run 只记一笔：重复点开结果页不产生新账目，揭示内容本身幂等。
+    idempotencyKey: `run-reveal:${run.id}`,
+  }).onConflictDoNothing();
+
+  return learningRunTargetRevealV2Schema.parse({
+    version: 2,
+    runId: run.id,
+    snapshotId: snapshot.snapshotId,
+    objectiveId: snapshot.objectiveId,
+    objectiveRevision: snapshot.objectiveRevision,
+    cardId: snapshot.cardId,
+    cardRevision: snapshot.cardRevision,
+    answerText,
+    support,
+    exposureId,
+    exposedAt: new Date().toISOString(),
   });
 }
 
@@ -1297,11 +1427,12 @@ export async function getResultPayloadV2(
     returnTargetV2: context.returnTargetV2,
   };
   if (context.run.result) {
+    const assessment = await loadResultAssessmentV2(tx, context.run.id);
     return getLearningRunResultResponseV2Schema.parse({
       ...base,
       status: "learning_result",
       httpStatus: 200,
-      result: projectLearningRunResultV2(context, context.run.result),
+      result: projectLearningRunResultV2(context, context.run.result, assessment),
     });
   }
   if (context.run.phase === "ended" || context.run.phase === "cancelled" || context.run.phase === "stale") {
@@ -1888,7 +2019,7 @@ export async function applyAction(
         createdAt: at,
         updatedAt: at,
       });
-      for (const [index, variant] of [plan.primaryVariant, plan.alternativeVariant].entries()) {
+      for (const [index, variant] of [plan.primaryVariant, ...plan.alternativeVariants].entries()) {
         const closure = plan.closures[variant.variantId];
         await tx.insert(learningTaskVariants).values({
           id: variant.variantId,

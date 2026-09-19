@@ -135,6 +135,14 @@ export const companionAgentToolEventV1Schema = z.object({
   proposalId: z.string().uuid().optional(),
   safeSummary: z.string().max(240).optional(),
   route: z.record(z.unknown()).optional(),
+  /**
+   * 客户端可直接执行（2026-09-19 对齐权限分级原设计）。
+   *
+   * 只在**用户预授权**（permissionLevel = full）且该次执行不需要确认时为 true：
+   * 带 route 的读类结果客户端应立即跳转，不再要求点「前往」；chip 仍下发作为留痕。
+   * 服务端是唯一的授权判定点——客户端只服从这个标志，不自行判断权限。
+   */
+  autoExecute: z.boolean().optional(),
 }).strict();
 export type CompanionAgentToolEventV1 = z.infer<typeof companionAgentToolEventV1Schema>;
 
@@ -174,8 +182,9 @@ export function canUseCompanionAgentTool(
       || definition.requiresConfirmation;
     return { allowed: true, requiresConfirmation };
   }
-  return {
-    allowed: true,
-    requiresConfirmation: definition.requiresConfirmation,
-  };
+  // full = 用户预授权（2026-09-19 对齐产品原设计：权限分级就是用户的授权开关）。
+  // 用户把权限开到 full，就表示"这类动作不必每次都问我"——工具直接执行，
+  // 路由类结果直接自动跳转（见 companionAgentRouteEventV1.autoExecute）。
+  // 安全底线只有一条：irreversible 已在上方被拦下（无论授权到哪一档都要人点头）。
+  return { allowed: true, requiresConfirmation: false };
 }

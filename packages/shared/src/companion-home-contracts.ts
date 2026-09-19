@@ -135,6 +135,8 @@ export const companionHomeProjectionV1Schema = z.strictObject({
     text: z.string().min(1).max(200),
     expiresAt: isoTimestampSchema,
     revision: z.number().int().positive(),
+    /** 念头管线切片④：cue 源自 assistant_thoughts 时携带，气泡可点开主动开场。 */
+    thoughtId: z.string().uuid().optional(),
   }).nullable(),
   roomProfile: companionRoomProfileV1Schema,
 }).superRefine((value, context) => {

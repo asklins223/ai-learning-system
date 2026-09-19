@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  evaluateDismissalFeedback,
   evaluateProactivePolicy,
   POLICY_LIMITS,
   type ProactivePolicyInput,
@@ -92,4 +93,24 @@ test("dedupe 冷却窗口与窗口内次数上限", () => {
 
 test("全通过 → allowed", () => {
   assert.deepEqual(evaluateProactivePolicy(base()), { allow: true, reasonCode: "allowed" });
+});
+
+// ── 展示反馈进生成（念头管线切片①，2026-09-18） ──────────────────────────
+
+test("反馈判定：最近 3 条送达里 dismiss ≥2 → 沉默", () => {
+  assert.equal(evaluateDismissalFeedback(["dismissed", "dismissed", "acted"]).suppress, true);
+  assert.equal(evaluateDismissalFeedback(["dismissed", "acted", "dismissed"]).suppress, true);
+});
+
+test("反馈判定：dismiss 不足阈值或窗口为空 → 不沉默", () => {
+  assert.equal(evaluateDismissalFeedback(["dismissed", "acted", "acted"]).suppress, false);
+  assert.equal(evaluateDismissalFeedback(["dismissed"]).suppress, false);
+  assert.equal(evaluateDismissalFeedback([]).suppress, false);
+  // 超出窗口的旧 dismiss 不参与
+  assert.equal(evaluateDismissalFeedback(["acted", "acted", "acted", "dismissed", "dismissed"]).suppress, false);
+});
+
+test("反馈判定：只看传入的已送达状态，未读状态由调用方过滤", () => {
+  // 传入 queued/delivered 不是本函数的合同——调用方 SQL 只取 displayed/acted/dismissed。
+  assert.equal(evaluateDismissalFeedback(["queued", "delivered", "dismissed"]).suppress, false);
 });

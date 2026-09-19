@@ -50,6 +50,9 @@ export const companionContentBlockV1Schema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("text"),
     text: z.string().min(1).max(20_000),
+    // 语气层情绪（2026-09-18）：worker 确定性语气分类的落库形态，
+    // 渲染层据此驱动 Live2D 表情。可选，历史消息没有该字段。
+    emotion: characterCueEmotionV1Schema.optional(),
   }).strict(),
   z.object({
     type: z.literal("code"),
@@ -94,6 +97,15 @@ export const companionMessageV1Schema = z.object({
     "action",
     "result",
     "error",
+    /**
+     * 用户按下"停止"时已经产出、但没能说完的那一段（2026-09-19）。
+     *
+     * 取消后 worker 的 latest-generation fence 会让迟到的 final 零写入，于是用户
+     * 看过的内容会从历史里消失。这条 kind 把当时累积的文本留下来——它是**给人看
+     * 的历史记录，不是给模型的上下文**：装配 next-turn prompt 时必须排除它，
+     * 否则半截话会让下一轮顺着断句续写（见 companion-dialogue.ts 的历史 SELECT）。
+     */
+    "cancelled",
   ]),
   blocks: z.array(companionContentBlockV1Schema).min(1).max(32),
   runId: z.string().uuid().nullable(),
@@ -204,27 +216,29 @@ export const companionPageContextV1Schema = z.discriminatedUnion("pageKind", [
   z.object({
     pageKind: z.literal("today"),
     sharing: z.literal("page_registered"),
-    contextRevision: companionHashV1Schema,
+    // 非学习运行页没有服务端签发的 revision 来源（旧 web 已删）；渲染层
+    // 只声明"我在这一页"，revision 留空（2026-09-18 聊天抽屉接线）。
+    contextRevision: companionHashV1Schema.optional(),
   }).strict(),
   z.object({
     pageKind: z.literal("review"),
     sharing: z.enum(["page_registered", "user_selected"]),
     cardId: z.string().uuid().optional(),
     keyPointId: z.string().uuid().optional(),
-    contextRevision: companionHashV1Schema,
+    contextRevision: companionHashV1Schema.optional(),
   }).strict(),
   z.object({
     pageKind: z.literal("card"),
     sharing: z.enum(["page_registered", "user_selected"]),
     cardId: z.string().uuid(),
     keyPointId: z.string().uuid().optional(),
-    contextRevision: companionHashV1Schema,
+    contextRevision: companionHashV1Schema.optional(),
   }).strict(),
   z.object({
     pageKind: z.literal("star_map"),
     sharing: z.enum(["page_registered", "user_selected"]),
     keyPointId: z.string().uuid().optional(),
-    contextRevision: companionHashV1Schema,
+    contextRevision: companionHashV1Schema.optional(),
   }).strict(),
   z.object({
     pageKind: z.literal("learning_run"),
@@ -233,6 +247,7 @@ export const companionPageContextV1Schema = z.discriminatedUnion("pageKind", [
     snapshotId: z.string().uuid(),
     taskId: z.string().uuid(),
     requestedCapability: z.enum(["none", "grounded_tutor"]),
+    // learning_run 保留必填：grounded_tutor grant 以它做新鲜度校验。
     contextRevision: companionHashV1Schema,
     groundedTutorGrant: companionGroundedTutorGrantV1Schema.nullable(),
   }).strict(),
@@ -268,6 +283,12 @@ export const createCompanionTurnRequestV1Schema = z.object({
   sourceSurface: z.enum(["pet", "main"]),
   supersedesGeneration: z.number().int().positive().optional(),
   context: companionPageContextV1Schema.optional(),
+  // 划选/拖拽投喂（2026-09-18）：用户在页面上选中的原文，随 turn 上抛。
+  // 持久化进 page_context，worker 以 <selection_data> 边界注入 prompt。
+  selection: z.strictObject({
+    text: z.string().min(1).max(2_000),
+    sharing: z.literal("user_selected"),
+  }).optional(),
 }).strict().superRefine((value, ctx) => {
   const textOnly = value.blocks[0]?.type === "text";
   if (!textOnly) {
@@ -512,6 +533,19 @@ export const proposedLearningActionPayloadV1Schema = z.discriminatedUnion("kind"
     memoryId: z.string().uuid(),
     revision: z.number().int().nonnegative(),
   }).strict(),
+  // ── 2026-09-19：auto-set / auto-fill 工具（guided 档提案确认后的执行分支）──
+  // full 档不创建提案，由 worker executeDirectTool 直执行；这里的 payload 形状
+  // 与 worker 侧 buildActionPayload 映射同源。
+  z.object({
+    kind: z.literal("save_memory"),
+    // 枚举与 assistant_memory_items.kind 的 DB CHECK 约束同源。
+    memoryKind: z.enum(["preference", "goal", "learning_context", "interaction_note", "episodic"]),
+    content: z.string().min(1).max(200),
+  }).strict(),
+  z.object({
+    kind: z.literal("set_pet_activeness"),
+    activeness: z.enum(["quiet", "moderate", "active"]),
+  }).strict(),
 ]);
 
 export const companionActionProposalV1Schema = z.object({
@@ -648,6 +682,10 @@ export const createCompanionLearningRunContextGrantRequestV1Schema = z.object({
   taskId: z.string().uuid(),
   contextRevision: z.string().regex(/^[a-f0-9]{64}$/),
 }).strict();
+
+export type CreateCompanionLearningRunContextGrantRequestV1 = z.infer<
+  typeof createCompanionLearningRunContextGrantRequestV1Schema
+>;
 
 /** 当前 LearningRun 的只读 Tutor 页面适配器快照。 */
 export const companionLearningRunContextV1Schema = z.object({

@@ -51,6 +51,19 @@ export function unwrapGatewayResult<T>(result: GatewayResultV1<T>): T {
   return result.data;
 }
 
+/**
+ * 当前工作区纪元。写操作必须带上它：一旦切换过工作区，旧的在途请求就会落到
+ * 新工作区上。会话发送与语音转写都从这里取。
+ */
+export async function requireWorkspaceEpoch(): Promise<number> {
+  const session = await window.ailearn.auth.getState({ meta: createRequestMeta() });
+  const context = unwrapGatewayResult(session);
+  if (context.status !== "authenticated" || !context.workspace) {
+    throw new Error("请先登录并进入工作区");
+  }
+  return context.workspace.workspaceEpoch;
+}
+
 export function gatewayErrorMessage(error: unknown): string {
   if (!(error instanceof RendererGatewayError)) return "服务暂时没有返回可确认的结果。";
 

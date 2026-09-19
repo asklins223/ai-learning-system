@@ -113,8 +113,15 @@ test("planRun v2：只把 required rubric 写入必须覆盖的评估合同", ()
     rubricTargetIdsOf(plan.closures[plan.primaryVariant.variantId].solution),
     ["r1"],
   );
+  // 2026-09-18：备位里可能出现结构化练习变体（评估层固定走
+  // deterministic_structured，rubricTargetIds 是规划器派生的合成 id）；
+  // 断言按交互家族定位口述备选，而不是假设它排第一。
+  const voiceAlternative = plan.alternativeVariants.find(
+    (v) => v.interaction.kind === "voice_teachback",
+  );
+  assert.ok(voiceAlternative, "voice alternative should exist");
   assert.deepEqual(
-    rubricTargetIdsOf(plan.closures[plan.alternativeVariant.variantId].solution),
+    rubricTargetIdsOf(plan.closures[voiceAlternative.variantId].solution),
     ["r1"],
   );
 });

@@ -225,7 +225,7 @@ export const COMPANION_RAIL_GUTTER = 80;
 
 /**
  * Fixed per-page seat for task surfaces, from the approved desktop-pages-v3
- * registry (`HUD_PAGES[*].seat`). Task pages are display-only: the seat side
+ * registry (`HUD_PAGES[*].seat`). Task pages use a fixed on-demand seat: its side
  * is decided by the page registry, never by the user, so the position is a
  * pure function of the viewport and the anchor box. One inset per axis shared
  * by both seats — the anchor hugs whichever chrome owns its gutter and stops

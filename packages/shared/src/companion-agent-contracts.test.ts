@@ -26,6 +26,14 @@ test("Agent permission levels keep hard confirmation boundaries", () => {
   assert.equal(canUseCompanionAgentTool("guided", reversible).requiresConfirmation, false);
   assert.equal(canUseCompanionAgentTool("guided", { ...reversible, requiresConfirmation: true }).requiresConfirmation, true);
   assert.equal(canUseCompanionAgentTool("full", dangerous).requiresConfirmation, true);
+  // full = 用户预授权（2026-09-19 对齐原设计）：授权档位下不再逐步确认，
+  // 只有 irreversible 仍是安全底线。
+  assert.equal(canUseCompanionAgentTool("full", reversible).requiresConfirmation, false);
+  assert.equal(
+    canUseCompanionAgentTool("full", { riskClass: "consequential" as const, requiresConfirmation: true })
+      .requiresConfirmation,
+    false,
+  );
 
   const focusGraph = getCompanionAgentTool("companion_focus_graph");
   assert.ok(focusGraph);
@@ -50,6 +58,49 @@ test("Tool argument validation rejects unknown and malformed calls", () => {
   assert.equal(validateCompanionAgentToolArguments("companion_pause_learning", { runId: "not-a-uuid" }).success, false);
   const valid = validateCompanionAgentToolArguments("companion_read_history", { limit: 3 });
   assert.deepEqual(valid, { success: true, data: { limit: 3 } });
+});
+
+test("Auto-set / auto-fill 工具按权限分级走确认或直执行（2026-09-19 对齐原设计）", () => {
+  for (const name of ["companion_save_memory", "companion_set_activeness"]) {
+    const definition = getCompanionAgentTool(name);
+    assert.ok(definition, `${name} 应已注册`);
+    assert.equal(definition.riskClass, "reversible_low");
+    // 注册表声明需要确认 → guided 档走提案；full 档预授权直执行；
+    // read_only 档被门禁阻止。
+    assert.equal(definition.requiresConfirmation, true);
+    assert.equal(canUseCompanionAgentTool("read_only", definition).allowed, false);
+    assert.equal(canUseCompanionAgentTool("guided", definition).requiresConfirmation, true);
+    assert.equal(canUseCompanionAgentTool("full", definition).requiresConfirmation, false);
+    // 两个工具都挂在 companion-memory skill 下（老账号的 enabledSkillIds 已包含它）。
+    assert.ok(definition.skillIds.includes("companion-memory"));
+  }
+
+  // 参数校验：kind 枚举与 DB CHECK 同源；content ≤200 字。
+  assert.equal(
+    validateCompanionAgentToolArguments("companion_save_memory", { kind: "preference", content: "喜欢安静地复习" }).success,
+    true,
+  );
+  assert.equal(
+    validateCompanionAgentToolArguments("companion_save_memory", { kind: "not_a_kind", content: "x" }).success,
+    false,
+  );
+  assert.equal(
+    validateCompanionAgentToolArguments("companion_save_memory", { kind: "goal", content: "x".repeat(201) }).success,
+    false,
+  );
+  assert.equal(validateCompanionAgentToolArguments("companion_set_activeness", { activeness: "active" }).success, true);
+  assert.equal(validateCompanionAgentToolArguments("companion_set_activeness", { activeness: "loud" }).success, false);
+
+  // companion-memory skill 清单包含新工具，且 triggerHints 能命中"帮我记住"。
+  const memorySkill = resolveCompanionAgentSkills({
+    version: 1,
+    permissionLevel: "guided",
+    enabledSkillIds: ["companion-memory"],
+  });
+  assert.deepEqual(memorySkill.map((skill) => skill.id), ["companion-memory"]);
+  const memoryTools = resolveCompanionAgentTools(memorySkill, "guided").map((tool) => tool.name);
+  assert.ok(memoryTools.includes("companion_save_memory"));
+  assert.ok(memoryTools.includes("companion_set_activeness"));
 });
 
 test("Agent SSE event schemas expose only safe tool metadata", () => {

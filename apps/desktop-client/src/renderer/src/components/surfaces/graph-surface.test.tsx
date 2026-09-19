@@ -177,7 +177,7 @@ describe("GraphSurface · Web 成熟版 Understanding Universe 移植", () => {
     // 适配只重置相机；恢复默认布局（清除手动拖拽）是独立的破坏性动作。
     expect(screen.getByRole("button", { name: "适配全部星图" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "清除手动拖拽并恢复默认布局" })).toBeTruthy();
-    expect(screen.getByLabelText("按理解状态探索星域")).toBeTruthy();
+    expect(screen.getByLabelText("按理解目标状态筛选星图")).toBeTruthy();
     expect(screen.getByLabelText("控制知识宇宙图层")).toBeTruthy();
   });
 
@@ -192,9 +192,11 @@ describe("GraphSurface · Web 成熟版 Understanding Universe 移植", () => {
     fireEvent.click(result);
 
     await waitFor(() => {
+      expect((search as HTMLInputElement).value).toBe("");
       const detail = screen.getByRole("complementary", { name: "星体详情" });
       expect(detail.textContent).toContain("关于提取练习的主张");
-      expect(detail.textContent).toContain("2 条直接关系");
+      expect(detail.textContent).toContain("直接关系");
+      expect(detail.textContent).toContain("2 条");
       expect(detail.textContent).toContain("记忆笔记");
       expect(detail.textContent).toContain("认知科学讲义");
     });
@@ -219,11 +221,28 @@ describe("GraphSurface · Web 成熟版 Understanding Universe 移植", () => {
   });
 
   it("服务端没有节点时不造假，解释星体如何出现", async () => {
+    const invoke = vi.fn();
+    useRoomStore.setState({ invoke } as never);
     stubGateway(snapshot({ nodes: [], edges: [] }));
     render(<GraphSurface />);
 
     expect(await screen.findByText("这片宇宙还没有星体")).toBeTruthy();
     expect(screen.getByText(/先从来源写下笔记并形成理解目标/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "查看来源库" }));
+    expect(invoke).toHaveBeenCalledWith("open-sources");
+  });
+
+  it("没有对应数据的图层控制会明确禁用，不伪装成有效操作", async () => {
+    stubGateway(snapshot({
+      nodes: snapshot().nodes.filter((node) => node.nodeRef.kind === "objective"),
+      edges: [],
+    }));
+    render(<GraphSurface />);
+
+    await screen.findByRole("region", { name: "理解星图：你的真实知识宇宙" });
+    expect((screen.getByRole("checkbox", { name: "证据卫星" }) as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole("checkbox", { name: "来源行星" }) as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole("checkbox", { name: "关系光路" }) as HTMLInputElement).disabled).toBe(true);
   });
 
   it("读取失败时给重试，不用演示数据填充", async () => {

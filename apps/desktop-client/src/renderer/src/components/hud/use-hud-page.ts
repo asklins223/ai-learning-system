@@ -43,13 +43,13 @@ export function useHudPageClasses() {
     const definition = HUD_PAGES[hudPage];
     // `mockup.html` writes both `page-NN` and the number's own chrome flags on
     // `.scene`; several mockup rules hang off the class rather than the page
-    // number — the collapsed rail geometry for 01/04 and the drawer gutters for
-    // 22 — so the class has to be published alongside `data-hud-page`.
+    // number — including the collapsed rail geometry for 01/04 — so the class
+    // has to be published alongside `data-hud-page`.
     const pageClass = `page-${definition.number}`;
     app.dataset.hudPage = definition.number;
     app.classList.add(pageClass);
-    app.classList.toggle("comp-left", definition.seat === "left");
-    app.classList.toggle("no-comp", definition.seat === "none");
+    app.classList.toggle("comp-left", definition.companion.seat === "left");
+    app.classList.toggle("no-comp", definition.companion.mode === "hidden");
     if (hudPage === "space") {
       app.dataset.hudSpace = hudSpaceEntry ?? "returning";
       app.classList.toggle("space-first", hudSpaceEntry === "first");

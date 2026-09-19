@@ -61,14 +61,28 @@ const assertTaskSurfaceCompanionQuiet = async (window, label) => {
     const visual = document.querySelector('.companion-visual-shell')
     return {
       surfaceOpen: app?.getAttribute('data-surface-open') === 'true',
+      policyMode: companion?.getAttribute('data-policy-mode') ?? null,
       taskSurfaceQuiet: companion?.getAttribute('data-task-surface-quiet') === 'true',
+      engaged: companion?.getAttribute('data-engaged') === 'true',
       ariaHidden: companion?.getAttribute('aria-hidden') ?? null,
       companionDisplay: companion instanceof HTMLElement ? getComputedStyle(companion).display : 'missing',
       visualDisplay: visual instanceof HTMLElement ? getComputedStyle(visual).display : 'missing',
       visualRectCount: visual?.getClientRects().length ?? 0,
+      composerCount: companion?.querySelectorAll('.companion-dock').length ?? 0,
+      bubbleCount: companion?.querySelectorAll('.companion-bubble, .companion-page-cue').length ?? 0,
     }
   })
-  if (contract.surfaceOpen && (!contract.taskSurfaceQuiet || contract.ariaHidden !== 'true' || contract.companionDisplay !== 'none' || contract.visualRectCount !== 0)) {
+  if (contract.surfaceOpen && (
+    !['ambient', 'assessment'].includes(contract.policyMode ?? '')
+    || !contract.taskSurfaceQuiet
+    || contract.engaged
+    || contract.ariaHidden !== null
+    || contract.companionDisplay === 'none'
+    || contract.visualDisplay === 'none'
+    || contract.visualRectCount !== 1
+    || contract.composerCount !== 0
+    || contract.bubbleCount !== 0
+  )) {
     throw new Error(`${label} task surface did not quiet the companion: ${JSON.stringify(contract)}`)
   }
   return contract
@@ -1083,7 +1097,7 @@ try {
     if (await window.locator('.onboarding-layer audio').count() !== 1) throw new Error('Independent onboarding voice track is missing')
     if (await window.locator('.action-rail').getAttribute('aria-hidden') !== 'true') throw new Error('First-entry guide did not quiet the primary action island')
     if (!(await window.locator('main#main-content').evaluate((node) => (node instanceof HTMLElement) && node.inert))) throw new Error('First-entry guide did not inert the main task layer')
-    if (!(await window.locator('.immersive-island').evaluate((node) => (node instanceof HTMLElement) && node.inert))) throw new Error('First-entry guide did not inert the control island')
+    if (!(await window.locator('.room-control').evaluate((node) => (node instanceof HTMLElement) && node.inert))) throw new Error('First-entry guide did not inert the control island')
     if (await window.locator('.hotspot-layer button').count() !== 0) throw new Error('First-entry guide left room hotspots focusable')
     await window.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === '跳过首次引导')
     await window.screenshot({ path: resolve(reviewRoot, 'onboarding.png') })
@@ -1437,7 +1451,7 @@ try {
     const background = [
       document.querySelector('.scene-stage'),
       document.querySelector('.companion-presence'),
-      document.querySelector('.immersive-island'),
+      document.querySelector('.room-control'),
     ]
     const otherActions = [...document.querySelectorAll('.home-command-deck > .rail-action:not(.rail-action--catalog)')]
     return {

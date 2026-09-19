@@ -32,7 +32,12 @@ import { canonicalJsonV1, sha256Utf8V1 } from "@ailearn/shared/content-hash";
 import { sql } from "drizzle-orm";
 import { logger } from "../lib/logger.ts";
 import { withWorkerWorkspaceTransaction } from "../db.ts";
-import { createProvider, createEmbeddingProvider } from "../lib/ai-provider.ts";
+import { createProvider, createEmbeddingProvider, withThinkingDisabled } from "../lib/ai-provider.ts";
+import {
+  CompanionStreamStoppedError,
+  createCompanionStreamDelivery,
+  reconcileStreamedText,
+} from "./companion-dialogue-stream.ts";
 import {
   AIConsentRequiredError,
   createGovernedEmbeddingProvider,
@@ -60,6 +65,7 @@ import {
   buildFinalCuePayload,
   buildCompanionPersonaMessages,
   validateCompanionOutput,
+  unwrapCompanionJsonEnvelope,
   textOfCompanionBlocks,
   parsePageContext,
   GROUNDED_TUTOR_COMPANION_PROMPT,
@@ -84,6 +90,87 @@ import {
 } from "./companion-dialogue-deltas.ts";
 
 const groundedTutorPromptSha256 = computeGroundedTutorPromptSha256(GROUNDED_TUTOR_COMPANION_PROMPT);
+
+/**
+ * 用户"停止"后至少留下多少字才算值得留档（2026-09-19）。
+ *
+ * 与"太短不念"同一口径：一两句寒暄都没说完就停下（如"好"、"嗯我"），
+ * 留在历史里是噪音而不是记录。可调，集中在这里改。
+ */
+const COMPANION_CANCELLED_MIN_CHARS = 12;
+
+/**
+ * 一轮**失败**之后，把她已经下发给客户端的部分留档（2026-09-19）。
+ *
+ * 与"用户按停止"那条留档对称：取消路径早就留了 `kind='cancelled'` 的部分记录，
+ * 而失败路径此前只写 `error` 事件、**不写消息**——于是气泡里她已经说过的那半句，
+ * 在收尾的一瞬间从对话历史里彻底消失（用户看到的是"内容没了"，历史里连这条都查不到）。
+ *
+ * 三条护栏：
+ * - 只在 run 的真实终态是 `failed` 时落（`assistant_message_id IS NULL` 同时保证幂等：
+ *   同一个 run 的重试/多次失败收尾不会插出第二条）；用户取消走 `cancelled` 路径，
+ *   supersede 走新回合，都不在这里落。
+ * - 太短不落（与取消同一个阈值）——碎片是噪音，不是记录。
+ * - 不写 `assistant.final` / `character.cue`:事件侧由 `error` 收尾，一个回合出现两个
+ *   "结束"会让客户端状态机打架。
+ *
+ * 落的是**已下发的可见前缀**（`deliveredText`），也就是用户真的看到过的那段字。
+ */
+export async function persistFailedPartial(args: {
+  workspaceId: string;
+  userId: string;
+  conversationId: string;
+  runId: string;
+  deliveredText: string;
+}): Promise<boolean> {
+  const text = args.deliveredText.trim();
+  if (text.length < COMPANION_CANCELLED_MIN_CHARS) return false;
+  const blocks = [{ type: "text" as const, text, emotion: resolveReplyToneEmotion(text) }];
+  const contentSha256 = sha256Utf8V1(canonicalJsonV1(blocks));
+  const messageId = randomUUID();
+  try {
+    return await withWorkerWorkspaceTransaction(
+      { workspaceId: args.workspaceId, userId: args.userId },
+      async (tx) => {
+        // 先锁住"这一轮确实失败了、且还没留过档"。用 SELECT ... FOR UPDATE 而不是
+        // 先写 assistant_message_id：那是指向 companion_messages 的**立即**外键，
+        // 消息行还没插进去就回填，整笔事务会被 FK 打回（取消路径踩过这个坑）。
+        const claimed = await tx.execute<{ id: string }>(sql`
+          SELECT id FROM companion_turn_runs
+          WHERE id = ${args.runId} AND status = 'failed' AND assistant_message_id IS NULL
+          FOR UPDATE
+        `);
+        if (!claimed[0]) return false;
+        const counters = await tx.execute<{ next_message_seq: string }>(sql`
+          UPDATE companion_conversations
+          SET next_message_seq = next_message_seq + 1, last_message_at = now()
+          WHERE id = ${args.conversationId}
+          RETURNING next_message_seq
+        `);
+        const seqRow = counters[0];
+        if (!seqRow) return false;
+        await tx.execute(sql`
+          INSERT INTO companion_messages
+            (id, workspace_id, user_id, conversation_id, seq, role, kind, blocks, run_id, content_sha256)
+          VALUES (${messageId}, ${args.workspaceId}, ${args.userId},
+                  ${args.conversationId}, ${Number(seqRow.next_message_seq) - 1},
+                  'assistant', 'error',
+                  ${JSON.stringify(blocks)}, ${args.runId}, ${contentSha256})
+        `);
+        await tx.execute(sql`
+          UPDATE companion_turn_runs
+          SET assistant_message_id = ${messageId}, updated_at = now()
+          WHERE id = ${args.runId}
+        `);
+        return true;
+      },
+    );
+  } catch (err) {
+    // 留档是"别把用户看过的字弄丢"的补救，不是主链路：它失败不该盖掉真正的失败原因。
+    logger.warn({ runId: args.runId, err }, "companion failed-partial retention skipped");
+    return false;
+  }
+}
 
 /** LearningRun 是正式学习页，缺证据时必须 fail closed。 */
 export function isGroundedTutorRequestedPageContext(
@@ -138,15 +225,22 @@ export async function runCompanionDialogue(
           ORDER BY seq DESC LIMIT 1
         `);
         const userText = userRows[0] ? textOfCompanionBlocks(userRows[0].blocks) : "";
-        const historyRows = await tx.execute<{ role: string; blocks: unknown }>(sql`
-          SELECT role, blocks FROM companion_messages
+        // kind 必须一起取，历史装配不能只看 role：
+        //   - `role='system'` 的系统注记不是对话轮次，映射成 "user" 会让模型以为
+        //     那是用户说的话；
+        //   - `kind='cancelled'`（用户按了停止）与 `kind='error'`（这一轮失败）都是
+        //     "她说到一半"的半截话，进上下文会让下一轮顺着断句续写。它们的读者是人，不是模型。
+        const historyRows = await tx.execute<{ role: string; kind: string; blocks: unknown }>(sql`
+          SELECT role, kind, blocks FROM companion_messages
           WHERE conversation_id = ${run.conversation_id}
             AND id <> ${run.user_message_id}
+            AND kind NOT IN ('cancelled', 'error')
           ORDER BY seq DESC LIMIT 20
         `);
         const recentMessages = historyRows
           .slice()
           .reverse()
+          .filter((m) => m.role !== "system")
           .map((m) => ({
             role: (m.role === "assistant" ? "assistant" : "user") as "user" | "assistant",
             text: textOfCompanionBlocks(m.blocks),
@@ -240,7 +334,8 @@ export async function runCompanionDialogue(
   }
   const textRes = resolveProviderForTask(govCtx, "companion_agent");
   const provider = createGovernedProvider(
-    createProvider(textRes.providerName, textRes.providerConfig),
+    // 交互对话关思考：整段取回语义下思考 token 全算进用户等待（见 withThinkingDisabled）。
+    createProvider(textRes.providerName, withThinkingDisabled(textRes.providerConfig)),
     govCtx,
     ctx.workspaceId,
     // AI P0-8（2026-09-15 审计）：接上 ai_audit_log 的唯一写入口 logAICall——
@@ -399,9 +494,13 @@ export async function runCompanionDialogue(
   );
   if (!claimed) return;
 
-  // ── 阶段 2b：统一 Agent loop ─────────────────────────────────────────
+  // ── 阶段 2b：统一 Agent loop（每一步真实流式下发） ────────────────────
   // 普通闲聊由 provider 以空工具列表单步完成；带 Skill 的请求在运行时内
-  // 进行有限步工具循环。这里保留原有批量 delta/TTS/终态投影管线。
+  // 进行有限步工具循环。**每一步**（含带工具的那几步）的 provider 增量都经
+  // 交付管线实时下发（稳定前缀 + 增量校验 + 边生成边落库），不再等全文取回后
+  // 再补写 delta。带工具的一步在调用工具前说的开场白会作为正文的一部分保留
+  // （见 runCompanionAgentLoop 的 visibleSegments）。
+  const streamingDelivery = createCompanionStreamDelivery({ ctx, read, expiresAt, notifyCompanionEvent });
   let assistantText: string;
   let ttsRawText: string | null = null;
   let agentResult;
@@ -413,48 +512,143 @@ export async function runCompanionDialogue(
       baseMessages: messages,
       expiresAt,
       continuationProposalId,
+      onProviderDelta: (delta) => streamingDelivery.onRawDelta(delta),
       handlerStartedAtMs,
     });
   } catch (err) {
     // 预算耗尽（步数/工具数/执行时间）是确定性失败：标记 recoverable=false，
     // 队列侧同时按不可重试处理，避免空转重投（见 isNonRetryableError）。
     const budgetExceeded = err instanceof CompanionAgentBudgetExceededError;
+    // 交付管线主动叫停（增量校验命中泄露/超限、fence 失联）：同样不可重试——
+    // 重投不会让"泄露"消失。已下发的部分必然是最终文本的前缀，客户端按 error 收尾。
+    const streamStopped = err instanceof CompanionStreamStoppedError;
     await markCompanionRunFailed(
       read,
       ctx.workspaceId,
       budgetExceeded ? "AGENT_BUDGET_EXCEEDED" : "INTERNAL_ERROR",
-      !budgetExceeded,
-      budgetExceeded ? "companion agent budget exceeded" : "companion agent execution failed",
+      !budgetExceeded && !streamStopped,
+      budgetExceeded
+        ? "companion agent budget exceeded"
+        : streamStopped
+          ? `companion stream stopped: ${streamingDelivery.failureReason() ?? "delivery pipeline"}`.slice(0, 240)
+          : "companion agent execution failed",
     );
+    // 她已经说出来的那半句不能随失败一起消失（2026-09-19）。
+    await persistFailedPartial({
+      workspaceId: ctx.workspaceId,
+      userId: read.userId,
+      conversationId: read.conversationId,
+      runId: read.runId,
+      deliveredText: streamingDelivery.deliveredText(),
+    });
     throw err;
   }
-  if (agentResult.status === "waiting_for_confirmation") return;
-  ttsRawText = agentResult.text;
+  if (agentResult.status === "waiting_for_confirmation") {
+    // 等用户确认：本轮不写 assistant.final（终态消息由确认后的续跑产出）。
+    // 但**必须把已下发的稳定前缀落库关门**（④-b）：带工具的一步现在也会流式，
+    // 这一步可能正是提议确认的那一步，开场白已经发给客户端——不 finish 的话
+    // 压在节流窗口里的尾巴永远写不出去，客户端草稿会缺一截。
+    const flushed = await streamingDelivery.finish();
+    if (!flushed.ok) {
+      logger.warn(
+        { runId: read.runId, reason: flushed.reason },
+        "companion stream flush failed on a waiting-for-confirmation turn",
+      );
+    }
+    return;
+  }
+  // 上游解包（2026-09-18）：个别轮次 provider 会把回复包成 JSON 信封，
+  // TTS 朗读文本与校验/落库文本都必须用剥离后的版本。
+  ttsRawText = unwrapCompanionJsonEnvelope(agentResult.text);
 
-  // 信任边界：全文校验必须先于任何对外可见的写入。delta 是实时下发给客户端
-  // 并入库的内容，先写后验等于让泄露检测/长度限额沦为"事后门"——校验失败
-  // （internal_token_leak / output_too_long）不会撤回已投递的 delta。
-  // 校验失败在此终结：零 delta 落库，客户端只看到 error 事件。
-  const validated = validateCompanionOutput(agentResult.text);
+  // 信任边界：流式期间每个 flush 前都已跑过增量校验（长度/泄露），这里收尾；
+  // 校验失败在此终结：已投递的稳定前缀仍在（它是最终文本的前缀），run 按失败收尾。
+  const streamed = await streamingDelivery.finish();
+  if (!streamed.ok) {
+    await markCompanionRunFailed(read, ctx.workspaceId, "INTERNAL_ERROR", false, streamed.reason);
+    await persistFailedPartial({
+      workspaceId: ctx.workspaceId,
+      userId: read.userId,
+      conversationId: read.conversationId,
+      runId: read.runId,
+      deliveredText: streamingDelivery.deliveredText(),
+    });
+    throw new Error(`companion stream validation failed: ${streamed.reason}`);
+  }
+  // 全文校验（markdown/标签净化、信封拒绝）必须对完整文本成立；已下发的稳定前缀
+  // 必须是最终文本的前缀，否则两条路径漂移——宁可判失败，也不给客户端一个
+  // 前后不一致的回复。
+  const validated = reconcileStreamedText({
+    delivered: streamed.text,
+    validated: validateCompanionOutput(ttsRawText),
+  });
   if (!validated.ok) {
+    // 诊断（2026-09-19）：流式前缀与全文净化不一致时，必须能一眼看出差在哪——
+    // 只记长度与首个差异点 + 两小段上下文，不整段落日志。
+    if (validated.reason === "stream_full_text_diverged") {
+      const deliveredText = streamed.text;
+      const finalText = validateCompanionOutput(ttsRawText);
+      const finalValue = finalText.ok ? finalText.text : "";
+      let divergeAt = 0;
+      while (
+        divergeAt < deliveredText.length
+        && divergeAt < finalValue.length
+        && deliveredText[divergeAt] === finalValue[divergeAt]
+      ) {
+        divergeAt += 1;
+      }
+      logger.warn(
+        {
+          runId: read.runId,
+          deliveredChars: deliveredText.length,
+          finalChars: finalValue.length,
+          divergeAt,
+          deliveredExcerpt: deliveredText.slice(Math.max(0, divergeAt - 12), divergeAt + 12),
+          finalExcerpt: finalValue.slice(Math.max(0, divergeAt - 12), divergeAt + 12),
+        },
+        "companion streamed prefix diverged from validated text",
+      );
+    }
     await markCompanionRunFailed(read, ctx.workspaceId, "INTERNAL_ERROR", false, validated.reason);
+    await persistFailedPartial({
+      workspaceId: ctx.workspaceId,
+      userId: read.userId,
+      conversationId: read.conversationId,
+      runId: read.runId,
+      deliveredText: streamingDelivery.deliveredText(),
+    });
     throw new Error(`companion output validation failed: ${validated.reason}`);
   }
   // delta 与终态 assistant message 使用同一份净化文本（markdown/标签剥离后），
   // 否则客户端流式渲染的内容与 assistant.final 指向的消息不一致。
   assistantText = validated.text;
-  try {
-    const batched = await writeBatchedDeltas({
-      assistantText,
-      ctx,
-      read,
-      expiresAt,
-      notifyCompanionEvent,
+  if (streamingDelivery.deliveredChars() === 0) {
+    // 没走成流式（provider 无流式实现 / 信封守卫 / 空流）：回退到整段补写 delta，
+    // 事件布局与 2026-09-18 之后的实现完全一致。
+    try {
+      const batched = await writeBatchedDeltas({
+        assistantText,
+        ctx,
+        read,
+        expiresAt,
+        notifyCompanionEvent,
+      });
+      if (!batched) return;
+    } catch (err) {
+      await markCompanionRunFailed(read, ctx.workspaceId, "INTERNAL_ERROR", true, "companion delta write failed");
+      throw err;
+    }
+  } else if (!(await streamingDelivery.writeTail(assistantText))) {
+    // 已下发内容与终态文本必须逐字对齐（appendFrom 的基准就是下发长度）。
+    await markCompanionRunFailed(read, ctx.workspaceId, "INTERNAL_ERROR", false, "delta_stream_diverged");
+    await persistFailedPartial({
+      workspaceId: ctx.workspaceId,
+      userId: read.userId,
+      conversationId: read.conversationId,
+      runId: read.runId,
+      deliveredText: streamingDelivery.deliveredText(),
     });
-    if (!batched) return;
-  } catch (err) {
-    await markCompanionRunFailed(read, ctx.workspaceId, "INTERNAL_ERROR", true, "companion delta write failed");
-    throw err;
+    throw new Error("companion streamed text diverged from validated text");
   }
 
   // 15b（字幕般流式 TTS）：validate 后全量切段、在终态事务前逐个下发。
@@ -495,7 +689,9 @@ export async function runCompanionDialogue(
   // 终态事务不再携带 segments——事件布局变为 final @ eventStart、cue @ +1、
   // character.cue @ +1。
   const assistantMessageId = randomUUID();
-  const blocks = [{ type: "text", text: assistantText }];
+  // 情绪接表情（2026-09-18）：语气层分类结果随消息落库，渲染层据此驱动 Live2D。
+  const replyEmotion = resolveReplyToneEmotion(assistantText);
+  const blocks = [{ type: "text", text: assistantText, emotion: replyEmotion }];
   const contentSha256 = sha256Utf8V1(canonicalJsonV1(blocks));
   const textSha256 = sha256Utf8V1(assistantText);
   try {
@@ -509,7 +705,59 @@ export async function runCompanionDialogue(
             AND generation = ${read.generation}
           RETURNING id
         `);
-        if (!alive[0]) return;
+        if (!alive[0]) {
+          // fence 未命中：run 已不是 active（cancelled / superseded / 并发终态已收尾）。
+          //
+          // 用户按了"停止"时，气泡里**已经出现过**的字必须留下来——否则取消一发生，
+          // 这段内容就从历史里彻底消失（迟到的 assistant.final 被 fence 拒绝，而
+          // companion_messages 只在 final 时写入）。这里是全仓**唯一**写 assistant
+          // 消息的地方，对话与 agent 两条链路都汇到这里，所以补这一处即可覆盖两者。
+          //
+          // 落库判据用一条原子 UPDATE：只有 run 的真实终态是 'cancelled' 才留档。
+          //   - `superseded`（被用户的新提问顶掉）不落：那一轮由新回合接替，落碎片是噪音；
+          //   - 太短不落：1–2 字的碎片进历史是噪音，不是记录（阈值见常量）。
+          // 顺带回填 assistant_message_id，让"这条消息属于哪轮 run"在数据里成立。
+          if (assistantText.trim().length >= COMPANION_CANCELLED_MIN_CHARS) {
+            // 先锁住"确属取消、且还没留过档"的那一行。**不能**先回填
+            // `assistant_message_id`：它是指向 `companion_messages` 的立即外键，
+            // 消息行还没插就回填会被 FK 打回、整笔终态事务回滚——留档会一声不响地
+            // 从未发生过（实机库里 9 个 cancelled run、0 条 cancelled 消息）。
+            const cancelled = await tx.execute<{ id: string }>(sql`
+              SELECT id FROM companion_turn_runs
+              WHERE id = ${read.runId} AND status = 'cancelled' AND assistant_message_id IS NULL
+              FOR UPDATE
+            `);
+            if (cancelled[0]) {
+              const partialCounters = await tx.execute<{ next_message_seq: string }>(sql`
+                UPDATE companion_conversations
+                SET next_message_seq = next_message_seq + 1, last_message_at = now()
+                WHERE id = ${read.conversationId}
+                RETURNING next_message_seq
+              `);
+              const partialSeqRow = partialCounters[0];
+              if (partialSeqRow) {
+                // blocks 与 contentSha256 直接复用成功路径算好的那份：两条路径
+                // 必须是同一套散列口径，否则同一段文本在库里有两个 contentSha256。
+                // 不写 assistant.final / character.cue：run 已是终态，事件侧由 cancel
+                // 那条 turn.cancelled 收尾——一个回合出现两个"结束"会让客户端状态机打架。
+                await tx.execute(sql`
+                  INSERT INTO companion_messages
+                    (id, workspace_id, user_id, conversation_id, seq, role, kind, blocks, run_id, content_sha256)
+                  VALUES (${assistantMessageId}, ${ctx.workspaceId}, ${read.userId},
+                          ${read.conversationId}, ${Number(partialSeqRow.next_message_seq) - 1},
+                          'assistant', 'cancelled',
+                          ${JSON.stringify(blocks)}, ${read.runId}, ${contentSha256})
+                `);
+                await tx.execute(sql`
+                  UPDATE companion_turn_runs
+                  SET assistant_message_id = ${assistantMessageId}, updated_at = now()
+                  WHERE id = ${read.runId}
+                `);
+              }
+            }
+          }
+          return;
+        }
 
         // 事件布局：final @ eventStart，character.cue @ +1
         //（15b：TTS 段已前置于 delta 过程/validate 后，终态事务不再含 segments）。
@@ -637,6 +885,13 @@ export async function runCompanionDialogue(
     // 投影 failed/error，避免 job retry/dead-letter 后 run 永久停在 running。
     logger.warn({ jobId: ctx.id, runId, err }, "companion_agent write phase failed");
     await markCompanionRunFailed(read, ctx.workspaceId, "INTERNAL_ERROR", true, "companion response commit failed");
+    await persistFailedPartial({
+      workspaceId: ctx.workspaceId,
+      userId: read.userId,
+      conversationId: read.conversationId,
+      runId: read.runId,
+      deliveredText: streamingDelivery.deliveredText(),
+    });
     throw err;
   }
 }

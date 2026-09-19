@@ -82,41 +82,6 @@
   transform: translateX(-50%) scaleX(0.82);
 }
 
-.companion-home-cue {
-  position: absolute;
-  z-index: 5;
-  bottom: calc(100% + 8px);
-  left: 50%;
-  width: max-content;
-  max-width: min(230px, 28vw);
-  padding: 9px 12px 10px;
-  color: #3b281d;
-  font-size: 12px;
-  font-weight: 650;
-  line-height: 1.45;
-  text-align: left;
-  white-space: normal;
-  border: 1px solid rgba(79, 50, 31, 0.28);
-  border-radius: 5px 14px 5px 5px;
-  background: rgba(255, 246, 218, 0.96);
-  box-shadow: 0 10px 24px rgba(41, 24, 14, 0.16), 0 2px 6px rgba(41, 24, 14, 0.12);
-  transform: translateX(-50%);
-  pointer-events: none;
-}
-
-.companion-home-cue::after {
-  position: absolute;
-  top: 100%;
-  left: 50%;
-  width: 11px;
-  height: 11px;
-  content: "";
-  border-right: 1px solid rgba(79, 50, 31, 0.28);
-  border-bottom: 1px solid rgba(79, 50, 31, 0.28);
-  background: rgba(255, 246, 218, 0.96);
-  transform: translate(-50%, -6px) rotate(45deg);
-}
-
 .home-v2-hud {
   position: fixed;
   z-index: 32;
@@ -490,27 +455,48 @@
   transition: opacity 150ms var(--home-v2-ease-out), transform 180ms var(--home-v2-ease-out);
 }
 
+/* 悬停说明卡走全应用 HUD 的暗色胶囊语言（与 home-v2-hud、room-control 同一
+   皮肤：半透明深棕 + 奶油字 + blur）。位置静止、不跟随鼠标；默认挂在热区
+   底边下方，书架 / 休息角这类大热区用区域级覆盖改挂到热区上方——它们底边
+   在屏幕中部，挂在下方会把卡片坠到半空。锚点用变量表达，hover/focus 共用。 */
 .home-v2-object__label {
+  --tip-x: 50%;
+  --tip-y: calc(100% - 2px);
+  --tip-align: -50%, 0;
   position: absolute;
   z-index: 2;
-  top: calc(100% - 2px);
-  left: 50%;
+  top: var(--tip-y);
+  left: var(--tip-x);
   display: flex;
   align-items: center;
   width: max-content;
   max-width: 220px;
-  min-height: 44px;
+  min-height: 38px;
   gap: 8px;
-  padding: 7px 11px 8px;
-  color: var(--home-v2-ink);
+  padding: 7px 13px 8px;
+  color: #fff6ea;
   text-align: left;
-  border: 1px solid rgba(77, 48, 29, 0.3);
-  border-radius: 2px 10px 3px 2px;
-  background: linear-gradient(145deg, rgba(255, 244, 214, 0.98), rgba(235, 208, 158, 0.98));
-  box-shadow: 0 13px 25px rgba(41, 23, 13, 0.24), 0 3px 7px rgba(41, 23, 13, 0.2);
+  border: 1px solid rgba(255, 244, 226, 0.22);
+  border-radius: 999px;
+  background: rgba(25, 23, 22, 0.86);
+  box-shadow: 0 12px 26px rgba(20, 14, 10, 0.3), 0 2px 8px rgba(20, 14, 10, 0.24);
+  backdrop-filter: blur(18px) saturate(1.12);
   opacity: 0;
-  transform: translate(-50%, 7px) rotate(-1deg);
+  transform: translate(var(--tip-align)) translateY(8px);
   transition: opacity 150ms var(--home-v2-ease-out), transform 180ms var(--home-v2-ease-out);
+}
+
+/* 书架：挂到热区上方偏左（避开右上角的灵动岛）。 */
+.home-v2-object--magic-catalog .home-v2-object__label {
+  --tip-x: 6%;
+  --tip-y: -10px;
+  --tip-align: -50%, -100%;
+}
+
+/* 休息角：底边贴近屏幕下缘，同样挂上方。 */
+.home-v2-object--rest-cushion .home-v2-object__label {
+  --tip-y: -10px;
+  --tip-align: -50%, -100%;
 }
 
 .home-v2-object__label > span {
@@ -528,7 +514,7 @@
 .home-v2-object__label small {
   max-width: 176px;
   overflow: hidden;
-  color: var(--home-v2-muted);
+  color: rgba(255, 246, 234, 0.66);
   font-size: 12px;
   font-weight: 580;
   text-overflow: ellipsis;
@@ -546,7 +532,7 @@
 
 .home-v2-object:focus-visible .home-v2-object__label {
   opacity: 1;
-  transform: translate(-50%, 0) rotate(-1deg);
+  transform: translate(var(--tip-align));
 }
 
 .home-v2-object:focus-visible .home-v2-object__response {
@@ -563,13 +549,14 @@
   }
   .home-v2-object:hover .home-v2-object__label {
     opacity: 1;
-    transform: translate(-50%, 0) rotate(-1deg);
+    transform: translate(var(--tip-align));
   }
 }
 
+/* 暗色胶囊上的状态色：保持「到期偏暖、魔法偏青」的语义，但换成深底可读的浅调。 */
 .home-v2-object[data-object-state="due"] .home-v2-object__label,
-.home-v2-object[data-object-state="attention"] .home-v2-object__label { color: #8d3d24; }
-.home-v2-object[data-object-state="magic"] .home-v2-object__label { color: #305f64; }
+.home-v2-object[data-object-state="attention"] .home-v2-object__label { color: #ffd9a4; }
+.home-v2-object[data-object-state="magic"] .home-v2-object__label { color: #a9e4d2; }
 
 /* Registered against the clean 1672 × 941 isometric cutaway. The targets are
    intentionally larger than their painted objects while their stable frame is
@@ -1244,7 +1231,6 @@
     max-height: calc(100dvh - 24px);
   }
 
-  .companion-home-cue { max-width: min(210px, 54vw); }
   .home-v2-hud { display: none; }
 }
 

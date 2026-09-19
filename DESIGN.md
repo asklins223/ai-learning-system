@@ -151,6 +151,21 @@ Home V2 的视觉路径是固定镜头 2.5D：高分辨率日/夜注册图层负
 - `prefers-reduced-motion: reduce` 将动画与过渡压到 `1ms`，并由应用同步到动效模式；减少动效不等于自动静音。
 - 验证印章只出现一次；跳过或声明暂时不会时不显示印章，不做庆祝。
 
+### Companion Interaction Layer
+
+伴星的日常操作收进一个稳定的交互台（`components/companion/CompanionDock.tsx`）：身份与页面上下文、功能夹、记录入口、录音、文字输入和发送共用一个 HUD 岛，不再散成多枚漂浮按钮。首页业务入口使用贴着交互台展开的纸质功能夹（`CompanionActionMenu.tsx`），禁止圆盘遮住角色；完整记录从右侧展开为纸质手记抽屉（`CompanionChatDrawer.tsx`），禁止居中聊天弹窗与连续圆角聊天气泡。三者共用同一条真实会话（`app/companion-chat-session.tsx`）。
+
+分工是一条硬规则：**气球负责“她说了什么”，玻璃负责“你对她做什么”。**
+
+- **气球**（`companion-bubble.css`）是动森式对话气球：奶油纸底 `#fff6e2` → `#fbeacb` 竖向渐变，外层 2px 浅描边 `rgba(255,253,245,.92)` + 内层 1px 暗线 `rgba(74,45,26,.3)` 双描边，圆角 `20px 22px 20px 22px`，底部中央旋转方块尾巴指向角色头顶。语气四档：`cue` / `touch` / `page` / `reply`。
+- **玻璃**（`companion-dock.css` / `companion-chat-drawer.css`）是首页 HUD 岛同一套语言：`rgba(20,22,24,.7)` 底、1px 暖白描边、顶部高光细线、`blur(20–22px) saturate(1.18–1.2)`、双层阴影；薄荷 `#a8d59a` 作主行动，蜜桃 `#ef9675` 作录音中状态。局部 token 一律以 `--dock-*` / `--chat-*` 前缀限定在这两个组件内。
+
+**文本与语音同一条时间线。** 回复气泡的可视字数由真实播放进度驱动（`app/companion-voice-playback.ts` 每 80ms 广播一次 `visibleChars`）；音频播不了时（静音、未解锁、合成失败、被提示音抢走）退到阅读计时器 `estimateCompanionReadDurationMs`，推进同一个计数。两者任一时刻只有一条在走，所以文字不会和声音各说各话。没有出声就不显示朗读指示——不假装在出声。
+
+**编排由 `data-phase` 一个属性驱动：** `idle → listening → transcribing → thinking → replying → idle`。交互台骨架在全部状态下保持稳定；不能编辑时保留输入位置、明确禁用并显示状态，不允许输入框突然收起成空白或麦克风残影。页面 starter 只显示在交互台的上下文行，不另起一张遮挡正文的浮动气泡。历史抽屉打开时交互台完整让位，Escape 按“功能夹 → 历史抽屉 → 交互台”分层关闭。
+
+**语音闸门。** 环境音沿用 `shouldRunHomeV2Ambient`（含 `surfaceOpen`，任务页静默）；**用户主动发起**的对话语音走同一函数但不含 `surfaceOpen`——用户亲口问出来的回复是他主动要的反馈，不是“主动输出”，与 2026-09-16 裁决 3 同一条线。
+
 ### Media Degradation & Accessibility
 
 - `full` 可使用获准的局部视频；`lite`、`off` 与 `prefers-reduced-motion` 保留静态 D0–D4 分层和完整任务操作，只有资产或 WebGL 失败才由同构图 poster 接管。媒体加载、解码或声音播放失败各自独立降级，不改变学习状态。

@@ -8,6 +8,7 @@ import type {
   TodayActivityV1,
 } from "@ailearn/shared/activity-surface-contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SETTINGS_ATTENTION_AI_CONSENT } from "../../app/companion-consent-gate";
 import { useRoomStore } from "../../app/room-store";
 import { StudySurface } from "./StudySurface";
 
@@ -112,7 +113,7 @@ function installApi(result: GatewayResultV1<TodayActivityV1> | Error) {
   return { getToday };
 }
 
-/** 「处理这 N 件」靠 scrollIntoView 把读者送到分诊区；这里换成本地 spy 才断言得到。 */
+/** 判断条按钮靠 scrollIntoView 把读者送到分诊区；这里换成本地 spy 才断言得到。 */
 function mockScroll(): { readonly scrollIntoView: ReturnType<typeof vi.fn> } {
   const scrollIntoView = vi.fn();
   Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: scrollIntoView });
@@ -129,7 +130,13 @@ afterEach(() => {
   Reflect.deleteProperty(window, "ailearn");
   Reflect.deleteProperty(Element.prototype, "scrollTo");
   Reflect.deleteProperty(Element.prototype, "scrollIntoView");
-  useRoomStore.setState({ hudPage: "home" });
+  useRoomStore.setState({
+    hudPage: "home",
+    destination: "room",
+    activeRunId: null,
+    settingsSection: "account",
+    settingsAttention: null,
+  });
   vi.restoreAllMocks();
 });
 
@@ -139,7 +146,7 @@ describe("today log surface", () => {
     render(<StudySurface />);
     // 整天空：判断条说一句话，操作区就地给出口 —— 不再是一张和判断条重复的空态纸。
     expect(await screen.findByText("今天还没有留下记录")).toBeTruthy();
-    expect(screen.getByText("今天还没有正向操作")).toBeTruthy();
+    expect(screen.getByText("从这里开始")).toBeTruthy();
     expect(screen.getByRole("button", { name: "写笔记" })).toBeTruthy();
     // 0 和 0 不摆成数字：空的一天不给 metrics。
     expect(document.querySelector(".day-verdict__metrics")).toBeNull();
@@ -149,7 +156,7 @@ describe("today log surface", () => {
     const { scrollIntoView } = mockScroll();
     installApi(ok(activity({ events: [event()], anomalies: [anomaly()] })));
     render(<StudySurface />);
-    await waitFor(() => expect(screen.getByText("有事务停在半路，处理完就能继续推进")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("有几件事卡在半路，处理完就能继续推进")).toBeTruthy());
     // 数字是判断条的主语，逐格取；"待处理"在判断条与分诊标题里都出现，按 data-metric 定位。
     const metricValue = (key: string) =>
       document.querySelector(`.day-verdict__metric[data-metric="${key}"] dd`)?.textContent;
@@ -158,16 +165,17 @@ describe("today log surface", () => {
     // 只有一个时刻就不画区间
     expect(metricValue("span")).toBe("09:05");
 
-    const jump = screen.getByRole("button", { name: /处理这 1 件/ });
+    const jump = screen.getByRole("button", { name: "查看 1 个处理项" });
     jump.click();
     expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(screen.getByRole("region", { name: /待处理 1 项/ }));
   });
 
   it("hides the triage jump when nothing is stuck", async () => {
     installApi(ok(activity({ events: [event()] })));
     render(<StudySurface />);
     await waitFor(() => expect(screen.getByText("今天的操作都推进得顺利")).toBeTruthy());
-    expect(screen.queryByRole("button", { name: /处理这/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /查看 .*处理项/ })).toBeNull();
   });
 
   it("shows the failure state and never fabricates local rows", async () => {
@@ -184,7 +192,7 @@ describe("today log surface", () => {
     await waitFor(() => expect(screen.getByText(/的卡片生成/)).toBeTruthy());
     expect(screen.getByText(/服务端要求你先判断/)).toBeTruthy();
     // 只有异常、没有正向操作的那一天必须给出口，不能只给一句散文描述。
-    expect(screen.getByText("今天还没有正向操作")).toBeTruthy();
+    expect(screen.getByText("从这里开始")).toBeTruthy();
     expect(screen.getByRole("button", { name: "收录来源" })).toBeTruthy();
   });
 
@@ -197,8 +205,8 @@ describe("today log surface", () => {
       ],
     })));
     render(<StudySurface />);
-    await waitFor(() => expect(screen.getByText("同一件事 ×3")).toBeTruthy());
-    expect(screen.getByText("3 件 · 归并为 1 类")).toBeTruthy();
+    await waitFor(() => expect(screen.getByText("同类记录 ×3")).toBeTruthy());
+    expect(screen.getByText("1 项 · 共 3 条记录")).toBeTruthy();
     expect(screen.getAllByRole("button", { name: /去处理/ })).toHaveLength(1);
   });
 
@@ -215,7 +223,7 @@ describe("today log surface", () => {
     expect(screen.getAllByText(/服务端要求你先判断/)).toHaveLength(1);
   });
 
-  it("collapses the triage past three piles and expands on demand", async () => {
+  it("collapses the triage past two items and expands on demand", async () => {
     installApi(ok(activity({
       anomalies: [
         anomaly({ id: "g1", title: "《甲》的卡片生成" }),
@@ -225,11 +233,11 @@ describe("today log surface", () => {
       ],
     })));
     render(<StudySurface />);
-    const more = await screen.findByRole("button", { name: "还有 1 类待处理" });
+    const more = await screen.findByRole("button", { name: "还有 2 个处理项" });
     expect(screen.queryByText("《丁》的卡片生成")).toBeNull();
     more.click();
     expect(await screen.findByText("《丁》的卡片生成")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "只留最厚的三类" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "收起" })).toBeTruthy();
   });
 
   it("gives every jump button a distinct accessible name", async () => {
@@ -240,8 +248,22 @@ describe("today log surface", () => {
       ],
     })));
     render(<StudySurface />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "查看 新建笔记 牛顿第二定律" })).toBeTruthy());
-    expect(screen.getByRole("button", { name: "查看 收录来源 间隔重复论文" })).toBeTruthy();
+    await waitFor(() => expect(screen.getByRole("button", { name: "查看 新建笔记 · 牛顿第二定律" })).toBeTruthy());
+    expect(screen.getByRole("button", { name: "查看 收录来源 · 间隔重复论文" })).toBeTruthy();
+  });
+
+  it("does not say the action twice when the server title already contains it", async () => {
+    // 实机数据：job 的 title 是"后台任务 · 伴星对话"，再前置动词就成了
+    // "后台任务 · 后台任务 · 伴星对话" —— 主行只说一遍。
+    installApi(ok(activity({
+      events: [event({ id: "job.scheduled:j1", kind: "job", verb: "job.scheduled", title: "后台任务 · 伴星对话", target: null })],
+    })));
+    render(<StudySurface />);
+    const systemToggle = await screen.findByRole("button", { name: /系统活动.*1 条派生处理/ });
+    expect(screen.queryByText("后台任务 · 伴星对话")).toBeNull();
+    systemToggle.click();
+    await waitFor(() => expect(screen.getByText("后台任务 · 伴星对话")).toBeTruthy());
+    expect(screen.queryByText(/后台任务 · 后台任务/)).toBeNull();
   });
 
   it("renders no jump button when the server could not resolve a target", async () => {
@@ -250,14 +272,52 @@ describe("today log surface", () => {
     await waitFor(() => expect(screen.getByText(/^失败/)).toBeTruthy());
     // 不给死路，也不装作有地方可去。
     expect(screen.queryByRole("button", { name: /去处理/ })).toBeNull();
-    expect(screen.getByText(/没能定位到现场/)).toBeTruthy();
+    expect(screen.getByText(/没有可直接打开的位置/)).toBeTruthy();
   });
 
   it("renders a machine-readable timestamp on every log row", async () => {
     installApi(ok(activity({ events: [event()] })));
     render(<StudySurface />);
-    const list = await screen.findByRole("list", { name: "今日操作日志" });
+    const list = await screen.findByRole("list", { name: "今日学习记录" });
     const stamp = within(list).getByText("09:05");
     expect(stamp.getAttribute("datetime")).toBe(new Date(2026, 8, 18, 9, 5).toISOString());
+  });
+
+  it("routes an AI consent failure to the exact settings recovery", async () => {
+    installApi(ok(activity({
+      anomalies: [anomaly({
+        id: "anomaly.job:consent",
+        kind: "job",
+        status: "failed",
+        title: "伴星回应失败",
+        detail: "operational_error:configuration:AIConsentRequiredError:ai_consent_required",
+        target: null,
+      })],
+    })));
+    render(<StudySurface />);
+    expect(await screen.findByText(/需要先完成工作区的 AI 使用同意/)).toBeTruthy();
+    expect(screen.queryByText(/AIConsentRequiredError/)).toBeNull();
+    screen.getByRole("button", { name: "去设置处理 伴星回应失败" }).click();
+    expect(useRoomStore.getState()).toMatchObject({
+      destination: "settings",
+      settingsSection: "data",
+      settingsAttention: SETTINGS_ATTENTION_AI_CONSENT,
+    });
+  });
+
+  it("opens a stuck learning run instead of the unrelated review queue", async () => {
+    installApi(ok(activity({
+      anomalies: [anomaly({
+        id: "anomaly.learning_run:stuck",
+        kind: "learning_run",
+        status: "active",
+        title: "学习旅程超过 24 小时没有进展",
+        target: { kind: "learning_run", id: RUN_ID, noteVersionId: null },
+      })],
+    })));
+    render(<StudySurface />);
+    const open = await screen.findByRole("button", { name: /去处理 学习旅程超过/ });
+    open.click();
+    expect(useRoomStore.getState()).toMatchObject({ destination: "validation", activeRunId: RUN_ID });
   });
 });

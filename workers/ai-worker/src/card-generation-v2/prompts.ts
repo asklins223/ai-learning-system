@@ -130,7 +130,7 @@
  *    答案的可判分命题）+ 整类清单（玩笑段子/情绪吐槽/闲聊寒暄/无意义字符/
  *    个人事务/身份凭据/传闻八卦/纯链接/无答案的提问/口味偏好）。
  */
-export const CARD_GENERATION_V2_PROMPT_VERSION = "card-generation-v2/v19";
+export const CARD_GENERATION_V2_PROMPT_VERSION = "card-generation-v2/v20";
 
 export const PLANNER_PROMPT_VERSION = `${CARD_GENERATION_V2_PROMPT_VERSION}/planner`;
 export const AUTHOR_PROMPT_VERSION = `${CARD_GENERATION_V2_PROMPT_VERSION}/author`;
@@ -448,10 +448,29 @@ answer 与 rubric）、presentation（含 front cue/prompt 与教学转换类型
   misconception_correction / source_grounded_application 之一）。
 - 必须给出所需 answer units，以及可判分的 rubric（required 单元 answerUnitIds 指向
   canonical answer 的 unit/item）。
-- canonicalAnswer 两种形态：①整体单一答案用 "kind":"text" + "unit"（**单对象**，含
-  unitId/text 两个字段，unit 绝不是数组）；②多个可独立判分的答案单元用
-  "kind":"bullets" + "items"（数组，每项含 unitId/text）。需要多个 answer unit 时
-  必须用 bullets，不要给 text.unit 传数组（schema 会拒绝）。
+- canonicalAnswer 五种形态，**按知识形态与证据选择，别永远用 text**（2026-09-18：此前
+  只教 text/bullets，导致全部卡片无法生成排序/关系练习题）：
+  ①整体单一答案："kind":"text" + "unit"（**单对象**，含 unitId/text 两个字段，unit 绝不是
+    数组）；
+  ②多个可独立判分的答案单元："kind":"bullets" + "items"（数组，每项含 unitId/text）；
+    需要多个 answer unit 时必须用 bullets，不要给 text.unit 传数组（schema 会拒绝）；
+  ③**有先后顺序的步骤/流程**（sequence / procedure 类知识，且证据明确给出顺序）：
+    "kind":"ordered_steps" + "steps"（数组，每项含 unitId/text，至少 2 步）——顺序本身就是
+    这类知识最该练的东西，用 text/bullets 会把它混进一段话里；
+  ④**一一对应关系**（术语-定义、参数-含义、名称-作用等配对）："kind":"mapping" + "pairs"
+    （数组，每项含 unitId/left/right）；
+  ⑤**多维对比**（comparison 类知识，证据给了多个对象在多个维度上的差异）：
+    "kind":"comparison" + "columns"（≥2 个列名）+ "rows"（每行含 unitId/dimension/values）。
+  选择依据：证据写的是步骤就给 ordered_steps，写的是配对就给 mapping，写的是多维对比就给
+  comparison，拿不准就退回 text/bullets。**结构化答案会被规划器转成排序题 / 关系连线题
+  （练习通道）——这是它们独有的价值，text/bullets 给不了。**
+- **preferredTaskIntents 按知识形态选，不要永远写 ["recall"]（2026-09-18：此前模板硬编码
+  recall，导致全部目标只能考"复述"）**：fact/definition → recall；causal_model/relationship
+  → explain；procedure/sequence → procedure；application_rule → apply；boundary → boundary。
+  可以给 1-2 个（第一个是主意图）。
+- **rubric 要覆盖整组答案单元（与"不得丢掉并列项"配套）**：canonicalAnswer 有 N 个 unit 时，
+  rubric 至少给出覆盖全部 required 要点的条目；若证据还支撑边界或易混点，可追加一条
+  boundary / relate facet 的条目（仍须严格基于证据，R30 不变）。不要永远只写一条。
 - relations 描述 answer unit 之间关系；kind 只能是 causes / contradicts / supports / part_of / example_of 之一；每条必须含 relationId、fromAnswerUnitId、toAnswerUnitId、kind 四个字段（fromAnswerUnitId/toAnswerUnitId 引用 canonicalAnswer 的 unit.unitId 或 items[].unitId；无关系时输出空数组 []）。
 - **relations 只在证据明确表达该关系时才输出（硬要求）**：证据只是并列清单、步骤顺序或
   枚举时，**不得**写成 causes / supports / part_of 等语义关系——"先做 A 再做 B"不等于
@@ -483,6 +502,12 @@ answer 与 rubric）、presentation（含 front cue/prompt 与教学转换类型
     （实测该契约矛盾会让"已通过两道 critic 的候选"在改写路径上被丢弃，
     整条 run 交付不出任何卡。）
   * explanation 允许是证据的同义改写与直接推论，不要求逐字引用。
+- **boundary / misconception / workedExample 的提取义务（2026-09-18）**：这三个字段
+  "可空"是指**证据没写时不许编**，不是可以不加检查地留空。写完卡后逐项回到证据查：
+  * 证据写了适用条件、前提、例外、不适用情形 → **必须**提取进 boundary；
+  * 证据写了"常被误认为 / 实际上 / 注意 / 并非"这类纠偏表述 → **必须**提取进 misconception；
+  * 证据给了具体例子、题设、样本 → **必须**提取进 workedExample；
+  确实没有对应内容才输出空字符串。判定方法是逐句回到证据里找，不是凭感觉。
 - 不要为了凑数编造不存在的知识；不要输出思维链，只输出严格 JSON。
 
 输出 JSON 结构（objectiveDraft + presentationDraft 合并为单个对象）：
@@ -492,7 +517,7 @@ answer 与 rubric）、presentation（含 front cue/prompt 与教学转换类型
     "publicSummary": "...",
     "conceptLabel": "概念级标题（名词短语，建议≤40字）",
     "knowledgeForm": "...",
-    "preferredTaskIntents": ["recall"],
+    "preferredTaskIntents": ["recall", "explain"],
     "canonicalAnswer": {
       "kind": "bullets",
       "items": [
@@ -529,7 +554,7 @@ answer 与 rubric）、presentation（含 front cue/prompt 与教学转换类型
     "publicSummary": "F=ma 公式表述",
     "conceptLabel": "牛顿第二定律",
     "knowledgeForm": "relationship",
-    "preferredTaskIntents": ["recall"],
+    "preferredTaskIntents": ["recall", "explain"],
     "canonicalAnswer": {
       "kind": "text",
       "unit": { "unitId": "ans-1", "text": "F=ma" }

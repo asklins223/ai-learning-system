@@ -876,21 +876,25 @@ export function ReviewSurface() {
           {/* 换卡是整行滑动，看得见的那一下就是反馈；看不到牌面的读者靠这句。 */}
           <p className="sr-only" role="status">{deckAnnouncement}</p>
 
-            {boundary ? (
-              /* 状态纸也是卡槽里唯一的一张牌：同一套堆位规则，它才落在正中。 */
-              <article className="deck-card front" data-depth="0">
-                <SurfaceDataState
-                  {...boundary}
-                  onRetry={boundary.kind === "error" ? () => reload() : undefined}
-                  action={boundary.kind === "empty" ? (
-                    <div className="actions">
-                      <button type="button" className="button" onClick={() => invoke("continue")}>回到今日学习</button>
-                      <button type="button" className="button" onClick={() => invoke("open-notebook")}>继续写笔记</button>
-                    </div>
-                  ) : undefined}
-                />
-              </article>
-            ) : visibleItems.map((item, offset) => {
+          {boundary ? (
+            /* 状态纸也是卡槽里唯一的一张牌：同一套堆位规则，它才落在正中。 */
+            <article className="deck-card front" data-depth="0">
+              <SurfaceDataState
+                {...boundary}
+                onRetry={boundary.kind === "error" ? () => reload() : undefined}
+                action={boundary.kind === "empty" ? (
+                  <div className="actions">
+                    {/* 空队列的下一步是回到今日学习：主行动走主按钮，与
+                        「开始复习」共用同一套主按钮语言。 */}
+                    <button type="button" className="button primary" onClick={() => invoke("continue")}>
+                      回到今日学习<ArrowRight size={15} aria-hidden="true" />
+                    </button>
+                    <button type="button" className="button" onClick={() => invoke("open-notebook")}>继续写笔记</button>
+                  </div>
+                ) : undefined}
+              />
+            </article>
+          ) : visibleItems.map((item, offset) => {
               const seat = windowStart + offset;
               const isFront = item.reviewId === front?.reviewId;
               const surface = objectives[item.objectiveId] ?? null;
@@ -935,33 +939,25 @@ export function ReviewSurface() {
                             <RotateCcw size={14} aria-hidden="true" />刷新开始条件
                           </button>
                         )}
-                        {surface?.sources.primaryNote ? (
-                          <button
-                            type="button"
-                            className="button"
-                            disabled={busy}
-                            onClick={() => {
-                              const note = surface.sources.primaryNote;
-                              if (!note) return;
+                        {/* 有主笔记就开笔记，否则落到理解目标页——同一个「查看来源」
+                            的两条去路，不是两颗按钮。 */}
+                        <button
+                          type="button"
+                          className="button"
+                          disabled={busy}
+                          onClick={() => {
+                            const note = surface?.sources.primaryNote;
+                            if (note) {
                               setActiveNoteRef({ noteId: note.noteId, noteVersionId: note.noteVersionId });
                               invoke("open-notebook");
-                            }}
-                          >
-                            查看来源
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            className="button"
-                            disabled={busy}
-                            onClick={() => {
-                              setActiveObjectiveId(item.objectiveId);
-                              invoke("open-objective");
-                            }}
-                          >
-                            查看来源
-                          </button>
-                        )}
+                              return;
+                            }
+                            setActiveObjectiveId(item.objectiveId);
+                            invoke("open-objective");
+                          }}
+                        >
+                          查看来源
+                        </button>
                         <button
                           type="button"
                           className="button"
@@ -1015,9 +1011,13 @@ export function ReviewSurface() {
         </section>
 
         <aside className="queue-reason" aria-label="这张卡为什么排在最前">
-          <span className={`tag${reason && reasonTag ? ` ${reasonTag.tone}` : failure ? " red" : ""}`.trim()}>
-            {reason && reasonTag ? reasonTag.label : failure ? "读取失败" : "队列"}
-          </span>
+          {/* 徽标只在有话可说时出现：没有卡也没有失败时，「队列」两个字不构成
+              状态，只是纸上的一粒噪音。 */}
+          {reasonTag ? (
+            <span className={reasonTag.tone ? `tag ${reasonTag.tone}` : "tag"}>{reasonTag.label}</span>
+          ) : failure ? (
+            <span className="tag red">读取失败</span>
+          ) : null}
           <h3>为什么现在复习它</h3>
 
           {/* 回执放在理由条顶部：底部的旧位置在 240px 窄栏里要滚动才看得到。 */}
@@ -1028,14 +1028,19 @@ export function ReviewSurface() {
           {reason && reasonTag ? (
             <>
               <p>{reviewReasonSentence(reason)}</p>
-              <div className="rule" />
-              <p>
-                到期：{dueLine}
-                <br />
-                同一理解目标：{reason.relatedCards} 张到期卡
-                <br />
-                已载入队列覆盖：{reason.affectedObjectives} 个理解目标
-              </p>
+              {/* 中段只补句子没说过的**卡级**事实：可以开始的卡，句子里已经写了
+                  到期时间和同目标卡数，再列一遍只会让读者对着一组数字猜"2 张和
+                  3 张是不是两回事"；冷却卡的句子只说冷却，这两行才有信息量。 */}
+              {reason.ready ? null : (
+                <>
+                  <div className="rule" />
+                  <p>
+                    到期：{dueLine}
+                    <br />
+                    同一理解目标：{reason.relatedCards} 张到期卡
+                  </p>
+                </>
+              )}
               <div className="rule" />
               {sequence.length > 0 ? (
                 <p className="small queue-reason__order">
@@ -1058,8 +1063,12 @@ export function ReviewSurface() {
                   {queue?.nextCursor ? "后续到期项还没有读取。" : "这是已载入队列的最后一张。"}
                 </p>
               )}
+              {/* 已载入多少、覆盖多少目标是**队列**级的事实：和后续顺序归在
+                  同一组，不再夹在两条分隔线中间孤零零地站着。 */}
               <p className="small">
                 已载入 {queue?.items.length ?? 0} / {deckTotal} 项
+                <br />
+                覆盖 {reason.affectedObjectives} 个理解目标
               </p>
               {queue?.nextCursor ? (
                 <p className="small">

@@ -1,11 +1,20 @@
 import { describe, expect, it } from "vitest";
 import {
   WINDOW_LIVE2D_ASSETS,
+  WINDOW_LIVE2D_TOOL_ATTENTION_DURATION_MS,
   isApprovedWindowLive2DManifest,
   motionForWindowLive2DEmotion,
   motionForWindowLive2D,
   parameterValuesForWindowLive2D,
 } from "./window-live2d-contract";
+
+/** 读一个参数，省掉每个用例都写一遍 find。 */
+function parameterValue(
+  values: readonly { readonly parameter: string; readonly value: number }[],
+  parameter: string,
+): number | undefined {
+  return values.find((value) => value.parameter === parameter)?.value;
+}
 
 describe("window Live2D policy", () => {
   it("fails closed when bundled model license approval is absent", () => {
@@ -103,5 +112,69 @@ describe("window Live2D policy", () => {
     expect(values.some((value) => value.parameter === "ParamMouthOpenY")).toBe(false);
     expect(values.some((value) => value.parameter === "ParamMouthForm")).toBe(false);
     expect(values.some((value) => value.parameter === "ParamA")).toBe(false);
+  });
+
+  describe("「看向手边」（方案 §5 第 9 项）", () => {
+    const idleBodyAngleX = (nowMs: number) => Math.sin(nowMs / 2_400) * 2;
+
+    it("没有冲量时 ParamBodyAngleX 逐帧等于静息摇摆（本次改动不改变既有画面）", () => {
+      for (const nowMs of [0, 600, 1_000, 2_400, 5_000]) {
+        const values = parameterValuesForWindowLive2D({
+          presentation: "idle",
+          nowMs,
+          voiceLevel: 0,
+        });
+        expect(parameterValue(values, "ParamBodyAngleX")).toBeCloseTo(idleBodyAngleX(nowMs));
+      }
+    });
+
+    it("工具刚开始执行时侧身 3 度，并在 1.5s 内二次缓出回到静息值", () => {
+      const atMs = 0;
+      // 起点：冲量满幅，静息摇摆此刻正好是 0。
+      expect(parameterValue(parameterValuesForWindowLive2D({
+        presentation: "idle", nowMs: 0, voiceLevel: 0, toolAttentionAtMs: atMs,
+      }), "ParamBodyAngleX")).toBeCloseTo(-3);
+
+      // 中点：(1 - 0.5)^2 = 0.25，偏移收窄到 -0.75。
+      const half = WINDOW_LIVE2D_TOOL_ATTENTION_DURATION_MS / 2;
+      expect(parameterValue(parameterValuesForWindowLive2D({
+        presentation: "idle", nowMs: half, voiceLevel: 0, toolAttentionAtMs: atMs,
+      }), "ParamBodyAngleX")).toBeCloseTo(idleBodyAngleX(half) - 0.75);
+    });
+
+    it("冲量窗口结束时与静息摇摆严丝合缝，不会回弹", () => {
+      const atMs = 0;
+      const lastFrame = WINDOW_LIVE2D_TOOL_ATTENTION_DURATION_MS - 1;
+      const atEnd = parameterValue(parameterValuesForWindowLive2D({
+        presentation: "idle", nowMs: lastFrame, voiceLevel: 0, toolAttentionAtMs: atMs,
+      }), "ParamBodyAngleX");
+      const afterEnd = parameterValue(parameterValuesForWindowLive2D({
+        presentation: "idle",
+        nowMs: WINDOW_LIVE2D_TOOL_ATTENTION_DURATION_MS,
+        voiceLevel: 0,
+        toolAttentionAtMs: atMs,
+      }), "ParamBodyAngleX");
+
+      expect(atEnd).toBeCloseTo(idleBodyAngleX(lastFrame), 3);
+      expect(afterEnd).toBeCloseTo(idleBodyAngleX(WINDOW_LIVE2D_TOOL_ATTENTION_DURATION_MS));
+    });
+
+    it("未来时间戳与非有限值都当作没有冲量，不写入非法参数", () => {
+      for (const toolAttentionAtMs of [Number.NaN, Number.POSITIVE_INFINITY, 4_000]) {
+        const values = parameterValuesForWindowLive2D({
+          presentation: "idle", nowMs: 1_000, voiceLevel: 0, toolAttentionAtMs,
+        });
+        expect(parameterValue(values, "ParamBodyAngleX")).toBeCloseTo(idleBodyAngleX(1_000));
+        expect(values.every((value) => Number.isFinite(value.value))).toBe(true);
+      }
+    });
+
+    it("冲量不与口型/表情抢参数：它只动 ParamBodyAngleX", () => {
+      const withImpulse = parameterValuesForWindowLive2D({
+        presentation: "speak", nowMs: 0, voiceLevel: 0.6, toolAttentionAtMs: 0,
+      });
+      expect(parameterValue(withImpulse, "ParamA")).toBeCloseTo(0.6);
+      expect(parameterValue(withImpulse, "ParamBodyAngleX")).toBeCloseTo(-3);
+    });
   });
 });

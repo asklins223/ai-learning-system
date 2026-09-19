@@ -15,6 +15,26 @@ import {
   deploymentConfigSchema,
   emailSchema,
   uuidSchema,
+  AVATAR_MAX_BYTES,
+  authProfileResultV1Schema,
+  avatarObjectKeySchema,
+  avatarUploadResultV1Schema,
+  inviteCreatedV1Schema,
+  inviteListResultV1Schema,
+  markdownImportResultV1Schema,
+  memberListResultV1Schema,
+  renameWorkspaceResultV1Schema,
+  searchDriftResultV1Schema,
+  searchReindexResultV1Schema,
+  type AuthProfileResultV1,
+  type AvatarUploadResultV1,
+  type InviteCreatedV1,
+  type InviteListResultV1,
+  type MarkdownImportResultV1,
+  type MemberListResultV1,
+  type RenameWorkspaceResultV1,
+  type SearchDriftResultV1,
+  type SearchReindexResultV1,
   type DesktopCreateLearningRunV2Request,
   type DesktopCardGenerationActivationSelectionV1,
   type DesktopCandidateReviewRequestV2,
@@ -31,8 +51,10 @@ import {
   nonEmptyStringSchema,
   runtimeSnapshotSchema,
   sessionContextSchema,
+  companionChatStreamEventV1Schema,
   type ApiConnectionStateV1,
   type CapabilityProjectionV1,
+  type CompanionChatStreamEventV1,
   type DeploymentConfigV1,
   type GatewayErrorCode,
   type LocalApiTrustV1,
@@ -48,6 +70,7 @@ import {
 } from "@ailearn/shared/desktop-ipc-contracts";
 import {
   getLearningRunResultResponseV2Schema,
+  learningRunTargetRevealV2Schema,
   learningRunActionResponseV2Schema,
   learningRunPublicSnapshotV2Schema,
   learningRunReturnContractV2Schema,
@@ -60,6 +83,7 @@ import { todayActivityV1Schema } from "@ailearn/shared/activity-surface-contract
 import { roomProjectionV1Schema, type RoomProjectionV1 } from "@ailearn/shared/room-projection-contracts";
 import {
   companionAccountStateV1Schema,
+  companionAnswerModePreferenceV1Schema,
   companionOverviewSchema,
   type CompanionAccountPatch,
   type CompanionAccountStateV1,
@@ -75,10 +99,50 @@ import {
 import {
   COMPANION_VOICE_MAX_AUDIO_BYTES,
   COMPANION_VOICE_SPEAK_VOICE,
+  COMPANION_VOICE_TRANSCRIBE_MAX_AUDIO_BYTES,
   companionVoiceSpeakResultV1Schema,
+  companionVoiceTranscribeResultV1Schema,
   type CompanionVoiceSpeakRequestV1,
   type CompanionVoiceSpeakResultV1,
+  type CompanionVoiceTranscribeRequestV1,
+  type CompanionVoiceTranscribeResultV1,
 } from "@ailearn/shared/companion-voice-contracts";
+import {
+  companionAgentRoutesListResultV1Schema,
+  companionRunNodesListResultV1Schema,
+  companionChatOpenThoughtResultV1Schema,
+  companionChatEnsureResultV1Schema,
+  companionChatListMessagesResultV1Schema,
+  companionChatProposalDecideResultV1Schema,
+  companionChatProposalGetResultV1Schema,
+  companionChatSendTurnResultV1Schema,
+  type CompanionAgentRoutesListRequestV1,
+  type CompanionAgentRoutesListResultV1,
+  type CompanionChatEnsureRequestV1,
+  type CompanionChatEnsureResultV1,
+  type CompanionChatListMessagesRequestV1,
+  type CompanionChatListMessagesResultV1,
+  type CompanionChatProposalDecideRequestV1,
+  type CompanionChatProposalDecideResultV1,
+  type CompanionChatProposalGetRequestV1,
+  type CompanionChatProposalGetResultV1,
+  type CompanionChatSendTurnRequestV1,
+  type CompanionChatSendTurnResultV1,
+  type CompanionChatOpenThoughtRequestV1,
+  type CompanionChatOpenThoughtResultV1,
+  type CompanionChatCancelRunRequestV1,
+  type CompanionChatCancelRunResultV1,
+  companionChatCancelRunResultV1Schema,
+  type CompanionRunNodesListRequestV1,
+  type CompanionRunNodesListResultV1,
+} from "@ailearn/shared/companion-chat-desktop-contracts";
+import {
+  companionGroundedTutorGrantV1Schema,
+  companionLearningRunContextV1Schema,
+  type CompanionGroundedTutorGrantV1,
+  type CompanionLearningRunContextV1,
+  type CreateCompanionLearningRunContextGrantRequestV1,
+} from "@ailearn/shared/companion-conversation-contracts";
 import {
   SOURCE_IMAGE_MAX_BYTES,
   SOURCE_IMAGE_MIME_TYPES,
@@ -338,7 +402,9 @@ const NATIVE_CAPABILITY_CHANNELS: Readonly<Record<keyof NativeCapabilityProjecti
   filePicker: null,
   clipboard: DESKTOP_IPC_CHANNELS.clipboardReadLinks,
   notifications: null,
-  asr: null,
+  // ASR：2026-09-18 起接了真实语音链路——本地 SenseVoice（WASM）优先，云
+  // `/voice/transcribe` 兜底，通道存在即视为可用。
+  asr: DESKTOP_IPC_CHANNELS.companionVoiceTranscribe,
   updates: null,
   live2d: null,
 };
@@ -358,6 +424,43 @@ function parseSseSequence(block: string): number | null {
   if (!idLine) return null;
   const value = Number(idLine.slice(3).trim());
   return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+/** 单帧 payload 的过桥上限：伴星事件体常态 <1KB，超过即视为异常帧丢弃。 */
+const COMPANION_CHAT_EVENT_MAX_PAYLOAD_BYTES = 16 * 1024;
+
+/**
+ * 伴星 SSE 单帧 → 可过桥的最小投影（`companionChatStreamEventV1Schema`）。
+ *
+ * 主进程是信任边界：畸形 JSON、缺字段、payload 非对象或超限一律返回 null 丢弃，
+ * 绝不把原始 SSE 文本转发给渲染层。事件类型不做白名单——DB 允许 18 种，桌面端
+ * 只对认识的那几种做事，未知类型照样过桥但不渲染。
+ */
+export function parseCompanionSseFrame(block: string): CompanionChatStreamEventV1 | null {
+  const dataLines: string[] = [];
+  for (const line of block.split(/\r?\n/)) {
+    if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+  }
+  if (dataLines.length === 0) return null;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(dataLines.join("\n"));
+  } catch {
+    return null;
+  }
+  if (typeof raw !== "object" || raw === null) return null;
+  const envelope = raw as Record<string, unknown>;
+  const payload = envelope.payload;
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return null;
+  if (JSON.stringify(payload).length > COMPANION_CHAT_EVENT_MAX_PAYLOAD_BYTES) return null;
+  const parsed = companionChatStreamEventV1Schema.safeParse({
+    seq: envelope.seq,
+    runId: envelope.runId ?? null,
+    generation: envelope.generation,
+    eventType: envelope.type,
+    payload,
+  });
+  return parsed.success ? parsed.data : null;
 }
 
 function waitForStreamRetry(milliseconds: number): Promise<void> {
@@ -669,6 +772,340 @@ export class DesktopGateway {
     this.credentialPersistence = "memory";
     await this.credentials?.clear().catch(() => undefined);
     return { changed: true, sessionsRevoked: true };
+  }
+
+  // ─── 旧版设置页回补（2026-09-18）：档案 / 头像 / 退出 / 邀请 / 成员 / 导入 / 索引 ──
+
+  /** GET /auth/me：当前档案（displayName + avatarUrl），设置页首次渲染用。 */
+  async getProfile(requestId?: string): Promise<AuthProfileResultV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request("/auth/me", { method: "GET" }, true, true, requestId);
+    const payload = (result.body ?? {}) as Record<string, unknown>;
+    const parsed = authProfileResultV1Schema.safeParse({
+      version: 1,
+      displayName: payload.displayName ?? null,
+      avatarUrl: payload.avatarUrl ?? null,
+    });
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  /** PUT /auth/profile：改昵称 / 清头像。回执直接来自服务端截断后的值。 */
+  async updateProfile(
+    fields: { displayName?: string | null; avatarUrl?: string | null },
+    requestId?: string,
+  ): Promise<AuthProfileResultV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request("/auth/profile", {
+      method: "PUT",
+      body: JSON.stringify(fields),
+    }, true, true, requestId);
+    const payload = (result.body ?? {}) as Record<string, unknown>;
+    const parsed = authProfileResultV1Schema.safeParse({
+      version: 1,
+      displayName: payload.displayName ?? null,
+      avatarUrl: payload.avatarUrl ?? null,
+    });
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    // 会话里缓存了旧 displayName，丢掉缓存让下次 getState 重读。
+    this.currentSession = null;
+    return parsed.data;
+  }
+
+  /** POST /uploads/avatars（multipart）：服务端在同一请求里完成 avatarUrl 持久化。 */
+  async uploadAvatar(
+    request: { fileName: string; mimeType: string; bytesBase64: string },
+    requestId?: string,
+  ): Promise<AvatarUploadResultV1> {
+    await this.ensureConnected(requestId);
+    const configuration = this.configuration;
+    if (!configuration) throw new DesktopGatewayFailure("configuration_error", "user_action");
+    const bytes = Buffer.from(request.bytesBase64, "base64");
+    if (bytes.byteLength === 0 || bytes.byteLength > AVATAR_MAX_BYTES) {
+      throw new DesktopGatewayFailure("validation", "user_action");
+    }
+    const form = new FormData();
+    form.set("file", new Blob([bytes], { type: request.mimeType }), request.fileName);
+    const headers = new Headers();
+    if (this.token) headers.set("Authorization", `Bearer ${this.token}`);
+    const controller = requestId ? new AbortController() : undefined;
+    if (requestId && controller) this.activeRequests.set(requestId, controller);
+    let response: Response;
+    try {
+      response = await fetch(new URL("/uploads/avatars", `${configuration.config.apiOrigin}/`), {
+        method: "POST",
+        headers,
+        body: form,
+        signal: controller?.signal,
+        redirect: "manual",
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new DesktopGatewayFailure("cancelled", "never", { localEffect: "request_cancelled" });
+      }
+      this.connection = { version: 1, kind: "api_unavailable" };
+      throw new DesktopGatewayFailure("api_unavailable", "safe_retry");
+    } finally {
+      if (requestId && controller && this.activeRequests.get(requestId) === controller) this.activeRequests.delete(requestId);
+    }
+    if (response.status >= 300 && response.status < 400 && response.status !== 304) {
+      this.connection = { version: 1, kind: "api_untrusted", reason: "wrong_service" };
+      throw new DesktopGatewayFailure("api_untrusted", "user_action");
+    }
+    let body: unknown = null;
+    try {
+      body = await response.json();
+    } catch {
+      body = null;
+    }
+    if (!response.ok && response.status === 401 && this.tokenIsRestored) {
+      await this.discardStoredCredential();
+    }
+    if (!response.ok) throw this.mapResponseError(response.status, response.headers, undefined, body);
+    const payload = (body ?? {}) as Record<string, unknown>;
+    const parsed = avatarUploadResultV1Schema.safeParse({
+      version: 1,
+      url: payload.url,
+      objectKey: payload.objectKey,
+    });
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  /** GET /uploads/{avatars/…}：头像原始字节，形状与来源图片字节通道一致。 */
+  async getAvatar(objectKey: string, requestId?: string): Promise<SourceImageGetResultV1> {
+    await this.ensureConnected(requestId);
+    if (!avatarObjectKeySchema.safeParse(objectKey).success) {
+      throw new DesktopGatewayFailure("validation", "user_action");
+    }
+    const result = await this.requestBinaryBytes(
+      `/uploads/${objectKey}`,
+      { method: "GET" },
+      { accept: "image/*", contentTypePrefix: "image/", maxBytes: AVATAR_MAX_BYTES },
+      requestId,
+    );
+    const mimeType = result.contentType.split(";")[0].trim();
+    if (!(SOURCE_IMAGE_MIME_TYPES as readonly string[]).includes(mimeType)) {
+      throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    }
+    const parsed = sourceImageGetResultV1Schema.safeParse({
+      version: 1,
+      mimeType,
+      imageBase64: Buffer.from(result.bytes).toString("base64"),
+      byteLength: result.bytes.byteLength,
+    });
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  /**
+   * POST /auth/leave-workspace：退出协作工作区。退出的是当前空间时，服务端会
+   * 撤销旧会话并签发个人空间的新令牌，这里像 switchWorkspace 一样保存它。
+   */
+  async leaveWorkspace(workspaceId: string, requestId?: string): Promise<SessionContextV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request("/auth/leave-workspace", {
+      method: "POST",
+      body: JSON.stringify({ workspaceId }),
+    }, true, true, requestId);
+    const body = (result.body ?? {}) as Record<string, unknown>;
+    if (body.switchedToPersonalWorkspace === true && typeof body.token === "string" && body.token.length > 0) {
+      this.token = body.token;
+      this.workspaceEpoch += 1;
+      await this.persistCredential(this.credentialPersistence === "safe_storage");
+    }
+    this.roomProjectionCache = null;
+    return this.loadSession(requestId);
+  }
+
+  /** PATCH /workspaces/:id/name：重命名自己的个人工作区。 */
+  async renameWorkspace(workspaceId: string, name: string, requestId?: string): Promise<RenameWorkspaceResultV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request(`/workspaces/${workspaceId}/name`, {
+      method: "PATCH",
+      body: JSON.stringify({ name }),
+    }, true, true, requestId);
+    const payload = (result.body ?? {}) as Record<string, unknown>;
+    const parsed = renameWorkspaceResultV1Schema.safeParse({
+      version: 1,
+      workspaceId: payload.workspaceId,
+      name: payload.name,
+    });
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    this.currentSession = null;
+    this.roomProjectionCache = null;
+    return parsed.data;
+  }
+
+  /** POST /invites（Owner）：token 只在这一次回执里出现。 */
+  async createInvite(
+    options: { role: "member" | "owner"; expiresInHours?: number },
+    requestId?: string,
+  ): Promise<InviteCreatedV1> {
+    await this.ensureConnected(requestId);
+    const body: Record<string, unknown> = { role: options.role };
+    if (options.expiresInHours !== undefined) body.expiresInHours = options.expiresInHours;
+    const result = await this.request("/invites", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }, true, true, requestId);
+    const payload = (result.body ?? {}) as Record<string, unknown>;
+    const parsed = inviteCreatedV1Schema.safeParse({
+      version: 1,
+      id: payload.id,
+      token: payload.token,
+      tokenHint: payload.tokenHint,
+      role: payload.role,
+      expiresAt: payload.expiresAt ?? null,
+    });
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  /** GET /invites（Owner）：邀请记录列表。 */
+  async listInvites(requestId?: string): Promise<InviteListResultV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request("/invites?limit=100", { method: "GET" }, true, true, requestId);
+    const payload = (result.body ?? {}) as { items?: unknown[]; total?: unknown };
+    const parsed = inviteListResultV1Schema.safeParse({
+      version: 1,
+      items: (payload.items ?? []).map((item) => {
+        const row = (item ?? {}) as Record<string, unknown>;
+        return {
+          version: 1,
+          id: row.id,
+          tokenHint: row.tokenHint,
+          role: row.role,
+          status: row.status,
+          createdAt: row.createdAt,
+          expiresAt: row.expiresAt ?? null,
+          consumedAt: row.consumedAt ?? null,
+          consumedByEmail: row.consumedBy ?? null,
+          revokedAt: row.revokedAt ?? null,
+        };
+      }),
+      total: payload.total,
+    });
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  /** DELETE /invites/:id（Owner）：服务端 204，回执在 main 侧拼。 */
+  async revokeInvite(inviteId: string, requestId?: string): Promise<{ revoked: true }> {
+    await this.ensureConnected(requestId);
+    await this.request(`/invites/${inviteId}`, { method: "DELETE" }, true, true, requestId);
+    return { revoked: true };
+  }
+
+  /** GET /members（Owner）：活跃成员列表。 */
+  async listMembers(requestId?: string): Promise<MemberListResultV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request("/members?limit=200", { method: "GET" }, true, true, requestId);
+    const payload = (result.body ?? {}) as { items?: unknown[]; total?: unknown };
+    const parsed = memberListResultV1Schema.safeParse({
+      version: 1,
+      items: (payload.items ?? []).map((item) => {
+        const row = (item ?? {}) as Record<string, unknown>;
+        return {
+          version: 1,
+          userId: row.userId,
+          email: row.email,
+          role: row.role,
+          joinedAt: row.joinedAt,
+        };
+      }),
+      total: payload.total,
+    });
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  /** DELETE /members/:userId（Owner）：移除成员，其会话立即失效。 */
+  async removeMember(userId: string, requestId?: string): Promise<{ removed: true }> {
+    await this.ensureConnected(requestId);
+    await this.request(`/members/${userId}`, { method: "DELETE" }, true, true, requestId);
+    return { removed: true };
+  }
+
+  /** POST /import/markdown（Owner，F-033 幂等）：完整笔记行不过桥，只报计数。 */
+  async importMarkdown(
+    items: ReadonlyArray<{ title?: string; content: string }>,
+    importId: string,
+    requestId?: string,
+  ): Promise<MarkdownImportResultV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request("/import/markdown", {
+      method: "POST",
+      body: JSON.stringify({ items, importId }),
+    }, true, true, requestId);
+    const payload = (result.body ?? {}) as Record<string, unknown>;
+    const parsed = markdownImportResultV1Schema.safeParse({
+      version: 1,
+      imported: payload.imported,
+      failed: Array.isArray(payload.errors) ? payload.errors.length : 0,
+    });
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  /** GET /search/drift（Owner，F-025）：只投影计数与结论。 */
+  async getSearchDrift(requestId?: string): Promise<SearchDriftResultV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request("/search/drift", { method: "GET" }, true, true, requestId);
+    const payload = (result.body ?? {}) as Record<string, unknown>;
+    const count = (value: unknown): number | undefined =>
+      Array.isArray(value) ? value.length : typeof value === "number" ? value : undefined;
+    const parsed = searchDriftResultV1Schema.safeParse({
+      version: 1,
+      hasDrift: payload.hasDrift,
+      ghosts: count(payload.ghosts),
+      missing: count(payload.missing),
+      stale: count(payload.staleTitles),
+    });
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  /** POST /search/reindex（Owner，F-011）：原子重建搜索投影。 */
+  async reindexSearch(requestId?: string): Promise<SearchReindexResultV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request("/search/reindex", { method: "POST", body: JSON.stringify({}) }, true, true, requestId);
+    const payload = (result.body ?? {}) as Record<string, unknown>;
+    const indexed = (payload.indexed ?? {}) as Record<string, unknown>;
+    const parsed = searchReindexResultV1Schema.safeParse({
+      version: 1,
+      deleted: payload.deleted,
+      indexedNotes: indexed.note,
+      indexedSources: indexed.source,
+      indexedObjectives: indexed.objective,
+      errors: payload.errors,
+      capped: payload.capped,
+    });
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  /** GET/PATCH /me/companion/answer-mode-preference：作答模态偏好（账号级）。 */
+  async getAnswerModePreference(requestId?: string) {
+    await this.ensureConnected(requestId);
+    const result = await this.request("/me/companion/answer-mode-preference", { method: "GET" }, true, true, requestId);
+    const parsed = companionAnswerModePreferenceV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  async setAnswerModePreference(
+    preference: "voice" | "silent" | "text" | "any",
+    requestId?: string,
+  ) {
+    await this.ensureConnected(requestId);
+    const result = await this.request("/me/companion/answer-mode-preference", {
+      method: "PATCH",
+      body: JSON.stringify({ version: 1, preference }),
+    }, true, true, requestId);
+    const parsed = companionAnswerModePreferenceV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
   }
 
   async listWorkspaces(requestId?: string): Promise<{ workspaces: WorkspaceSummaryV1[] }> {
@@ -1157,6 +1594,332 @@ export class DesktopGateway {
       requestId,
     );
     const parsed = companionAccountStateV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  // ─── 伴星聊天发送链路 + 语音转文本（2026-09-18 接线） ────────────────────
+  //
+  // 服务端契约（routes.ts / companion-voice-service.ts）早已就绪，桌面端此前
+  // 只有只读列表。这里的四个方法与渲染层 CompanionChatDrawer 构成完整链路：
+  // 录音 → 本地 SenseVoice（WASM）转写，本地引擎不可用才落到云通道；文本
+  // 或语音转写作为 turn 提交；回复靠 messages 轮询取回（SSE 是后续正规化路径）。
+
+  /**
+   * ensureConversation：复用最近一条 active dialogue，没有才新建。
+   * GET /companion/conversations?kind=dialogue&status=active&limit=1 → POST 兜底。
+   */
+  async ensureCompanionConversation(
+    _request: CompanionChatEnsureRequestV1,
+    requestId?: string,
+  ): Promise<CompanionChatEnsureResultV1> {
+    await this.ensureConnected(requestId);
+    const listResult = await this.request(
+      "/companion/conversations?kind=dialogue&status=active&limit=1",
+      { method: "GET" },
+      true,
+      true,
+      requestId,
+    );
+    const parsedList = companionConversationListV1Schema.safeParse(listResult.body);
+    if (!parsedList.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    const existing = parsedList.data.items[0];
+    if (existing) {
+      const parsed = companionChatEnsureResultV1Schema.safeParse({
+        version: 1,
+        conversation: existing,
+        created: false,
+      });
+      if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+      return parsed.data;
+    }
+    const createResult = await this.request(
+      "/companion/conversations",
+      { method: "POST", body: JSON.stringify({ version: 1, kind: "dialogue" }) },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionChatEnsureResultV1Schema.safeParse({
+      version: 1,
+      conversation: createResult.body,
+      created: true,
+    });
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  /** 发送一轮（POST /companion/conversations/:id/turns，Idempotency-Key 必填）。 */
+  async sendCompanionTurn(
+    request: CompanionChatSendTurnRequestV1,
+    requestId?: string,
+  ): Promise<CompanionChatSendTurnResultV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request(
+      `/companion/conversations/${request.conversationId}/turns`,
+      { method: "POST", body: JSON.stringify(request.turn), headers: { "Idempotency-Key": request.idempotencyKey } },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionChatSendTurnResultV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  /** 消息分页（GET /companion/conversations/:id/messages，升序返回）。 */
+  async listCompanionChatMessages(
+    request: CompanionChatListMessagesRequestV1,
+    requestId?: string,
+  ): Promise<CompanionChatListMessagesResultV1> {
+    await this.ensureConnected(requestId);
+    const query = new URLSearchParams();
+    if (request.limit != null) query.set("limit", String(request.limit));
+    if (request.beforeSeq != null) query.set("beforeSeq", String(request.beforeSeq));
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    const result = await this.request(
+      `/companion/conversations/${request.conversationId}/messages${suffix}`,
+      { method: "GET" },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionChatListMessagesResultV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  /** Existing LearningRun page adapter; no new HTTP shape is introduced. */
+  async getCompanionLearningRunContext(
+    runId: string,
+    requestId?: string,
+  ): Promise<CompanionLearningRunContextV1> {
+    await this.ensureConnected(requestId);
+    const safeRunId = uuidSchema.parse(runId);
+    const result = await this.request(
+      `/learning-runs/${safeRunId}/companion-context`,
+      { method: "GET" },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionLearningRunContextV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  /** Issues the server's existing five-minute, single-use grounded tutor grant. */
+  async createCompanionLearningRunContextGrant(
+    runId: string,
+    request: CreateCompanionLearningRunContextGrantRequestV1,
+    requestId?: string,
+  ): Promise<CompanionGroundedTutorGrantV1> {
+    await this.ensureConnected(requestId);
+    const safeRunId = uuidSchema.parse(runId);
+    const result = await this.request(
+      `/learning-runs/${safeRunId}/companion-context-grants`,
+      { method: "POST", body: JSON.stringify(request) },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionGroundedTutorGrantV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  /** 提案快照（GET /companion/proposals/:id）：确认卡数据源（含 payloadSha256）。 */
+  async getCompanionChatProposal(
+    request: CompanionChatProposalGetRequestV1,
+    requestId?: string,
+  ): Promise<CompanionChatProposalGetResultV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request(
+      `/companion/proposals/${request.proposalId}`,
+      { method: "GET" },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionChatProposalGetResultV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  /** 提案裁决（POST /companion/proposals/:id/decision，Idempotency-Key 必填）。 */
+  async decideCompanionChatProposal(
+    request: CompanionChatProposalDecideRequestV1,
+    requestId?: string,
+  ): Promise<CompanionChatProposalDecideResultV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request(
+      `/companion/proposals/${request.proposalId}/decision`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          version: 1,
+          proposalId: request.proposalId,
+          decision: request.decision,
+          idempotencyKey: request.idempotencyKey,
+          expectedPayloadSha256: request.expectedPayloadSha256,
+        }),
+        headers: { "Idempotency-Key": request.idempotencyKey },
+      },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionChatProposalDecideResultV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  /** agent 导航 route 轮询（GET /companion/conversations/:id/agent-routes?after=）。 */
+  async listCompanionAgentRoutes(
+    request: CompanionAgentRoutesListRequestV1,
+    requestId?: string,
+  ): Promise<CompanionAgentRoutesListResultV1> {
+    await this.ensureConnected(requestId);
+    const after = request.afterSeq != null ? String(request.afterSeq) : "0";
+    const result = await this.request(
+      `/companion/conversations/${request.conversationId}/agent-routes?after=${after}`,
+      { method: "GET" },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionAgentRoutesListResultV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  /**
+   * 过程节点留痕（GET /companion/conversations/:id/run-nodes?after=）。
+   *
+   * 与 listCompanionAgentRoutes 同形状的只读窗口：节点事件 + 每轮 run 摘要。
+   * payload 原样带回，由渲染层用与实时链路同一个收敛函数折成节点。
+   */
+  async listCompanionRunNodes(
+    request: CompanionRunNodesListRequestV1,
+    requestId?: string,
+  ): Promise<CompanionRunNodesListResultV1> {
+    await this.ensureConnected(requestId);
+    const after = request.afterSeq != null ? String(request.afterSeq) : "0";
+    const result = await this.request(
+      `/companion/conversations/${request.conversationId}/run-nodes?after=${after}`,
+      { method: "GET" },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionRunNodesListResultV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  /**
+   * 停止本轮（2026-09-19）：`POST /companion/runs/:id/cancel`。
+   *
+   * 服务端语义：首次 202、run 已是终态则 200 幂等——两者同一形状，客户端只看 status。
+   * 请求体沿用服务端 cancel schema（`generation` 做 CAS + `reason:'user'`），不自造字段。
+   */
+  async cancelCompanionChatRun(
+    request: CompanionChatCancelRunRequestV1,
+    requestId?: string,
+  ): Promise<CompanionChatCancelRunResultV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request(
+      `/companion/runs/${request.runId}/cancel`,
+      {
+        method: "POST",
+        body: JSON.stringify({ version: 1, generation: request.generation, reason: "user" }),
+      },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionChatCancelRunResultV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  /** 主动开场（切片④）：POST /companion/thoughts/:id/open，落她的开场消息。 */
+  async openCompanionThought(
+    request: CompanionChatOpenThoughtRequestV1,
+    requestId?: string,
+  ): Promise<CompanionChatOpenThoughtResultV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request(
+      `/companion/thoughts/${request.thoughtId}/open`,
+      { method: "POST", body: JSON.stringify({ version: 1 }) },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionChatOpenThoughtResultV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  /**
+   * 语音转文本（POST /voice/transcribe，purpose=companion_dialogue）。
+   * 复用 uploadNoteImage 的 multipart fetch 语义（request() 固定 JSON
+   * Content-Type，装不下 multipart）；服务端 magic-byte 校验后转 SiliconFlow。
+   */
+  async transcribeCompanionVoice(
+    request: CompanionVoiceTranscribeRequestV1,
+    requestId?: string,
+  ): Promise<CompanionVoiceTranscribeResultV1> {
+    await this.ensureConnected(requestId);
+    const configuration = this.configuration;
+    if (!configuration) throw new DesktopGatewayFailure("configuration_error", "user_action");
+    const bytes = Buffer.from(request.audioBase64, "base64");
+    if (bytes.byteLength === 0 || bytes.byteLength > COMPANION_VOICE_TRANSCRIBE_MAX_AUDIO_BYTES) {
+      throw new DesktopGatewayFailure("validation", "user_action");
+    }
+    const form = new FormData();
+    form.set("purpose", "companion_dialogue");
+    form.set("language", request.language);
+    form.set("durationMs", String(request.durationMs));
+    form.set("file", new Blob([bytes], { type: "audio/wav" }), "companion-input.wav");
+
+    const headers = new Headers();
+    if (this.token) headers.set("Authorization", `Bearer ${this.token}`);
+    const controller = requestId ? new AbortController() : undefined;
+    if (requestId && controller) this.activeRequests.set(requestId, controller);
+    let response: Response;
+    try {
+      response = await fetch(new URL("/voice/transcribe", `${configuration.config.apiOrigin}/`), {
+        method: "POST",
+        headers,
+        body: form,
+        signal: controller?.signal,
+        redirect: "manual",
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new DesktopGatewayFailure("cancelled", "never", { localEffect: "request_cancelled" });
+      }
+      this.connection = { version: 1, kind: "api_unavailable" };
+      throw new DesktopGatewayFailure("api_unavailable", "safe_retry");
+    } finally {
+      if (requestId && controller && this.activeRequests.get(requestId) === controller) this.activeRequests.delete(requestId);
+    }
+    if (response.status >= 300 && response.status < 400 && response.status !== 304) {
+      this.connection = { version: 1, kind: "api_untrusted", reason: "wrong_service" };
+      throw new DesktopGatewayFailure("api_untrusted", "user_action");
+    }
+    let body: unknown = null;
+    try {
+      body = await response.json();
+    } catch {
+      body = null;
+    }
+    if (!response.ok && response.status === 401 && this.tokenIsRestored) {
+      await this.discardStoredCredential();
+    }
+    if (!response.ok) throw this.mapResponseError(response.status, response.headers, undefined, body);
+    const parsed = companionVoiceTranscribeResultV1Schema.safeParse(body);
     if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
     return parsed.data;
   }
@@ -2013,6 +2776,104 @@ export class DesktopGateway {
     return stop;
   }
 
+  /**
+   * 伴星会话事件流（§5.3）：`GET /companion/conversations/:id/events`。
+   *
+   * 与 learningRun/cardGeneration 两条流同构（NOTIFY 唤醒 + 兜底轮询由服务端负责），
+   * 区别是这里转发**事件本身**而不是"有新版本了"的信号：回复的渐进显现与逐句开口
+   * 要求帧到即渲染，再让渲染层回查一次消息等于把流式的收益原路还回去。
+   *
+   * `eventCursor` 是订阅起点（seq 独占），来自回合响应的 `eventCursor`——从
+   * turn.accepted 之后开始收，不重放历史。断线以 `Last-Event-ID` 续传；
+   * 400/409（游标落在过期窗口）只允许重置为 0 重放一次，再失败即停流并报错，
+   * 由渲染层的消息快照兜底。
+   */
+  async watchCompanionConversationEvents(
+    conversationId: string,
+    eventCursor: number,
+    onEvent: (event: CompanionChatStreamEventV1) => void | Promise<void>,
+    onError?: (error: unknown) => void,
+  ): Promise<() => void> {
+    await this.ensureConnected();
+    const safeConversationId = this.safeUuid(conversationId);
+    const controller = new AbortController();
+    let closed = false;
+    let cursor = Number.isSafeInteger(eventCursor) && eventCursor >= 0 ? eventCursor : 0;
+    let resetOnce = false;
+    const stop = (): void => {
+      closed = true;
+      controller.abort();
+    };
+
+    const run = async (): Promise<void> => {
+      while (!closed) {
+        try {
+          const configuration = this.configuration;
+          if (!configuration) throw new DesktopGatewayFailure("configuration_error", "user_action");
+          const headers = new Headers({ Accept: "text/event-stream" });
+          if (this.token) headers.set("Authorization", `Bearer ${this.token}`);
+          // 服务端 cursor 取合法较大值：query `after` 与 Last-Event-ID 并存时以
+          // 大者为准（§5.3），两者给同一个值即可。
+          if (cursor > 0) headers.set("Last-Event-ID", `${safeConversationId}:${cursor}`);
+          const eventsUrl = new URL(
+            `/companion/conversations/${safeConversationId}/events`,
+            `${configuration.config.apiOrigin}/`,
+          );
+          eventsUrl.searchParams.set("after", String(cursor));
+          const response = await fetch(eventsUrl, {
+            method: "GET",
+            headers,
+            signal: controller.signal,
+            redirect: "manual",
+          });
+          if (response.status === 400 || response.status === 409) {
+            // INVALID_CURSOR / CURSOR_EXPIRED：窗口已过期，只能从头重放一次。
+            // 渲染层按 runId/generation 过滤，重放不会污染当前回合的呈现。
+            if (resetOnce) throw this.mapResponseError(response.status, response.headers);
+            resetOnce = true;
+            cursor = 0;
+            continue;
+          }
+          if (response.status >= 300 && response.status < 400) {
+            throw new DesktopGatewayFailure("api_untrusted", "user_action");
+          }
+          if (!response.ok) throw this.mapResponseError(response.status, response.headers);
+          const reader = response.body?.getReader();
+          if (!reader) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+          const decoder = new TextDecoder();
+          let buffer = "";
+          while (!closed) {
+            const chunk = await reader.read();
+            if (chunk.done) break;
+            buffer += decoder.decode(chunk.value, { stream: true });
+            const blocks = buffer.split(/\r?\n\r?\n/);
+            buffer = blocks.pop() ?? "";
+            for (const block of blocks) {
+              const event = parseCompanionSseFrame(block);
+              if (!event || event.seq <= cursor) continue;
+              cursor = event.seq;
+              await onEvent(event);
+            }
+          }
+          buffer += decoder.decode();
+          const tail = parseCompanionSseFrame(buffer);
+          if (tail && tail.seq > cursor) {
+            cursor = tail.seq;
+            await onEvent(tail);
+          }
+          if (!closed) await waitForStreamRetry(1000);
+        } catch (error) {
+          if (closed || (error instanceof Error && error.name === "AbortError")) return;
+          onError?.(error);
+          if (error instanceof DesktopGatewayFailure && ["api_untrusted", "auth_required", "reauth_required", "forbidden", "not_found", "unsupported_contract"].includes(error.code)) return;
+          await waitForStreamRetry(1000);
+        }
+      }
+    };
+    void run();
+    return stop;
+  }
+
   async startLearningRun(request: DesktopCreateLearningRunV2Request, commandId: string, requestId?: string): Promise<z.infer<typeof learningRunPublicSnapshotV2Schema>> {
     await this.ensureConnected(requestId);
     const body = { ...request, version: 2 as const, idempotencyKey: this.idempotencyKey("learningRun-start", commandId) };
@@ -2102,6 +2963,15 @@ export class DesktopGateway {
   async getLearningRunReturnContract(runId: string, requestId?: string): Promise<z.infer<typeof learningRunReturnContractV2Schema>> {
     const safeRunId = this.safeUuid(runId);
     return this.getLearningRunV2(safeRunId, `/learning-runs/${safeRunId}/return-contract/v2`, learningRunReturnContractV2Schema, requestId);
+  }
+
+  async revealLearningRunTarget(runId: string, requestId?: string): Promise<z.infer<typeof learningRunTargetRevealV2Schema>> {
+    await this.ensureConnected(requestId);
+    const safeRunId = this.safeUuid(runId);
+    const result = await this.request(`/learning-runs/${safeRunId}/reveal/v2`, { method: "POST", body: "{}" }, true, true, requestId);
+    const parsed = learningRunTargetRevealV2Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
   }
 
   async recordLearningRunActivityLease(runId: string, request: DesktopRecordLearningRunActivityLeaseRequestV2, requestId?: string): Promise<z.infer<typeof recordLearningRunActivityLeaseOutputV2Schema>> {

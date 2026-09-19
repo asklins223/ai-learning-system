@@ -19,9 +19,12 @@ import {
 import type { ReadContext } from "./companion-dialogue-store.ts";
 import {
   boundedToolCallIdentity,
+  runStreamingAgentStep,
   safeArgumentsHash,
   selectSkill,
 } from "./companion-agent-runtime.ts";
+import { CompanionStreamStoppedError } from "./companion-dialogue-stream.ts";
+import type { AIProvider } from "../lib/ai-provider.ts";
 
 const ALL_SKILLS = [
   "learning-context",
@@ -134,11 +137,18 @@ test("工具解析：guided 自动执行可逆低风险，其余写操作一律�
   assert.equal(canUseCompanionAgentTool("guided", focus).requiresConfirmation, false);
 });
 
-test("工具解析：full 权限仍对破坏性操作强制确认", () => {
+test("工具解析：full 权限 = 用户预授权，只有不可逆动作仍需确认", () => {
+  // 2026-09-19 对齐权限分级原设计：full 是用户的事前授权，consequential 不再
+  // 逐步确认（自动跳转/自动设置）；irreversible 仍是安全底线。
   const start = getCompanionAgentTool("companion_start_learning");
   assert.ok(start);
   assert.equal(start.requiresConfirmation, true);
   assert.deepEqual(canUseCompanionAgentTool("full", start), {
+    allowed: true,
+    requiresConfirmation: false,
+  });
+  // guided 档维持逐次确认（默认档必须保守）。
+  assert.deepEqual(canUseCompanionAgentTool("guided", start), {
     allowed: true,
     requiresConfirmation: true,
   });
@@ -196,4 +206,206 @@ test("Skill 清单自身满足预算上限", () => {
       assert.ok(definition.skillIds.includes(id), `${toolName} 未声明属于 ${id}`);
     }
   }
+});
+
+// ─── 单步流式执行的中止语义（2026-09-19 观察项修复；④-b 起覆盖每一步） ────
+//
+// runStreamingAgentStep 不依赖 DB（provider/onProviderDelta 全注入），这里锁住
+// 三条路径：正常完成、交付管线"说停"（返回 false）、交付管线**抛错**（落库事务
+// 异常/desync）。第三条是 2026-09-19 的修复：此前 rejection 被链尾吞掉，provider
+// 会白读到流尾才在 finish() 暴露失败。另加 ④-b 的两条：工具步能带回 tool_calls、
+// 分段符随本段第一个文本增量一起下发。
+
+function streamingStubProvider(deltas: string[], toolCalls?: unknown[]): {
+  provider: AIProvider;
+  state: { emitted: number; aborted: boolean };
+} {
+  const state = { emitted: 0, aborted: false };
+  const provider = {
+    id: "stub",
+    modelId: "stub-model",
+    visionModelId: "stub-model",
+    promptVersion: "test",
+    chatCompletion: async () => { throw new Error("not used"); },
+    executeAgentTurn: async () => { throw new Error("not used"); },
+    chatCompletionStream: async (
+      _messages: unknown,
+      _options: unknown,
+      signal: AbortSignal | undefined,
+      onDelta: (delta: string) => void,
+    ): Promise<{ content: string; toolCalls?: unknown[]; finishReason?: string }> => {
+      const onAbort = (): void => { state.aborted = true; };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      let content = "";
+      for (const delta of deltas) {
+        if (state.aborted || signal?.aborted) throw new Error("AI request aborted during stream");
+        onDelta(delta);
+        content += delta;
+        state.emitted += 1;
+        // 让 flushChain 的微任务链有机会运行——真实链路里是网络读的间隙。
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      if (state.aborted || signal?.aborted) throw new Error("AI request aborted during stream");
+      return toolCalls ? { content, toolCalls, finishReason: "tool_calls" } : { content };
+    },
+  } as unknown as AIProvider;
+  return { provider, state };
+}
+
+const STREAM_STEP_REQUEST = {
+  role: "companion_agent",
+  systemPrompt: "测试 system",
+  messages: [{ role: "user" as const, content: "打个招呼" }],
+  tools: [],
+  maxTokens: 700,
+  temperature: 0.9,
+};
+
+test("流式单步：JSON 信封被剥掉，交付管线只看到正文增量，返回完整原文", async () => {
+  // json_object 模式下模型吐的是 {"reply": "…"}；流式的可见内容必须是**正文**，
+  // 信封语法一个字符都不能漏给客户端（2026-09-19 实机缺主语的根因就在这条链路上）。
+  const deltas = ['{"reply": "', "你好", "呀，", "今天想学点", '什么？"}'];
+  const { provider, state } = streamingStubProvider(deltas);
+  const seen: string[] = [];
+  const result = await runStreamingAgentStep({
+    provider,
+    stepRequest: STREAM_STEP_REQUEST as never,
+    ctxSignal: new AbortController().signal,
+    timeoutMs: 5_000,
+    onProviderDelta: async (delta: string) => {
+      seen.push(delta);
+      return true;
+    },
+  });
+  // 返回值是**解码后的正文**（本轮回复的唯一事实来源）：下游不再按优先级从
+  // 原始 JSON 里挑键——那正是"流式内容与落库正文分叉"的来源。
+  assert.equal(result.content, "你好呀，今天想学点什么？");
+  assert.deepEqual(result.toolCalls, []);
+  assert.deepEqual(seen, ["你好", "呀，", "今天想学点", "什么？"]);
+  assert.equal(state.aborted, false);
+});
+
+test("流式单步：以 `[标签]` 开头的自然回复直通，头部一个字符都不能丢", async () => {
+  // 2026-09-19 收窄：头部嗅探初版只看首字符是否 `{`/`[`，于是以 `[empathetic]`
+  // 这类方括号开头的正常回复也会被送进 JSON 信封解码器——解不出形状就**一个字都
+  // 不下发**，那一轮会缺头（库里确有 `这么开心，是遇到什么有趣的事了吗？` /
+  // `呀。今天的学习状态怎么样？` 这类落库正文）。真实信封只有 `{` / `[{` / `["`
+  // 三种开头，数组里不会直接出现裸字母，所以 `[标签]` 必须走直通。
+  const deltas = ["[empathetic]", "，你已经", "很努力了呀。"];
+  const { provider, state } = streamingStubProvider(deltas);
+  const seen: string[] = [];
+  const result = await runStreamingAgentStep({
+    provider,
+    stepRequest: STREAM_STEP_REQUEST as never,
+    ctxSignal: new AbortController().signal,
+    timeoutMs: 5_000,
+    onProviderDelta: async (delta: string) => {
+      seen.push(delta);
+      return true;
+    },
+  });
+  // 头部原样下发（标签由下游 sanitizeCompanionVisibleText 统一剥离）。
+  assert.equal(result.content, "[empathetic]，你已经很努力了呀。");
+  assert.deepEqual(seen, ["[empathetic]", "，你已经", "很努力了呀。"]);
+  assert.equal(state.aborted, false);
+});
+
+test("流式单步（④-b）：带工具的一步把 tool_calls 一并带回，开场白仍下发", async () => {
+  // ④-b 的核心：SSE 里 delta.tool_calls 与 delta.content 并列，流式路径必须把
+  // 工具调用解析出来——否则"打开复习页"这类请求会变成"她说了句我去看看，
+  // 然后什么都没发生"。
+  const deltas = ["好，", "这就带你过去。"];
+  const { provider } = streamingStubProvider(deltas, [
+    { id: "call_1", name: "companion_open_review", arguments: {} },
+  ]);
+  const seen: string[] = [];
+  const result = await runStreamingAgentStep({
+    provider,
+    stepRequest: STREAM_STEP_REQUEST as never,
+    ctxSignal: new AbortController().signal,
+    timeoutMs: 5_000,
+    onProviderDelta: async (delta: string) => {
+      seen.push(delta);
+      return true;
+    },
+  });
+  assert.equal(result.content, "好，这就带你过去。");
+  assert.deepEqual(result.toolCalls, [{ id: "call_1", name: "companion_open_review", arguments: {} }]);
+  assert.equal(result.finishReason, "tool_calls");
+  assert.deepEqual(seen, ["好，", "这就带你过去。"]);
+});
+
+test("流式单步（④-b）：分段符随本段第一个文本增量一起下发（与最终正文拼接口径一致）", async () => {
+  const { provider } = streamingStubProvider(["根据你的笔记，", "今天有三张卡要复习。"]);
+  const seen: string[] = [];
+  await runStreamingAgentStep({
+    provider,
+    stepRequest: STREAM_STEP_REQUEST as never,
+    ctxSignal: new AbortController().signal,
+    timeoutMs: 5_000,
+    separatorBefore: "\n\n",
+    onProviderDelta: async (delta: string) => {
+      seen.push(delta);
+      return true;
+    },
+  });
+  assert.deepEqual(seen, ["\n\n根据你的笔记，", "今天有三张卡要复习。"]);
+});
+
+test("流式单步（④-b）：本段没有文本时不下发分段符（最终正文也不会空出一段）", async () => {
+  const { provider } = streamingStubProvider([], [
+    { id: "call_1", name: "companion_read_context", arguments: {} },
+  ]);
+  const seen: string[] = [];
+  await runStreamingAgentStep({
+    provider,
+    stepRequest: STREAM_STEP_REQUEST as never,
+    ctxSignal: new AbortController().signal,
+    timeoutMs: 5_000,
+    separatorBefore: "\n\n",
+    onProviderDelta: async (delta: string) => {
+      seen.push(delta);
+      return true;
+    },
+  });
+  assert.deepEqual(seen, []);
+});
+
+test("流式单步：交付管线说停（返回 false）→ 立即中断读取，抛 CompanionStreamStoppedError", async () => {
+  const deltas = ['{"reply": "', "第一段", "第二段", "第三段", "第四段", '"}'];
+  const { provider, state } = streamingStubProvider(deltas);
+  await assert.rejects(
+    runStreamingAgentStep({
+      provider,
+      stepRequest: STREAM_STEP_REQUEST as never,
+      ctxSignal: new AbortController().signal,
+      timeoutMs: 5_000,
+      onProviderDelta: async (delta: string) => delta !== "第二段",
+    }),
+    (error: unknown) => error instanceof CompanionStreamStoppedError,
+  );
+  assert.equal(state.aborted, true, "底层请求必须被中断");
+  assert.ok(state.emitted < deltas.length, "不得继续消费剩余增量");
+});
+
+test("流式单步：交付管线抛错（落库异常）→ 同样立即中断，不再白读到流尾", async () => {
+  const deltas = ['{"reply": "', "第一段", "第二段", "第三段", "第四段", "第五段", '"}'];
+  const { provider, state } = streamingStubProvider(deltas);
+  await assert.rejects(
+    runStreamingAgentStep({
+      provider,
+      stepRequest: STREAM_STEP_REQUEST as never,
+      ctxSignal: new AbortController().signal,
+      timeoutMs: 5_000,
+      onProviderDelta: async (delta: string) => {
+        if (delta === "第二段") throw new Error("companion delta stream desync: written=1 expected=2");
+        return true;
+      },
+    }),
+    (error: unknown) => error instanceof CompanionStreamStoppedError,
+  );
+  // 观察项修复的核心断言：抛错路径与"说停"路径行为一致——abort 及时触发，
+  // 后续增量不再进入 provider 读取循环。
+  assert.equal(state.aborted, true, "底层请求必须被中断");
+  assert.ok(state.emitted < deltas.length, "不得继续消费剩余增量");
 });

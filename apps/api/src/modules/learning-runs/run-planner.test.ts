@@ -55,9 +55,9 @@ test("planRun：恰好一个 Task，text 主 Variant + voice 备选，闭包完�
   assert.equal(task.purpose, "formal");
   assert.equal(task.templateTrustCeiling, "mastery_eligible");
   assert.equal(plan.primaryVariant.interaction.kind, "text_response");
-  assert.equal(plan.alternativeVariant.interaction.kind, "voice_teachback");
+  assert.equal(plan.alternativeVariants[0].interaction.kind, "voice_teachback");
   // 两个 variant 都有独立 private/safety/disclosure 闭包
-  for (const variant of [plan.primaryVariant, plan.alternativeVariant]) {
+  for (const variant of [plan.primaryVariant, plan.alternativeVariants[0]]) {
     const closure = plan.closures[variant.variantId];
     assert.ok(closure, `closure for ${variant.variantId}`);
     assert.equal(closure.solution.kind, "open_response");
@@ -99,7 +99,7 @@ test("planRun：goal 映射 intent（clarify→paraphrase、transfer→apply、e
 test("planRun：responsePreference=voice 时主 Variant 为 voice", () => {
   const plan = planRun(target, { ...baseOptions(), responsePreference: "voice" });
   assert.equal(plan.primaryVariant.interaction.kind, "voice_teachback");
-  assert.equal(plan.alternativeVariant.interaction.kind, "text_response");
+  assert.equal(plan.alternativeVariants[0].interaction.kind, "text_response");
 });
 
 test("planRun：确定性可重放（同输入同 runId 时 hash 一致）", () => {
@@ -217,15 +217,15 @@ function makeViewInput(): RunViewInput {
         alternativeFamily: null,
       },
       {
-        id: plan.alternativeVariant.variantId,
+        id: plan.alternativeVariants[0].variantId,
         taskId: task.taskId,
         purpose: "formal",
         templateTrustCeiling: "mastery_eligible",
         estimatedActiveSeconds: task.estimatedActiveSeconds,
-        interaction: plan.alternativeVariant.interaction,
-        publicPayloadHash: plan.alternativeVariant.publicPayloadHash,
-        inputSchemaHash: plan.alternativeVariant.inputSchemaHash,
-        disclosureProfileHash: plan.alternativeVariant.disclosureProfileHash,
+        interaction: plan.alternativeVariants[0].interaction,
+        publicPayloadHash: plan.alternativeVariants[0].publicPayloadHash,
+        inputSchemaHash: plan.alternativeVariants[0].inputSchemaHash,
+        disclosureProfileHash: plan.alternativeVariants[0].disclosureProfileHash,
         revision: 1,
         status: "standby",
         alternativeFamily: null,
@@ -276,14 +276,14 @@ test("§7.8 题面轮换：hash 纳入题面 prompt，不同角度 → 不同 pu
   // 无 avoid 集：两次都用第一个角度 → hash 相同（确定性）。
   assert.equal(planA.primaryVariant.publicPayloadHash, planB.primaryVariant.publicPayloadHash);
   // 同角度下 text/voice 备选 hash 不同（interaction 不同）。
-  assert.notEqual(planA.primaryVariant.publicPayloadHash, planA.alternativeVariant.publicPayloadHash);
+  assert.notEqual(planA.primaryVariant.publicPayloadHash, planA.alternativeVariants[0].publicPayloadHash);
 });
 
 test("§7.8 题面轮换：avoid 集包含当前角度时选未呈现角度", () => {
   const first = planRun(target, baseOptions());
   const avoid = new Set([
     first.primaryVariant.publicPayloadHash,
-    first.alternativeVariant.publicPayloadHash,
+    first.alternativeVariants[0].publicPayloadHash,
   ]);
   const rotated = planRun(target, { ...baseOptions(), recentPublicPayloadHashes: avoid });
   assert.notEqual(
@@ -292,8 +292,8 @@ test("§7.8 题面轮换：avoid 集包含当前角度时选未呈现角度", ()
     "rotate 后主 Variant hash 必须变化",
   );
   assert.notEqual(
-    rotated.alternativeVariant.publicPayloadHash,
-    first.alternativeVariant.publicPayloadHash,
+    rotated.alternativeVariants[0].publicPayloadHash,
+    first.alternativeVariants[0].publicPayloadHash,
   );
   // 新角度生成的不同 prompt（不可能是同义词替换的相同 hash）。
   assert.notEqual(rotated.tasks[0].prompt, first.tasks[0].prompt);
@@ -304,7 +304,7 @@ test("§7.8 题面轮换：角度池耗尽时复用第一个（候选耗尽语�
   const collected: string[] = [];
   for (let i = 0; i < 3; i += 1) {
     const plan = planRun(target, { ...baseOptions(), recentPublicPayloadHashes: new Set(collected) });
-    collected.push(plan.primaryVariant.publicPayloadHash, plan.alternativeVariant.publicPayloadHash);
+    collected.push(plan.primaryVariant.publicPayloadHash, plan.alternativeVariants[0].publicPayloadHash);
   }
   const exhausted = planRun(target, { ...baseOptions(), recentPublicPayloadHashes: new Set(collected) });
   assert.equal(

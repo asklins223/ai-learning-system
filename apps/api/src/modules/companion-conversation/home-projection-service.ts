@@ -404,10 +404,14 @@ async function readProactiveCue(
     if (typeof text !== "string") continue;
     const trimmed = text.trim();
     if (trimmed.length === 0 || trimmed.length > 200) continue;
+    // 念头管线切片④：systemEventId 形如 "thought:<uuid>" 时气泡可点击开场。
+    const systemEventId = (payload as Record<string, unknown>).systemEventId;
+    const thoughtMatch = typeof systemEventId === "string" ? /^thought:([0-9a-fA-F-]{36})$/.exec(systemEventId) : null;
     return {
       text: trimmed,
       expiresAt: row.expiresAt.toISOString(),
       revision: row.inboxSequence,
+      ...(thoughtMatch ? { thoughtId: thoughtMatch[1] } : {}),
     };
   }
   return null;

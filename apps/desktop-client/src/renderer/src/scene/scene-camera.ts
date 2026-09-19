@@ -36,7 +36,6 @@ export const SCENE_CAMERA_PRESETS: Readonly<Record<ViewPresetId, SceneCameraPres
   room: { label: "房间总览", scale: 1, xPercent: 0, yPercent: 0 },
   study: { label: "研究册近景", scale: 1.12, xPercent: 0, yPercent: -3.5 },
   notebook: { label: "笔记近景", scale: 1.13, xPercent: 1.5, yPercent: -4 },
-  card: { label: "学习卡近景", scale: 1.15, xPercent: -2.5, yPercent: -4.5 },
   "card-generation": { label: "卡片生成近景", scale: 1.15, xPercent: -2.5, yPercent: -4.5 },
   review: { label: "复习近景", scale: 1, xPercent: 0, yPercent: 0 },
   search: { label: "档案墙总览", scale: 1, xPercent: 0, yPercent: 0 },

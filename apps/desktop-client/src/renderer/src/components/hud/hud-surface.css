@@ -30,7 +30,6 @@
 .task-surface--note-library,
 .task-surface--notebook { background-image: url("/assets/approved-v3/environments/writing-day-v1.png"); }
 .task-surface--study,
-.task-surface--card,
 .task-surface--card-generation,
 .task-surface--objective-library,
 .task-surface--objective-detail { background-image: url("/assets/approved-v3/environments/workshop-day-v1.png"); }
@@ -46,7 +45,6 @@
 .task-surface--note-library::after,
 .task-surface--notebook::after,
 .task-surface--study::after,
-.task-surface--card::after,
 .task-surface--card-generation::after,
 .task-surface--objective-library::after,
 .task-surface--objective-detail::after,
@@ -68,7 +66,6 @@
 .desktop-app[data-theme="night"] .task-surface--note-library,
 .desktop-app[data-theme="night"] .task-surface--notebook { background-image: url("/assets/approved-v3/environments/writing-night-v1.png"); }
 .desktop-app[data-theme="night"] .task-surface--study,
-.desktop-app[data-theme="night"] .task-surface--card,
 .desktop-app[data-theme="night"] .task-surface--card-generation,
 .desktop-app[data-theme="night"] .task-surface--objective-library,
 .desktop-app[data-theme="night"] .task-surface--objective-detail { background-image: url("/assets/approved-v3/environments/workshop-night-v1.png"); }
@@ -156,7 +153,6 @@
   .study-card,
   .evidence-slip,
   .day-route,
-  .record-strip,
   .card-deck,
   .queue-reason,
   .assessment-sheet,
@@ -184,34 +180,90 @@
   transition: left 420ms var(--hud-ease-out), right 420ms var(--hud-ease-out);
 }
 
-.desktop-app.hud-surface .companion-presence .speech {
-  top: 6px;
+/* 伴星内容气泡已迁移到 companion-bubble.css（.companion-page-cue /
+   .companion-bubble）。这里不再保留针对旧 .speech 的定位规则。 */
+
+/* ---------------------------------------------------------------------------
+ * 动态伴星座位（全部任务界面，2026-09-19）
+ *
+ * 注册表只决定“这一页的伴星坐哪边”，不决定“伴星此刻在不在场”。版心的预留
+ * 必须跟着在场状态走：`.companion-absent`（临时隐藏 / 账号关闭 / Live2D 不可用 /
+ * 注册表 hidden）由 companion 运行时发布到 `.desktop-app`，缺席即恢复
+ * “无伴星”几何（与 `.no-comp` 同值），在场时维持各页原有的固定预算：
+ *
+ *   右侧座位页          right: 245px   → 缺席 88px
+ *   左侧座位页(.comp-left) left: 365px  → 缺席 88px
+ *   wide 版心(16/17)     right: 245px   → 缺席 55px（.content.full 原值）
+ *   星图(19)             seat-gutter 340px → 缺席 0（见 understanding-universe.css）
+ *
+ * 过渡时长对齐 `.companion-scene-anchor` 的座位迁移，版心与角色同步让位/归位。
+ * ------------------------------------------------------------------------- */
+.desktop-app.hud-surface .content {
+  transition: left 420ms var(--hud-ease-out), right 420ms var(--hud-ease-out);
+}
+/* 右侧座位页缺席：恢复 88px。:not(.drawer-open) 让聊天抽屉的 405px/205px
+   预留继续优先；:not(.page-19) 让星图的全出血版心（inset:0）不受影响。 */
+.desktop-app.hud-surface.companion-absent:not(.drawer-open):not(.page-19) .content {
+  right: 88px;
+}
+/* 左侧座位页（11 目标详情 / 15 复习队列）缺席：撤销 365px 左预留，回到 V3.1
+   基线 128px（hud-pages.css 的 `.hud-surface .content{left:128px}`）。
+   :not(.page-19)：星图是全出血版心，座位让位走它自己的 seat-gutter。 */
+.desktop-app.hud-surface.comp-left.companion-absent:not(.page-19) .content {
+  left: 128px;
+}
+/* 折叠栏把左基线从 128px 收到 92px，左侧座位页缺席同样回到折叠基线。 */
+.desktop-app.hud-surface.nav-collapsed.comp-left.companion-absent:not(.page-19) .content {
+  left: 92px;
+}
+@media (max-width: 760px) {
+  .desktop-app.hud-surface.companion-absent:not(.drawer-open):not(.page-19) .content {
+    right: 44px;
+  }
+  .desktop-app.hud-surface.comp-left.companion-absent:not(.page-19) .content {
+    left: 64px;
+  }
+  .desktop-app.hud-surface.nav-collapsed.comp-left.companion-absent:not(.page-19) .content {
+    left: 46px;
+  }
 }
 
-.desktop-app.hud-surface.comp-left .companion-presence .speech {
-  left: 0;
-  right: auto;
+/* WorkspaceLibrary（10 理解目标 / 11 目标详情）走 `.approved-surface__content`
+   壳，同一动态机制、同一注册表座位；注意这套壳的「无伴星」基线与 `.content`
+   不同：默认 right:88 / left:88，折叠左座 22px，窄窗 44/64px。壳自带 560ms
+   过渡，无需另加。 */
+.desktop-app.hud-surface.companion-absent .approved-surface__content {
+  right: 88px;
+}
+.desktop-app.hud-surface.comp-left.companion-absent .approved-surface__content {
+  left: 88px;
+}
+.desktop-app.hud-surface[data-directory-rail="collapsed"].comp-left.companion-absent .approved-surface__content {
+  left: 22px;
+}
+@media (max-width: 760px) {
+  .desktop-app.hud-surface.companion-absent .approved-surface__content { right: 44px; }
+  .desktop-app.hud-surface.comp-left.companion-absent .approved-surface__content { left: 64px; }
+  .desktop-app.hud-surface[data-directory-rail="collapsed"].comp-left.companion-absent .approved-surface__content { left: 11px; }
 }
 
-.desktop-app.hud-surface:not(.comp-left) .companion-presence .speech {
-  right: 0;
-  left: auto;
+/* Wide 版心页（16 理解练习 / 17 练习结果）：注册表给它们的座位在右侧，但
+   `.content.full` 只有 55px 边距，半身 Mao 会直接压住右下角的作答卡与操作坞。
+   伴星在场时按右侧座位页同款 245px 预算收窄版心；缺席时恢复全宽（与上面的
+   通用缺席规则同特异性，靠声明顺序在其后取胜）。 */
+.desktop-app.hud-surface.page-16 .content.full,
+.desktop-app.hud-surface.page-17 .content.full {
+  right: 245px;
 }
-
-/* Home V2 uses a compact live character rather than the mockup's oversized
-   static cutout. Lift its one-line HUD bubble above the head so the character
-   never paints over the copy while still keeping the bubble anchored to Mao. */
-.desktop-app[data-home-scene-variant="v2"] .companion-presence[data-surface="room"] .speech {
-  top: clamp(-80px, -8vh, -48px);
-  right: -8px;
-  z-index: 4;
-  width: min(220px, 28vw);
+.desktop-app.hud-surface.page-16.companion-absent .content.full,
+.desktop-app.hud-surface.page-17.companion-absent .content.full {
+  right: 55px;
 }
-
-/* The whisper panel is the surface-aware companion copy; the HUD bubble carries
-   the one-line mockup script and stays out of its way. */
-.desktop-app.hud-surface .companion-presence[data-whisper-open="true"] .speech {
-  display: none;
+@media (max-width: 760px) {
+  .desktop-app.hud-surface.page-16 .content.full,
+  .desktop-app.hud-surface.page-17 .content.full { right: 124px; }
+  .desktop-app.hud-surface.page-16.companion-absent .content.full,
+  .desktop-app.hud-surface.page-17.companion-absent .content.full { right: 28px; }
 }
 
 /* ---------------------------------------------------------------------------
@@ -569,6 +621,17 @@
   place-items: center;
 }
 
+/* 紧凑视口下折叠目录与返回 pill 合体：mockup 给的 102px 定宽装不下
+   「返回书房」四个字（46px 引导位 + 10px 图标 + 10px 间距 + 28px 文本），
+   标签被折成两行塞进 27px 高的 pill。让 pill 按内容取宽，标签不再折行。 */
+@media (max-width: 760px) {
+  .hud-surface.nav-collapsed .return-home {
+    width: auto;
+    padding-right: 10px;
+    white-space: nowrap;
+  }
+}
+
 /* ---------------------------------------------------------------------------
  * Page-body layout the mockup expresses with fixed sample content but real
  * records need to scroll inside the same paper.
@@ -814,79 +877,63 @@
    and one card for the selected section. The ported stylesheet owns all of that;
    these are the pieces the mockup's static sample never had to show. */
 
-/* The mockup's `write-line` is a drawn ledger line, so a real dropdown inside it
-   has to look like the line rather than like a form control. */
-.hud-surface .write-line--select {
-  display: inline-flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-width: 108px;
-  cursor: pointer;
-}
-.hud-surface .write-line--select select {
-  flex: 1;
-  min-width: 0;
-  padding: 0;
-  color: inherit;
-  border: 0;
-  outline: 0;
-  background: transparent;
-  font: inherit;
-  appearance: none;
-  cursor: pointer;
-}
-.hud-surface .write-line--select svg { width: 13px; height: 13px; flex: none; opacity: 0.7; }
-.hud-surface .write-line--select:focus-within { border-color: rgba(96, 72, 51, 0.48); background: rgba(255, 255, 255, 0.62); }
-.hud-surface .write-line--select:has(select:disabled) { opacity: 0.55; cursor: not-allowed; }
-
-/* A section that has no preference of its own shows its reading note under the
-   rows instead of crowding the last choice. */
-.hud-surface .settings-note { margin: 13px 0 0; }
-
 /* The card's own action row, where the mockup puts 切换空间 / 保存设置. This
    client applies every setting as it changes and has no server-side settings
-   write, so the row carries only actions the product can actually honour. */
+   write, so the row carries only actions the product can actually honour.
+   It stays in flow: the body above it is the flexible item, so the row is
+   pinned to the bottom edge anyway — and a notice that grows a fourth line
+   pushes it down instead of sliding underneath it. */
 .hud-surface .settings-actions {
-  position: absolute;
-  right: 29px;
-  bottom: 24px;
-  left: 29px;
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 10px;
   flex-wrap: wrap;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--hud-line);
+  flex: none;
 }
 .hud-surface .settings-actions .small { margin-right: auto; max-width: 40ch; }
 
 /* The preference card is a column: tag, title, a body that takes whatever room
-   is left, and the action row pinned to the bottom edge. The body scrolls inside
-   that column, so a long section can never run underneath the anchored row and
-   no section depends on a hand-measured height. */
+   is left, then the notice and the action row. The body scrolls inside that
+   column, so a long section can never run underneath the footer. */
 .hud-surface .settings-card.preference {
   display: flex;
   flex-direction: column;
-  padding-bottom: 70px;
 }
-/* As a flex column, the card's own tag would stretch to the full width. */
-.hud-surface .settings-card.preference > .tag { align-self: flex-start; }
+.hud-surface .settings-card.preference > .title {
+  flex: none;
+  margin: 0 0 16px;
+  text-wrap: balance;
+}
+/* `overflow: auto` is the card's own scroll container, so it owns the scrollbar.
+   It deliberately does not reserve a gutter: reserving one insets the right edge
+   by the scrollbar's width even when nothing overflows, which pushes the rows out
+   of the card's symmetric 29px padding and is visible on every section that fits.
+   The thin scrollbar the platform draws on demand is the lesser cost. */
 .hud-surface .settings-card.preference > .settings-body {
   flex: 1 1 auto;
   min-height: 0;
+  /* Mao's three-button rail sits just inside the companion seat. Without a
+     content safe-area, right-aligned switches and the onboarding action run
+     underneath those buttons even though the paper itself still fits. */
+  padding-right: 54px;
   overflow: auto;
-  padding-right: 5px;
   scrollbar-color: rgba(79, 57, 39, 0.34) transparent;
   scrollbar-width: thin;
-  scrollbar-gutter: stable;
 }
 
 /* A section taller than the card keeps scrolling, but a sliced row reads as a
    broken layout rather than as more content. The fade only appears while there
    really is something below, and the flag is measured, never assumed. */
-.hud-surface .settings-card.preference > .settings-body[data-overflow="true"] {
+.hud-surface .settings-card.preference > .settings-body[data-has-more="true"] {
   mask-image: linear-gradient(to bottom, #000 calc(100% - 22px), rgba(0, 0, 0, 0.15) 100%);
 }
+
+/* 设置区按钮都是短标签（保存/复制/撤销…）：窄卡里宁可占满一行也不把字竖着断。 */
+.hud-surface .settings-body .button { white-space: nowrap; }
 
 /* `overflow-wrap` because an export confirmation carries an absolute file path,
    which has no break opportunity of its own. */
@@ -909,21 +956,121 @@
    a control block over a capability list, a data-boundary diagram, and an
    inventory of what the workspace holds. */
 
-/* Grouped preferences (account): a heading, its rows, a rule. */
-.hud-surface .settings-group + .settings-group { margin-top: 15px; padding-top: 13px; border-top: 1px solid var(--hud-line); }
+/* ── Vertical rhythm ───────────────────────────────────────────────────────
+   One rule for every top-level block in the card, whatever the block is: the
+   identity strip, a group, a control block, a pair of columns, a capability
+   list. The old `A + B` pairings could only ever cover the pairs somebody
+   remembered to write, which is how the identity strip ended up welded to the
+   group under it and a capability list ended up welded to the group after it.
+   The two notices are the card's own voice, not a block, so they set their own
+   spacing. */
+.hud-surface .settings-body > * + *:not(.settings-notice):not(.settings-notice-paper),
+.hud-surface .settings-account-column > * + * {
+  margin-top: 15px;
+  padding-top: 13px;
+  border-top: 1px solid var(--hud-line);
+}
+
+/* 目录标题在 158px 列里就差几个像素放不下「想调整哪一块？」，断出一个孤字
+   行；移植版给它的左右 5px margin 在左对齐文本下没有作用，收掉即单行。
+   紧凑列（79px）仍放不下，`text-wrap: balance` 让两行均匀，不剩孤字。 */
+.hud-surface .settings-menu h2 {
+  margin: 0 0 14px;
+  font-size: 18px;
+  text-wrap: balance;
+}
+.hud-surface .settings-menu button {
+  min-height: 40px;
+  margin: 2px 0;
+  padding: 9px 11px;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+/* A group is a heading and whatever it owns: a row list, the theme plates, the
+   boundary diagram, the inventory tiles. The heading owns the gap above the
+   content, so it reads the same whatever follows it — before this, a group
+   opening on a list sat 20px under its title and a group opening on a choice row
+   sat 9px under it. */
 .hud-surface .settings-group__title {
-  margin: 0 0 9px;
+  margin: 0 0 10px;
   color: var(--hud-soft);
   font-size: 9px;
   font-weight: 800;
   letter-spacing: 0.08em;
 }
-.hud-surface .settings-group .choice-row:first-of-type { margin-top: 0; }
+.hud-surface .settings-group > .settings-group__title + * { margin-top: 0; }
+/* 伴星因缺少工作区 AI 同意停摆时，会把读者送到「签署状态」卡并让它闪一下
+   （2026-09-19）。一次性引导：动画跑完自己停，类由渲染层在 4.2s 后移除
+   （时长与 settings-surface 的 SETTINGS_ATTENTION_MS 成对，改一处要改两处）。 */
+@keyframes settings-attention-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(255, 214, 140, 0); }
+  16% { box-shadow: 0 0 0 4px rgba(255, 214, 140, 0.45); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 214, 140, 0); }
+}
+.hud-surface .settings-group--attention {
+  border-radius: 12px;
+  animation: settings-attention-pulse 4.2s ease-out 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .hud-surface .settings-group--attention {
+    animation: none;
+    outline: 1px solid rgba(255, 214, 140, 0.5);
+    outline-offset: 3px;
+  }
+}
+.hud-surface .settings-group__note {
+  margin: 0 0 10px;
+  color: var(--hud-soft);
+  font-size: 10px;
+  line-height: 1.55;
+}
+.hud-surface .settings-group__note--after { margin: 10px 0 0; }
+
+/* Account and workspace used to be two independent papers beside the directory,
+   while every other category used one. One stable paper prevents the whole page
+   from changing geometry when the reader switches category; the split now lives
+   inside the body, where it expresses the actual “space / person” relationship. */
+.hud-surface .settings-account-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.94fr) minmax(0, 1.06fr);
+  gap: 24px;
+  align-items: start;
+}
+.hud-surface .settings-account-column { min-width: 0; }
+.hud-surface .settings-account-column .space-identity {
+  margin: 0;
+}
+.hud-surface .settings-account-column .space-identity h3 {
+  margin: 0 0 4px;
+  font: 680 18px/1.3 "Noto Serif SC", "Songti SC", serif;
+  letter-spacing: -0.02em;
+}
+
+.hud-surface .settings-inline-state {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 11px 12px;
+  border: 1px solid rgba(96, 72, 51, 0.22);
+  border-radius: 14px 18px 13px 16px;
+  background: rgba(255, 255, 255, 0.28);
+}
+.hud-surface .settings-inline-state[data-tone="error"] {
+  border-color: rgba(175, 82, 44, 0.34);
+  background: #f3e0d6;
+  color: #7d3a20;
+}
+.hud-surface .settings-inline-state > span { min-width: 0; }
+.hud-surface .settings-inline-state b { display: block; font: 650 12px/1.4 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .settings-inline-state small { display: block; margin-top: 2px; color: inherit; font-size: 10px; line-height: 1.5; opacity: 0.82; overflow-wrap: anywhere; }
 
 /* Membership (members): who you are, then the spaces that answer to it. */
+/* 身份条本来为角色标签留了第三列；那一列已经删掉，网格跟着收成两列。 */
 .hud-surface .settings-identity {
   display: grid;
-  grid-template-columns: 58px minmax(0, 1fr) auto;
+  grid-template-columns: 58px minmax(0, 1fr);
   gap: 13px;
   align-items: center;
   padding: 14px 15px;
@@ -940,10 +1087,28 @@
   color: #fff8e8;
   font: 700 19px "Noto Serif SC", "Songti SC", serif;
 }
+/* 用户上传的头像与首字母印章同位同尺寸，占满那一格。 */
+.hud-surface .settings-identity__avatar {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: block;
+}
 .hud-surface .settings-identity b { display: block; font: 650 14px/1.3 "Noto Serif SC", "Songti SC", serif; }
 .hud-surface .settings-identity small { display: block; margin-top: 3px; color: var(--hud-soft); font-size: 9px; }
 
-.hud-surface .settings-ledger { display: grid; gap: 4px; margin: 13px 0 0; }
+.hud-surface .settings-ledger { display: grid; gap: 5px; margin: 13px 0 0; }
+/* 每行是「切换行 + 行内退出按钮」的两列小格：退出是行内操作，不另起一行。
+   按钮居中而不是拉伸——紧凑视口里说明文字换行会把行撑高，拉伸会让退出
+   变成一枚与行等高的竖长胶囊。 */
+.hud-surface .settings-ledger__item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; }
+.hud-surface .settings-ledger__leave { min-height: 0; padding: 0 11px; font-size: 10px; }
+.hud-surface .settings-ledger__leave:disabled { cursor: default; opacity: 0.72; }
+/* 设置页里用 label 包 file input 当按钮：光标跟随可用性。 */
+.hud-surface label.button { cursor: pointer; }
+.hud-surface label.button:has(> input:disabled) { cursor: default; }
+.hud-surface label.button[data-disabled="true"] { cursor: not-allowed; opacity: 0.52; }
 .hud-surface .settings-ledger__row {
   display: grid;
   grid-template-columns: 26px minmax(0, 1fr) auto;
@@ -959,16 +1124,17 @@
   cursor: pointer;
   transition: background-color 150ms ease, transform 150ms var(--hud-ease-out);
 }
-.hud-surface .settings-ledger__row:hover:not(:disabled) { background: rgba(255, 255, 255, 0.62); transform: translateX(2px); }
-.hud-surface .settings-ledger__row[aria-current="true"] { background: var(--hud-butter); }
+.hud-surface .settings-ledger__row:hover:not(:disabled):not([aria-current="true"]) { background: rgba(255, 255, 255, 0.62); transform: translateX(2px); }
+.hud-surface .settings-ledger__row[aria-current="true"] { background: var(--hud-butter); cursor: default; }
 .hud-surface .settings-ledger__row:disabled { cursor: default; opacity: 0.72; }
+/* 与身份印章、空间印章同一个绿：同一枚字母泥印在一页里不该有三种底色。 */
 .hud-surface .settings-ledger__seal {
   display: grid;
   place-items: center;
   width: 26px;
   height: 26px;
   border-radius: 50%;
-  background: #6f8b73;
+  background: #52644f;
   color: #fff8e8;
   font-size: 11px;
   font-weight: 700;
@@ -987,7 +1153,7 @@
   text-align: left;
   border: 3px solid transparent;
   border-radius: 20px 24px 18px 22px;
-  background: rgba(255, 255, 255, 0.4);
+  background: rgba(255, 255, 255, 0.34);
   cursor: pointer;
   transition: transform 160ms var(--hud-ease-out), border-color 160ms ease, background-color 160ms ease;
 }
@@ -1016,7 +1182,23 @@
   box-shadow: 0 3px 7px rgba(45, 28, 17, 0.28);
 }
 
-/* Control block + capability list (companion). */
+/* 目录行与主题卡是这一页仅有的两处位移反馈，两者都要服从「动效等级」和系统的
+   减少动效偏好：上面写着关掉动效，这里就不能还在动。 */
+@media (prefers-reduced-motion: reduce) {
+  .hud-surface .settings-ledger__row,
+  .hud-surface .settings-theme { transition: none; }
+  .hud-surface .settings-ledger__row:hover:not(:disabled):not([aria-current="true"]),
+  .hud-surface .settings-theme:hover { transform: none; }
+}
+.task-surface[data-motion-mode="off"] .settings-ledger__row,
+.task-surface[data-motion-mode="off"] .settings-theme { transition: none; }
+.task-surface[data-motion-mode="off"] .settings-ledger__row:hover:not(:disabled):not([aria-current="true"]),
+.task-surface[data-motion-mode="off"] .settings-theme:hover { transform: none; }
+
+/* Control block (companion, account, members): a head and the field it owns. */
+/* members 面板以一个 block 开场：它是正文第一个孩子，不吃 block 自身的
+   margin-top，否则这一栏比其他分区整体低 11px 起步。 */
+.hud-surface .settings-body > .settings-block:first-child { margin-top: 0; }
 .hud-surface .settings-block {
   margin-top: 11px;
   padding: 11px 13px;
@@ -1024,27 +1206,121 @@
   background: rgba(255, 255, 255, 0.34);
 }
 .hud-surface .settings-block__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.hud-surface .settings-block__title { display: flex; align-items: flex-start; gap: 10px; }
-/* A group that follows a block — or a finished pair of columns — needs the same
-   separation two stacked groups get. */
-.hud-surface .settings-block + .settings-group,
-.hud-surface .settings-columns + .settings-group { margin-top: 15px; padding-top: 13px; border-top: 1px solid var(--hud-line); }
+/* 块头说明之后接输入行：间距走体系，不再写内联 marginTop。 */
+.hud-surface .settings-block__head + .hud-field { margin-top: 10px; }
 .hud-surface .settings-block__head b { display: block; font: 650 12px/1.3 "Noto Serif SC", "Songti SC", serif; }
 .hud-surface .settings-block__head p { margin: 3px 0 0; color: var(--hud-soft); font-size: 9px; line-height: 1.5; }
+.hud-surface .settings-field { display: grid; gap: 6px; margin-top: 10px; }
+.hud-surface .settings-form .settings-field { margin-top: 0; }
+.hud-surface .settings-field__label {
+  color: var(--hud-soft);
+  font-size: 10px;
+  font-weight: 750;
+}
 
-.hud-surface .settings-capabilities { display: grid; gap: 5px; margin-top: 12px; }
-.hud-surface .settings-capability {
-  display: grid;
-  grid-template-columns: 22px minmax(0, 1fr) auto;
-  gap: 9px;
+.hud-surface .settings-disclosure {
+  border-top: 1px solid var(--hud-line);
+  border-bottom: 1px solid var(--hud-line);
+}
+.hud-surface .settings-disclosure > summary {
+  display: flex;
   align-items: center;
-  padding: 7px 10px;
+  justify-content: space-between;
+  min-height: 48px;
+  padding: 8px 2px;
+  cursor: pointer;
+  list-style: none;
+}
+.hud-surface .settings-disclosure > summary::-webkit-details-marker { display: none; }
+.hud-surface .settings-disclosure > summary:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+  border-radius: 10px;
+}
+.hud-surface .settings-disclosure > summary::after {
+  content: "+";
+  flex: none;
+  color: var(--hud-soft);
+  font-size: 18px;
+  line-height: 1;
+}
+.hud-surface .settings-disclosure[open] > summary::after { content: "−"; }
+.hud-surface .settings-disclosure > summary b { display: block; font: 650 12px/1.35 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .settings-disclosure > summary small { display: block; margin-top: 2px; color: var(--hud-soft); font-size: 9px; }
+.hud-surface .settings-disclosure > .settings-form,
+.hud-surface .settings-disclosure > .settings-rows { margin: 0 0 12px; }
+
+/* ── Rows ──────────────────────────────────────────────────────────────────
+   The card's one row object. A consent toggle, a capability chip, a roster
+   entry and a ledger value are all drawn here, so a row can never drift from
+   its neighbours in padding, in the gap before its control, or in whether the
+   title is serif 12px or sans 11px. `mark` is optional: lists that carry a
+   drawn glyph set it, label/value pairs leave it out and start at the card's
+   edge. */
+.hud-surface .settings-rows { display: grid; gap: 5px; margin-top: 10px; }
+.hud-surface .settings-rows--split { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px 14px; }
+.hud-surface .settings-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
   border-radius: 15px 19px 14px 17px;
   background: rgba(255, 255, 255, 0.34);
 }
-.hud-surface .settings-capability__mark { display: grid; place-items: center; color: #5f7a5d; }
-.hud-surface .settings-capability b { display: block; font-size: 11px; font-weight: 700; }
-.hud-surface .settings-capability small { display: block; margin-top: 2px; color: var(--hud-soft); font-size: 9px; }
+/* 三格各自落位：自动布局会把无 mark 行的控件放进中间的弹性轨——宽行里控件
+   不贴右，窄列长文案里弹性轨被压成 0，按钮整个溢出卡片边缘。 */
+.hud-surface .settings-row__mark { grid-column: 1; display: grid; place-items: center; color: #5f7a5d; }
+.hud-surface .settings-row__body { grid-column: 2; display: block; min-width: 0; }
+.hud-surface .settings-row__control { grid-column: 3; display: inline-flex; align-items: center; justify-content: flex-end; gap: 7px; flex-wrap: wrap; }
+.hud-surface .settings-row b { display: block; font: 650 12px/1.35 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .settings-row small { display: block; margin-top: 2px; color: var(--hud-soft); font-size: 10px; line-height: 1.5; }
+
+.hud-surface .settings-invite-receipt {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, auto) auto;
+  gap: 10px;
+  align-items: center;
+  margin-top: 8px;
+  padding: 11px 12px;
+  border-radius: 15px 19px 14px 17px;
+  background: var(--hud-butter);
+}
+.hud-surface .settings-invite-receipt b { display: block; font: 650 12px/1.35 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .settings-invite-receipt small { display: block; margin-top: 2px; color: var(--hud-soft); font-size: 9px; }
+.hud-surface .settings-invite-receipt code {
+  min-width: 0;
+  padding: 7px 9px;
+  overflow: auto hidden;
+  border: 1px solid rgba(96, 72, 51, 0.2);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.42);
+  color: var(--hud-ink);
+  font: 600 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  user-select: all;
+  white-space: nowrap;
+}
+
+/* A stacked form of fields (display name, password, invite code) — not a list of
+   rows, so it keeps a field's own spacing rather than the row list's 5px. */
+.hud-surface .settings-form { display: grid; gap: 9px; margin-top: 10px; }
+
+/* The file inputs behind 「更换…」/「选择文件…」 are a channel, not a control: the
+   label is what the reader sees. Visually hidden rather than `display: none`, so
+   the input stays focusable and the label is reachable from the keyboard. */
+.hud-surface .settings-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+/* 文件输入被视觉隐藏后，焦点落在输入上，环要画在读者看见的那个按钮上；只在
+   键盘来源时出现（`:focus-visible`），并且用全站焦点色，不另起一套蓝色。 */
+.hud-surface label.button:has(> input:focus-visible) {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+}
 
 /* Data boundary (data): what leaves the workspace, drawn as the path it takes. */
 .hud-surface .settings-boundary {
@@ -1052,7 +1328,6 @@
   grid-template-columns: minmax(0, 1fr) 24px minmax(0, 1fr) 24px minmax(0, 1fr);
   gap: 5px;
   align-items: center;
-  margin-top: 13px;
   padding: 15px 13px;
   border-radius: 22px 27px 19px 25px;
   background: rgba(255, 255, 255, 0.34);
@@ -1076,21 +1351,8 @@
 .hud-surface .settings-boundary__node--stop span { background: #f3e0d6; border-color: rgba(175, 82, 44, 0.34); }
 .hud-surface .settings-boundary__arrow { display: grid; place-items: center; color: var(--hud-soft); }
 
-.hud-surface .settings-consent-list { display: grid; gap: 5px; margin-top: 11px; }
-.hud-surface .settings-consent-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: center;
-  padding: 9px 11px;
-  border-radius: 15px 19px 14px 17px;
-  background: rgba(255, 255, 255, 0.34);
-}
-.hud-surface .settings-consent-row b { display: block; font-size: 11px; font-weight: 700; }
-.hud-surface .settings-consent-row small { display: block; margin-top: 2px; color: var(--hud-soft); font-size: 9px; line-height: 1.5; }
-/* The right-hand cell holds either a status chip, an action, or a switch with
-   its own busy tag, so it is a row rather than a bare control. */
-.hud-surface .settings-consent-row__control { display: inline-flex; align-items: center; gap: 7px; }
+/* 台账行里的小图标：以前是内联的 marginRight/verticalAlign，写死的数字散在 JSX 里。 */
+.hud-surface .write-line__icon { margin-right: 6px; vertical-align: -2px; }
 
 .hud-surface .settings-notice-paper {
   margin-top: 12px;
@@ -1103,14 +1365,14 @@
 }
 
 /* Inventory (management): what the workspace actually holds, as tiles. */
-.hud-surface .settings-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; margin-top: 12px; }
+.hud-surface .settings-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; margin-top: 10px; }
 .hud-surface .settings-stat {
   display: grid;
   gap: 4px;
   justify-items: center;
   padding: 13px 8px;
   border-radius: 18px 22px 16px 20px;
-  background: rgba(255, 255, 255, 0.4);
+  background: rgba(255, 255, 255, 0.34);
   text-align: center;
 }
 .hud-surface .settings-stat b { font: 680 24px/1 "Noto Serif SC", "Songti SC", serif; color: #4c664f; }
@@ -1118,15 +1380,25 @@
 .hud-surface .settings-stat[data-loading="true"] b { color: var(--hud-soft); }
 
 @media (max-width: 900px), (max-height: 660px) {
-  .hud-surface .settings-group + .settings-group { margin-top: 7px; padding-top: 6px; }
-  .hud-surface .settings-group__title { margin-bottom: 4px; font-size: 5px; }
-  .hud-surface .settings-theme__plate { height: 34px; }
-  .hud-surface .settings-stat b { font-size: 12px; }
-  .hud-surface .settings-identity { grid-template-columns: 28px minmax(0, 1fr) auto; gap: 6px; padding: 6px 7px; }
-  .hud-surface .settings-identity__seal { width: 26px; height: 26px; font-size: 10px; }
-  .hud-surface .settings-boundary { padding: 7px 6px; grid-template-columns: minmax(0, 1fr) 12px minmax(0, 1fr) 12px minmax(0, 1fr); }
-  .hud-surface .settings-boundary__node span { min-height: 24px; font-size: 5px; }
-  .hud-surface .settings-capability { grid-template-columns: 14px minmax(0, 1fr) auto; gap: 5px; padding: 4px 5px; }
+  .hud-surface .settings-body > * + *:not(.settings-notice):not(.settings-notice-paper),
+  .hud-surface .settings-account-column > * + * { margin-top: 10px; padding-top: 9px; }
+  .hud-surface .settings-group__title { margin-bottom: 7px; font-size: 9px; }
+  .hud-surface .settings-theme__plate { height: 44px; }
+  .hud-surface .settings-stat { padding: 10px 7px; }
+  .hud-surface .settings-stat b { font-size: 18px; }
+  .hud-surface .settings-identity { grid-template-columns: 38px minmax(0, 1fr); gap: 9px; padding: 9px 10px; }
+  .hud-surface .settings-identity__seal,
+  .hud-surface .settings-identity__avatar { width: 36px; height: 36px; }
+  .hud-surface .settings-identity__seal { font-size: 13px; }
+  .hud-surface .settings-account-column .space-identity h3 { font-size: 14px; }
+  .hud-surface .settings-boundary { padding: 9px 8px; grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr) 16px minmax(0, 1fr); }
+  .hud-surface .settings-boundary__node span { min-height: 34px; font-size: 9px; }
+  .hud-surface .settings-boundary__node b,
+  .hud-surface .settings-boundary__node small { font-size: 8px; }
+  .hud-surface .settings-row { gap: 8px; padding: 8px 9px; }
+  .hud-surface .settings-row b { font-size: 11px; }
+  .hud-surface .settings-row small { font-size: 9px; }
+  .hud-surface .settings-ledger__leave { padding: 0 9px; font-size: 9px; }
 }
 
 /* Loading and failure replace the cards with a single surface so the directory
@@ -1142,32 +1414,79 @@
 .hud-surface .settings-columns {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px 20px;
+  gap: 15px 20px;
   align-items: start;
 }
-/* A cell that starts a column never carries the between-group rule, and a column
-   that stacks two groups draws that rule inside itself instead. */
-.hud-surface .settings-columns > * { margin-top: 0; padding-top: 0; border-top: 0; }
-.hud-surface .settings-columns > .settings-column {
-  display: grid;
-  align-content: start;
-  gap: 13px;
-  min-width: 0;
-}
-.hud-surface .settings-column > .settings-group + .settings-group { padding-top: 13px; border-top: 1px solid var(--hud-line); }
-/* The capability list reads better as two short columns once the card is wide. */
-.hud-surface .settings-capabilities--split { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px 14px; }
+/* A cell in the grid is separated from its neighbour by the gap, never by the
+   stacked-block rule: a bare group in the second cell must not grow the rule
+   just because it happens to follow a group in the markup. */
+.hud-surface .settings-columns > * { min-width: 0; margin: 0; padding: 0; border: 0; }
+
 @media (max-width: 1100px) {
-  .hud-surface .settings-capabilities--split { grid-template-columns: minmax(0, 1fr); }
+  .hud-surface .settings-rows--split { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (max-width: 1100px) {
-  .hud-surface .settings-columns { grid-template-columns: minmax(0, 1fr); gap: 13px; }
+  .hud-surface .settings-columns { grid-template-columns: minmax(0, 1fr); gap: 15px; }
 }
 
 @media (max-width: 900px), (max-height: 660px) {
-  .hud-surface .settings-hud[data-layout="single"] { grid-template-columns: 79px minmax(0, 1fr); }
-  .hud-surface .settings-columns { gap: 5px; }
+  /* The generated reference sheet halves every setting control at its compact
+     breakpoint. That works for a static thumbnail, not for an interactive
+     settings centre at 200% display scaling. Keep the paper compact while
+     preserving readable labels and real pointer targets. */
+  .hud-surface .settings-hud[data-layout="single"] { grid-template-columns: 112px minmax(0, 1fr); gap: 9px; }
+  .hud-surface .settings-menu { padding: 10px 8px; border-width: 2px; }
+  .hud-surface .settings-menu h2 { margin: 2px 3px 8px; font-size: 14px; }
+  .hud-surface .settings-menu button { min-height: 34px; margin: 1px 0; padding: 7px 8px; font-size: 10px; }
+  .hud-surface .settings-card { padding: 15px 17px; border-width: 2px; }
+  .hud-surface .settings-card.preference > .title { margin-bottom: 11px; font-size: 17px; }
+  .hud-surface .settings-card .small,
+  .hud-surface .settings-card .meta { font-size: 9px; }
+  .hud-surface .settings-card .button { min-height: 32px; padding: 0 11px; font-size: 10px; }
+  .hud-surface .settings-card .tag { padding: 4px 7px; font-size: 9px; }
+  .hud-surface .settings-card .switch { width: 42px; height: 24px; padding: 2px; }
+  .hud-surface .settings-card .switch i { width: 20px; height: 20px; }
+  .hud-surface .settings-card .switch.on i { transform: translateX(18px); }
+  .hud-surface .settings-columns { gap: 10px; }
+}
+
+@media (max-width: 760px) {
+  /* At the app's 720 × 405 compact contract a vertical directory consumes the
+     very width that settings rows need. It becomes a scrollable category rail;
+     the selected paper retains the rest of the viewport and scrolls internally. */
+  .hud-surface .settings-hud[data-layout="single"] {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: 8px;
+  }
+  .hud-surface .settings-menu {
+    display: flex;
+    gap: 5px;
+    align-items: center;
+    overflow: auto hidden;
+    padding: 6px;
+    border-radius: 17px 21px 16px 19px;
+    scrollbar-width: thin;
+  }
+  .hud-surface .settings-menu h2 { display: none; }
+  .hud-surface .settings-menu button {
+    flex: 0 0 auto;
+    width: auto;
+    min-height: 32px;
+    margin: 0;
+    padding: 6px 10px;
+    white-space: nowrap;
+  }
+  .hud-surface .settings-card--state { grid-column: auto; }
+  .hud-surface .settings-card.preference > .settings-body { padding-right: 50px; }
+  .hud-surface .settings-account-grid { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .hud-surface .settings-account-column + .settings-account-column {
+    padding-top: 12px;
+    border-top: 1px solid var(--hud-line);
+  }
+  .hud-surface .settings-invite-receipt { grid-template-columns: minmax(0, 1fr) auto; }
+  .hud-surface .settings-invite-receipt > div { grid-column: 1 / -1; }
 }
 
 /* Source detail: the parsed fragment types the mockup's sample text never had
@@ -1268,7 +1587,6 @@
 .hud-surface .active-map,
 .hud-surface .goal-stack,
 .hud-surface .day-route,
-.hud-surface .record-strip,
 .hud-surface .queue-reason,
 .hud-surface .card-press,
 .hud-surface .study-card,
@@ -1458,12 +1776,11 @@
   transform: scaleX(1);
 }
 
-/* The trigger rides in the pill's own slot box, so a collapsed island is one
-   circle at the exact spot the mockup pill's right end occupies. */
+/* The trigger is the pill's own last slot in the flow: collapsed, it is the
+   single circle at the exact spot the mockup pill's right end occupies; it
+   never leaves that spot, so clicking it again collapses the island. */
 .hud-surface .room-control .room-control-trigger {
-  position: absolute;
-  top: 5px;
-  right: 5px;
+  position: relative;
   display: grid;
   width: 38px;
   height: 38px;
@@ -1521,10 +1838,11 @@
   box-shadow: none;
 }
 
-/* Expanded, the trigger gives its spot back to the pill's own last slot. */
+/* Expanded, the trigger keeps its seat and becomes the collapse control: the
+   icon swaps to double chevrons (TSX), the seal just brightens a touch. */
 .hud-surface .room-control[data-expanded="true"] .room-control-trigger {
-  opacity: 0;
-  pointer-events: none;
+  border-color: rgba(255, 244, 226, 0.34);
+  background: rgba(35, 32, 30, 0.9);
 }
 
 /* The slots ride the same morph: sealed away while collapsed, in 65ms behind
@@ -1626,11 +1944,9 @@
 }
 
 /* The generated compact pill (≤760px) shrinks to 29px with 23px slots; the
-   trigger has to shrink with it or it would overflow the seal. */
+   trigger rides the same slot sizing. */
 @media (max-width: 760px) {
   .hud-surface .room-control .room-control-trigger {
-    top: 3px;
-    right: 3px;
     width: 23px;
     height: 23px;
   }
@@ -2015,8 +2331,13 @@
 }
 
 /* The mockup draws the tabs as decorative spans; the client needs real buttons,
-   so the geometry moves to the button and the span keeps the mockup's skin. */
+   so the geometry moves to the button and the span keeps the mockup's skin.
+   `inline-flex` makes the button's box the span's box: the default anonymous
+   button layout measured 2px shorter than the span it wrapped, leaving the
+   label painting outside the hit target. */
 .hud-surface .memory-tabs button {
+  display: inline-flex;
+  align-items: center;
   padding: 0;
   color: inherit;
   font-family: inherit;
@@ -2063,7 +2384,9 @@
 }
 
 .hud-surface .diary-entry__top b { min-width: 0; }
-.hud-surface .diary-entry__top time { flex: none; color: #9fb6bb; font-size: 8px; }
+/* `time` 之外，人格卡与预设卡把「安静 / 适度 / 活跃」放在同一列：
+   同一版式，但只有真正的时间才配 `<time>` 语义。 */
+.hud-surface .diary-entry__top :is(time, .entry-flag) { flex: none; color: #9fb6bb; font-size: 8px; }
 .hud-surface .diary-entry__body {
   display: -webkit-box;
   overflow: hidden;
@@ -2072,6 +2395,12 @@
 }
 
 .hud-surface .diary-entry.is-selected .diary-entry__body { -webkit-line-clamp: 4; }
+
+/* 记忆正文里会出现没有断点的长英文串（笔记名、URL、标识符）：
+   中文按自然断行没问题，长拉丁串必须允许在任意字符处折行，
+   否则会把 258px 的卡面横向撑破。 */
+.hud-surface .diary-entry__body,
+.hud-surface .diary-entry__top b { overflow-wrap: anywhere; }
 
 /* Honest empty and pending notes inside the card. */
 .hud-surface .record-empty {
@@ -2099,6 +2428,18 @@
   line-height: 1.55;
 }
 
+/* 分节标题，不是脚注：人格与日记里把一屏内容串起来的行（活跃度、边界、
+   预设、原话）此前借用了 record-foot 的弱化样式，层级倒置 —— 标题比它的
+   内容还轻。这里给它们自己的样式：比脚注大一号、亮一档，节前多留空。 */
+.hud-surface .record-heading {
+  flex: none;
+  margin: 14px 0 0;
+  color: #b9ced2;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.5;
+}
+
 .hud-surface .record-chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 2px 0 8px; }
 
 .hud-surface .record-chips button {
@@ -2121,6 +2462,10 @@
 .hud-surface .record-chips button:hover { background: rgba(255, 255, 255, 0.15); }
 .hud-surface .record-chips button.is-on:hover { background: var(--hud-butter); }
 .hud-surface .record-chips button:focus-visible { outline: 2px solid rgba(255, 244, 214, 0.75); outline-offset: 2px; }
+
+/* 与星图 legend / 记忆带同一种计数排版：数字是标签后的一个弱化粗体，
+   而不是和标签混排的普通文本 —— 两处是同一份筛选词汇表。 */
+.hud-surface .record-chips button b { font-weight: 700; opacity: 0.75; }
 
 /* Diary counts and persona tags read as small ledger facts, not as prose. */
 .hud-surface .record-facts {
@@ -2634,6 +2979,7 @@
   overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
+  overflow-wrap: anywhere;
 }
 
 .hud-surface .memory-focus__meta { color: #6f5d4e; font-size: 8.5px; line-height: 1.6; }
@@ -2713,6 +3059,32 @@
 .hud-surface .record-search input::placeholder { color: #8ba3a8; }
 .hud-surface .record-search:focus-within { box-shadow: inset 0 0 0 1px rgba(243, 214, 120, 0.5); }
 
+/* 第 18 页对 `input[type=search]` 的同一裁决：UA 自绘的 ✕ 不属于这套设计，
+   而且空态文案明确让用户「清空搜索词」，所以给一颗同语言的清除钮补上位。 */
+.hud-surface .record-search input::-webkit-search-cancel-button,
+.hud-surface .record-search input::-webkit-search-decoration {
+  appearance: none;
+  display: none;
+}
+
+.hud-surface .record-search__clear {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  color: #a9c2c7;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.1);
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.hud-surface .record-search__clear:hover { color: #eef3ea; background: rgba(255, 255, 255, 0.2); }
+.hud-surface .record-search__clear:focus-visible { outline: 2px solid rgba(255, 244, 214, 0.75); outline-offset: 1px; }
+
 /* The retry beside the failure it belongs to, instead of a page-level reload. */
 .hud-surface .record-retry {
   display: inline-flex;
@@ -2785,9 +3157,25 @@
 .hud-surface .record-switches button:disabled { opacity: 0.55; cursor: default; }
 .hud-surface .record-switches button:focus-visible { outline: 2px solid rgba(255, 244, 214, 0.75); outline-offset: 2px; }
 
-.hud-surface .diary-days { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; margin: 2px 0 9px; }
+/* 日期条是一条日历：一行、按时间序、箭头收在两端。换行会把 7 天折成两三排、
+   让「后一天」孤悬在末行尾，所以放不下时横向滚动 —— 键盘聚焦时浏览器会把
+   离屏的日期滚进视野。两侧的负 margin 抵消内边距，焦点环不进滚动裁剪区。 */
+.hud-surface .diary-days {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 3px;
+  margin: 0 -2px 7px;
+  padding: 2px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+
+.hud-surface .diary-days::-webkit-scrollbar { display: none; }
 
 .hud-surface .diary-days button {
+  flex: none;
   padding: 3px 6px;
   color: #a9c2c7;
   font-family: inherit;
@@ -2873,6 +3261,7 @@
   .hud-surface .record-empty { font-size: 5.5px; padding: 6px; }
   .hud-surface .record-empty b { font-size: 7px; }
   .hud-surface .record-foot { font-size: 5px; }
+  .hud-surface .record-heading { font-size: 6px; margin-top: 9px; }
   .hud-surface .record-chips button,
   .hud-surface .record-retry,
   .hud-surface .diary-days button { font-size: 5px; padding: 2px 4px; }
@@ -2903,6 +3292,7 @@
   .hud-surface .persona-presets button,
   .hud-surface .persona-reset button,
   .hud-surface .record-retry,
+  .hud-surface .record-search__clear,
   .hud-surface button.diary-entry { transition: none; }
   .hud-surface .memory-field .star-node:hover i { transform: none; }
 }
@@ -2988,77 +3378,6 @@
 .hud-surface .current-note .note-shelf-actions .button { position: static; }
 
 /* ---------------------------------------------------------------------------
- * Today's route (mockup 14): the mockup pins three sample tickets and a sample
- * ledger on a fixed canvas. The real page raises up to three real stops, so a
- * ticket becomes the control itself and every string is as long as the record
- * behind it — clamped and scrollable instead of overflowing the paper.
- * ------------------------------------------------------------------------- */
-
-.hud-surface button.task-ticket {
-  display: block;
-  appearance: none;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.hud-surface button.task-ticket strong,
-.hud-surface .task-ticket small { overflow-wrap: anywhere; }
-
-/* A stop is a pointer, not the content: a long title clamps rather than pushing
-   the route past the paper. Opening the stop shows the whole text. */
-.hud-surface .task-ticket strong {
-  display: -webkit-box;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 4;
-}
-
-.hud-surface .task-ticket small {
-  display: -webkit-box;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-}
-
-/* The pill inside a ticket is the mockup's own decoration; the ticket is the
-   control, so the pill never becomes a second hit target. */
-.hud-surface button.task-ticket .button { pointer-events: none; }
-
-.hud-surface button.task-ticket:focus-visible {
-  outline: 3px solid rgba(57, 103, 132, 0.42);
-  outline-offset: 3px;
-}
-
-/* One stop is not a route, so the guide line only appears when the reader has
-   somewhere to walk next. */
-.hud-surface .day-route[data-ticket-count="0"] .day-line,
-.hud-surface .day-route[data-ticket-count="1"] .day-line { display: none; }
-
-/* The route's loading / empty / failure paper sits on the band the tickets and
-   the ledger leave free. */
-.hud-surface .day-route__state {
-  position: absolute;
-  top: 170px;
-  right: 310px;
-  bottom: 24px;
-  left: 66px;
-  display: grid;
-  place-items: center;
-  padding: 0 24px;
-}
-
-.hud-surface .record-strip {
-  overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(79, 57, 39, 0.42) transparent;
-}
-
-.hud-surface .record-strip .tag { margin-bottom: 4px; }
-.hud-surface .record-strip .record-entry { overflow-wrap: anywhere; }
-
-/* ---------------------------------------------------------------------------
  * Review queue (mockup 15): the mockup writes the reason slip by hand. The real
  * slip is folded out of the queue, so it is allowed to grow and scroll, and the
  * front card keeps the mockup's action row clear of its own text.
@@ -3077,6 +3396,12 @@
 }
 
 .hud-surface .deck-card.front > .surface-data-state { flex: 1 1 auto; }
+
+/* 边界卡（载入中/出错/空）没有动作行：为动作行预留的底部高度只会把
+   居中的状态块顶离卡面中心（状态块自身是 place-content:center）。把底垫
+   收回与顶边对称，三种状态才真正居中。:has 的高特异性让它同时压过宽窗
+   与缩放带里为动作行写的 padding-bottom。 */
+.hud-surface .deck-card.front:has(> .surface-data-state) { padding-bottom: 37px; }
 
 /* The mockup's question is one hand-written line; a real concept label or public
    summary is as long as its own record, so it clamps above the action row. */
@@ -3097,10 +3422,11 @@
 }
 
 /* The mockup writes the action row inline; the integration layer owns it so the
-   narrow layout can move it together with the card. */
+   narrow layout can move it together with the card. left/right 43px 对齐卡片
+   自身的 43px 内边距：按钮与正文共用同一条左边缘。 */
 .hud-surface .deck-card.front .actions {
   position: absolute;
-  left: 42px;
+  left: 43px;
   bottom: 31px;
 }
 
@@ -3247,23 +3573,23 @@
 
 /* 位置进度：深色是"看到第几张"，浅色是"已经读进来多少"，底槽是服务端确认的
    总数。三者都不额外请求。 */
-/* 位置条坐在正面那张卡正下方，和卡片同宽：卡叠下面是房间的照片，裸的进度槽在
-   画面上根本看不出边界，所以它自己带一张纸。 */
+/* 位置条坐在正面那张卡**正下方**，和卡片同宽。它是牌堆网格的第二行（卡全在
+   1/1），跟着牌堆一起居中 —— 之前钉在列底 bottom:3px，列一比牌堆高，它就和
+   卡片脱开一大截，提示文字悬在桌面上。 */
 .hud-surface .deck-foot {
-  position: absolute;
-  right: 0;
-  bottom: 3px;
-  left: 0;
+  grid-row: 2;
   display: flex;
   align-items: center;
   gap: 10px;
   width: var(--deck-card-w);
   height: 21px;
-  margin: 0 auto;
+  margin: 10px auto 0;
   padding: 0 10px;
   color: var(--hud-soft);
   border: 1px solid rgba(255, 252, 235, 0.72);
-  border-radius: 999px;
+  /* 页面内容不用药丸形（形状体系把药丸留给右上沉浸控制岛）：位置条和
+     deck-nav 的小纸片用同一族不规则圆角。 */
+  border-radius: 12px 14px 11px 13px;
   background: rgba(245, 234, 213, 0.88);
   box-shadow: 0 2px 6px rgba(67, 43, 27, 0.16);
   font-size: 9px;
@@ -3299,7 +3625,18 @@
   white-space: nowrap;
 }
 
+/* 列一窄，不换行的提示就会把进度条挤成一条细缝；位置感由进度条自己承担
+   （与 ≤760px 窗口的处理同一条规则），提示只留在读得下它的列宽里。 */
+@container (max-width: 480px) {
+  .hud-surface .deck-foot__hint { display: none; }
+}
+
 .hud-surface .queue-reason {
+  /* 便签跟着内容走，不再整列拉伸：它是牌堆旁的一张说明纸，不是页面上
+     最重的一块色面 —— 拉满整列时大半张黄纸是空的，还把牌堆比了下去。
+     内容超出列高时仍然自己滚动。 */
+  align-self: start;
+  max-height: 100%;
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: rgba(79, 57, 39, 0.42) transparent;
@@ -3333,26 +3670,17 @@
   text-decoration: none;
 }
 
-.hud-surface .queue-reason__order button:focus-visible,
-.hud-surface .queue-reason__more:focus-visible,
-.hud-surface .queue-reason__failure button:focus-visible {
-  outline: 2px solid rgba(57, 103, 132, 0.5);
-  outline-offset: 2px;
-}
+/* （焦点环的实色规则在文件末尾「Accessibility repairs」一组里；这里原来的
+   半透明蓝版本特异性相同但更早，是死规则，已删。） */
 
-.hud-surface .queue-reason__failure { color: var(--hud-red); }
-.hud-surface .queue-reason__failure button { margin-left: 6px; font-weight: 700; }
-
-/* The defer receipt reads as a quiet confirmation, not an alert: the card left
-   the queue by the user's own request, so nothing here is red. */
-.hud-surface .queue-reason__notice { color: inherit; }
 
 /* A loaded window had no pointer path from card 1 to card 2 — the deck only
    answered the arrow keys and the slip's three links. The pair sits in the
-   card's own action row corner and wears the mockup's paper chip. */
+   card's own action row corner and wears the mockup's paper chip. right 43px
+   与动作行的 43px 同一条边：两个簇共享卡片内边距这条基准线。 */
 .hud-surface .deck-nav {
   position: absolute;
-  right: 42px;
+  right: 43px;
   bottom: 31px;
   display: flex;
   gap: 8px;
@@ -3388,11 +3716,6 @@
 .hud-surface .deck-nav__step:disabled {
   cursor: not-allowed;
   opacity: 0.45;
-}
-
-.hud-surface .deck-nav__step:focus-visible {
-  outline: 2px solid rgba(57, 103, 132, 0.5);
-  outline-offset: 2px;
 }
 
 /* Stepping the deck used to rewrite the same card's text in place. The body
@@ -3439,14 +3762,12 @@
   .hud-surface .deck-card h2 { font-size: 19px; }
   .hud-surface .deck-card.front h2 { -webkit-line-clamp: 2; }
   .hud-surface .deck-card.front .sub { -webkit-line-clamp: 2; }
-  .hud-surface .day-route__state { top: 130px; right: 210px; left: 54px; }
-  .hud-surface .record-strip { width: 170px; }
 }
 
 /* 窄列里的卡片：动作行不再钉在卡角，而是回到正常流里跟着正文排，卡片高度跟内容
-   走，只在底部给箭头留一条 56px 的带。判据是列宽（容器查询），因为 1280 的窗口
-   下列宽 565、卡片只有 407，动作行与钉在同一角的箭头会互相压住（实测相差 6px）；
-   而 1440 的窗口下列宽 725、卡片 520，并排刚刚好 —— 同一套 CSS 要能同时成立。 */
+   走，底部只留一条正常的内边距。判据是列宽（容器查询），因为 1280 的窗口下列宽
+   565、卡片只有 407，动作行与钉在同一角的箭头会互相压住（实测相差 6px）；而 1440
+   的窗口下列宽 725、卡片 520，并排刚刚好 —— 同一套 CSS 要能同时成立。 */
 @container (max-width: 600px) {
   .hud-surface .card-deck {
     --pile-lift: 0.5;
@@ -3456,14 +3777,29 @@
     height: auto;
     min-height: 0;
   }
-  .hud-surface .deck-card.front { padding-bottom: 56px; }
+  /* 箭头回到内容流里、跟在动作行后面右对齐：动作行折行时，钉在角落的箭头
+     会和按钮断成两簇，卡片右下只剩一块空位。既然两者都进了流，为绝对定位
+     预留的底部高度也一并收回。 */
+  .hud-surface .deck-card.front { padding-bottom: 24px; }
   .hud-surface .deck-card.front .actions {
     position: static;
     margin-top: auto;
     padding-top: 12px;
     flex-wrap: wrap;
   }
-  .hud-surface .deck-nav { right: 26px; bottom: 16px; }
+  .hud-surface .deck-nav {
+    position: static;
+    align-self: flex-end;
+    margin-top: 10px;
+  }
+  /* 按钮密度跟着卡片走：125%/150% 系统缩放正好落进这个带里，桌面尺寸的
+     按钮会反客为主 —— 150% 时一格一行地把整张卡吃掉。收一档字号与高度，
+     主按钮的主次不变。 */
+  .hud-surface .deck-card.front .actions .button {
+    min-height: 30px;
+    padding: 0 10px;
+    font-size: 10px;
+  }
 }
 
 /* 761–900px CSS 只会出现在极端缩放（1280 的窗口开到 168% 以上）。这个宽度下
@@ -3479,102 +3815,17 @@
 }
 
 /* ---------------------------------------------------------------------------
- * Page 14 · the route is a grid, not three hand-placed tickets.
- *
- * The ported artboard pins ticket 3 at left:530px while the ledger column starts
- * at (paper − 270): below a 1398px window the third ticket is painted under the
- * 学习记录 strip, and the strip has no background, so both texts overlap. A
- * three-column grid keeps every ticket inside the band the mockup leaves free,
- * and shrinks the columns instead of pushing them off the paper.
- * ------------------------------------------------------------------------- */
-.hud-surface .day-route {
-  /* 记录栏占的横向带宽。原稿把这个数分别写进 .day-line 的 right、记录栏的
-     right+width 与状态纸的 right；这里只命名一次给路线网格用，另外几处仍是
-     ported 值 310px —— 改宽度时必须一起核。 */
-  --ledger-column: 310px;
-}
-
-.hud-surface .day-route__route {
-  position: absolute;
-  left: 54px;
-  right: var(--ledger-column);
-  top: 124px;
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 205px));
-  gap: 33px;
-  align-items: start;
-}
-
-/* The ported per-ticket `left`/`top` are coordinates on the artboard; inside the
-   grid the column decides x and the row decides y. Rotation and paper colour
-   still come from the ported nth-of-type rules. */
-.hud-surface .day-route .day-route__route .task-ticket {
-  position: relative;
-  left: auto;
-  top: auto;
-  right: auto;
-  width: auto;
-}
-
-/* 站台错落：原稿是 top 130/151/124，网格里用 margin 表达同一段高差。 */
-.hud-surface .day-route .day-route__route .task-ticket:nth-of-type(2) { margin-top: 27px; }
-.hud-surface .day-route .day-route__route .task-ticket:nth-of-type(3) { margin-top: -6px; }
-
-/* 1152–1424px（125%–150% 缩放）：纸张放得下三列 205px，但放不下 245px 的记录栏；
-   先把记录栏收到 170px，读数带才算真的让给了路线。 */
-@media (min-width: 761px) and (max-width: 1424px) {
-  /* 记录栏 right:25 + width:170 → 它的左边缘在 pb−195；路线留在 pb−215，
-     于是读数带与票面之间始终有 20px 净空（和 mockup 紧凑段的 155/135 同构）。 */
-  .hud-surface .record-strip { width: 170px; }
-  .hud-surface .day-line { right: 215px; }
-  .hud-surface .day-route__state { right: 215px; }
-}
-
-/* 761–1151px：即便记录栏收到 170px，三列 14px 的票面也挤不出可读的行宽，所以按
-   mockup 自己在 ≤760px 给出的紧凑票面排（票面小一号、列宽交给网格）。数值镜像
-   hud-pages.css:145 的紧凑段 —— 改那边要同步改这里。 */
-@media (min-width: 761px) and (max-width: 1151px) {
-  .hud-surface .day-route { padding: 12px 15px; }
-  .hud-surface .day-route h2 { font-size: 12px; }
-  .hud-surface .day-route__route { left: 27px; right: 215px; top: 62px; gap: 16px; }
-  .hud-surface .day-route .day-route__route .task-ticket:nth-of-type(2) { margin-top: 10px; }
-  .hud-surface .day-route .day-route__route .task-ticket:nth-of-type(3) { margin-top: -3px; }
-  .hud-surface .task-ticket { min-height: 68px; padding: 9px 8px; }
-  .hud-surface .task-ticket strong { font-size: 7px; }
-  .hud-surface .task-ticket small { font-size: 5px; }
-  .hud-surface .day-line { left: 33px; right: 215px; top: 85px; height: 2px; }
-  .hud-surface .record-entry { padding: 5px 0; font-size: 5px; }
-  .hud-surface .record-entry b { font-size: 6px; }
-  .hud-surface .day-route__state { top: 85px; right: 215px; left: 33px; }
-}
-
-/* 票面自己要有按下反馈：源来的 hover 位移不足以说明"这一下点到了"。 */
-.hud-surface button.task-ticket:active {
-  transform: translateY(-1px) rotate(0deg) scale(0.985);
-  transition-duration: 110ms;
-}
-
-/* 第三张票与 .tag 同为 butter 底色，标签会整个消失；给票面和记录栏里的标签
-   补一圈纸边，让标签在任何纸色上都读得出边界。 */
-.hud-surface .task-ticket .tag,
-.hud-surface .record-strip .tag {
-  box-shadow: inset 0 0 0 1px rgba(73, 47, 29, 0.24);
-}
-
-/* 学习记录的范围说明：它是"窗口只有最近 N 条"的披露，不是一条记录。 */
-.hud-surface .record-entry--scope {
-  color: var(--hud-soft);
-  font-style: normal;
-}
-
-/* ---------------------------------------------------------------------------
  * Accessibility repairs on both pages.
  * ------------------------------------------------------------------------- */
 
 /* 失败文案压在黄油纸上的对比度只有 3.74:1（比它替换掉的正文还低），而"重试"
    按钮就在这段里；理由条上的 .small 也只是 4.44:1。 */
 .hud-surface .queue-reason__failure { color: var(--accent-deep, #8e391d); }
+.hud-surface .queue-reason__failure button { margin-left: 6px; font-weight: 700; }
 .hud-surface .queue-reason .small { color: #5f4b3a; }
+
+/* The defer receipt reads as a quiet confirmation, not an alert: the card left
+   the queue by the user's own request, so nothing here is red. */
 .hud-surface .queue-reason__notice { color: inherit; }
 
 /* 四组焦点环原本都是半透明蓝（≈1.9–2.1:1，低于非文本 3:1），而且特异性高于
@@ -3588,7 +3839,6 @@
   outline-offset: 4px;
 }
 
-.hud-surface button.task-ticket:focus-visible,
 .hud-surface .deck-nav__step:focus-visible,
 .hud-surface .queue-reason__order button:focus-visible,
 .hud-surface .queue-reason__more:focus-visible,
@@ -3616,31 +3866,21 @@
 }
 
 @media (max-width: 760px) {
-  .hud-surface .day-route__route {
-    left: 27px;
-    right: 155px;
-    top: 62px;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 16px;
-  }
-  .hud-surface .day-route .day-route__route .task-ticket:nth-of-type(2) { margin-top: 10px; }
-  .hud-surface .day-route .day-route__route .task-ticket:nth-of-type(3) { margin-top: -3px; }
-}
-
-@media (max-width: 760px) {
   .hud-surface .card-deck { --deck-card-w: min(260px, 72%); }
-  .hud-surface .deck-foot { height: 12px; font-size: 5px; }
+  /* 位置条进了文档流会占一行，把牌堆顶向卡槽上沿；最小窗（720×405）实测
+     上溢 11px，这里收回来：底垫 28→8（内容下移 10px）+ 位置条贴牌堆一点。 */
+  .hud-surface .card-deck { padding-bottom: 8px; }
+  .hud-surface .deck-foot { height: 12px; margin-top: 4px; font-size: 5px; }
   /* 5px 的提示文字在这里只是噪点：进度条本身已经说明了位置。 */
   .hud-surface .deck-foot__hint { display: none; }
-  .hud-surface .deck-card.front { padding-top: 18px; padding-bottom: 46px; }
+  .hud-surface .deck-card.front { padding-top: 18px; padding-bottom: 24px; }
   .hud-surface .deck-card.front h2 { -webkit-line-clamp: 2; font-size: 13px; }
   .hud-surface .deck-card.front .sub { -webkit-line-clamp: 1; }
   .hud-surface .deck-card.front .actions .button { min-height: 18px; padding: 0 6px; font-size: 5px; }
   .hud-surface .deck-card .meta .deck-card__state { padding: 1px 4px; font-size: 5px; }
-  .hud-surface .deck-nav { right: 21px; bottom: 12px; gap: 6px; }
+  .hud-surface .deck-nav { gap: 6px; }
   .hud-surface .deck-nav__step { width: 22px; height: 22px; border-width: 1px; border-radius: 9px 10px 8px 9px; }
   .hud-surface .deck-nav__step svg { width: 11px; height: 11px; }
-  .hud-surface .day-route__state { top: 85px; right: 155px; bottom: 12px; left: 33px; }
 }
 
 
@@ -4616,6 +4856,28 @@
 }
 .hud-surface .learning-run-result-evidence b { font-size: 10px; }
 .hud-surface .learning-run-result-evidence p { margin: 0; color: var(--hud-soft); font-size: 10px; line-height: 1.65; }
+.hud-surface .learning-run-result-rubric { margin-top: 6px; border-top: 1px solid var(--hud-line); }
+.hud-surface .learning-run-result-rubric > b { display: block; padding: 13px 2px 4px; font-size: 10px; }
+.hud-surface .learning-run-result-rubric ul { list-style: none; margin: 0; padding: 0; }
+.hud-surface .learning-run-result-rubric li { padding: 9px 2px; border-bottom: 1px solid var(--hud-line); }
+.hud-surface .learning-run-result-rubric li:last-child { border-bottom: none; }
+.hud-surface .learning-run-result-rubric__head { display: block; font-weight: 800; font-size: 10px; color: var(--hud-ink); }
+.hud-surface .learning-run-result-rubric li[data-verdict="covered"] .learning-run-result-rubric__head { color: var(--hud-green); }
+.hud-surface .learning-run-result-rubric li[data-verdict="missing"] .learning-run-result-rubric__head,
+.hud-surface .learning-run-result-rubric li[data-verdict="contradicted"] .learning-run-result-rubric__head { color: var(--hud-clay); }
+.hud-surface .learning-run-result-rubric li p { margin: 3px 0 0; color: var(--hud-soft); font-size: 10px; line-height: 1.6; }
+.hud-surface .learning-run-result-reveal { margin-top: 14px; }
+.hud-surface .learning-run-result-reveal__body {
+  margin-top: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--hud-line);
+  border-radius: 14px 17px 13px 16px;
+  background: var(--hud-cream);
+}
+.hud-surface .learning-run-result-reveal__body h3 { margin: 0 0 6px; }
+.hud-surface .learning-run-result-reveal__answer { margin: 0 0 8px; font-weight: 800; font-size: 11px; line-height: 1.6; color: var(--hud-ink); }
+.hud-surface .learning-run-result-reveal__body p { margin: 0 0 6px; color: var(--hud-soft); font-size: 10px; line-height: 1.65; }
+.hud-surface .learning-run-result-reveal__body p:last-child { margin-bottom: 0; }
 .hud-surface .learning-run-next-step {
   display: grid;
   grid-template-columns: 74px minmax(0, 0.8fr) minmax(180px, 1.2fr);

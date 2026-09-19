@@ -36,6 +36,32 @@ export interface WindowLive2DMotionCue {
   readonly index: number;
 }
 
+/** Amplitude of the idle body sway the `idle` layer keeps emitting, in degrees. */
+const IDLE_BODY_ANGLE_SWAY_DEGREES = 2;
+
+/**
+ * 「看向手边」（方案 §5 第 9 项）：工具开始执行时先侧身看一眼工具再回正。
+ * 幅度取负值 = 朝工具所在的一侧（右手边），持续时间足够被看见但不拖住动作。
+ */
+const TOOL_ATTENTION_BODY_ANGLE_DEGREES = -3;
+export const WINDOW_LIVE2D_TOOL_ATTENTION_DURATION_MS = 1_500;
+
+/**
+ * Offset added to the idle sway while a tool-attention impulse is live.
+ * Returns `null` outside the impulse window so the `gaze` layer releases
+ * `ParamBodyAngleX` back to the `idle` layer and the sway resumes untouched.
+ * The offset eases to exactly 0 at the end of the window, which keeps the
+ * handoff between the two layers continuous (no snap back to the sway).
+ */
+function toolAttentionBodyAngleOffset(atMs: number | undefined, nowMs: number): number | null {
+  if (typeof atMs !== "number" || !Number.isFinite(atMs)) return null;
+  const elapsed = nowMs - atMs;
+  if (elapsed < 0 || elapsed >= WINDOW_LIVE2D_TOOL_ATTENTION_DURATION_MS) return null;
+
+  const progress = elapsed / WINDOW_LIVE2D_TOOL_ATTENTION_DURATION_MS;
+  return TOOL_ATTENTION_BODY_ANGLE_DEGREES * (1 - progress) ** 2;
+}
+
 /**
  * Renderer-local asset paths. They intentionally stay relative to
  * `document.baseURI`, so the same build works under Vite's dev origin and the
@@ -168,17 +194,31 @@ export function parameterValuesForWindowLive2D(input: {
   readonly nowMs: number;
   readonly voiceLevel: number;
   readonly emotion?: Live2DEmotionState | null;
+  /** Timestamp (same clock as `nowMs`) of the latest tool-executing impulse. */
+  readonly toolAttentionAtMs?: number;
 }): WindowLive2DParameterValue[] {
   const blinkPhase = input.nowMs % 4_500;
   const eyeOpen = blinkPhase >= 3_600 && blinkPhase < 3_750
     ? Math.abs((blinkPhase - 3_675) / 75)
     : 1;
+  const idleBodyAngleX = Math.sin(input.nowMs / 2_400) * IDLE_BODY_ANGLE_SWAY_DEGREES;
   const requests: Live2DParameterRequest[] = [
     { layer: "idle", parameter: "ParamBreath", value: 0.5 + Math.sin(input.nowMs / 900) * 0.25 },
-    { layer: "idle", parameter: "ParamBodyAngleX", value: Math.sin(input.nowMs / 2_400) * 2 },
+    { layer: "idle", parameter: "ParamBodyAngleX", value: idleBodyAngleX },
     { layer: "blink", parameter: "ParamEyeLOpen", value: eyeOpen },
     { layer: "blink", parameter: "ParamEyeROpen", value: eyeOpen },
   ];
+
+  // The impulse rides on top of the idle sway instead of replacing it, so the
+  // `gaze` layer can hand `ParamBodyAngleX` back without a visible jump.
+  const toolAttention = toolAttentionBodyAngleOffset(input.toolAttentionAtMs, input.nowMs);
+  if (toolAttention !== null) {
+    requests.push({
+      layer: "gaze",
+      parameter: "ParamBodyAngleX",
+      value: idleBodyAngleX + toolAttention,
+    });
+  }
 
   const presentationFacs: Live2DParameterRequest[] = [];
   switch (input.presentation) {

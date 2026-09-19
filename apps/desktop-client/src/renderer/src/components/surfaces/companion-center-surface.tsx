@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { ArrowUpDown, ChevronLeft, ChevronRight, RefreshCw, RotateCcw, Search, Sparkles } from "lucide-react";
+import { ChevronLeft, ChevronRight, RefreshCw, RotateCcw, Search, Sparkles, X } from "lucide-react";
 import type { GatewayResultV1 } from "@ailearn/shared/desktop-ipc-contracts";
 import type {
   CompanionConversationListV1,
@@ -315,18 +315,24 @@ export function CompanionCenterSurface() {
   };
 
   /**
-   * A star that the current filter keeps off the plate is still a record the user
-   * asked about, so the card is allowed to show it, but the filter is what the
-   * list is about: moving the focus retunes the filter instead of fighting it.
+   * A record the current conditions hide is still a record the user asked
+   * about, so the card is allowed to show it, but the conditions are what the
+   * list is about: following a record into the list retunes the state filter,
+   * the family filter and the search box instead of fighting them.
    */
-  const focusFromTrail = (memoryId: string) => {
-    focusMemory(memoryId);
-    const view = views.find((item) => item.id === memoryId);
-    if (!view) return;
+  const revealConditions = (view: MemoryView) => {
     if (memoryFilter !== "all" && view.state !== memoryFilter) setMemoryFilter("all");
     if (familyFilter !== "all" && MEMORY_FAMILIES[memoryFamilyOf(view.kind)].id !== familyFilter) {
       setFamilyFilter("all");
     }
+    const needle = query.trim().toLowerCase();
+    if (needle && !view.content.toLowerCase().includes(needle)) setQuery("");
+  };
+
+  const focusFromTrail = (memoryId: string) => {
+    focusMemory(memoryId);
+    const view = views.find((item) => item.id === memoryId);
+    if (view) revealConditions(view);
   };
 
   const runAction = async (action: MemoryAction, memoryId: string) => {
@@ -416,11 +422,61 @@ export function CompanionCenterSurface() {
     window.ailearn.companion.persona.reset({ meta: createRequestMeta(epochRef.current) }));
 
   const companionName = persona?.profile?.name ?? persona?.activePreset?.name ?? "Mao";
-  const headline = candidates.length > 0
-    ? `${candidates.length} 条记忆等你确认`
-    : trail.length > 0
-      ? "今晚想回看哪段经历？"
-      : "还没有可以回看的经历";
+
+  /**
+   * The card's closing line counts the section the reader is in, not the whole
+   * archive: memory totals over the dialogue list read as a misplaced footnote.
+   * Every figure here is already held by a section that rendered above — no new
+   * read, and a failed section says so in its own words. Empty while the page
+   * itself is still empty; the JSX only reads it once `data` exists.
+   */
+  const recordFoot = !data ? "" : (() => {
+    if (tab === "dialogue") {
+      if (!data.conversations.ok) return "对话记录当前不可用";
+      const items = data.conversations.value.items;
+      const base = items.length === 0
+        ? "还没有对话记录"
+        : data.conversations.value.nextCursor
+          ? `最近 ${items.length} 段对话 · 更早的尚未加载`
+          : `共 ${items.length} 段对话`;
+      return persona?.profile ? `${base} · 累计互动 ${persona.profile.interactionCount} 次` : base;
+    }
+    if (tab === "diary") {
+      if (diary.data && diary.data.ok) {
+        const daily = diary.data.value;
+        if (daily.status === "generated" && daily.date) {
+          const factCount = Object.values(daily.facts)
+            .reduce((sum, count) => sum + (typeof count === "number" ? count : 0), 0);
+          return `${diaryDayLabel(daily.date)} · 记下 ${factCount} 件事`;
+        }
+        return `${diaryDayLabel(daily.date ?? todayIsoDate())}还没有日记`;
+      }
+      return diary.failure ? "日记当前不可用" : "正在读取日记";
+    }
+    if (tab === "memory") {
+      return memories
+        ? `共 ${views.length} 条记忆 · ${candidates.length} 条待确认`
+        : "记忆列表当前不可用";
+    }
+    return persona ? `人格预设 ${persona.presets.length} 套` : "人格档案当前不可用";
+  })();
+  /**
+   * The card speaks for the section it is showing: a headline about looking
+   * back over the trail made no sense over the dialogue list or the persona
+   * settings. Only the memory section tracks the records — a candidate count
+   * is the one line that must rise above any fixed copy.
+   */
+  const headline = tab === "dialogue"
+    ? "你们说过的每一句话。"
+    : tab === "diary"
+      ? "伴星把一天写成日记。"
+      : tab === "persona"
+        ? "她的性格与边界。"
+        : candidates.length > 0
+          ? `${candidates.length} 条记忆等你确认`
+          : trail.length > 0
+            ? "今晚想回看哪段经历？"
+            : "还没有可以回看的经历";
 
   const scrollToRecord = (memoryId: string) => {
     if (!memoryId) return;
@@ -437,6 +493,10 @@ export function CompanionCenterSurface() {
   };
 
   const openMemoryInList = (memoryId: string) => {
+    // The same retune the trail applies: a diary link into a memory the current
+    // conditions would hide must still land on its row, not scroll to nothing.
+    const view = views.find((item) => item.id === memoryId);
+    if (view) revealConditions(view);
     setTab("memory");
     focusMemory(memoryId);
     scrollToRecord(memoryId);
@@ -550,12 +610,7 @@ export function CompanionCenterSurface() {
               )}
             </div>
 
-            <p className="record-foot">
-              {memories
-                ? `共 ${views.length} 条记忆 · ${candidates.length} 条待确认`
-                : "记忆列表当前不可用"}
-              {persona?.profile ? ` · 累计互动 ${persona.profile.interactionCount} 次` : ""}
-            </p>
+            <p className="record-foot">{recordFoot}</p>
           </aside>
 
           <main className="memory-field" aria-label="记忆星轨">
@@ -641,13 +696,14 @@ function DialogueRecords({
   return (
     <>
       <div className="record-chips" role="group" aria-label="对话排序">
+        {/* 排序方向由文字表意：两枚按钮共用同一个双向箭头图标时不携带任何信息。 */}
         <button
           type="button"
           className={order === "recent" ? "is-on" : undefined}
           aria-pressed={order === "recent"}
           onClick={() => onOrder("recent")}
         >
-          <ArrowUpDown size={10} aria-hidden="true" />最近
+          最近
         </button>
         <button
           type="button"
@@ -655,7 +711,7 @@ function DialogueRecords({
           aria-pressed={order === "oldest"}
           onClick={() => onOrder("oldest")}
         >
-          <ArrowUpDown size={10} aria-hidden="true" />最早
+          最早
         </button>
       </div>
 
@@ -679,7 +735,7 @@ function DialogueRecords({
             {open ? (
               <span className="diary-entry__detail">
                 <small>状态 {conversation.status === "active" ? "进行中" : "已归档"}</small>
-                <small>标题由{conversation.titleSource === "user" ? "你" : conversation.titleSource === "auto" ? "伴星自动" : conversation.titleSource === "system" ? "系统" : "占位生成"}</small>
+                <small>标题由{conversation.titleSource === "user" ? "你" : conversation.titleSource === "auto" ? "伴星自动" : conversation.titleSource === "system" ? "系统" : "占位符生成"}</small>
                 <small>首次记录 {formatDate(conversation.createdAt)}</small>
                 <small>
                   {conversation.lastMessageAt
@@ -815,7 +871,7 @@ function DiaryRecords({
 
       {daily.conversationHighlights.length > 0 ? (
         <>
-          <p className="record-foot">当天留下的原话</p>
+          <p className="record-heading">当天留下的原话</p>
           {daily.conversationHighlights.map((highlight, index) => (
             <div key={`${highlight.role}-${index}`} className="diary-entry">
               <small className="diary-entry__body">
@@ -897,6 +953,12 @@ function MemoryRecords({
           placeholder="搜索记忆正文"
           onChange={(event) => onQuery(event.target.value)}
         />
+        {query ? (
+          <button type="button" className="record-search__clear" onClick={() => onQuery("")}>
+            <X size={10} aria-hidden="true" />
+            <span className="sr-only">清空搜索词</span>
+          </button>
+        ) : null}
       </label>
 
       <div className="record-chips" role="group" aria-label="记忆筛选">
@@ -908,12 +970,13 @@ function MemoryRecords({
             aria-pressed={filter === id}
             onClick={() => onFilter(id)}
           >
-            {label} {counts[id]}
+            {label} <b>{counts[id]}</b>
           </button>
         ))}
         {family ? (
           <button type="button" className="is-on is-family" aria-pressed onClick={() => onFamily("all")}>
-            {family.label} ✕
+            {family.label}
+            <X size={10} aria-hidden="true" />
           </button>
         ) : null}
       </div>
@@ -999,9 +1062,9 @@ function PersonaRecords({
           <div className="diary-entry">
             <span className="diary-entry__top">
               <b>{shown.name}</b>
-              <time>{ACTIVE_NESS_LABEL[shown.activeness] ?? shown.activeness}</time>
+              <span className="entry-flag">{ACTIVE_NESS_LABEL[shown.activeness] ?? shown.activeness}</span>
             </span>
-            <small>{profile ? `档案修订 ${profile.revision}` : "来自系统预设，还没有保存成你的档案"}</small>
+            <small>{profile ? "已保存为你的档案" : "来自系统预设，还没有保存成你的档案"}</small>
           </div>
 
           <div className="record-tags">
@@ -1012,7 +1075,7 @@ function PersonaRecords({
 
           {shown.examples.length > 0 ? (
             <>
-              <p className="record-foot">它平时会这样说</p>
+              <p className="record-heading">它平时会这样说</p>
               {shown.examples.map((example, index) => (
                 <div key={`${example.text}-${index}`} className="diary-entry">
                   <small className="diary-entry__body">{example.text}</small>
@@ -1036,7 +1099,7 @@ function PersonaRecords({
 
       {profile ? (
         <>
-          <p className="record-foot">伴星的活跃度 · 选定即保存</p>
+          <p className="record-heading">伴星的活跃度 · 选定即保存</p>
           <div className="record-chips" role="group" aria-label="活跃度">
             {ACTIVE_NESS_ITEMS.map(([value, label, hint]) => (
               <button
@@ -1053,7 +1116,7 @@ function PersonaRecords({
             ))}
           </div>
 
-          <p className="record-foot">边界 · 改动会立即保存</p>
+          <p className="record-heading">边界 · 改动会立即保存</p>
           <div className="record-switches" role="group" aria-label="边界">
             {BOUNDARY_ITEMS.map(([key, label, hint]) => {
               const value = profile.boundaries[key];
@@ -1077,7 +1140,7 @@ function PersonaRecords({
         </>
       ) : null}
 
-      <p className="record-foot">人格预设{persona.presets.length > 0 ? " · 选定即保存为你的档案" : ""}</p>
+      <p className="record-heading">人格预设{persona.presets.length > 0 ? " · 选定即保存为你的档案" : ""}</p>
       {persona.presets.length === 0 ? (
         <p className="record-empty"><b>服务端没有提供预设</b>当前环境没有可选的预设人格。</p>
       ) : (
@@ -1095,10 +1158,12 @@ function PersonaRecords({
               >
                 <span className="diary-entry__top">
                   <b>{preset.name}</b>
-                  <time>{ACTIVE_NESS_LABEL[preset.activeness] ?? preset.activeness}</time>
+                  <span className="entry-flag">{ACTIVE_NESS_LABEL[preset.activeness] ?? preset.activeness}</span>
                 </span>
                 <small className="diary-entry__body">{preset.speakingStyle}</small>
-                <small>{active ? "当前使用" : busy === "preset" ? "正在保存…" : "使用这套预设"}</small>
+                {/* 保存中所有预设一并禁用，这里的标签只区分「在用 / 未用」，
+                    不假装知道哪一套正在保存。 */}
+                <small>{active ? "当前使用" : "使用这套预设"}</small>
               </button>
             );
           })}
@@ -1160,7 +1225,8 @@ function StarTrail({
   readonly onFocus: (memoryId: string) => void;
   readonly onRevealHidden: (ids: readonly string[]) => void;
 }) {
-  const { points, hidden, hiddenIds } = plotMemoryStars(views);
+  const sky = useMemo(() => plotMemoryStars(views), [views]);
+  const { points, hidden, hiddenIds } = sky;
   const focused = focus ? points.find((point) => point.view.id === focus.id) ?? null : null;
   const outer = MEMORY_FAMILIES[MEMORY_FAMILIES.length - 1];
   const starRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -1168,12 +1234,12 @@ function StarTrail({
   // deterministic layout, so it never reshuffles under a re-render. A grain
   // that lands on a real star (or its caption) is dropped at render time —
   // there it reads as a second, fake memory rather than as depth.
-  const dust = useMemo(() => {
-    const plotted = plotMemoryStars(views).points;
-    return skyDust(56).filter((star) =>
-      plotted.every((point) => Math.hypot(point.x - star.x, point.y - star.y) > 5),
-    );
-  }, [views]);
+  const dust = useMemo(
+    () => skyDust(56).filter((star) =>
+      points.every((point) => Math.hypot(point.x - star.x, point.y - star.y) > 5),
+    ),
+    [points],
+  );
   const [hoverId, setHoverId] = useState<string | null>(null);
   const [reducedMotion, setReducedMotion] = useState(false);
 
@@ -1194,7 +1260,7 @@ function StarTrail({
     : null;
 
   /** Arrow keys walk the trail in its own order, so 40 stars stay reachable. */
-  const onStarKeyDown = (event: React.KeyboardEvent, index: number) => {
+  const onStarKeyDown = (event: ReactKeyboardEvent, index: number) => {
     const step = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1
       : event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1
         : 0;

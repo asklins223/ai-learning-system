@@ -703,7 +703,17 @@ const modelObjectiveDraftSchema = z
       "fact", "definition", "relationship", "comparison", "sequence",
       "procedure", "causal_model", "boundary", "application_rule",
     ]),
-    preferredTaskIntents: z.array(z.enum(["recall", "explain", "apply", "compare", "generate"])).min(1).max(6),
+    // 2026-09-18（v20 实测修复）：对齐 TaskIntentV1 的 9 值词表。此前钉死在
+    // 5 值旧词表（compare/generate 并不是合法意图，paraphrase/example/boundary/
+    // procedure/relate/repair 反而缺失）—— v20 让模型按知识形态选 intent 后，
+    // 选到 "procedure" 即被此 schema 拒绝，author 反复 schema violation。
+    preferredTaskIntents: z
+      .array(z.enum([
+        "recall", "paraphrase", "explain", "example", "apply",
+        "boundary", "procedure", "relate", "repair",
+      ]))
+      .min(1)
+      .max(6),
     // 2026-08-16（实机验证修复）：改用正式 canonicalAnswerV2Schema（7 种形态：
     // text 单对象 / bullets / ordered_steps / mapping / comparison / formula / code）。
     // 此前只接受 kind:"text"+unit 单对象——模型输出多 answer unit（数组）时被拒，
@@ -720,9 +730,14 @@ const modelObjectiveDraftSchema = z
       version: z.literal(2),
       units: z
         .array(
-          z.strictObject({
+          z.          strictObject({
             rubricUnitId: z.string().min(1).max(160),
-            facet: z.enum(["recall", "explain", "apply", "compare", "generate"]),
+            // 2026-09-18（v20）：同 preferredTaskIntents，对齐 9 值意图词表
+            // （facets 与 planV2Run 的 requiredRubricUnits 直接对接）。
+            facet: z.enum([
+              "recall", "paraphrase", "explain", "example", "apply",
+              "boundary", "procedure", "relate", "repair",
+            ]),
             criterion: z.string().min(1).max(2000),
             required: z.boolean(),
             answerUnitIds: z.array(z.string().min(1).max(160)).min(1).max(80),
@@ -778,8 +793,12 @@ ${describeSchemaIssues(error)}
 
 修正要求（只改结构，不要改变你要教的知识点）：
 - 顶层必须是 {"objective": {...}, "presentation": {...}} 两个对象。
-- objective.canonicalAnswer 只有两种形态：整体单答案用 {"kind":"text","unit":{"unitId","text"}}（unit 是**对象不是数组**）；
-  多个可独立判分的答案用 {"kind":"bullets","items":[{"unitId","text"}, ...]}。
+- objective.canonicalAnswer 有五种形态（保持你在系统提示里选择的 kind，只修结构）：
+  {"kind":"text","unit":{"unitId","text"}}（unit 是**对象不是数组**）；
+  {"kind":"bullets","items":[{"unitId","text"}, ...]}；
+  {"kind":"ordered_steps","steps":[{"unitId","text"}, ...]}（≥2 步）；
+  {"kind":"mapping","pairs":[{"unitId","left","right"}, ...]}；
+  {"kind":"comparison","columns":[...≥2],"rows":[{"unitId","dimension","values":[...]}, ...]}。
 - rubric.units[] 每项含 rubricUnitId / facet / criterion / required / answerUnitIds（字符串数组）；
   answerUnitIds 必须指向 canonicalAnswer 里真实存在的 unitId。
 - relations[] 每项含 relationId / fromAnswerUnitId / toAnswerUnitId / kind 四个字段；无关系输出 []。

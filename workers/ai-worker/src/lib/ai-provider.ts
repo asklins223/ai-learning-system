@@ -59,18 +59,36 @@ export interface AIProvider {
 
   /**
    * §8.2 真实流式 chat completion：逐 token/增量调用 onDelta（不可为空串），
-   * 返回累积全文。可选实现。
+   * 返回累积全文与（若实现支持）本轮 native tool_calls。可选实现。
    *
-   * 注意：Companion Agent 运行时改为一次性取回完整答复（executeAgentTurn +
-   * writeBatchedDeltas），当前生产代码已无调用方；保留声明供 provider 层
-   * 统一重构处理。
+   * 生产调用方：companion agent 的每一步（runStreamingAgentStep，
+   * responseFormat="text"），增量经交付管线边生成边落库下发。
+   *
+   * `toolCalls` 为可选：SSE 里 `delta.tool_calls` 与 `delta.content` 并列，
+   * 但只有声明 `chatCompletionStreamToolCalls = true` 的实现才保证把它解析出来。
+   * 未声明的实现仍会返回该字段（恒为空数组），调用方据此判断"这一步真的没调工具"
+   * 还是"这条流根本看不见工具调用"。
    */
   chatCompletionStream?(
     messages: ChatMessage[],
     options: ChatOptions,
     signal: AbortSignal | undefined,
     onDelta: (deltaText: string) => void,
-  ): Promise<{ content: string }>;
+  ): Promise<{
+    content: string;
+    toolCalls?: AgentTurnResult["toolCalls"];
+    /** SSE 末尾的 finish_reason（缺省视作 stop；"length" 表示输出被截断）。 */
+    finishReason?: string;
+  }>;
+
+  /**
+   * 流式路径是否解析 `delta.tool_calls`（2026-09-19 ④-b）。
+   *
+   * agent 循环用它决定**带工具的一步**能不能走流式：不能的话那一步必须留在
+   * 整段取回路径上（否则模型返回的工具调用会被静默丢掉，用户看到的是一句
+   * "我去看看"却什么都没发生）。
+   */
+  chatCompletionStreamToolCalls?: boolean;
 
   // ── Supervisor Agent v1（计划 §8.1） ──
   executeAgentTurn?(request: AgentTurnRequest, signal?: AbortSignal): Promise<AgentTurnResult>;
@@ -135,6 +153,25 @@ export function createProvider(
     throw new Error(`provider ${id} is not configured for agent_turn`);
   }
   return impl as unknown as AIProvider;
+}
+
+/**
+ * 交互链路低延迟变体：返回一份显式关闭思考模式的 provider 配置。
+ *
+ * 平台配置里的 `enableThinking`（如 tokenrhythm）是给后台任务的质量档位；
+ * 伴星对话与念头生成是**用户等待中**的交互，而这两条链路都是整段取回
+ * （非流式）：等待时间 = 思考 token + 正文，思考全算进首字延迟。各 provider
+ * 实现都优先读 `platformOptions.disableThinking`（openai-compatible /
+ * opencode-go 发 `enable_thinking: false`；dashscope 缺省即关闭）。
+ *
+ * 返回新对象、不改写入参：上游 `resolveProviderForTask` 返回的是治理上下文
+ * 里的共享配置，就地改写会波及同一 job 的 embedding 等其他能力。
+ */
+export function withThinkingDisabled(config: AIProviderRuntimeConfig): AIProviderRuntimeConfig {
+  return {
+    ...config,
+    options: { ...(config.options ?? {}), disableThinking: true },
+  };
 }
 
 /**

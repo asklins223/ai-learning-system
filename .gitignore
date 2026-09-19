@@ -95,3 +95,12 @@ apps/desktop-client/src/renderer/public/assets/learning-room/v1/posters/home-v2/
 apps/desktop-client/src/renderer/public/assets/learning-room/v1/foreground/
 # 本地环境变量文件
 apps/desktop-client/.env.development
+# 本地语音识别（sherpa-onnx WASM 运行时 + SenseVoice 模型，模型单文件 239MB）
+apps/desktop-client/src/renderer/public/models/asr/
+apps/desktop-client/src/renderer/public/sherpa/
+# 伴星语音识别模型本体与 tokenizer（大文件，本地保留）
+model.int8.onnx
+tokens.txt
+# 界面验证证据截图与交互原型（本地保留）
+apps/desktop-client/outputs/
+apps/desktop-client/prototypes/

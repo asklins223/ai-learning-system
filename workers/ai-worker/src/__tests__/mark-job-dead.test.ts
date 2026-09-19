@@ -20,6 +20,7 @@ const baseJob: ClaimedJob = {
   requestedBy: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
   attempts: 0,
   leaseToken: "lease-dead-test",
+  resourceClass: "card_foreground",
 };
 
 function createRecordingUpdater(shouldSucceed = true): {

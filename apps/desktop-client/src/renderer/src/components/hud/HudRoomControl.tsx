@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Gauge, House, Moon, Orbit, Settings2, Sun, UserRound, Volume2, VolumeX } from "lucide-react";
+import { ChevronsRight, Gauge, House, Moon, Orbit, Settings2, Sun, UserRound, Volume2, VolumeX } from "lucide-react";
 import { useRoomStore } from "../../app/room-store";
 import { publishGateInvalidation } from "../../app/gate-invalidation";
 import { resolveSceneMotionMode } from "../../scene/scene-motion";
@@ -30,17 +30,26 @@ function SpaceSealIcon() {
 /**
  * Room control island (mockup `controls()`), collapsed to one seal by default.
  *
- * The interaction is the previous island's: a single trigger circle sits where
- * the pill's last slot lands, the pill's skin scales out of it through the
- * right-anchored 300ms morph, and the slots fade in 65ms behind it. Expanded,
- * this is page 04's pill — the same slots at the same coordinates — and the
- * learning-space seal opens 04B's `.home-menu` card. The motion-mode slot (mockup
+ * The interaction is the previous island's: a single trigger circle sits at the
+ * pill's right end, the pill's skin scales out of it through the right-anchored
+ * 300ms morph, and the slots fade in 65ms behind it. The learning-space seal
+ * opens 04B's `.home-menu` card. The motion-mode slot (mockup
  * 没有画它，但上一版灵动岛有) is restored so 动效等级和它的指示灯始终可触达.
  *
  * `readOnly` renders the pill already open (mockup 04A paints the decorative
  * `controls()` on the first-entry paper; nothing behind it has a space to act
  * on, so there is nothing to collapse into).
+ *
+ * 折叠入口（2026-09-18 交互修复，二次返工）：触发印章常驻药丸最右端的
+ * 原位置——折叠时它是唯一圆点，展开后留在原地、图标换成双箭头，再点一下
+ * 即从原位置缩回；不额外新增收起槽位。点空白与 Esc 保留。头像 / 设置这类
+ * 要打开 surface 的槽位改为「先播放 300ms 折叠动画，动画走完再跳转」，
+ * 避免设置面板瞬间盖住折叠过程。
  */
+
+/** 药丸折叠动画 300ms，导航等它走完再发生，留一帧余量。 */
+const COLLAPSE_BEFORE_NAVIGATE_MS = 320;
+
 export function HudRoomControl({ readOnly = false }: { readonly readOnly?: boolean }) {
   const invoke = useRoomStore((state) => state.invoke);
   const destination = useRoomStore((state) => state.destination);
@@ -62,6 +71,12 @@ export function HudRoomControl({ readOnly = false }: { readonly readOnly?: boole
   const menuRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const spaceRef = useRef<HTMLButtonElement>(null);
+  /** 「先折叠再跳转」的定时器；用户在窗口期内重新展开时必须撤销。 */
+  const navigateTimerRef = useRef<number | undefined>(undefined);
+
+  useEffect(() => () => {
+    if (navigateTimerRef.current !== undefined) window.clearTimeout(navigateTimerRef.current);
+  }, []);
 
   const isExpanded = readOnly || onboardingOpen || expanded;
 
@@ -157,15 +172,31 @@ export function HudRoomControl({ readOnly = false }: { readonly readOnly?: boole
       setExpanded(false);
       return;
     }
+    // 窗口期内反悔（刚点了头像又立刻展开）就取消待执行的跳转。
+    if (navigateTimerRef.current !== undefined) {
+      window.clearTimeout(navigateTimerRef.current);
+      navigateTimerRef.current = undefined;
+    }
     setSpaceNotice(null);
     setExpanded(true);
   };
 
-  const openSettings = (section: "account" | "appearance") => {
+  /** 先收起药丸，等折叠动画播完再执行 action，让跳转发生在收拢之后。 */
+  const collapseThen = (action: () => void) => {
+    if (navigateTimerRef.current !== undefined) window.clearTimeout(navigateTimerRef.current);
     setSpaceMenuOpen(false);
     setExpanded(false);
-    setSettingsSection(section);
-    invoke("open-settings");
+    navigateTimerRef.current = window.setTimeout(() => {
+      navigateTimerRef.current = undefined;
+      action();
+    }, COLLAPSE_BEFORE_NAVIGATE_MS);
+  };
+
+  const openSettings = (section: "account" | "appearance") => {
+    collapseThen(() => {
+      setSettingsSection(section);
+      invoke("open-settings");
+    });
   };
 
   const collapse = () => {
@@ -185,31 +216,13 @@ export function HudRoomControl({ readOnly = false }: { readonly readOnly?: boole
         inert={readOnly || onboardingOpen || undefined}
       >
         <button
-          ref={triggerRef}
-          type="button"
-          className="room-control-trigger"
-          aria-expanded={isExpanded}
-          aria-label={isExpanded ? "收起房间控制" : "展开房间控制"}
-          aria-hidden={isExpanded || undefined}
-          // Expanded, the seal visually hands its spot to the pill's last slot:
-          // out of the tab order (the slots are the island's controls then), but
-          // still programmatically focusable so Escape can hand focus back.
-          tabIndex={isExpanded ? -1 : undefined}
-          title="房间控制"
-          inert={readOnly || undefined}
-          onClick={toggleExpanded}
-        >
-          <Orbit aria-hidden="true" />
-          <i className={`room-control-trigger__status room-control-trigger__status--${motionMode}`} aria-hidden="true" />
-        </button>
-        <button
           type="button"
           className={destination === "room" ? "active" : undefined}
           disabled={readOnly}
           inert={!isExpanded || undefined}
           aria-label="返回理解书房"
           title="返回房间总览"
-          onClick={() => { collapse(); invoke("home"); }}
+          onClick={() => collapseThen(() => invoke("home"))}
         >
           <House aria-hidden="true" />
         </button>
@@ -289,6 +302,24 @@ export function HudRoomControl({ readOnly = false }: { readonly readOnly?: boole
           onClick={() => openSettings("account")}
         >
           <UserRound aria-hidden="true" />
+        </button>
+        {/* 触发印章常驻药丸最右端的原位置：折叠时它是唯一的圆点，展开后
+            留在原地变为收起控制（图标换成指向收拢方向的双箭头），再点一下
+            即缩回——折叠入口就是「原位置那颗印章」，不新增槽位。 */}
+        <button
+          ref={triggerRef}
+          type="button"
+          className="room-control-trigger"
+          aria-expanded={isExpanded}
+          aria-label={isExpanded ? "收起房间控制" : "展开房间控制"}
+          title={isExpanded ? "收起" : "房间控制"}
+          inert={readOnly || undefined}
+          onClick={toggleExpanded}
+        >
+          {isExpanded
+            ? <ChevronsRight key="collapse" className="room-control-icon-swap" aria-hidden="true" />
+            : <Orbit key="orbit" aria-hidden="true" />}
+          <i className={`room-control-trigger__status room-control-trigger__status--${motionMode}`} aria-hidden="true" />
         </button>
       </div>
       {!readOnly && isExpanded && spaceMenuOpen ? (

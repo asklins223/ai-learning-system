@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   anomalyPhase,
+  anomalyRecovery,
   anomalyStep,
   buildTodayAnomalyGroups,
   buildTodayLogRows,
   buildTodayVerdict,
   formatLogTime,
+  readableAnomalyDetail,
   sharedAnomalyStep,
   sortAnomalyGroups,
   todayAnomalyTruncationNote,
@@ -80,6 +82,16 @@ describe("buildTodayLogRows", () => {
     ]);
     expect(rows[0].target).toBeNull();
   });
+
+  it("does not say the action twice when the server title already contains it", () => {
+    // 实机数据："后台任务 · 伴星对话" + 动词"后台任务" => 主行只说一遍。
+    const job = buildTodayLogRows([
+      event({ id: "job.scheduled:j1", kind: "job", verb: "job.scheduled", title: "后台任务 · 伴星对话" }),
+    ])[0];
+    expect(job.headline).toBe("后台任务 · 伴星对话");
+    // title 里没有动作语义时照常前置。
+    expect(buildTodayLogRows([event()])[0].headline).toBe("新建笔记 · 牛顿第二定律");
+  });
 });
 
 describe("todaySpan", () => {
@@ -109,11 +121,11 @@ describe("buildTodayVerdict", () => {
       truncated: false,
     });
     expect(verdict.metrics.map((metric) => `${metric.label}${metric.value}`)).toEqual([
-      "记录2",
+      "学习记录2",
       "待处理1",
       "时段09:05 – 14:00",
     ]);
-    expect(verdict.headline).toBe("有事务停在半路，处理完就能继续推进");
+    expect(verdict.headline).toBe("有几件事卡在半路，处理完就能继续推进");
     expect(verdict.detail).toBe("笔记 2");
   });
 
@@ -134,9 +146,29 @@ describe("buildTodayVerdict", () => {
     expect(verdict.headline).toBe("今天还没有留下记录");
   });
 
+  it("shows only the pending fact when there are anomalies but no activity", () => {
+    const verdict = buildTodayVerdict({ events: [], anomalies: [anomaly()], truncated: false });
+    expect(verdict.metrics).toEqual([{ key: "pending", label: "待处理", value: "1", alarm: true }]);
+  });
+
   it("keeps the plus sign when the server capped the log", () => {
     const verdict = buildTodayVerdict({ events: [event()], anomalies: [], truncated: true });
     expect(verdict.metrics[0].value).toBe("1+");
+  });
+
+  it("does not let a page of system jobs inflate the learning count or span", () => {
+    const jobs = Array.from({ length: 100 }, (_, index) => event({
+      id: `job.scheduled:${index}`,
+      at: at(15, index % 60),
+      kind: "job",
+      verb: "job.scheduled",
+      title: "伴星派生处理",
+      target: null,
+    }));
+    const verdict = buildTodayVerdict({ events: [event(), ...jobs], anomalies: [], truncated: true });
+    expect(verdict.metrics[0]).toMatchObject({ label: "学习记录", value: "1" });
+    expect(verdict.metrics.find((metric) => metric.key === "span")?.value).toBe("09:05");
+    expect(verdict.detail).toBe("笔记 1 · 系统活动 100+");
   });
 });
 
@@ -213,20 +245,41 @@ describe("buildTodayAnomalyGroups", () => {
         target: { kind: "source", id: "j1", noteVersionId: null },
       }),
     ]);
-    expect(groups.map((group) => group.statusLabel)).toEqual(["需要处理", "重试耗尽"]);
+    expect(groups.map((group) => group.statusLabel)).toEqual(["需要处理", "多次重试失败"]);
   });
 
-  it("collapses repeats of the same thing and counts them", () => {
-    // 真实数据：26 条异常只有 4 个不同标题，逐条渲染就是一堵分不清的墙。
+  it("keeps different target ids separate even when their copy is identical", () => {
     const groups = buildTodayAnomalyGroups([
       anomaly(),
       anomaly({ id: "anomaly.card_generation:r2", occurredAt: at(10, 30), target: { kind: "card_generation", id: "r2", noteVersionId: null } }),
       anomaly({ id: "anomaly.card_generation:r3", occurredAt: at(9, 0), target: { kind: "card_generation", id: "r3", noteVersionId: null } }),
     ]);
+    expect(groups).toHaveLength(3);
+    expect(groups.map((group) => group.target?.id)).toEqual(["r1", "r2", "r3"]);
+  });
+
+  it("collapses repeated records for the same target and counts them", () => {
+    const groups = buildTodayAnomalyGroups([
+      anomaly(),
+      anomaly({ id: "anomaly.card_generation:r1:retry-2", occurredAt: at(9, 30) }),
+      anomaly({ id: "anomaly.card_generation:r1:retry-3", occurredAt: at(9, 0) }),
+    ]);
     expect(groups).toHaveLength(1);
     expect(groups[0].count).toBe(3);
     // 服务端按时间倒序，所以跳转取的是最近的那一条。
     expect(groups[0].target).toEqual({ kind: "card_generation", id: "r1", noteVersionId: null });
+  });
+
+  it("turns a raw AI consent failure into a safe recovery path", () => {
+    const raw = anomaly({
+      id: "anomaly.job:consent",
+      kind: "job",
+      status: "failed",
+      detail: "operational_error:configuration:AIConsentRequiredError:ai_consent_required",
+      target: null,
+    });
+    expect(anomalyRecovery(raw)).toBe("ai_consent");
+    expect(readableAnomalyDetail(raw)).toBe("需要先完成工作区的 AI 使用同意，伴星才能继续回应。");
   });
 
   it("keeps a jump target when the server could resolve one, and null otherwise", () => {

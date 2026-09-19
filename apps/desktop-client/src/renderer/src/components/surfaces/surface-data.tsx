@@ -34,27 +34,45 @@ export function useSurfaceProjection<T>(
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [failure, setFailure] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshFailure, setRefreshFailure] = useState<string | null>(null);
   const loadedRef = useRef<T | null>(null);
+  const requestRef = useRef(0);
   const refreshOnFocus = options.refreshOnFocus === true;
 
   const load = useCallback(async ({ silent = false }: { readonly silent?: boolean } = {}) => {
+    const request = ++requestRef.current;
+    const preservesExistingData = silent && loadedRef.current !== null;
     // A page keeps the records it already has while a refresh runs. Only the
     // first read of a target owns the loading paper — otherwise every autosave
     // receipt would blank the page it had just written to.
-    if (!loadedRef.current) setLoading(true);
-    if (!silent) setFailure(null);
+    if (preservesExistingData) {
+      setRefreshing(true);
+      setRefreshFailure(null);
+    } else {
+      setLoading(true);
+      setFailure(null);
+    }
     try {
       const session = await readAuthenticatedSession(epochRef);
       const next = await read({ workspaceEpoch: session.workspaceEpoch });
+      // Focus and visibility can fire together. Only the newest request may
+      // replace the paper, otherwise a slower stale response can win the race.
+      if (request !== requestRef.current) return;
       loadedRef.current = next;
       setData(next);
     } catch (error) {
+      if (request !== requestRef.current) return;
       // A silent re-read never reports failure over records that are already on
-      // the paper: it exists to swap in fresher records, and a moment without
-      // the network must not replace a readable page with an error card.
-      if (!silent) setFailure(gatewayErrorMessage(error));
+      // the paper. It does expose a small non-blocking status so a manual
+      // “刷新” never looks as though the click was ignored.
+      const message = gatewayErrorMessage(error);
+      if (preservesExistingData) setRefreshFailure(message);
+      else setFailure(message);
     } finally {
-      if (!silent) setLoading(false);
+      if (request !== requestRef.current) return;
+      if (preservesExistingData) setRefreshing(false);
+      else setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
@@ -62,6 +80,7 @@ export function useSurfaceProjection<T>(
   useEffect(() => {
     // A new target (another note, another source) is a first read again.
     loadedRef.current = null;
+    setRefreshFailure(null);
     void load();
   }, [load]);
 
@@ -81,7 +100,7 @@ export function useSurfaceProjection<T>(
     };
   }, [refreshOnFocus, load]);
 
-  return { data, loading, failure, reload: load, epochRef };
+  return { data, loading, failure, refreshing, refreshFailure, reload: load, epochRef };
 }
 
 /**

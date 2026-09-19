@@ -6,7 +6,6 @@ export type ViewPresetId =
   | "search"
   | "graph"
   | "validation"
-  | "card"
   | "card-generation"
   | "source-library"
   | "source-detail"
@@ -24,7 +23,6 @@ export type RoomDestination =
   | "search"
   | "graph"
   | "validation"
-  | "card"
   | "card-generation"
   | "source-library"
   | "source-detail"
@@ -53,7 +51,6 @@ export type RoomIntent =
   | "search"
   | "graph"
   | "validate"
-  | "open-card"
   | "open-card-generation"
   | "open-sources"
   | "open-source"
@@ -89,8 +86,6 @@ export function resolveRoomIntent(intent: RoomIntent): RoomViewState {
       return { destination: "graph", viewPreset: "graph", surface: "graph" };
     case "validate":
       return { destination: "validation", viewPreset: "validation", surface: "validation" };
-    case "open-card":
-      return { destination: "card", viewPreset: "card", surface: "card" };
     case "open-card-generation":
       return { destination: "card-generation", viewPreset: "card-generation", surface: "card-generation" };
     case "open-sources":

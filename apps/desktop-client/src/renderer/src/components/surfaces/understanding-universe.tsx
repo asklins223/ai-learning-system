@@ -203,35 +203,12 @@ interface SceneCache {
   builtWithHoverId: string | null;
 }
 
-interface BackgroundCache {
-  key: string;
-  canvas: HTMLCanvasElement;
-}
-
-interface DustStar {
-  x: number;
-  y: number;
-  size: number;
-  alpha: number;
-  phase: number;
-  speed: number;
-  layer: number;
-}
-
 interface Palette {
-  spaceTop: string;
-  spaceBottom: string;
-  /** Opacity of the painted sky gradient — below 1 lets the shell's
-   *  observatory room plate (shared with the companion center) show through. */
-  skyAlpha: number;
-  nebulaA: string;
-  nebulaB: string;
   /** Colour of the halo drawn behind each knowledge cluster. Same family as the
-   *  sky nebulae but a different job — the halos are local to the graph and are
-   *  multiplied by their own draw alpha, so they keep their own strength. */
+   *  observatory image but a different job — the halos are local to the graph
+   *  and are multiplied by their own draw alpha. */
   envelopeA: string;
   envelopeB: string;
-  dust: string;
   text: string;
   muted: string;
   edge: string;
@@ -266,33 +243,27 @@ const BASE_RADIUS: Record<GraphNode["type"], number> = {
 const DEFAULT_PALETTE: Palette = {
   // Fallback only — the live values come from the --universe-* custom
   // properties in understanding-universe.css and must stay in sync with them.
-  spaceTop: "#172a3d",
-  spaceBottom: "#0e1b2a",
-  skyAlpha: 0.9,
-  nebulaA: "rgba(147, 207, 201, 0.07)",
-  nebulaB: "rgba(232, 181, 99, 0.04)",
-  envelopeA: "rgba(147, 207, 201, 0.18)",
-  envelopeB: "rgba(232, 181, 99, 0.1)",
-  dust: "#cfe2f2",
-  text: "#eadbc5",
-  muted: "rgba(234, 219, 197, 0.62)",
-  edge: "rgba(234, 219, 197, 0.16)",
-  edgeGlow: "#93cfc9",
-  source: "#e8b563",
-  note: "#7ec8bd",
-  card: "#ffe3a6",
-  keyPoint: "#93cfc9",
-  orbit: "rgba(244, 223, 192, 0.28)",
-  evidenceTrack: "rgba(244, 223, 192, 0.14)",
-  selected: "#ffe3a6",
-  labelBackdrop: "#101d2b",
+  envelopeA: "rgba(121, 206, 220, 0.22)",
+  envelopeB: "rgba(233, 198, 111, 0.12)",
+  text: "#fff3df",
+  muted: "rgba(214, 235, 235, 0.88)",
+  edge: "rgba(121, 206, 220, 0.84)",
+  edgeGlow: "#79cedc",
+  source: "#e9c66f",
+  note: "#8fc7a7",
+  card: "#ffe4a3",
+  keyPoint: "#79cedc",
+  orbit: "rgba(121, 206, 220, 0.36)",
+  evidenceTrack: "rgba(121, 206, 220, 0.2)",
+  selected: "#ffe4a3",
+  labelBackdrop: "#081827",
   states: {
-    misunderstood: "#d96d4f",
-    due_review: "#e8a23c",
-    preliminary_understood: "#7ec8bd",
-    reviewed: "#94ba79",
-    seen: "#93cfc9",
-    unseen: "#9a8a75",
+    misunderstood: "#df7657",
+    due_review: "#e9c66f",
+    preliminary_understood: "#8fc7a7",
+    reviewed: "#9fc28a",
+    seen: "#79cedc",
+    unseen: "#a89782",
   },
 };
 
@@ -302,11 +273,6 @@ function clamp(value: number, min: number, max: number) {
 
 function finitePoint(point: Readonly<UniversePoint> | undefined): point is Readonly<UniversePoint> {
   return Boolean(point && Number.isFinite(point.x) && Number.isFinite(point.y));
-}
-
-function hashNumber(value: number) {
-  const sine = Math.sin(value * 12.9898 + 78.233) * 43758.5453;
-  return sine - Math.floor(sine);
 }
 
 function hashString(value: string) {
@@ -325,14 +291,8 @@ function cssValue(style: CSSStyleDeclaration, name: string, fallback: string) {
 function readPalette(element: HTMLElement): Palette {
   const style = getComputedStyle(element);
   return {
-    spaceTop: cssValue(style, "--universe-space-top", DEFAULT_PALETTE.spaceTop),
-    spaceBottom: cssValue(style, "--universe-space-bottom", DEFAULT_PALETTE.spaceBottom),
-    skyAlpha: Number(cssValue(style, "--universe-sky-alpha", "0.9")) || 0.9,
-    nebulaA: cssValue(style, "--universe-nebula-a", DEFAULT_PALETTE.nebulaA),
-    nebulaB: cssValue(style, "--universe-nebula-b", DEFAULT_PALETTE.nebulaB),
     envelopeA: cssValue(style, "--universe-envelope-a", DEFAULT_PALETTE.envelopeA),
     envelopeB: cssValue(style, "--universe-envelope-b", DEFAULT_PALETTE.envelopeB),
-    dust: cssValue(style, "--universe-dust", DEFAULT_PALETTE.dust),
     text: cssValue(style, "--universe-label", DEFAULT_PALETTE.text),
     muted: cssValue(style, "--universe-label-muted", DEFAULT_PALETTE.muted),
     edge: cssValue(style, "--universe-edge", DEFAULT_PALETTE.edge),
@@ -347,7 +307,7 @@ function readPalette(element: HTMLElement): Palette {
     labelBackdrop: cssValue(
       style,
       "--universe-label-backdrop",
-      cssValue(style, "--universe-space-bottom", DEFAULT_PALETTE.labelBackdrop),
+      DEFAULT_PALETTE.labelBackdrop,
     ),
     states: {
       misunderstood: cssValue(
@@ -366,20 +326,6 @@ function readPalette(element: HTMLElement): Palette {
       unseen: cssValue(style, "--universe-state-unseen", DEFAULT_PALETTE.states.unseen),
     },
   };
-}
-
-function makeDust(count: number): DustStar[] {
-  return Array.from({ length: count }, (_, index) => ({
-    x: hashNumber(index * 7 + 1),
-    y: hashNumber(index * 7 + 2),
-    size: 0.45 + hashNumber(index * 7 + 3) * 1.45,
-    // Capped low: several hundred of these cover the whole sky, so their alpha
-    // sets how much pale light dilutes the navy.
-    alpha: 0.12 + hashNumber(index * 7 + 4) * 0.5,
-    phase: hashNumber(index * 7 + 5) * Math.PI * 2,
-    speed: 0.35 + hashNumber(index * 7 + 6) * 0.75,
-    layer: 0.015 + hashNumber(index * 7 + 7) * 0.035,
-  }));
 }
 
 function typeColor(type: GraphNode["type"], palette: Palette) {
@@ -522,14 +468,8 @@ function canvasLayer(width: number, height: number, dpr: number) {
 
 function paletteKey(palette: Palette) {
   return [
-    palette.spaceTop,
-    palette.spaceBottom,
-    String(palette.skyAlpha),
-    palette.nebulaA,
-    palette.nebulaB,
     palette.envelopeA,
     palette.envelopeB,
-    palette.dust,
     palette.text,
     palette.muted,
     palette.edge,
@@ -1120,8 +1060,6 @@ export const UnderstandingUniverse = forwardRef<
   /** Holds the storage key whose offsets have been loaded (null = none yet). */
   const storageLoadedRef = useRef<string | null>(null);
   const paletteRef = useRef<Palette>(DEFAULT_PALETTE);
-  const dustRef = useRef<DustStar[]>(makeDust(240));
-  const backgroundCacheRef = useRef<BackgroundCache | null>(null);
   const sceneCacheRef = useRef<SceneCache | null>(null);
   const spatialIndexRef = useRef<ScreenSpatialIndex | null>(null);
   const labelWidthCacheRef = useRef<Map<string, number>>(new Map());
@@ -1816,73 +1754,6 @@ export const UnderstandingUniverse = forwardRef<
     context.clearRect(0, 0, width, height);
 
     const currentPaletteKey = paletteKey(palette);
-    const backgroundKey = `${width}:${height}:${dpr}:${currentPaletteKey}`;
-    let backgroundCache = backgroundCacheRef.current;
-    if (!backgroundCache || backgroundCache.key !== backgroundKey) {
-      const backgroundCanvas = canvasLayer(width, height, dpr);
-      const backgroundContext = backgroundCanvas.getContext("2d");
-      if (backgroundContext) {
-        backgroundContext.setTransform(dpr, 0, 0, dpr, 0, 0);
-        const background = backgroundContext.createLinearGradient(0, 0, width, height);
-        background.addColorStop(0, palette.spaceTop);
-        background.addColorStop(1, palette.spaceBottom);
-        backgroundContext.fillStyle = background;
-        // Translucent base: the observatory room plate on the shell (the same
-        // background the companion center uses) glows through the night sky.
-        backgroundContext.globalAlpha = palette.skyAlpha;
-        backgroundContext.fillRect(0, 0, width, height);
-        backgroundContext.globalAlpha = 1;
-
-        const nebula = backgroundContext.createRadialGradient(
-          width * 0.16,
-          height * 0.2,
-          0,
-          width * 0.16,
-          height * 0.2,
-          Math.max(width, height) * 0.66,
-        );
-        nebula.addColorStop(0, palette.nebulaA);
-        nebula.addColorStop(1, "rgba(0,0,0,0)");
-        backgroundContext.fillStyle = nebula;
-        backgroundContext.fillRect(0, 0, width, height);
-        const nebulaTwo = backgroundContext.createRadialGradient(
-          width * 0.86,
-          height * 0.82,
-          0,
-          width * 0.86,
-          height * 0.82,
-          Math.max(width, height) * 0.54,
-        );
-        nebulaTwo.addColorStop(0, palette.nebulaB);
-        nebulaTwo.addColorStop(1, "rgba(0,0,0,0)");
-        backgroundContext.fillStyle = nebulaTwo;
-        backgroundContext.fillRect(0, 0, width, height);
-        backgroundContext.fillStyle = palette.dust;
-        for (const star of dustRef.current) {
-          const x = star.x * width;
-          const y = star.y * height;
-          backgroundContext.globalAlpha = star.alpha * (0.72 + Math.sin(star.phase) * 0.18);
-          backgroundContext.beginPath();
-          backgroundContext.arc(x, y, star.size, 0, Math.PI * 2);
-          backgroundContext.fill();
-        }
-        backgroundContext.globalAlpha = 1;
-      }
-      backgroundCache = { key: backgroundKey, canvas: backgroundCanvas };
-      backgroundCacheRef.current = backgroundCache;
-    }
-    context.drawImage(
-      backgroundCache.canvas,
-      0,
-      0,
-      backgroundCache.canvas.width,
-      backgroundCache.canvas.height,
-      0,
-      0,
-      width,
-      height,
-    );
-
     const sceneKey = [
       sceneRevisionRef.current,
       width,
@@ -2427,9 +2298,7 @@ export const UnderstandingUniverse = forwardRef<
       sizeRef.current = { width, height, dpr };
       canvas.width = Math.ceil(width * dpr);
       canvas.height = Math.ceil(height * dpr);
-      dustRef.current = makeDust(clamp(Math.round((width * height) / 3600), 130, 360));
       paletteRef.current = readPalette(root);
-      backgroundCacheRef.current = null;
       sceneCacheRef.current = null;
       spatialIndexRef.current = null;
       tooltipPointRef.current = null;
@@ -2471,7 +2340,6 @@ export const UnderstandingUniverse = forwardRef<
     if (!root) return;
     const refreshPalette = () => {
       paletteRef.current = readPalette(root);
-      backgroundCacheRef.current = null;
       labelWidthCacheRef.current.clear();
       invalidateScene();
     };
@@ -2653,4 +2521,3 @@ export const UnderstandingUniverse = forwardRef<
 });
 
 UnderstandingUniverse.displayName = "UnderstandingUniverse";
-

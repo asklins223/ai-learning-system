@@ -62,6 +62,7 @@ import {
   type ActivationIntentV2,
 } from "@ailearn/shared/card-generation-v2-contracts";
 import { isCardGenerationReviewOpen } from "@ailearn/shared/card-generation-desktop-contracts";
+import { extractAnswerText, frontLeaksAnswerVerbatimV2 } from "@ailearn/shared/card-generation-v2-pipeline";
 import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
 import {
   computeClientReviewHashV2,
@@ -770,6 +771,23 @@ async function createOrUpdateObjectiveAndCard(
     front: { cue: string; context?: string; prompt: string };
     estimatedReviewSeconds: number;
   };
+
+  // 发布侧泄题后闸（2026-09-18）：生成管线的 frontLeakageGate 只覆盖 worker
+  // 候选链路；候选审核通过后的任何激活路径都要再过一次同款「逐字照抄」判定，
+  // 否则正面即答案的卡能绕过闸门直接发布（库中 34 张已发布卡即此形态）。
+  // 判定与 frontLeakageGate 完全同源（frontLeaksAnswerVerbatimV2），不会出现
+  // 两侧标准不一致。
+  const leakedFront = frontLeaksAnswerVerbatimV2(
+    `${presentationDraft.front.cue} ${presentationDraft.front.prompt}`,
+    extractAnswerText(objectiveDraft.canonicalAnswer as never),
+  );
+  if (leakedFront) {
+    throw new CardGenerationV2ServiceError(
+      "front_leaks_answer",
+      422,
+      "卡片正面逐字照抄了答案，不能发布；请在候选审核中修改正面或拒绝该候选",
+    );
+  }
 
   switch (intent.kind) {
     case "create_new": {

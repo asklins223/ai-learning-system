@@ -23,6 +23,7 @@ import {
   learningRunPublicSnapshotV2Schema,
   learningRunReturnContractV2Schema,
   getLearningRunResultResponseV2Schema,
+  learningRunTargetRevealV2Schema,
   learningTaskDraftV2Schema,
   learningTaskDraftWriteReceiptV2Schema,
   putLearningTaskDraftRequestV2Schema,
@@ -39,8 +40,15 @@ import {
 } from "./companion-home-contracts.ts";
 import {
   companionVoiceSpeakResultV1Schema,
+  companionVoiceTranscribeResultV1Schema,
   type CompanionVoiceSpeakRequestV1,
 } from "./companion-voice-contracts.ts";
+// 伴星聊天发送链路（2026-09-18 接线）：建/复用 dialogue、发 turn、拉消息。
+import {
+  companionChatEnsureResultV1Schema,
+  companionChatListMessagesResultV1Schema,
+  companionChatSendTurnResultV1Schema,
+} from "./companion-chat-desktop-contracts.ts";
 // 站内图片字节通道：来源解析把网页图片写进对象存储后，正文引用指向
 // `/api/uploads/…`；渲染层够不到 API 源也不持有令牌，由 main 代取。
 import {
@@ -73,6 +81,7 @@ import {
 import {
   companionAccountStateV1Schema,
   companionOverviewSchema,
+  companionAnswerModePreferenceV1Schema,
   type CompanionAccountPatch,
 } from "./companion-shell-contracts.ts";
 import { noteDetailV1Schema } from "./note-projection-contracts.ts";
@@ -150,9 +159,29 @@ export const DESKTOP_IPC_CHANNELS = {
   authReauthenticate: "ailearn.v1.auth.reauthenticate",
   authChangePassword: "ailearn.v1.auth.changePassword",
   authJoinWorkspace: "ailearn.v1.auth.joinWorkspace",
+  // 旧版设置页回补（2026-09-18）：档案、头像与退出工作区。
+  authProfileGet: "ailearn.v1.auth.profile.get",
+  authUpdateProfile: "ailearn.v1.auth.profile.update",
+  authUploadAvatar: "ailearn.v1.auth.avatar.upload",
+  authAvatarGet: "ailearn.v1.auth.avatar.get",
+  authLeaveWorkspace: "ailearn.v1.auth.leaveWorkspace",
   workspaceList: "ailearn.v1.workspace.list",
   workspaceSwitch: "ailearn.v1.workspace.switch",
   workspaceGetCurrent: "ailearn.v1.workspace.getCurrent",
+  workspaceRename: "ailearn.v1.workspace.rename",
+  // SEC-02 / ADR-0009：Owner 的邀请发出与成员管理。
+  inviteCreate: "ailearn.v1.invite.create",
+  inviteList: "ailearn.v1.invite.list",
+  inviteRevoke: "ailearn.v1.invite.revoke",
+  memberList: "ailearn.v1.member.list",
+  memberRemove: "ailearn.v1.member.remove",
+  // 数据维护工具：Markdown 批量导入、搜索索引漂移检测与重建。
+  settingsMarkdownImport: "ailearn.v1.settings.markdownImport",
+  searchDriftGet: "ailearn.v1.search.drift",
+  searchReindex: "ailearn.v1.search.reindex",
+  // 任务 14：作答模态偏好（跨设备账号级）。
+  companionAnswerModeGet: "ailearn.v1.companion.answerMode.get",
+  companionAnswerModePatch: "ailearn.v1.companion.answerMode.patch",
   capabilitiesGet: "ailearn.v1.capabilities.get",
   windowGetState: "ailearn.v1.window.getState",
   windowSetTitlebarTheme: "ailearn.v1.window.setTitlebarTheme",
@@ -180,6 +209,25 @@ export const DESKTOP_IPC_CHANNELS = {
   companionPersonaPatch: "ailearn.v1.companion.persona.patch",
   companionPersonaReset: "ailearn.v1.companion.persona.reset",
   companionConversationsList: "ailearn.v1.companion.conversations.list",
+  // 伴星聊天发送链路 + 语音转文本（2026-09-18 接线，companion-chat-desktop-contracts）。
+  companionVoiceTranscribe: "ailearn.v1.companion.voice.transcribe",
+  companionChatEnsureConversation: "ailearn.v1.companion.chat.ensureConversation",
+  companionChatSendTurn: "ailearn.v1.companion.chat.sendTurn",
+  companionChatListMessages: "ailearn.v1.companion.chat.listMessages",
+  // 提案确认 + agent 导航 route 轮询（2026-09-18 补接线）。
+  companionChatProposalGet: "ailearn.v1.companion.chat.proposal.get",
+  companionChatProposalDecide: "ailearn.v1.companion.chat.proposal.decide",
+  companionChatAgentRoutes: "ailearn.v1.companion.chat.agentRoutes.list",
+  // 过程节点留痕（2026-09-19）：GET /companion/conversations/:id/run-nodes。
+  companionChatRunNodes: "ailearn.v1.companion.chat.runNodes.list",
+  // 停止本轮（2026-09-19）：POST /companion/runs/:id/cancel。
+  companionChatCancelRun: "ailearn.v1.companion.chat.cancelRun",
+  // 念头主动开场（切片④，2026-09-18）。
+  companionChatOpenThought: "ailearn.v1.companion.chat.openThought",
+  // LearningRun 页面只读上下文 + 一次性 grounded tutor 授权。HTTP 协议不变，
+  // 这里只把既有服务端端点收进 Electron 的 typed bridge。
+  companionLearningRunGetContext: "ailearn.v1.companion.learningRun.getContext",
+  companionLearningRunCreateContextGrant: "ailearn.v1.companion.learningRun.createContextGrant",
   noteGet: "ailearn.v1.note.get",
   sourceList: "ailearn.v1.source.list",
   sourceCreate: "ailearn.v1.source.create",
@@ -222,6 +270,7 @@ export const DESKTOP_IPC_CHANNELS = {
   learningRunSubmit: "ailearn.v1.learningRun.submit",
   learningRunAction: "ailearn.v1.learningRun.action",
   learningRunGetResult: "ailearn.v1.learningRun.getResult",
+  learningRunRevealTarget: "ailearn.v1.learningRun.revealTarget",
   learningRunGetReturnContract: "ailearn.v1.learningRun.getReturnContract",
   learningRunRecordActivityLease: "ailearn.v1.learningRun.recordActivityLease",
   learningRunAbandon: "ailearn.v1.learningRun.abandon",
@@ -948,6 +997,135 @@ const workspaceSummaryShape = {
   isPersonal: z.boolean(),
 };
 
+// ─── 旧版设置页回补（2026-09-18）─────────────────────────────────────
+// 服务端链路全部早已存在（/auth/profile、/uploads/avatars、/invites、/members、
+// /auth/leave-workspace、/workspaces/:id/name、/import/markdown、/search/drift、
+// /search/reindex、/me/companion/answer-mode-preference）；这里只把它们的回执
+// 收进 typed bridge，时间戳只作展示，不做时刻运算，因此放宽为非空字符串。
+
+/** GET/PUT /auth/profile 的回执（displayName ≤32 字、avatarUrl ≤500 字，服务端截断）。 */
+export const authProfileResultV1Schema = z.strictObject({
+  version: z.literal(1),
+  displayName: z.string().max(32).nullable(),
+  avatarUrl: z.string().max(500).nullable(),
+});
+export type AuthProfileResultV1 = z.infer<typeof authProfileResultV1Schema>;
+
+/** 头像通道上限与 API 的 MAX_AVATAR_SIZE（2MB）对齐。 */
+export const AVATAR_MAX_BYTES = 2_000_000;
+const AVATAR_OBJECT_KEY_PATTERN =
+  /^avatars\/[0-9a-f-]{36}\/[0-9a-f-]{36}\.(?:png|jpg|jpeg|gif|webp)$/;
+
+export const avatarObjectKeySchema = z
+  .string()
+  .min(1)
+  .max(512)
+  .regex(AVATAR_OBJECT_KEY_PATTERN, "invalid avatar object key");
+
+/** POST /uploads/avatars 的回执；服务端已在同一请求里持久化 avatarUrl。 */
+export const avatarUploadResultV1Schema = z.strictObject({
+  version: z.literal(1),
+  url: z.string().min(1).max(512).startsWith("/api/uploads/avatars/"),
+  objectKey: avatarObjectKeySchema,
+});
+export type AvatarUploadResultV1 = z.infer<typeof avatarUploadResultV1Schema>;
+
+/** POST /auth/leave-workspace 的回执；true 时 main 已换发并保存新令牌。 */
+export const leaveWorkspaceResultV1Schema = z.strictObject({
+  version: z.literal(1),
+  switchedToPersonalWorkspace: z.boolean(),
+});
+export type LeaveWorkspaceResultV1 = z.infer<typeof leaveWorkspaceResultV1Schema>;
+
+/** PATCH /workspaces/:id/name 的回执。 */
+export const renameWorkspaceResultV1Schema = z.strictObject({
+  version: z.literal(1),
+  workspaceId: uuidSchema,
+  name: nonEmptyStringSchema,
+});
+export type RenameWorkspaceResultV1 = z.infer<typeof renameWorkspaceResultV1Schema>;
+
+/** POST /invites：token 只在创建回执里出现一次。 */
+export const inviteCreatedV1Schema = z.strictObject({
+  version: z.literal(1),
+  id: nonEmptyStringSchema,
+  token: z.string().min(1).max(200),
+  tokenHint: nonEmptyStringSchema,
+  role: z.enum(["member", "owner"]),
+  expiresAt: z.string().min(1).nullable(),
+});
+export type InviteCreatedV1 = z.infer<typeof inviteCreatedV1Schema>;
+
+export const inviteStatusSchema = z.enum(["active", "consumed", "revoked", "expired"]);
+export type InviteStatusV1 = z.infer<typeof inviteStatusSchema>;
+
+export const inviteListItemV1Schema = z.strictObject({
+  version: z.literal(1),
+  id: nonEmptyStringSchema,
+  tokenHint: nonEmptyStringSchema,
+  role: z.enum(["member", "owner"]),
+  status: inviteStatusSchema,
+  createdAt: z.string().min(1),
+  expiresAt: z.string().min(1).nullable(),
+  consumedAt: z.string().min(1).nullable(),
+  consumedByEmail: z.string().min(1).nullable(),
+  revokedAt: z.string().min(1).nullable(),
+});
+export type InviteListItemV1 = z.infer<typeof inviteListItemV1Schema>;
+
+export const inviteListResultV1Schema = z.strictObject({
+  version: z.literal(1),
+  items: z.array(inviteListItemV1Schema).max(100),
+  total: nonNegativeIntSchema,
+});
+export type InviteListResultV1 = z.infer<typeof inviteListResultV1Schema>;
+
+export const memberListItemV1Schema = z.strictObject({
+  version: z.literal(1),
+  userId: uuidSchema,
+  email: z.string().min(1).max(320),
+  role: z.enum(["owner", "member"]),
+  joinedAt: z.string().min(1),
+});
+export type MemberListItemV1 = z.infer<typeof memberListItemV1Schema>;
+
+export const memberListResultV1Schema = z.strictObject({
+  version: z.literal(1),
+  items: z.array(memberListItemV1Schema).max(500),
+  total: nonNegativeIntSchema,
+});
+export type MemberListResultV1 = z.infer<typeof memberListResultV1Schema>;
+
+/** POST /import/markdown：完整笔记行不过桥，渲染层只需要计数。 */
+export const markdownImportResultV1Schema = z.strictObject({
+  version: z.literal(1),
+  imported: nonNegativeIntSchema,
+  failed: nonNegativeIntSchema,
+});
+export type MarkdownImportResultV1 = z.infer<typeof markdownImportResultV1Schema>;
+
+/** GET /search/drift：只投影计数与结论，ID 列表留给服务端日志。 */
+export const searchDriftResultV1Schema = z.strictObject({
+  version: z.literal(1),
+  hasDrift: z.boolean(),
+  ghosts: nonNegativeIntSchema,
+  missing: nonNegativeIntSchema,
+  stale: nonNegativeIntSchema,
+});
+export type SearchDriftResultV1 = z.infer<typeof searchDriftResultV1Schema>;
+
+/** POST /search/reindex 回执。 */
+export const searchReindexResultV1Schema = z.strictObject({
+  version: z.literal(1),
+  deleted: nonNegativeIntSchema,
+  indexedNotes: nonNegativeIntSchema,
+  indexedSources: nonNegativeIntSchema,
+  indexedObjectives: nonNegativeIntSchema,
+  errors: nonNegativeIntSchema,
+  capped: z.boolean(),
+});
+export type SearchReindexResultV1 = z.infer<typeof searchReindexResultV1Schema>;
+
 export const workspaceSummarySchema = z
   .strictObject(workspaceSummaryShape)
   .superRefine((value, context) => {
@@ -1057,10 +1235,35 @@ export const gatewayEventPayloadM1Schema = z.union([
 ]);
 export type GatewayEventPayloadM1 = z.infer<typeof gatewayEventPayloadM1Schema>;
 
+/**
+ * 伴星会话 SSE 的单帧（§5.3 wire 事件的最小投影）。
+ *
+ * 主进程消费 `/companion/conversations/:id/events`，把每帧投影成这个形状转发给
+ * 渲染层。刻意**不**内嵌完整的 `companionStreamEventV1Schema`：事件 union 只覆盖
+ * 客户端认识的类型，而 DB 约束允许 18 种（action.started / proactive.delivery 等），
+ * 用完整 union 校验会让未知类型整帧被丢弃，也会把桌面端锁死在 web 端的事件版本上。
+ * 这里只保证"可安全过桥"的不变量：seq/runId/generation 类型正确、eventType 有界、
+ * payload 是对象（尺寸在网关上另有限制），具体语义由渲染层按 eventType 收窄。
+ */
+export const companionChatStreamEventV1Schema = z.strictObject({
+  /** 会话内单调的事件 seq（与 SSE id 同行）。 */
+  seq: nonNegativeIntSchema,
+  runId: uuidSchema.nullable(),
+  generation: nonNegativeIntSchema,
+  eventType: nonEmptyStringSchema,
+  payload: z.record(z.unknown()),
+});
+export type CompanionChatStreamEventV1 = z.infer<typeof companionChatStreamEventV1Schema>;
+
 export const gatewayEventPayloadM2Schema = z.union([
   gatewayEventPayloadM1Schema,
   z.strictObject({ kind: z.literal("learning_run_changed"), runId: uuidSchema, revision: nonNegativeIntSchema }),
   z.strictObject({ kind: z.literal("card_generation_changed"), runId: uuidSchema, eventCursor: nonNegativeIntSchema, revision: nonNegativeIntSchema }),
+  z.strictObject({
+    kind: z.literal("companion_chat_event"),
+    conversationId: uuidSchema,
+    event: companionChatStreamEventV1Schema,
+  }),
 ]);
 export type GatewayEventPayloadM2 = z.infer<typeof gatewayEventPayloadM2Schema>;
 
@@ -1068,6 +1271,11 @@ export const gatewayEventPayloadSchema = z.union([
   gatewayEventPayloadM1Schema,
   z.strictObject({ kind: z.literal("learning_run_changed"), runId: uuidSchema, revision: nonNegativeIntSchema }),
   z.strictObject({ kind: z.literal("card_generation_changed"), runId: uuidSchema, eventCursor: nonNegativeIntSchema, revision: nonNegativeIntSchema }),
+  z.strictObject({
+    kind: z.literal("companion_chat_event"),
+    conversationId: uuidSchema,
+    event: companionChatStreamEventV1Schema,
+  }),
   z.strictObject({ kind: z.literal("companion_delivery_changed"), conversationId: uuidSchema, cursor: cursorSchema }),
   z.strictObject({ kind: z.literal("domain_job_changed"), jobId: uuidSchema, revision: nonNegativeIntSchema }),
 ]);
@@ -1082,7 +1290,7 @@ export const gatewayEventSchema = z
     workspaceEpoch: nonNegativeIntSchema,
     cursor: cursorSchema,
     eventRevision: nonNegativeIntSchema,
-    kind: z.enum(["connection_changed", "snapshot_invalidated", "learning_run_changed", "card_generation_changed", "companion_delivery_changed", "domain_job_changed"]),
+    kind: z.enum(["connection_changed", "snapshot_invalidated", "learning_run_changed", "card_generation_changed", "companion_chat_event", "companion_delivery_changed", "domain_job_changed"]),
     schemaRevision: nonEmptyStringSchema,
     data: gatewayEventPayloadSchema,
   })
@@ -1114,6 +1322,19 @@ const cardGenerationSubscriptionTopicSchema = z.strictObject({
   runId: uuidSchema,
   cursor: cursorSchema.optional(),
 });
+/**
+ * 伴星会话事件流（§5.3）：桌面端终于有了 SSE 消费者。
+ *
+ * `eventCursor` 是订阅起点（seq 独占）：`POST .../turns` 的响应带回
+ * `eventCursor = turn.accepted 的 seq`，从这里挂流就只收本轮之后的事件，
+ * 不会重放整段历史（事件 TTL 是 24h，从头重放代价不可接受）。缺省 0 时
+ * 由主进程从事件头开始读——只在没有回合游标的降级路径使用。
+ */
+const companionChatSubscriptionTopicSchema = z.strictObject({
+  kind: z.literal("companionChat"),
+  conversationId: uuidSchema,
+  eventCursor: nonNegativeIntSchema.optional(),
+});
 
 export const subscriptionTopicM1Schema = z.discriminatedUnion("kind", [
   runtimeSubscriptionTopicSchema,
@@ -1125,6 +1346,7 @@ export const subscriptionTopicSchema = z.discriminatedUnion("kind", [
   workspaceSubscriptionTopicSchema,
   learningRunSubscriptionTopicSchema,
   cardGenerationSubscriptionTopicSchema,
+  companionChatSubscriptionTopicSchema,
   z.strictObject({ kind: z.literal("companionDelivery"), cursor: cursorSchema.optional() }),
   z.strictObject({ kind: z.literal("domainJob"), jobId: uuidSchema, cursor: cursorSchema.optional() }),
 ]);
@@ -1135,6 +1357,7 @@ export const subscriptionTopicM2Schema = z.discriminatedUnion("kind", [
   workspaceSubscriptionTopicSchema,
   learningRunSubscriptionTopicSchema,
   cardGenerationSubscriptionTopicSchema,
+  companionChatSubscriptionTopicSchema,
 ]);
 export type SubscriptionTopicM2 = z.infer<typeof subscriptionTopicM2Schema>;
 
@@ -1221,6 +1444,15 @@ export interface AILearnDesktopApiM1 {
     reauthenticate(input: { meta: RequestMetaV1; password: string }): Promise<GatewayResultV1<SessionContextV1>>;
     changePassword(input: { meta: RequestMetaV1; commandId: string; currentPassword: string; newPassword: string }): Promise<GatewayResultV1<{ changed: true; sessionsRevoked: true }>>;
     joinWorkspace(input: { meta: RequestMetaV1; inviteToken: string }): Promise<GatewayResultV1<SessionContextV1>>;
+    /**
+     * 旧版设置页回补：档案读写、头像与退出协作工作区。
+     * 档案写入后 main 会丢弃缓存的会话，下次 getState 重新读取。
+     */
+    getProfile(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<AuthProfileResultV1>>;
+    updateProfile(input: { meta: RequestMetaV1; displayName?: string | null; avatarUrl?: string | null }): Promise<GatewayResultV1<AuthProfileResultV1>>;
+    uploadAvatar(input: { meta: RequestMetaV1; request: { version: 1; fileName: string; mimeType: string; bytesBase64: string } }): Promise<GatewayResultV1<AvatarUploadResultV1>>;
+    getAvatar(input: { meta: RequestMetaV1; request: { version: 1; objectKey: string } }): Promise<GatewayResultV1<z.infer<typeof sourceImageGetResultV1Schema>>>;
+    leaveWorkspace(input: { meta: RequestMetaV1; workspaceId: Uuid }): Promise<GatewayResultV1<SessionContextV1>>;
   };
   readonly workspace: {
     list(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<{ workspaces: WorkspaceSummaryV1[] }>>;
@@ -1244,6 +1476,21 @@ export interface AILearnDesktopApiM1 {
      * 并落盘。渲染进程只拿到回执，看不到也不写文件系统。
      */
     export(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<WorkspaceExportResultV1>>;
+    /** PROFILE-01：重命名自己的个人工作区。 */
+    rename(input: { meta: RequestMetaV1; workspaceId: Uuid; name: string }): Promise<GatewayResultV1<RenameWorkspaceResultV1>>;
+  };
+  /**
+   * SEC-02 / ADR-0009：Owner 的邀请发出与成员管理。服务端 requireOwner 收口，
+   * Member 调用只会得到 forbidden，界面按 membership.role 隐藏入口。
+   */
+  readonly invites: {
+    create(input: { meta: RequestMetaV1; role: "member" | "owner"; expiresInHours?: number }): Promise<GatewayResultV1<InviteCreatedV1>>;
+    list(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<InviteListResultV1>>;
+    revoke(input: { meta: RequestMetaV1; inviteId: Uuid }): Promise<GatewayResultV1<{ revoked: true }>>;
+  };
+  readonly members: {
+    list(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<MemberListResultV1>>;
+    remove(input: { meta: RequestMetaV1; userId: Uuid }): Promise<GatewayResultV1<{ removed: true }>>;
   };
   readonly capabilities: {
     get(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<CapabilityProjectionV1>>;
@@ -1319,6 +1566,80 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
         meta: RequestMetaV1;
         request: CompanionVoiceSpeakRequestV1;
       }): Promise<GatewayResultV1<z.infer<typeof companionVoiceSpeakResultV1Schema>>>;
+      /**
+       * 语音转文本（2026-09-18 接线）：渲染层本地录好 16kHz WAV，main 送到
+       * `POST /voice/transcribe`（purpose=companion_dialogue）。本地 SenseVoice
+       * （WASM）优先，这条云通道是本地引擎不可用时的兜底。
+       */
+      transcribe(input: {
+        meta: RequestMetaV1;
+        request: import("./companion-voice-contracts.ts").CompanionVoiceTranscribeRequestV1;
+      }): Promise<GatewayResultV1<z.infer<typeof companionVoiceTranscribeResultV1Schema>>>;
+    };
+    /**
+     * 聊天发送链路（2026-09-18 接线）：建/复用 dialogue → 发 turn → 轮询
+     * messages 拿回复。此前桌面端只有只读的对话历史。
+     */
+    readonly chat: {
+      ensureConversation(input: {
+        meta: RequestMetaV1;
+        request: import("./companion-chat-desktop-contracts.ts").CompanionChatEnsureRequestV1;
+      }): Promise<GatewayResultV1<z.infer<typeof companionChatEnsureResultV1Schema>>>;
+      sendTurn(input: {
+        meta: RequestMetaV1;
+        request: import("./companion-chat-desktop-contracts.ts").CompanionChatSendTurnRequestV1;
+      }): Promise<GatewayResultV1<z.infer<typeof companionChatSendTurnResultV1Schema>>>;
+      listMessages(input: {
+        meta: RequestMetaV1;
+        request: import("./companion-chat-desktop-contracts.ts").CompanionChatListMessagesRequestV1;
+      }): Promise<GatewayResultV1<z.infer<typeof companionChatListMessagesResultV1Schema>>>;
+      /** 提案快照（2026-09-18）：action 消息的确认卡数据源。 */
+      getProposal(input: {
+        meta: RequestMetaV1;
+        request: import("./companion-chat-desktop-contracts.ts").CompanionChatProposalGetRequestV1;
+      }): Promise<GatewayResultV1<import("./companion-chat-desktop-contracts.ts").CompanionChatProposalGetResultV1>>;
+      /** 提案裁决（2026-09-18）：confirm 必须携带快照冻结的 payloadSha256。 */
+      decideProposal(input: {
+        meta: RequestMetaV1;
+        request: import("./companion-chat-desktop-contracts.ts").CompanionChatProposalDecideRequestV1;
+      }): Promise<GatewayResultV1<import("./companion-chat-desktop-contracts.ts").CompanionChatProposalDecideResultV1>>;
+      /** agent 导航 route 轮询（2026-09-18）：按 seq 游标拉取 agent.tool 路由事件。 */
+      listAgentRoutes(input: {
+        meta: RequestMetaV1;
+        request: import("./companion-chat-desktop-contracts.ts").CompanionAgentRoutesListRequestV1;
+      }): Promise<GatewayResultV1<import("./companion-chat-desktop-contracts.ts").CompanionAgentRoutesListResultV1>>;
+      /**
+       * 过程节点留痕（2026-09-19）：按 seq 游标拉取 assistant.status / agent.skill /
+       * agent.tool 事件 + 每轮 run 的步数与工具消耗摘要。
+       */
+      listRunNodes(input: {
+        meta: RequestMetaV1;
+        request: import("./companion-chat-desktop-contracts.ts").CompanionRunNodesListRequestV1;
+      }): Promise<GatewayResultV1<import("./companion-chat-desktop-contracts.ts").CompanionRunNodesListResultV1>>;
+      /** 主动开场（切片④，2026-09-18）：点击念头气泡，把她的开场消息落进会话。 */
+      openThought(input: {
+        meta: RequestMetaV1;
+        request: import("./companion-chat-desktop-contracts.ts").CompanionChatOpenThoughtRequestV1;
+      }): Promise<GatewayResultV1<import("./companion-chat-desktop-contracts.ts").CompanionChatOpenThoughtResultV1>>;
+      /**
+       * 停止本轮（2026-09-19）：服务端原子取消 + 写 turn.cancelled(reason=user)，
+       * worker 在 fence 处把已输出的文本以 kind='cancelled' 留档。
+       */
+      cancelRun(input: {
+        meta: RequestMetaV1;
+        request: import("./companion-chat-desktop-contracts.ts").CompanionChatCancelRunRequestV1;
+      }): Promise<GatewayResultV1<import("./companion-chat-desktop-contracts.ts").CompanionChatCancelRunResultV1>>;
+    };
+    readonly learningRun: {
+      getContext(input: {
+        meta: RequestMetaV1;
+        runId: Uuid;
+      }): Promise<GatewayResultV1<import("./companion-conversation-contracts.ts").CompanionLearningRunContextV1>>;
+      createContextGrant(input: {
+        meta: RequestMetaV1;
+        runId: Uuid;
+        request: import("./companion-conversation-contracts.ts").CreateCompanionLearningRunContextGrantRequestV1;
+      }): Promise<GatewayResultV1<import("./companion-conversation-contracts.ts").CompanionGroundedTutorGrantV1>>;
     };
     /**
      * 账号级 presence 设置（GET/PATCH /me/companion）。PATCH 必须携带当前
@@ -1367,6 +1688,11 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
     /** 只读对话记录：会话摘要，没有消息正文，也没有发送通道。 */
     readonly conversations: {
       list(input: { meta: RequestMetaV1; limit?: number }): Promise<GatewayResultV1<z.infer<typeof companionConversationListV1Schema>>>;
+    };
+    /** 任务 14：作答模态偏好（voice/silent/text/any，账号级跨设备）。 */
+    readonly answerMode: {
+      get(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof companionAnswerModePreferenceV1Schema>>>;
+      patch(input: { meta: RequestMetaV1; preference: "voice" | "silent" | "text" | "any" }): Promise<GatewayResultV1<z.infer<typeof companionAnswerModePreferenceV1Schema>>>;
     };
   };
   readonly note: {
@@ -1468,6 +1794,14 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
   };
   readonly search: {
     global(input: { meta: RequestMetaV1; query: string; type?: "note" | "source" | "objective"; limit?: number; offset?: number }): Promise<GatewayResultV1<z.infer<typeof desktopSearchPageSchema>>>;
+    /** F-025：搜索索引漂移检测（Owner）。 */
+    drift(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<SearchDriftResultV1>>;
+    /** F-011：重建当前工作区搜索索引（Owner）。 */
+    reindex(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<SearchReindexResultV1>>;
+  };
+  /** F-033 / G-006：Markdown 批量导入（Owner）。内容是 UTF-8 文本，不是 base64。 */
+  readonly markdownImport: {
+    run(input: { meta: RequestMetaV1; items: ReadonlyArray<{ title?: string; content: string }>; importId: string }): Promise<GatewayResultV1<MarkdownImportResultV1>>;
   };
   readonly learningRun: {
     get(input: { meta: RequestMetaV1; runId: Uuid }): Promise<GatewayResultV1<z.infer<typeof learningRunPublicSnapshotV2Schema>>>;
@@ -1498,6 +1832,7 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
       request: DesktopLearningRunActionRequestV2;
     }): Promise<GatewayResultV1<z.infer<typeof learningRunActionResponseV2Schema>>>;
     getResult(input: { meta: RequestMetaV1; runId: Uuid }): Promise<GatewayResultV1<z.infer<typeof getLearningRunResultResponseV2Schema>>>;
+    revealTarget(input: { meta: RequestMetaV1; runId: Uuid }): Promise<GatewayResultV1<z.infer<typeof learningRunTargetRevealV2Schema>>>;
     getReturnContract(input: { meta: RequestMetaV1; runId: Uuid }): Promise<GatewayResultV1<z.infer<typeof learningRunReturnContractV2Schema>>>;
     recordActivityLease(input: {
       meta: RequestMetaV1;

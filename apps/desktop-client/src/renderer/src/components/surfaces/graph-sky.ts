@@ -142,7 +142,10 @@ export function isEvidenceNode(node: UnderstandingNodeProjectionV3): node is Evi
  *  correctness one. */
 export function graphNodeSummary(node: UnderstandingNodeProjectionV3): string {
   if (isObjectiveNode(node)) {
-    return `${graphObjectiveStateLabel(node.personal.state)} · ${node.publicSummary}`;
+    // The detail header and facts grid already name the personal state. Keep
+    // the summary focused on the objective itself so the opening hierarchy
+    // does not repeat “到期复习” or “学习中” three times.
+    return node.publicSummary;
   }
   if (isSourceNode(node)) return `${graphSourceModalityLabel(node.modality)}来源`;
   // The server has no basis to compute a note's freshness (it records no

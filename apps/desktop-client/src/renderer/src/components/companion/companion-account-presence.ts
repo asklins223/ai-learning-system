@@ -23,6 +23,20 @@ export const COMPANION_INTERVENTION_OPTIONS = [
   ["active", "活跃"],
 ] as const;
 
+/**
+ * 助理权限档位（2026-09-19 权限分级对齐原设计）。
+ *
+ * - read_only：只允许读类工具；
+ * - guided：写类/有影响的动作每次都要用户确认（现状行为）；
+ * - full：用户预授权——除 irreversible 底线外不再逐步确认，路由直接自动跳转，
+ *   自动设置/自动填充类工具直接执行。
+ */
+export const COMPANION_AGENT_PERMISSION_OPTIONS = [
+  ["read_only", "只读"],
+  ["guided", "分步确认"],
+  ["full", "自动执行"],
+] as const;
+
 /** 默认静默时段：夜间 22:00 → 次日 07:00，与设置中心的口径一致。 */
 export const DEFAULT_QUIET_HOURS = Object.freeze({
   startLocal: "22:00",

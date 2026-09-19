@@ -4,10 +4,9 @@ import { createRequestMeta, gatewayErrorMessage, unwrapGatewayResult } from "../
 import { useRoomStore } from "../../app/room-store";
 import { mediaAssetUrl, useLearningRoomManifest } from "../../media/learning-room-manifest";
 import { HOME_V2_ENABLED } from "../home-v2/home-v2";
-import { WindowLive2D } from "../companion/WindowLive2D";
+import { CompanionRoot } from "../companion/CompanionPresence";
 import { DirectoryRail } from "../DirectoryRail";
 import { HudRoomControl } from "./HudRoomControl";
-import { HUD_PAGES } from "./hud-pages";
 import { useHudPage } from "./use-hud-page";
 
 function workspaceRoleLabel(workspace: WorkspaceSummaryV1): string {
@@ -212,7 +211,6 @@ export function HudFirstSpaceScene({
 }) {
   useHudPage("space", { spaceFirstEntry: true });
   const theme = useRoomStore((state) => state.theme);
-  const motionMode = useRoomStore((state) => state.motionMode);
   const { manifest } = useLearningRoomManifest();
   // The mockup puts 04A on `bg-home`, so the plate is the home room's own
   // poster — the same pair `RoomStage` paints behind the live home page.
@@ -235,19 +233,7 @@ export function HudFirstSpaceScene({
         {nightPlate ? <img className="room-backplate room-backplate--home-night" src={nightPlate} alt="" draggable={false} /> : null}
       </div>
       <DirectoryRail readOnly />
-      <div className="companion right">
-        <div className="speech">
-          <b>MAO · 页面联动</b>
-          {HUD_PAGES.space.bubble}
-        </div>
-        <WindowLive2D
-          active
-          motionMode={motionMode}
-          presentation="idle"
-          ariaLabel="Mao"
-          style={{ width: 430, height: 430 }}
-        />
-      </div>
+      <CompanionRoot />
       <HudRoomControl readOnly />
       <HudFirstSpace
         workspaces={workspaces}
