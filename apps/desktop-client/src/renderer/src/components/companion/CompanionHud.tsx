@@ -1,13 +1,17 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useRef,
   useState,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
 import {
+  ArrowDownToLine,
+  CalendarDays,
   ChevronLeft,
   History,
   Keyboard,
@@ -16,6 +20,7 @@ import {
   MoreHorizontal,
   Quote,
   RotateCcw,
+  Search,
   Send,
   Settings2,
   Sparkles,
@@ -26,10 +31,12 @@ import {
 import type { CompanionAccountPatch, CompanionAccountStateV1 } from "@ailearn/shared/companion-shell-contracts";
 import type { CompanionAgentPermissionLevel } from "@ailearn/shared/companion-agent-contracts";
 import type { DesktopRouteV1 } from "@ailearn/shared/desktop-ipc-contracts";
+import type { CompanionMessageV1 } from "@ailearn/shared/companion-conversation-contracts";
 import { gatewayErrorMessage } from "../../app/desktop-client";
 import {
   companionMessageText,
   useCompanionChat,
+  type CompanionNavChip,
   type CompanionProposalUiState,
 } from "../../app/companion-chat-session";
 import {
@@ -1181,6 +1188,103 @@ function CompanionHistoryDrawer({
   const micRef = useRef<HTMLButtonElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const stopping = chat.cancelling;
+  // 抽屉里"正在说…"的平滑打字机（2026-09-19 流式卡顿）：气泡有显现驱动器，
+  // 抽屉此前是裸渲染 draft.text——服务端的 delta 是 24 字/90ms 的节流块，
+  // 裸渲染就是一跳一跳的大块。这里按与气泡同一条阅读钟推进，落后太多时
+  // 加速追赶，视觉上是连续打字而不是整块砸出来。
+  const smoothedDraftText = useSmoothedDraftText(chat.draft);
+
+  // ── 微信式历史浏览（2026-09-19） ──────────────────────────────────────
+  // 关键词搜索 / 日期筛选 / 上滑分页（每页 20，hook 侧游标加载）/ 跳转最新。
+  // 搜索与日期筛选共用一份全量缓存（首次进入时拉全，~1200 条封顶）。
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchInput, setSearchInput] = useState("");
+  const [dateFilter, setDateFilter] = useState<string | null>(null);
+  const [allMessages, setAllMessages] = useState<readonly CompanionMessageV1[] | null>(null);
+  const [allLoading, setAllLoading] = useState(false);
+  const [atLatest, setAtLatest] = useState(true);
+  const prevScrollHeightRef = useRef<number | null>(null);
+  const messagesRef = useRef(chat.messages);
+  messagesRef.current = chat.messages;
+
+  const ensureAllMessages = useCallback(async () => {
+    if (allMessages || allLoading) return;
+    setAllLoading(true);
+    try {
+      setAllMessages(await chat.fetchAllMessages());
+    } finally {
+      setAllLoading(false);
+    }
+  }, [chat, allMessages, allLoading]);
+
+  /** 向前翻页时的滚动锚定：prepend 会让浏览器把视口内容整体推下去，这里按高度差拉回来。 */
+  useEffect(() => {
+    const list = listRef.current;
+    const prevHeight = prevScrollHeightRef.current;
+    if (!list || prevHeight == null) return;
+    prevScrollHeightRef.current = null;
+    list.scrollTop = list.scrollHeight - prevHeight + list.scrollTop;
+  }, [chat.messages.length]);
+
+  const scrollToLatest = useCallback(() => {
+    const list = listRef.current;
+    if (list) list.scrollTo({ top: list.scrollHeight, behavior: "smooth" });
+  }, []);
+
+  const handleListScroll = useCallback(() => {
+    const list = listRef.current;
+    if (!list) return;
+    setAtLatest(list.scrollHeight - list.scrollTop - list.clientHeight < 160);
+    if (list.scrollTop <= 56 && chat.historyHasMore && !chat.historyLoadingOlder) {
+      prevScrollHeightRef.current = list.scrollHeight;
+      void chat.loadOlderMessages();
+    }
+  }, [chat]);
+
+  /** 搜索结果点击 → 确保目标已在加载范围（不够就向前翻页），再滚到那条并闪烁标记。 */
+  const jumpToMessage = useCallback(async (id: string) => {
+    let guard = 0;
+    let present = messagesRef.current.some((message) => message.id === id);
+    while (!present && chat.historyHasMore && guard < 30) {
+      guard += 1;
+      await chat.loadOlderMessages();
+      present = messagesRef.current.some((message) => message.id === id);
+    }
+    if (!present) return;
+    setSearchOpen(false);
+    setSearchInput("");
+    setDateFilter(null);
+    window.requestAnimationFrame(() => {
+      const el = listRef.current?.querySelector(`[data-message-id="${id}"]`);
+      el?.scrollIntoView({ block: "center" });
+      el?.setAttribute("data-flash", "true");
+      window.setTimeout(() => el?.removeAttribute("data-flash"), 1600);
+    });
+  }, [chat]);
+
+  /** 单条消息（常规时间线与日期筛选视图共用）。 */
+  const renderArticle = useCallback((message: CompanionMessageV1) => {
+    // 一条消息对应哪一轮 run：取消时 worker 落的那条部分记录也带 assistantMessageId，
+    // 所以"你在这里停下了"能挂到正确的那条上。
+    const trace = message.role === "assistant"
+      ? chat.runTraces.find((item) => item.summary.assistantMessageId === message.id) ?? null
+      : null;
+    return (
+      <article data-message-id={message.id} data-role={message.role} data-kind={message.kind} data-cancelled={message.kind === "cancelled" || undefined}>
+        <header><span>{message.role === "user" ? "你" : "Mao"}{message.kind === "voice_transcript" ? " · 语音" : ""}</span><time>{messageTime(message.createdAt)}</time></header>
+        <p>{companionMessageText(message)}</p>
+        {message.kind === "cancelled" ? <p className="companion-history__stopped">你在这里停下了{stopSummary(trace)}</p> : null}
+        {/* 失败留档（2026-09-19）：worker 把"她已经说出来的那半句"落成 kind='error'，
+            这里必须说清它是半句——否则读者会以为她就是这么说的。 */}
+        {message.kind === "error" ? <p className="companion-history__stopped">这一轮没能说完{stopSummary(trace)}</p> : null}
+        {/* 过程留痕：只要这轮有可展示的节点（状态/技能/工具任一）就挂出来。 */}
+        {trace && shouldShowRunTrace(trace)
+          ? <CompanionRunTracePanel trace={trace} />
+          : null}
+        {message.role === "assistant" ? message.blocks.filter((block) => block.type === "action_ref").map((block) => block.type === "action_ref" ? <CompanionProposalCard key={block.proposalId} state={chat.proposalStates[block.proposalId]} onDecide={(decision) => void chat.decideProposal(block.proposalId, decision)} /> : null) : null}
+      </article>
+    );
+  }, [chat]);
 
   useEffect(() => {
     if (open) {
@@ -1229,10 +1333,13 @@ function CompanionHistoryDrawer({
     void chat.cancel();
   }, [chat]);
 
-  const openRoute = useCallback(async (route: DesktopRouteV1) => {
+  const openRoute = useCallback(async (chip: CompanionNavChip) => {
+    if (!chip.route) return;
     setNavNote(null);
     try {
-      await chat.goToRoute(route);
+      await chat.goToRoute(chip.route);
+      // 跳转成功的 chip 就地消失（2026-09-19 用户反馈）：提示的使命完成了。
+      chat.dismissNavChip(chip.id);
     } catch (error) {
       setNavNote(`跳转失败：${gatewayErrorMessage(error)}`);
     }
@@ -1246,53 +1353,127 @@ function CompanionHistoryDrawer({
         <div><strong>历史会话</strong><span>真实会话、语音转写和动作提案</span></div>
         <button type="button" onClick={onClose} aria-label="关闭历史会话"><X size={17} /></button>
       </header>
-      <div ref={listRef} className="companion-history__list">
+      {/* 微信式工具行（2026-09-19）：关键词搜索 / 日期筛选 */}
+      <div className="companion-history__toolbar">
+        {searchOpen ? (
+          <div className="companion-history__searchbar">
+            <Search size={13} aria-hidden="true" />
+            <input
+              autoFocus
+              value={searchInput}
+              onChange={(event) => {
+                setSearchInput(event.currentTarget.value);
+                void ensureAllMessages();
+              }}
+              placeholder="搜索聊天记录"
+              aria-label="搜索聊天记录"
+            />
+            {searchInput ? <button type="button" onClick={() => setSearchInput("")} aria-label="清空搜索词"><X size={12} /></button> : null}
+            <button type="button" onClick={() => { setSearchOpen(false); setSearchInput(""); }} aria-label="退出搜索"><X size={14} /></button>
+          </div>
+        ) : (
+          <>
+            <button type="button" className="companion-history__tool" onClick={() => setSearchOpen(true)}>
+              <Search size={14} aria-hidden="true" />搜索
+            </button>
+            <label className="companion-history__tool companion-history__date">
+              <CalendarDays size={14} aria-hidden="true" />
+              <input
+                type="date"
+                value={dateFilter ?? ""}
+                onChange={(event) => {
+                  setDateFilter(event.currentTarget.value || null);
+                  void ensureAllMessages();
+                }}
+                aria-label="按日期筛选聊天记录"
+              />
+              {dateFilter ? <button type="button" onClick={(event) => { event.preventDefault(); setDateFilter(null); }} aria-label="清除日期筛选"><X size={12} /></button> : null}
+            </label>
+          </>
+        )}
+      </div>
+      <div ref={listRef} className="companion-history__list" onScroll={handleListScroll}>
         {chat.phase === "loading" ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />正在读取会话…</p> : null}
-        {chat.messages.map((message) => {
-          // 一条消息对应哪一轮 run：取消时 worker 落的那条部分记录也带 assistantMessageId，
-          // 所以"你在这里停下了"能挂到正确的那条上。
-          const trace = message.role === "assistant"
-            ? chat.runTraces.find((item) => item.summary.assistantMessageId === message.id) ?? null
-            : null;
-          return (
-            <article key={message.id} data-role={message.role} data-kind={message.kind} data-cancelled={message.kind === "cancelled" || undefined}>
-              <header><span>{message.role === "user" ? "你" : "Mao"}{message.kind === "voice_transcript" ? " · 语音" : ""}</span><time>{messageTime(message.createdAt)}</time></header>
-              <p>{companionMessageText(message)}</p>
-              {message.kind === "cancelled" ? <p className="companion-history__stopped">你在这里停下了{stopSummary(trace)}</p> : null}
-              {/* 失败留档（2026-09-19）：worker 把"她已经说出来的那半句"落成 kind='error'，
-                  这里必须说清它是半句——否则读者会以为她就是这么说的。 */}
-              {message.kind === "error" ? <p className="companion-history__stopped">这一轮没能说完{stopSummary(trace)}</p> : null}
-              {/* 过程留痕（方案 §1 第三层）：单步闲聊不显示，避免每句话都挂一行。 */}
-              {trace && (trace.summary.stepCount > 1 || trace.summary.toolCallCount > 0)
-                ? <CompanionRunTracePanel trace={trace} />
-                : null}
-              {message.role === "assistant" ? message.blocks.filter((block) => block.type === "action_ref").map((block) => block.type === "action_ref" ? <CompanionProposalCard key={block.proposalId} state={chat.proposalStates[block.proposalId]} onDecide={(decision) => void chat.decideProposal(block.proposalId, decision)} /> : null) : null}
-            </article>
-          );
-        })}
-        {/*
-          进行中的一轮（2026-09-19 ③）：历史此前只渲染 `listMessages` 的快照，而
-          `companion_messages` 只在 `assistant.final` 的终态事务里才写——于是"她正在说的
-          这段话"在历史里根本不存在，用户必须等整轮结束才能看到。`draft` 早就在气泡里
-          实时显示了，这里把它按同一条消息的样子折进历史（同一份文本，不另起数据源）。
-          过程留痕按 runId 找：进行中那轮的 `assistantMessageId` 还是 null，不能用它匹配。
-        */}
         {(() => {
-          const draft = chat.draft;
-          if (!draft || draft.text.trim().length === 0) return null;
-          const trace = chat.runTraces.find((item) => item.summary.runId === draft.runId) ?? null;
+          // 三种视图：搜索命中列表 / 某一天的记录 / 常规时间线（日期分组 + 上滑翻页）。
+          const keyword = searchInput.trim();
+          if (searchOpen && keyword) {
+            const needle = keyword.toLowerCase();
+            const hits = (allMessages ?? []).filter((message) => companionMessageText(message).toLowerCase().includes(needle));
+            return (
+              <>
+                {allMessages == null ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />正在载入全部记录…</p> : null}
+                {allMessages != null && hits.length === 0 ? <p className="companion-history__system">没有找到包含「{keyword}」的消息</p> : null}
+                {hits.map((message) => (
+                  <button key={message.id} type="button" className="companion-history__hit" onClick={() => void jumpToMessage(message.id)}>
+                    <header><span>{message.role === "user" ? "你" : "Mao"}</span><time>{messageDayLabel(message.createdAt)} {messageTime(message.createdAt)}</time></header>
+                    <p>{highlightText(companionMessageText(message), keyword)}</p>
+                  </button>
+                ))}
+                {allMessages != null && hits.length > 0 ? <p className="companion-history__system">共 {hits.length} 条 · 点一条回到它的上下文</p> : null}
+              </>
+            );
+          }
+          if (dateFilter) {
+            const dayMessages = (allMessages ?? []).filter((message) => messageDayKey(message.createdAt) === dateFilter);
+            return (
+              <>
+                <div className="companion-history__day companion-history__day--filter">
+                  <span>{messageDayLabel(`${dateFilter}T12:00:00`)} 的记录{allMessages != null ? ` · ${dayMessages.length} 条` : ""}</span>
+                  <button type="button" onClick={() => setDateFilter(null)}>看全部</button>
+                </div>
+                {allMessages == null ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />正在载入全部记录…</p> : null}
+                {allMessages != null && dayMessages.length === 0 ? <p className="companion-history__system">这一天没有聊天记录</p> : null}
+                {dayMessages.map((message) => renderArticle(message))}
+              </>
+            );
+          }
           return (
-            <article data-role="assistant" data-live="true">
-              <header><span>Mao</span><time>正在说…</time></header>
-              <p>{draft.text}</p>
-              {trace && (trace.summary.stepCount > 1 || trace.summary.toolCallCount > 0)
-                ? <CompanionRunTracePanel trace={trace} />
-                : null}
-            </article>
+            <>
+              {chat.historyLoadingOlder ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />加载更早的消息…</p> : null}
+              {!chat.historyHasMore && chat.messages.length > 0 ? <p className="companion-history__system">没有更早的消息了</p> : null}
+              {chat.messages.map((message, index) => {
+                const previous = index > 0 ? chat.messages[index - 1] : null;
+                const showDay = !previous || messageDayKey(previous.createdAt) !== messageDayKey(message.createdAt);
+                return (
+                  <Fragment key={message.id}>
+                    {showDay ? <div className="companion-history__day">{messageDayLabel(message.createdAt)}</div> : null}
+                    {renderArticle(message)}
+                  </Fragment>
+                );
+              })}
+              {/*
+                进行中的一轮（2026-09-19 ③）：历史此前只渲染 `listMessages` 的快照，而
+                `companion_messages` 只在 `assistant.final` 的终态事务里才写——于是"她正在说的
+                这段话"在历史里根本不存在，用户必须等整轮结束才能看到。`draft` 早就在气泡里
+                实时显示了，这里把它按同一条消息的样子折进历史（同一份文本，不另起数据源）。
+                过程留痕按 runId 找：进行中那轮的 `assistantMessageId` 还是 null，不能用它匹配。
+              */}
+              {(() => {
+                const draft = chat.draft;
+                if (!draft || draft.text.trim().length === 0) return null;
+                const trace = chat.runTraces.find((item) => item.summary.runId === draft.runId) ?? null;
+                return (
+                  <article data-role="assistant" data-live="true">
+                    <header><span>Mao</span><time>正在说…</time></header>
+                    <p>{smoothedDraftText}</p>
+                    {trace && shouldShowRunTrace(trace)
+                      ? <CompanionRunTracePanel trace={trace} />
+                      : null}
+                  </article>
+                );
+              })()}
+              {chat.phase === "sending" && !chat.draft ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />Mao 正在结合当前页面想一想…</p> : null}
+            </>
           );
         })()}
-        {chat.phase === "sending" && !chat.draft ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />Mao 正在结合当前页面想一想…</p> : null}
       </div>
+      {/* 跳转至最新消息（微信式）：离开底部后出现，一键回底部。 */}
+      {!atLatest && !searchOpen && !dateFilter ? (
+        <button type="button" className="companion-history__jump" onClick={scrollToLatest} aria-label="跳转至最新消息">
+          <ArrowDownToLine size={13} aria-hidden="true" />最新
+        </button>
+      ) : null}
       {/* 常驻输入行（方案 §2）：与交互台同一套纸面表单，复用同一条会话，不新开滚动容器。 */}
       <form className="companion-history__composer" onSubmit={(event) => { event.preventDefault(); void sendText(); }}>
         {voiceEnabled ? (
@@ -1339,11 +1520,77 @@ function CompanionHistoryDrawer({
           <button type="submit" disabled={!input.trim() || voice.phase === "transcribing"} aria-label="发送"><Send size={15} /></button>
         )}
       </form>
-      {chat.navChips.length > 0 ? <div className="companion-history__nav">{chat.navChips.map((chip) => <div key={chip.id}><span>{chip.summary}</span>{chip.route ? <button type="button" onClick={() => void openRoute(chip.route!)}>前往</button> : <small>桌面端暂不支持这个跳转</small>}<button type="button" onClick={() => chat.dismissNavChip(chip.id)} aria-label="知道了"><X size={12} /></button></div>)}</div> : null}
+      {chat.navChips.length > 0 ? <div className="companion-history__nav">{chat.navChips.map((chip) => <div key={chip.id}><span>{chip.summary}</span>{chip.route ? <button type="button" onClick={() => void openRoute(chip)}>前往</button> : <small>桌面端暂不支持这个跳转</small>}<button type="button" onClick={() => chat.dismissNavChip(chip.id)} aria-label="知道了"><X size={12} /></button></div>)}</div> : null}
       {navNote || chat.failure ? <p className="companion-history__error" role="status">{navNote ?? chat.failure}</p> : null}
     </aside>,
     document.body,
   );
+}
+
+/**
+ * 抽屉"正在说…"的平滑打字机（2026-09-19 流式卡顿）。
+ *
+ * 服务端交付是节流块（24 字 / 90ms，实测一轮只有 2–5 块），裸渲染 `draft.text`
+ * 就是文字一跳一跳地砸出来。这里把显现收进一条时间线：
+ * - 正常一拍（60ms，与气泡阅读钟同一节奏）推进一个字；
+ * - 落后超过 `DRAFT_SMOOTH_MAX_LAG_CHARS`（≈3 秒阅读量）就按比例加速追赶，
+ *   保证不滞后生成太远——文字到达快的轮次会自动提速，不会越攒越多；
+ * - 换轮（runId 变化）从零起算；文本回退（服务端 appendFrom 回写）时切片
+ *   天然收短，不额外处理。
+ */
+const DRAFT_SMOOTH_TICK_MS = 60;
+const DRAFT_SMOOTH_MAX_LAG_CHARS = 48;
+
+function useSmoothedDraftText(draft: { runId: string; text: string } | null): string {
+  const [shownLength, setShownLength] = useState(0);
+  const stateRef = useRef({ runId: "", target: 0, shown: 0 });
+
+  useEffect(() => {
+    const state = stateRef.current;
+    if (!draft) {
+      if (state.target !== 0 || state.shown !== 0) {
+        state.target = 0;
+        state.shown = 0;
+        setShownLength(0);
+      }
+      return;
+    }
+    if (state.runId !== draft.runId) {
+      state.runId = draft.runId;
+      state.target = 0;
+      state.shown = 0;
+      setShownLength(0);
+    }
+    state.target = draft.text.length;
+  }, [draft]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const state = stateRef.current;
+      if (state.shown >= state.target) return;
+      const lag = state.target - state.shown;
+      const step = lag > DRAFT_SMOOTH_MAX_LAG_CHARS ? Math.ceil(lag / 12) : 1;
+      state.shown = Math.min(state.target, state.shown + step);
+      setShownLength(state.shown);
+    }, DRAFT_SMOOTH_TICK_MS);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const text = draft?.text ?? "";
+  return text.slice(0, shownLength);
+}
+
+/**
+ * 这条消息/这轮草稿要不要挂过程留痕（2026-09-19 放宽口径）。
+ *
+ * 旧口径（步数>1 或有工具）会把"单步但带状态/技能节点"的轮次整段藏掉——而那些
+ * 节点恰恰是用户要看的"她在做什么"。新口径：只要有可渲染节点，或确实走了多步/
+ * 工具，就展示；真正的一步纯闲聊（零节点）仍然不挂，避免每句话都拖一行。
+ */
+function shouldShowRunTrace(trace: CompanionRunTrace): boolean {
+  return trace.summary.stepCount > 1
+    || trace.summary.toolCallCount > 0
+    || trace.nodes.length > 0;
 }
 
 /** 「你在这里停下了 · 思考 N 步 · 调用 M 次工具」——步数取 run 摘要，数不出来就不写。 */
@@ -1393,6 +1640,61 @@ function messageTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
   return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
+}
+
+/** 搜索命中的关键词高亮（大小写不敏感）。 */
+function highlightText(text: string, keyword: string): ReactNode {
+  if (!keyword) return text;
+  const lower = text.toLowerCase();
+  const needle = keyword.toLowerCase();
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  let index = lower.indexOf(needle);
+  let key = 0;
+  while (index >= 0) {
+    if (index > cursor) parts.push(text.slice(cursor, index));
+    parts.push(<mark key={key}>{text.slice(index, index + needle.length)}</mark>);
+    key += 1;
+    cursor = index + needle.length;
+    index = lower.indexOf(needle, cursor);
+  }
+  if (cursor < text.length) parts.push(text.slice(cursor));
+  return parts;
+}
+
+/** 微信式日期分组键："YYYY-MM-DD"。 */
+function messageDayKey(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+/** 分组头文案：今天 / 昨天 / M月D日 / YYYY年M月D日。 */
+function messageDayLabel(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const key = messageDayKey(value);
+  const now = new Date();
+  const todayKey = messageDayKey(now.toISOString());
+  const yesterday = new Date(now.getTime() - 86_400_000);
+  const yesterdayKey = messageDayKey(yesterday.toISOString());
+  if (key === todayKey) return "今天";
+  if (key === yesterdayKey) return "昨天";
+  const sameYear = date.getFullYear() === now.getFullYear();
+  return sameYear
+    ? `${date.getMonth() + 1}月${date.getDate()}日`
+    : `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
+}
+
+/** 日期筛选 input[type=date] 的取值键（当地时间）。 */
+function dateInputKey(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
 }
 
 function CompanionProposalCard({ state, onDecide }: { readonly state: CompanionProposalUiState | undefined; readonly onDecide: (decision: "confirm" | "reject") => void }) {

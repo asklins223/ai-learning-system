@@ -1018,9 +1018,9 @@
   right: 14px;
   bottom: 14px;
   display: grid;
-  /* 头部 / 列表（独立滚动）/ 常驻输入行 / 跳转 chip / 错误行。
+  /* 头部 / 工具行（搜索·日期） / 列表（独立滚动）/ 常驻输入行 / 跳转 chip / 错误行。
      输入行有自己的行，不塞进滚动容器——方案 §2 要求它固定在底部不随列表滚动。 */
-  grid-template-rows: auto minmax(0, 1fr) auto auto auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto auto;
   width: min(410px, calc(100vw - 28px));
   overflow: hidden;
   color: var(--companion-ink);
@@ -1078,6 +1078,190 @@
   gap: 9px;
   padding: 14px;
   overflow: auto;
+  scroll-behavior: auto;
+}
+
+/* ── 微信式历史浏览（2026-09-19）：工具行 / 搜索 / 日期分组 / 跳转最新 ── */
+
+.companion-history__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px 0;
+}
+
+.companion-history__tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 11px;
+  color: var(--companion-muted);
+  font-size: 11px;
+  border: 1.5px solid rgba(201, 164, 126, .55);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, .55);
+  cursor: pointer;
+}
+
+.companion-history__tool:hover { background: rgba(255, 248, 220, .9); }
+
+.companion-history__searchbar {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 11px;
+  color: var(--companion-muted);
+  border: 1.5px solid rgba(201, 164, 126, .65);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, .72);
+}
+
+.companion-history__searchbar input {
+  flex: 1;
+  min-width: 0;
+  color: var(--companion-ink);
+  font-size: 12px;
+  border: none;
+  outline: none;
+  background: transparent;
+}
+
+.companion-history__searchbar button {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(201, 164, 126, .28);
+  cursor: pointer;
+}
+
+.companion-history__date { position: relative; }
+
+.companion-history__date input {
+  width: 118px;
+  color: var(--companion-muted);
+  font-size: 11px;
+  border: none;
+  outline: none;
+  background: transparent;
+}
+
+.companion-history__date button {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(201, 164, 126, .28);
+  cursor: pointer;
+}
+
+/* 日期分组头（微信：居中灰胶囊） */
+.companion-history__day {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 6px 0 1px;
+  color: var(--companion-muted);
+  font-size: 10px;
+}
+
+.companion-history__day--filter {
+  justify-content: space-between;
+  padding: 4px 8px;
+  border: 1.5px dashed rgba(201, 164, 126, .6);
+  border-radius: 12px;
+  background: rgba(255, 248, 220, .6);
+}
+
+.companion-history__day--filter button {
+  padding: 3px 9px;
+  color: var(--companion-ink);
+  font-size: 10px;
+  border: 1.5px solid rgba(145, 195, 168, .8);
+  border-radius: 10px;
+  background: rgba(205, 235, 217, .6);
+  cursor: pointer;
+}
+
+/* 搜索命中列表 */
+.companion-history__hit {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  padding: 9px 11px;
+  text-align: left;
+  border: 1.5px solid rgba(201, 164, 126, .5);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, .55);
+  cursor: pointer;
+}
+
+.companion-history__hit:hover { background: var(--companion-cream); }
+
+.companion-history__hit header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--companion-muted);
+  font-size: 9px;
+}
+
+.companion-history__hit p {
+  margin: 0;
+  color: var(--companion-ink);
+  font-size: 11.5px;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.companion-history__hit mark,
+.companion-history__list mark {
+  padding: 0 1px;
+  border-radius: 3px;
+  background: rgba(245, 181, 116, .55);
+  color: inherit;
+}
+
+/* 「跳转至最新消息」悬浮钮：输入行上方右侧 */
+.companion-history__jump {
+  position: absolute;
+  right: 16px;
+  bottom: 76px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  color: var(--companion-ink);
+  font-size: 11px;
+  border: 1.5px solid rgba(201, 164, 126, .75);
+  border-radius: 15px;
+  background: rgba(255, 249, 233, .96);
+  box-shadow: 0 6px 16px rgba(91, 62, 39, .16);
+  cursor: pointer;
+}
+
+.companion-history__jump:hover { background: var(--companion-cream); }
+
+/* 搜索命中跳回上下文时的闪烁标记 */
+.companion-history__list article[data-flash="true"] {
+  animation: companion-history-flash 1.6s ease-out;
+}
+
+@keyframes companion-history-flash {
+  0%, 55% { border-color: var(--companion-peach-strong); box-shadow: 0 0 0 3px rgba(245, 181, 116, .35); }
+  100% { border-color: rgba(201, 164, 126, .58); box-shadow: none; }
 }
 
 .companion-history__list article {

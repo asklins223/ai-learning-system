@@ -206,6 +206,17 @@ export interface CompanionChatSession {
   readonly navChips: readonly CompanionNavChip[];
   readonly proposalStates: Readonly<Record<string, CompanionProposalUiState>>;
   readonly mode: CompanionUiMode;
+  /** 向前还有更老的历史页（微信式上滑加载）。 */
+  readonly historyHasMore: boolean;
+  /** 正在向前翻页。 */
+  readonly historyLoadingOlder: boolean;
+  /** 向前翻一页（每页 20 条）；由历史抽屉的上滑触发。 */
+  loadOlderMessages(): Promise<void>;
+  /**
+   * 全量拉取会话消息（搜索/日期筛选的数据底座，带会话级缓存）。
+   * 上限约 1200 条；失败静默返回已收集部分。
+   */
+  fetchAllMessages(): Promise<readonly CompanionMessageV1[]>;
   /**
    * 最近一条助手消息的语气情绪（2026-09-18 情绪接表情）。抽屉不再自己算——
    * 消息已经住在这里，情绪也就跟着上来，气泡层与表情共用同一个来源。
@@ -266,6 +277,57 @@ export function companionMessageText(message: CompanionMessageV1): string {
     })
     .filter((value) => value.length > 0)
     .join("\n");
+}
+
+/**
+ * 把已授权的落点真正落到渲染层视图上（2026-09-19 用户实测修复）。
+ *
+ * 主进程 `navigation.go` 只推进**主进程侧的历史栈**（返回/恢复用），页面切换的
+ * 唯一开关是 room-store 的 `invoke`——既有做法见 TaskSurface 的
+ * `navigateThroughMainResolver`：resolve/go 之后由渲染层自己换页。缺了这一步，
+ * 「前往」就是一次空转：两条 IPC 都成功、无报错、页面纹丝不动。
+ *
+ * agent 路由能映射出的每种 DesktopRoute 都必须有落点；没有等价视图时返回
+ * false，调用方如实报"跳不了"，不假装跳过了。
+ */
+async function applyRouteToRoom(route: DesktopRouteV1): Promise<boolean> {
+  const room = useRoomStore.getState();
+  switch (route.kind) {
+    case "room.home":
+      room.invoke("home");
+      return true;
+    case "review.queue":
+      room.invoke("review");
+      return true;
+    case "understanding.graph":
+      room.invoke("graph");
+      return true;
+    case "source.library":
+      room.invoke("open-sources");
+      return true;
+    case "source.detail":
+      room.setActiveSourceId(route.sourceId);
+      room.invoke("open-source");
+      return true;
+    case "note.detail":
+      // 阅读页只按 noteId 读当前版本（NoteTargetRef 的契约），版本号如实留空。
+      room.setActiveNoteRef({ noteId: route.noteId, noteVersionId: null, mode: "read" });
+      room.setNoteReturnTo("library");
+      room.invoke("open-notebook");
+      return true;
+    case "learningRun.detail":
+      // 与 ReviewSurface / WorkspaceLibrarySurface 同一条入口：设 activeRunId，
+      // Player 由它驱动挂载。
+      room.setActiveRunId(route.runId);
+      return true;
+    default:
+      return false;
+  }
+}
+
+/** 同一落点 + 同一文案 = 同一条提示（用于新 chip 让位旧 chip，防止同款堆叠）。 */
+function navChipSharesTarget(a: CompanionNavChip, b: CompanionNavChip): boolean {
+  return a.summary === b.summary && JSON.stringify(a.route) === JSON.stringify(b.route);
 }
 
 /**
@@ -351,6 +413,16 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
   const [failure, setFailure] = useState<string | null>(null);
   const [conversation, setConversation] = useState<CompanionChatConversationV1 | null>(null);
   const [messages, setMessages] = useState<CompanionMessageV1[]>([]);
+  // ── 历史分页（2026-09-19 微信式历史抽屉） ────────────────────────────────
+  // `messages` 仍只装"最近窗口"（refreshMessages 的结果）；更老的页挂在
+  // `olderMessages`（游标 beforeSeq 向前翻，每页 20 条），展示时合并。
+  // 合并去重按 id：optimistic 用户消息与 refresh 重取可能短暂同现。
+  const [olderMessages, setOlderMessages] = useState<CompanionMessageV1[]>([]);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+  const [historyLoadingOlder, setHistoryLoadingOlder] = useState(false);
+  const historyOldestSeqRef = useRef<number | null>(null);
+  const historyLoadingRef = useRef(false);
+  const historyAllRef = useRef<CompanionMessageV1[] | null>(null);
   const [liveReply, setLiveReply] = useState<CompanionChatLiveReply | null>(null);
   const [draft, setDraft] = useState<CompanionChatDraft | null>(null);
   const [interrupted, setInterrupted] = useState<CompanionChatInterrupted | null>(null);
@@ -368,6 +440,35 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
   const [feedSelection, setFeedSelection] = useState<string | null>(null);
   const [proposalStates, setProposalStates] = useState<Record<string, CompanionProposalUiState>>({});
   const [navChips, setNavChips] = useState<CompanionNavChip[]>([]);
+
+  /**
+   * 追加导航 chip（SSE 实时流、抽屉轮询与提案确认共用，2026-09-19）。
+   *
+   * 除按 id 去重外，同一落点 + 同一文案的旧 chip 让位给最新一条：模型连着几轮都
+   * 调 companion_open_review 时，抽屉底部会堆出一列同款「已定位到复习页面」按钮
+   * （用户实测截图 3 条同款）。留最新的，关掉它这组提示就一起清掉。
+   */
+  const pushNavChips = useCallback((incoming: readonly CompanionNavChip[]) => {
+    setNavChips((current) => {
+      const seen = new Set(current.map((chip) => chip.id));
+      const additions: CompanionNavChip[] = [];
+      for (const chip of incoming) {
+        if (seen.has(chip.id)) continue;
+        seen.add(chip.id);
+        additions.push(chip);
+      }
+      if (additions.length === 0) return current;
+      const superseded = new Set(
+        current
+          .filter((chip) => !chip.autoExecute
+            && additions.some((next) => navChipSharesTarget(chip, next)))
+          .map((chip) => chip.id),
+      );
+      if (superseded.size === 0) return [...current, ...additions];
+      return [...current.filter((chip) => !superseded.has(chip.id)), ...additions];
+    });
+  }, []);
+
   const [mode, setMode] = useState<CompanionUiMode>("closed");
   const [cancelling, setCancelling] = useState(false);
   const [stopNotice, setStopNotice] = useState<string | null>(null);
@@ -399,6 +500,11 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
     draftRef.current = "";
     setConversation(null);
     setMessages([]);
+    setOlderMessages([]);
+    setHistoryHasMore(false);
+    setHistoryLoadingOlder(false);
+    historyOldestSeqRef.current = null;
+    historyAllRef.current = null;
     setLiveReply(null);
     setDraft(null);
     setInterrupted(null);
@@ -444,8 +550,88 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
       request: { version: 1, conversationId, limit: 50 },
     }));
     setMessages(result.items);
+    // 搜索/日期筛选的全量缓存随之过期。
+    historyAllRef.current = null;
+    // 分页基线只在会话首次加载时建立一次：后续 refresh（发完一轮、停止一轮）
+    // 只替换"最近窗口"，不动已翻出来的老页游标。
+    if (historyOldestSeqRef.current === null) {
+      historyOldestSeqRef.current = result.oldestSeq;
+      setHistoryHasMore(result.hasMore);
+    }
     return result.items;
   }, []);
+
+  /**
+   * 向前翻一页历史（每页 20 条，微信式上滑加载）。失败静默：这是补白读取，
+   * 不走 `unwrapGatewayResult`——它会把 not-ok 升级成门禁全量重置（2026-09-19
+   * 实测教训），翻页失败最多就是少看到一页旧消息。
+   */
+  const loadOlderMessages = useCallback(async (): Promise<void> => {
+    if (historyLoadingRef.current) return;
+    const conversation = conversationRef.current;
+    const beforeSeq = historyOldestSeqRef.current;
+    if (!conversation || beforeSeq == null) return;
+    historyLoadingRef.current = true;
+    setHistoryLoadingOlder(true);
+    try {
+      const epoch = await requireWorkspaceEpoch();
+      const result = await window.ailearn.companion.chat.listMessages({
+        meta: createRequestMeta(epoch),
+        request: { version: 1, conversationId: conversation.id, limit: 20, beforeSeq },
+      });
+      if (!result.ok) return;
+      historyOldestSeqRef.current = result.data.oldestSeq;
+      setHistoryHasMore(result.data.hasMore);
+      setOlderMessages((current) => {
+        const seen = new Set(current.map((item) => item.id));
+        const older = result.data.items.filter((item) => !seen.has(item.id));
+        return older.length > 0 ? [...older, ...current] : current;
+      });
+    } catch {
+      // 静默：下一次滚动会再试。
+    } finally {
+      historyLoadingRef.current = false;
+      setHistoryLoadingOlder(false);
+    }
+  }, []);
+
+  /**
+   * 全量拉取（搜索/日期筛选的数据底座，带会话级缓存）：向前翻到会话开头，
+   * **再并上当前最近窗口**——搜索池必须包含最近 50 条，否则刚聊过的内容搜不到。
+   * 上限约 1200 条 + 最近窗口；失败静默返回已收集部分。
+   */
+  const fetchAllMessages = useCallback(async (): Promise<readonly CompanionMessageV1[]> => {
+    if (historyAllRef.current) return historyAllRef.current;
+    const conversation = conversationRef.current;
+    if (!conversation) return [];
+    const older: CompanionMessageV1[] = [];
+    let beforeSeq = historyOldestSeqRef.current;
+    let guard = 0;
+    while (beforeSeq != null && guard < 12) {
+      guard += 1;
+      const epoch = await requireWorkspaceEpoch();
+      const result = await window.ailearn.companion.chat.listMessages({
+        meta: createRequestMeta(epoch),
+        request: { version: 1, conversationId: conversation.id, limit: 100, beforeSeq },
+      });
+      if (!result.ok) break;
+      older.push(...result.data.items);
+      historyOldestSeqRef.current = result.data.oldestSeq;
+      setHistoryHasMore(result.data.hasMore);
+      if (!result.data.hasMore || result.data.oldestSeq == null || result.data.oldestSeq === beforeSeq) break;
+      beforeSeq = result.data.oldestSeq;
+    }
+    older.sort((a, b) => a.seq - b.seq);
+    const seen = new Set(older.map((item) => item.id));
+    const full = [...older, ...messages.filter((item) => !seen.has(item.id))];
+    setOlderMessages((current) => {
+      const known = new Set(current.map((item) => item.id));
+      const missing = older.filter((item) => !known.has(item.id));
+      return missing.length > 0 ? [...missing, ...current] : current;
+    });
+    historyAllRef.current = full;
+    return full;
+  }, [messages]);
 
   /**
    * 从 run 摘要里取回"当前活动 run 的 generation"（2026-09-19）。
@@ -520,18 +706,12 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
         }
         routeCursorRef.current = Math.max(routeCursorRef.current, data.latestSeq);
         if (data.items.length === 0) return;
-        setNavChips((current) => {
-          const seen = new Set(current.map((chip) => chip.id));
-          const additions = data.items
-            .filter((item) => !seen.has(`evt:${item.seq}`))
-            .map<CompanionNavChip>((item) => ({
-              id: `evt:${item.seq}`,
-              summary: item.safeSummary,
-              route: desktopRouteFromAgentRoute(item.route),
-              ...(item.autoExecute ? { autoExecute: true } : {}),
-            }));
-          return additions.length > 0 ? [...current, ...additions] : current;
-        });
+        pushNavChips(data.items.map<CompanionNavChip>((item) => ({
+          id: `evt:${item.seq}`,
+          summary: item.safeSummary,
+          route: desktopRouteFromAgentRoute(item.route),
+          ...(item.autoExecute ? { autoExecute: true } : {}),
+        })));
       } catch {
         // 轮询失败不打断聊天主链路。
       }
@@ -642,6 +822,21 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
     }
     if (run.status === "cancelled") return { kind: "cancelled" };
     return null;
+  }, []);
+
+  /**
+   * 认领超时后的僵尸清理（2026-09-19 用户实测"频繁提问就卡死、功能用不了"）。
+   *
+   * 实机上出现过 run 永远停在 accepted、worker 日志零记录的僵尸（job 在 worker
+   * 重启时丢失）。它不会自己变成终态，于是：这一轮要白等满 120s 才报超时，下一轮
+   * 发送还要先撞 409 再走接替。超时即尽力取消（原子置 cancelled），把僵尸就地
+   * 变成终态；失败也无所谓——下一轮发送的 supersedesGeneration 仍能接替它。
+   */
+  const cancelRunInBackground = useCallback((runId: string, runGeneration: number, runEpoch: number): void => {
+    void window.ailearn.companion.chat.cancelRun({
+      meta: createRequestMeta(runEpoch),
+      request: { version: 1, runId, generation: runGeneration },
+    }).catch(() => undefined);
   }, []);
 
   /**
@@ -807,6 +1002,34 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
             eventType: streamed.eventType,
             payload: streamed.payload,
           }));
+          // 导航 chip 走 **SSE 实时通道**（2026-09-19 用户实测修复）：此前 chip 只靠
+          // 抽屉打开时的 agent-routes 轮询补白——用户在气泡模式下聊天，route 事件根本
+          // 不会被拉取，permissionLevel=full 的 autoExecute 自然一次都不触发；等打开
+          // 抽屉，首次游标又跳到最新，旧事件全被吞掉。现在流里带 seq 的 agent.tool 帧
+          // 直接折成 chip（抽屉轮询按同一 id 去重，两条来源不冲突），自动跳不再依赖
+          // 抽屉开关。
+          if (streamed.eventType === "agent.tool") {
+            const tool = streamed.payload.tool as
+              | { name?: unknown; safeSummary?: unknown; route?: unknown; autoExecute?: unknown }
+              | undefined;
+            if (
+              tool
+              && typeof tool.safeSummary === "string"
+              && tool.safeSummary.length > 0
+              && tool.route
+              && typeof tool.route === "object"
+            ) {
+              const route = desktopRouteFromAgentRoute(tool.route as CompanionAgentRouteEventV1["route"]);
+              if (route) {
+                pushNavChips([{
+                  id: `evt:${streamed.seq}`,
+                  summary: tool.safeSummary,
+                  route,
+                  ...(tool.autoExecute === true ? { autoExecute: true } : {}),
+                }]);
+              }
+            }
+          }
           if (streamed.eventType === "assistant.delta") {
             const payload = streamed.payload as { appendFrom?: unknown; textDelta?: unknown };
             if (typeof payload.textDelta !== "string") return;
@@ -858,7 +1081,7 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
       })();
     });
     return { promise, cancel };
-  }, []);
+  }, [pushNavChips]);
 
   /**
    * 认领本轮的回复：SSE（快路径，含草稿）与兜底轮询（慢路径）并行，先到者胜。
@@ -1093,7 +1316,9 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
         return true;
       } else {
         // 超时：这条 run 可能还在跑，也可能永远不会产出消息。同样把已经说出来的部分
-        // 留档（气泡继续显示它），提示可以稍后在记录里看全文。
+        // 留档（气泡继续显示它），提示可以稍后在记录里看全文。超时即尽力取消，
+        // 防止僵尸 run 继续挡会话（见 cancelRunInBackground 注释）。
+        cancelRunInBackground(sent.runId, sent.generation, epoch);
         const message = "消息已经送达，但这次回复等待超时。可以打开对话记录稍后查看。";
         draftRef.current = "";
         setDraft(null);
@@ -1112,6 +1337,7 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
           hasActionBlocks: reply.blocks.some((block) => block.type === "action_ref"),
         });
       } else {
+        cancelRunInBackground(sent.runId, sent.generation, epoch);
         const message = "消息已经送达，但这次回复等待超时。可以打开对话记录稍后查看。";
         draftRef.current = "";
         setDraft(null);
@@ -1235,7 +1461,7 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
       // 确认后服务端直接给出落点（decision.route）——同样走导航 chip，用户点「前往」。
       if (result.route) {
         const route = desktopRouteFromAgentRoute(result.route);
-        setNavChips((current) => [...current, {
+        pushNavChips([{
           id: `decision:${proposalId}`,
           summary: result.safeSummary ?? "已确认，可以前往。",
           route,
@@ -1248,7 +1474,10 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
         return { ...current, [proposalId]: { ...existing, deciding: undefined, error: gatewayErrorMessage(error) } };
       });
     }
-  }, [proposalStates]);
+  }, [proposalStates, pushNavChips]);
+
+  /** 用户本会话亲手「前往」过的落点类型（会话内授权升级，见 goToRoute 内注释）。 */
+  const manuallyNavigatedKindsRef = useRef<Set<string>>(new Set());
 
   const goToRoute = useCallback(async (route: DesktopRouteV1) => {
     const resolveResponse = await window.ailearn.navigation.resolve({ meta: createRequestMeta(), route });
@@ -1259,6 +1488,14 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
       route: resolved.current.route,
       entryKind: "user",
     });
+    // 历史栈记完还要真正换页（applyRouteToRoom）——否则按钮点了没反应。
+    const applied = await applyRouteToRoom(resolved.current.route);
+    if (!applied) throw new Error("这个落点在桌面端还没有对应的页面");
+    // 会话内授权升级（2026-09-19 用户实测"第二次就不自动跳了"）：用户亲手点过
+    // 「前往」的落点类型，本轮会话里后续同类落点直接自动跳——用户已经用行动
+    // 授过权，再让他一枚一枚点同款按钮就是把确认当打卡。会话级记忆，不持久化；
+    // 服务端 permissionLevel=full 的 autoExecute 仍然照走。
+    manuallyNavigatedKindsRef.current.add(resolved.current.route.kind);
   }, []);
 
   // ── 预授权跳转（2026-09-19 对齐权限分级原设计） ────────────────────────
@@ -1269,18 +1506,40 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
   const autoExecutedRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     const pending = navChips.filter(
-      (chip) => chip.autoExecute && chip.route && !autoExecutedRef.current.has(chip.id),
+      (chip) => chip.route
+        && !autoExecutedRef.current.has(chip.id)
+        && (chip.autoExecute || manuallyNavigatedKindsRef.current.has(chip.route.kind)),
     );
     if (pending.length === 0) return;
     for (const chip of pending) autoExecutedRef.current.add(chip.id);
-    void goToRoute(pending[pending.length - 1].route!).catch(() => undefined);
+    // 执行成功的 chip 就地消失（2026-09-19 用户反馈）：跳都跳过去了，提示还留在
+    // 抽屉里就是"这条已经办完了"和"这条还在等处理"自相矛盾。失败保留（用户还能
+    // 手动点）。只执行最后一个（一回合连开两页时以最终落点为准），但全部移除。
+    const executedIds = new Set(pending.map((chip) => chip.id));
+    void goToRoute(pending[pending.length - 1].route!)
+      .then(() => {
+        setNavChips((current) => current.filter((chip) => !executedIds.has(chip.id)));
+      })
+      .catch(() => undefined);
   }, [navChips, goToRoute]);
+
+  // 展示层看到的是合并后的完整时间线（老页在前，最近窗口在后）。
+  const mergedMessages = useMemo<CompanionMessageV1[]>(() => {
+    if (olderMessages.length === 0) return messages;
+    const seen = new Set(olderMessages.map((item) => item.id));
+    const newer = messages.filter((item) => !seen.has(item.id));
+    return newer.length > 0 ? [...olderMessages, ...newer] : olderMessages;
+  }, [olderMessages, messages]);
 
   const value = useMemo<CompanionChatSession>(() => ({
     phase,
     failure,
     conversationId: conversation?.id ?? null,
-    messages,
+    messages: mergedMessages,
+    historyHasMore,
+    historyLoadingOlder,
+    loadOlderMessages,
+    fetchAllMessages,
     liveReply,
     draft,
     interrupted,
@@ -1315,11 +1574,15 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
     draft,
     failure,
     feedSelection,
+    fetchAllMessages,
     goToRoute,
+    historyHasMore,
+    historyLoadingOlder,
     interrupted,
+    loadOlderMessages,
+    mergedMessages,
     mode,
     liveReply,
-    messages,
     navChips,
     nodes,
     phase,
