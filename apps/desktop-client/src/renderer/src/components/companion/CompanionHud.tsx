@@ -130,6 +130,13 @@ export interface CompanionHudProps {
 }
 
 type MoreView = "menu" | "actions" | "settings";
+
+type CompanionVoiceSegmentReadyDetail = Readonly<{
+  runId: string;
+  segmentId: string;
+  ordinal: number;
+  text: string;
+}>;
 type BubbleStage = "visible" | "leaving";
 
 /**
@@ -231,6 +238,11 @@ export function CompanionHud({
   const speechSessionRef = useRef<CompanionSpeechSession | null>(null);
   /** 已经喂给语音会话的字符数（防止同一段文本被重复排进队列）。 */
   const spokenCharsRef = useRef(0);
+  const latestDraftTextRef = useRef("");
+  const voiceFallbackTimerRef = useRef(0);
+  const pendingVoiceSegmentsRef = useRef<CompanionVoiceSegmentReadyDetail[]>([]);
+  const seenVoiceSegmentIdsRef = useRef(new Set<string>());
+  const [voiceSegmentRevision, setVoiceSegmentRevision] = useState(0);
   /**
    * 本轮关心的播放计划 id。播放进度是模块级广播，换轮时旧计划的 `stopped` 也会到——
    * 不过滤的话它会把新的一轮误判成"音频停了"，文字就会抢在声音前面。
@@ -280,6 +292,23 @@ export function CompanionHud({
     micRef.current?.style.setProperty("--voice-level", level.toFixed(3));
   }), [voice.subscribeLevel]);
 
+  useEffect(() => {
+    const onVoiceSegment = (event: Event) => {
+      const detail = (event as CustomEvent<Partial<CompanionVoiceSegmentReadyDetail>>).detail;
+      if (!detail || typeof detail.runId !== "string" || typeof detail.segmentId !== "string"
+        || typeof detail.ordinal !== "number" || typeof detail.text !== "string" || !detail.text) return;
+      if (seenVoiceSegmentIdsRef.current.has(detail.segmentId)) return;
+      seenVoiceSegmentIdsRef.current.add(detail.segmentId);
+      pendingVoiceSegmentsRef.current.push(detail as CompanionVoiceSegmentReadyDetail);
+      setVoiceSegmentRevision((value) => value + 1);
+    };
+    window.addEventListener("ailearn:companion-voice-segment-ready", onVoiceSegment);
+    return () => {
+      window.removeEventListener("ailearn:companion-voice-segment-ready", onVoiceSegment);
+      window.clearTimeout(voiceFallbackTimerRef.current);
+    };
+  }, []);
+
   // ── 呼吸角标接真实输出振幅（方案 §4） ─────────────────────────────────
   // 订阅的是**输出**振幅（`subscribeHomeV2VoiceLevel`：HomeV2AudioController 的真
   // AnalyserNode 每帧峰值），不是麦克风那条输入电平。好处是角标与她嘴型的起伏来自
@@ -325,6 +354,7 @@ export function CompanionHud({
     const draft = chat.draft;
     const reveal = ensureRevealDriver();
     if (!draft) return;
+    latestDraftTextRef.current = draft.text;
     if (draftRunIdRef.current !== draft.runId) {
       draftRunIdRef.current = draft.runId;
       // 换轮：上一轮没念完的立刻停掉，否则两轮的语音会叠在一起。先摘掉计划 id，
@@ -333,6 +363,10 @@ export function CompanionHud({
       speechSessionRef.current?.stop();
       speechSessionRef.current = null;
       spokenCharsRef.current = 0;
+      window.clearTimeout(voiceFallbackTimerRef.current);
+      pendingVoiceSegmentsRef.current = pendingVoiceSegmentsRef.current.filter((segment) => segment.runId === draft.runId);
+      seenVoiceSegmentIdsRef.current.clear();
+      for (const segment of pendingVoiceSegmentsRef.current) seenVoiceSegmentIdsRef.current.add(segment.segmentId);
     }
     reveal.noteArrived(draft.text.length);
     setBubbleStage("visible");
@@ -350,11 +384,33 @@ export function CompanionHud({
     const session = speechSessionRef.current;
     reveal.noteSession(session ? session.mode : "unavailable");
     if (!session) return;
-    const pending = draft.text.slice(spokenCharsRef.current);
-    if (pending.length === 0) return;
-    session.feed(pending);
-    spokenCharsRef.current = draft.text.length;
-  }, [chat.draft, ensureRevealDriver, voiceEnabled]);
+    const remainingSegments: CompanionVoiceSegmentReadyDetail[] = [];
+    for (const segment of pendingVoiceSegmentsRef.current.sort((a, b) => a.ordinal - b.ordinal)) {
+      if (segment.runId !== draft.runId) continue;
+      const pending = draft.text.slice(spokenCharsRef.current);
+      if (pending.startsWith(segment.text)) {
+        session.feed(segment.text);
+        spokenCharsRef.current += segment.text.length;
+        continue;
+      }
+      // SSE 重连可能重放已经由 fallback 入队的段，segmentId 去重之外再以当前
+      // 已消费前缀兜一层，保证绝不会把同一句念两遍。
+      if (draft.text.slice(0, spokenCharsRef.current).includes(segment.text)) continue;
+      remainingSegments.push(segment);
+    }
+    pendingVoiceSegmentsRef.current = remainingSegments;
+    window.clearTimeout(voiceFallbackTimerRef.current);
+    voiceFallbackTimerRef.current = window.setTimeout(() => {
+      const currentSession = speechSessionRef.current;
+      const currentText = latestDraftTextRef.current;
+      if (!currentSession || draftRunIdRef.current !== draft.runId) return;
+      const pending = currentText.slice(spokenCharsRef.current);
+      if (!pending) return;
+      currentSession.feed(pending);
+      spokenCharsRef.current = currentText.length;
+    }, 180);
+    return () => window.clearTimeout(voiceFallbackTimerRef.current);
+  }, [chat.draft, ensureRevealDriver, voiceEnabled, voiceSegmentRevision]);
 
   useEffect(() => {
     const reply = chat.liveReply;
@@ -379,6 +435,10 @@ export function CompanionHud({
       speechSessionRef.current?.stop();
       speechSessionRef.current = null;
       spokenCharsRef.current = 0;
+      latestDraftTextRef.current = "";
+      window.clearTimeout(voiceFallbackTimerRef.current);
+      pendingVoiceSegmentsRef.current = [];
+      seenVoiceSegmentIdsRef.current.clear();
       reveal.reset();
       setBubbleStage("visible");
       draftRunIdRef.current = null;
@@ -389,6 +449,7 @@ export function CompanionHud({
     // 朗读收尾（2026-09-19 ⑥）：本轮若已经在草稿阶段开了口，这里只补剩下的尾巴，
     // 不再另起一段语音——否则同一句话会被念两遍。没开过口的（整段到达、未走流式）
     // 仍然走 `speakCompanionLine` 单次调用。太短不念（走阅读钟）。
+    window.clearTimeout(voiceFallbackTimerRef.current);
     const session = speechSessionRef.current;
     speechSessionRef.current = null;
     let handle: ActiveCompanionSpeech | null = null;
@@ -1261,30 +1322,85 @@ function CompanionHistoryDrawer({
     }
   }, [chat]);
 
-  /** 搜索结果点击 → 补齐上下文分页 → 滚到那条并闪烁。 */
-  const jumpToMessage = useCallback(async (id: string) => {
-    let guard = 0;
-    let present = messagesRef.current.some((message) => message.id === id);
-    while (!present && chat.historyHasMore && guard < 30) {
-      guard += 1;
-      await chat.loadOlderMessages();
-      present = messagesRef.current.some((message) => message.id === id);
-    }
-    if (!present) return;
-    setSearchInput("");
-    setDateFilter(null);
+  // ── 微信式「选中即回根页面跳转」（2026-09-19 三次返工的正确模型） ──────
+  // 聊天记录页只负责「找」：搜索框、日历、结果列表。用户选中搜索命中或日期后，
+  // **关闭聊天记录页、回到历史会话根页面**，由根页面滚动定位到那条消息 /
+  // 那一天的第一条消息。时间线永远只存在于根页面，不出现第二个消息窗口。
+  const pendingJumpRef = useRef<{ messageId?: string; dateKey?: string } | null>(null);
+  const chatRef = useRef(chat);
+  chatRef.current = chat;
+  const [jumpNotice, setJumpNotice] = useState<string | null>(null);
+
+  const flashMessage = useCallback((id: string) => {
     window.requestAnimationFrame(() => {
       const el = listRef.current?.querySelector(`[data-message-id="${id}"]`);
       el?.scrollIntoView({ block: "center" });
       el?.setAttribute("data-flash", "true");
       window.setTimeout(() => el?.removeAttribute("data-flash"), 1600);
     });
-  }, [chat]);
+  }, []);
 
-  /** 单条消息：渲染逻辑抽到 `CompanionChatRecordArticle`（对话/记录两视图共用）。 */
-  const renderArticle = useCallback((message: CompanionMessageV1) => (
-    <CompanionChatRecordArticle message={message} chat={chat} />
-  ), [chat]);
+  /** 搜索命中：记录页里点一下 → 回根页面定位到那条。 */
+  const jumpToMessage = useCallback((id: string) => {
+    pendingJumpRef.current = { messageId: id };
+    setRecordOpen(false);
+  }, []);
+
+  /** 日期筛选：选一天 → 回根页面定位到那天第一条。 */
+  const pickDate = useCallback((dayKey: string) => {
+    pendingJumpRef.current = { dateKey: dayKey };
+    setRecordOpen(false);
+    setCalendarOpen(false);
+  }, []);
+
+  // 聊天记录页关闭后，在根页面执行待处理的跳转（消息可能要向前补页才找得到）。
+  useEffect(() => {
+    if (recordOpen) return;
+    const pending = pendingJumpRef.current;
+    if (!pending) return;
+    pendingJumpRef.current = null;
+    let cancelled = false;
+    void (async () => {
+      if (pending.messageId) {
+        let guard = 0;
+        let present = messagesRef.current.some((message) => message.id === pending.messageId);
+        while (!present && chatRef.current.historyHasMore && guard < 30) {
+          guard += 1;
+          await chatRef.current.loadOlderMessages();
+          present = messagesRef.current.some((message) => message.id === pending.messageId);
+        }
+        if (cancelled) return;
+        if (!present) { setJumpNotice("没有定位到那条消息（可能超出可加载范围）"); return; }
+        flashMessage(pending.messageId);
+        return;
+      }
+      if (pending.dateKey) {
+        let guard = 0;
+        const oldestDay = () => (messagesRef.current[0] ? messageDayKey(messagesRef.current[0].createdAt) : "9999-99-99");
+        while (guard < 40 && chatRef.current.historyHasMore && oldestDay() > pending.dateKey) {
+          guard += 1;
+          await chatRef.current.loadOlderMessages();
+        }
+        if (cancelled) return;
+        const first = messagesRef.current.find((message) => messageDayKey(message.createdAt) === pending.dateKey);
+        if (!first) { setJumpNotice(`${messageDayLabel(`${pending.dateKey}T12:00:00`)}没有聊天记录`); return; }
+        flashMessage(first.id);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [recordOpen, flashMessage]);
+
+  // 有待处理跳转时，抑制「自动定位到最新」，避免覆盖跳转位置。打开抽屉
+  // （含切到聊天记录视图）自动定位到最新一条（要求 ③）；rAF 等一帧布局再滚。
+  useEffect(() => {
+    if (!open || !mounted) return;
+    if (pendingJumpRef.current) return;
+    const frame = window.requestAnimationFrame(() => {
+      const list = listRef.current;
+      if (list) list.scrollTop = list.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [open, mounted, recordOpen, chat.messages.length, chat.phase]);
 
   // 记录视图全量池的三态：加载中 / 失败可重试 / 未就绪。杜绝「null 永远转圈」。
   const poolStateBlock = allLoading && allMessages == null
@@ -1311,18 +1427,6 @@ function CompanionHistoryDrawer({
     const timer = window.setTimeout(() => { setMounted(false); setExiting(false); }, 280);
     return () => window.clearTimeout(timer);
   }, [mounted, open]);
-
-  // 打开抽屉（含切到聊天记录视图）自动定位到最新一条（要求 ③）。此前直接在
-  // effect 里赋 scrollTop，抽屉挂载同帧布局未完成会滚了个空——改 rAF 等一帧
-  // 布局再滚；消息后到（length 变化）时同样补滚一次。
-  useEffect(() => {
-    if (!open || !mounted) return;
-    const frame = window.requestAnimationFrame(() => {
-      const list = listRef.current;
-      if (list) list.scrollTop = list.scrollHeight;
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [open, mounted, recordOpen, chat.messages.length, chat.phase]);
 
   useEffect(() => voice.subscribeLevel((level) => {
     micRef.current?.style.setProperty("--voice-level", level.toFixed(3));
@@ -1424,63 +1528,19 @@ function CompanionHistoryDrawer({
               <MonthCalendar
                 pool={allMessages ?? chat.messages}
                 selected={dateFilter}
-                onPick={(dayKey) => { setDateFilter(dayKey); setCalendarOpen(false); void ensureAllMessages(); }}
+                onPick={(dayKey) => pickDate(dayKey)}
               />
             ) : null}
           </div>
         </div>
       ) : null}
       <div ref={listRef} className="companion-history__list" onScroll={handleListScroll}>
-        {chat.phase === "loading" ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />正在读取会话…</p> : null}
-        {chat.historyLoadingOlder ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />加载更早的消息…</p> : null}
-        {(() => {
-          // 记录视图的两种筛选态：搜索命中 / 某一天的记录。
-          const keyword = searchInput.trim();
-          if (recordOpen && keyword) {
-            const needle = keyword.toLowerCase();
-            const hits = (allMessages ?? []).filter((message) => companionMessageText(message).toLowerCase().includes(needle));
-            return (
-              <>
-                {poolStateBlock}
-                {allMessages != null && hits.length === 0 ? <p className="companion-history__system">没有找到包含「{keyword}」的消息</p> : null}
-                {hits.map((message) => (
-                  <button key={message.id} type="button" className="companion-record__hit" onClick={() => void jumpToMessage(message.id)}>
-                    <header><span>{message.role === "user" ? "你" : "Mao"}</span><time>{messageDayLabel(message.createdAt)} {messageTime(message.createdAt)}</time></header>
-                    <p>{highlightText(companionMessageText(message), keyword)}</p>
-                  </button>
-                ))}
-                {allMessages != null && hits.length > 0 ? <p className="companion-history__system">共 {hits.length} 条 · 点一条回到它的上下文</p> : null}
-              </>
-            );
-          }
-          if (recordOpen && dateFilter) {
-            const dayMessages = (allMessages ?? []).filter((message) => messageDayKey(message.createdAt) === dateFilter);
-            return (
-              <>
-                <div className="companion-record__day companion-record__day--filter">
-                  <span>{messageDayLabel(`${dateFilter}T12:00:00`)} 的记录{allMessages != null ? ` · ${dayMessages.length} 条` : ""}</span>
-                  <button type="button" onClick={() => setDateFilter(null)}>看全部</button>
-                </div>
-                {poolStateBlock}
-                {allMessages != null && dayMessages.length === 0 ? <p className="companion-history__system">这一天没有聊天记录</p> : null}
-                {dayMessages.map((message) => renderArticle(message))}
-              </>
-            );
-          }
-          return null;
-        })()}
-        {/* 时间线（对话视图的全部内容；记录视图「看全部」/搜索跳转后的上下文也走这里） */}
-        {(!recordOpen || !searchInput.trim()) && !(recordOpen && dateFilter) ? (
+        {/* ── 对话视图：日期分组时间线 ── */}
+        {!recordOpen ? (
           <>
-            {!recordOpen || allMessages != null || allLoading || allError
-              ? null
-              : (
-                <p className="companion-history__system">
-                  全部记录暂时不可用。
-                  <button type="button" className="companion-record__retry" onClick={() => void ensureAllMessages()}>重试</button>
-                </p>
-              )}
-            {recordOpen && allMessages == null && allLoading ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />正在载入全部记录…</p> : null}
+            {chat.phase === "loading" ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />正在读取会话…</p> : null}
+            {chat.historyLoadingOlder ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />加载更早的消息…</p> : null}
+            {!chat.historyHasMore && chat.messages.length > 0 ? <p className="companion-history__system">没有更早的消息了</p> : null}
             {chat.messages.map((message, index) => {
               const previous = index > 0 ? chat.messages[index - 1] : null;
               const showDay = !previous || messageDayKey(previous.createdAt) !== messageDayKey(message.createdAt);
@@ -1498,27 +1558,53 @@ function CompanionHistoryDrawer({
               实时显示了，这里把它按同一条消息的样子折进历史（同一份文本，不另起数据源）。
               过程留痕按 runId 找：进行中那轮的 `assistantMessageId` 还是 null，不能用它匹配。
             */}
-            {!recordOpen ? (
-              <>
-                {(() => {
-                  const draft = chat.draft;
-                  if (!draft || draft.text.trim().length === 0) return null;
-                  const trace = chat.runTraces.find((item) => item.summary.runId === draft.runId) ?? null;
-                  return (
-                    <article data-role="assistant" data-live="true">
-                      <header><span>Mao</span><time>正在说…</time></header>
-                      <p>{smoothedDraftText}</p>
-                      {trace && shouldShowRunTrace(trace)
-                        ? <CompanionRunTracePanel trace={trace} />
-                        : null}
-                    </article>
-                  );
-                })()}
-                {chat.phase === "sending" && !chat.draft ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />Mao 正在结合当前页面想一想…</p> : null}
-              </>
-            ) : null}
+            {(() => {
+              const draft = chat.draft;
+              if (!draft || draft.text.trim().length === 0) return null;
+              const trace = chat.runTraces.find((item) => item.summary.runId === draft.runId) ?? null;
+              return (
+                <article data-role="assistant" data-live="true">
+                  <header><span>Mao</span><time>正在说…</time></header>
+                  <p>{smoothedDraftText}</p>
+                  {trace && shouldShowRunTrace(trace)
+                    ? <CompanionRunTracePanel trace={trace} />
+                    : null}
+                </article>
+              );
+            })()}
+            {chat.phase === "sending" && !chat.draft ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />Mao 正在结合当前页面想一想…</p> : null}
           </>
-        ) : null}
+        ) : (
+          /* ── 聊天记录视图：只负责「找」。选中搜索命中或日期后回到上面的对话时间线定位 ── */
+          <>
+            {chat.phase === "loading" ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />正在读取会话…</p> : null}
+            {(() => {
+              const keyword = searchInput.trim();
+              if (!keyword) {
+                return (
+                  <p className="companion-history__system">
+                    输入关键词搜索全部聊天记录；或点右上角「按日期」选一天——都会回到对话里的那个位置。
+                  </p>
+                );
+              }
+              const needle = keyword.toLowerCase();
+              const hits = (allMessages ?? []).filter((message) => companionMessageText(message).toLowerCase().includes(needle));
+              return (
+                <>
+                  {poolStateBlock}
+                  {allMessages != null && hits.length === 0 ? <p className="companion-history__system">没有找到包含「{keyword}」的消息</p> : null}
+                  {hits.map((message) => (
+                    <button key={message.id} type="button" className="companion-record__hit" onClick={() => jumpToMessage(message.id)}>
+                      <header><span>{message.role === "user" ? "你" : "Mao"}</span><time>{messageDayLabel(message.createdAt)} {messageTime(message.createdAt)}</time></header>
+                      <p>{highlightText(companionMessageText(message), keyword)}</p>
+                    </button>
+                  ))}
+                  {allMessages != null && hits.length > 0 ? <p className="companion-history__system">共 {hits.length} 条 · 点一条回到它的上下文</p> : null}
+                </>
+              );
+            })()}
+          </>
+        )}
       </div>
       {/* 跳转至最新消息（微信式）：离开底部后出现，一键回底部。 */}
       {!atLatest ? (
