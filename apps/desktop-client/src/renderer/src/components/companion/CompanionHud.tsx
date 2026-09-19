@@ -1260,6 +1260,10 @@ function CompanionHistoryDrawer({
   const micRef = useRef<HTMLButtonElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const stopping = chat.cancelling;
+  /** 单条消息渲染（时间线用）：来自聊天记录库的共享组件。 */
+  const renderArticle = useCallback((message: CompanionMessageV1) => (
+    <CompanionChatRecordArticle message={message} chat={chat} />
+  ), [chat]);
   // 抽屉里"正在说…"的平滑打字机（2026-09-19 流式卡顿）：气泡有显现驱动器，
   // 抽屉此前是裸渲染 draft.text——服务端的 delta 是 24 字/90ms 的节流块，
   // 裸渲染就是一跳一跳的大块。这里按与气泡同一条阅读钟推进，落后太多时
