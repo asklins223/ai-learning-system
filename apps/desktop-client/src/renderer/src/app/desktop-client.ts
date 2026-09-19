@@ -98,6 +98,17 @@ export function gatewayErrorMessage(error: unknown): string {
       return "这条学习内容已经不存在或不再对当前账号可见。";
     case "feature_disabled":
       return "这项学习能力当前未在本环境启用。";
+    // 2026-09-19 补映射：这些码此前落到 default 兜底句，用户看不出发生了什么。
+    case "invalid_request":
+    case "validation":
+      return "这次请求的内容没有通过校验，请检查后重试。";
+    case "invalid_navigation":
+    case "route_not_available":
+      return "当前版本还不支持这个跳转目标。";
+    case "cancelled":
+      return "这一轮已经取消。";
+    case "safe_internal_error":
+      return "学习服务内部出了点问题，已记录；请稍后重试。";
     // Auth-form outcomes. These read as account and invitation problems, not as
     // learning-content problems, because that is the surface they appear on.
     case "email_exists":
