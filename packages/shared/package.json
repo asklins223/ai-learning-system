@@ -166,6 +166,11 @@
       "import": "./src/companion-bridge-revision.ts",
       "default": "./src/companion-bridge-revision.ts"
     },
+    "./companion-bridge-contracts": {
+      "types": "./src/companion-bridge-contracts.ts",
+      "import": "./src/companion-bridge-contracts.ts",
+      "default": "./src/companion-bridge-contracts.ts"
+    },
     "./companion-character-contracts": {
       "types": "./src/companion-character-contracts.ts",
       "import": "./src/companion-character-contracts.ts",
@@ -180,6 +185,11 @@
       "types": "./src/companion-home-contracts.ts",
       "import": "./src/companion-home-contracts.ts",
       "default": "./src/companion-home-contracts.ts"
+    },
+    "./companion-journey-contracts": {
+      "types": "./src/companion-journey-contracts.ts",
+      "import": "./src/companion-journey-contracts.ts",
+      "default": "./src/companion-journey-contracts.ts"
     },
     "./companion-memory-desktop-contracts": {
       "types": "./src/companion-memory-desktop-contracts.ts",

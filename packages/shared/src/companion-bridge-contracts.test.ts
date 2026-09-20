@@ -17,7 +17,7 @@ const uuid = () => crypto.randomUUID();
 
 test("mainPageContextInputV2Schema：renderer 只提交非安全字段，安全字段被拒绝", () => {
   const ok = {
-    routeRef: { kind: "card", cardId: uuid() },
+    routeRef: { kind: "card", cardId: uuid(), objectiveId: uuid() },
     pageKind: "card",
     entityRefs: [{ kind: "card", cardId: uuid() }, { kind: "key_point", keyPointId: uuid() }],
     interactionState: "idle",

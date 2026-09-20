@@ -1,7 +1,7 @@
 /**
  * 伴星路由的能力边界契约（fail-closed）。
  *
- * 这一类缺陷在 2026-09-16 审计中被真实发现过：`session/current` 与
+ * 这一类缺陷在 2026-09-16 审计中被真实发现过：连续历史与
  * `history/search` 会读出会话正文，却只挂 requireSession、没有任何 capability
  * 门禁（已修）。本文件把「开关关闭 → 404；开关开启 → 401」变成逐路由断言，
  * 使「新加一条伴星路由但忘记门禁」或「门禁被顺手删掉」都会立刻变红。
@@ -50,8 +50,8 @@ before(async () => {
   setFlags([]);
   const { companionConversationRoutes, companionConversationManagementRoutes } =
     await import("./routes.ts");
-  const { assistantSessionRoutes } =
-    await import("./assistant-session-routes.ts");
+  const { continuousHistoryRoutes } =
+    await import("./continuous-history-routes.ts");
   const { memoryRoutes } = await import("./memory-routes.ts");
   const { petProfileRoutes } = await import("./pet-profile-routes.ts");
   const { dailySummaryRoutes } = await import("./daily-summary-routes.ts");
@@ -65,7 +65,7 @@ before(async () => {
   app = Fastify({ logger: false });
   await app.register(companionConversationRoutes);
   await app.register(companionConversationManagementRoutes);
-  await app.register(assistantSessionRoutes);
+  await app.register(continuousHistoryRoutes);
   await app.register(memoryRoutes);
   await app.register(petProfileRoutes);
   await app.register(dailySummaryRoutes);
@@ -117,8 +117,7 @@ const ON_REQUEST_GATED_ROUTES: RouteCase[] = [
 /** B 组：preHandler 门禁（认证优先）→ 匿名恒 401，路由必须存在。 */
 const PRE_HANDLER_GATED_ROUTES: RouteCase[] = [
   { label: "dialogue: learning-context", flag: "COMPANION_DIALOGUE_V1_ENABLED", method: "GET", url: "/companion/learning-context" },
-  { label: "dialogue: conversations list", flag: "COMPANION_DIALOGUE_V1_ENABLED", method: "GET", url: "/companion/conversations" },
-  { label: "dialogue: session current", flag: "COMPANION_DIALOGUE_V1_ENABLED", method: "GET", url: "/companion/session/current" },
+  { label: "dialogue: continuous history", flag: "COMPANION_DIALOGUE_V1_ENABLED", method: "GET", url: "/companion/history" },
   { label: "dialogue: history search", flag: "COMPANION_DIALOGUE_V1_ENABLED", method: "GET", url: "/companion/history/search?q=x" },
   { label: "dialogue: inbox ensure", flag: "COMPANION_DIALOGUE_V1_ENABLED", method: "POST", url: "/companion/inbox/ensure", payload: {} },
 ];

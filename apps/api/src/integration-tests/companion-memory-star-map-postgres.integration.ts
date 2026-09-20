@@ -77,7 +77,7 @@ test("候选记忆不进星图；确认后才成为节点（默认 candidate=tru
   }));
   const map = await inTx((tx) => getMemoryStarMap(tx, scope));
   assert.equal(map.nodes.map((node) => node.memoryId).includes(direct.memoryItemId), true);
-  assert.equal(map.version, 1);
+  assert.equal(map.version, 2);
   assert.equal(map.cursor, null);
 });
 
@@ -138,7 +138,13 @@ test("pinned 节点排在 active 之前，且实体关联与 orphaned 标记如�
   assert.equal(map.nodes[pinnedIndex]?.state, "pinned");
 
   const links = map.nodes[pinnedIndex]?.entityLinks ?? [];
-  assert.deepEqual(links, [{ entityType: "note", entityId, orphaned: true }]);
+  assert.deepEqual(links, [{
+    entityType: "note",
+    entityId,
+    label: "关联内容已不存在",
+    target: null,
+    orphaned: true,
+  }]);
   assert.deepEqual(map.nodes[plainIndex]?.entityLinks, [], "无关联节点返回空数组而不是 null");
 });
 

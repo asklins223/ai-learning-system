@@ -1,7 +1,7 @@
 /**
  * Delivery 时间线审计端点（文档 16 §14.3：action/result 时间线）。
  *
- * GET /companion/deliveries/timeline?after=<inboxSequence>&limit=50
+ * GET /companion/deliveries/timeline?before=<inboxSequence>&limit=50
  * 返回该 workspace 用户的 delivery 时间线（含 action/result/session/失效），
  * 倒序。审计用（无写权限）。capability：COMPANION_JOURNEY_V2 同开关。
  */
@@ -11,14 +11,14 @@ import { z } from "zod";
 import { requireSession } from "../identity/middleware.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
 import { ASSISTANT_DELIVERY_KIND_VALUES, type AssistantDeliveryV2 } from "@ailearn/shared";
-import { listInbox } from "./delivery-service.ts";
+import { listDeliveryTimeline } from "./delivery-service.ts";
 
 function isCompanionJourneyV2Enabled(): boolean {
   return process.env.COMPANION_JOURNEY_V2 === "true";
 }
 
 const timelineQuerySchema = z.object({
-  after: z.coerce.number().int().min(0).optional(),
+  before: z.coerce.number().int().positive().optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),
   kind: z.enum(ASSISTANT_DELIVERY_KIND_VALUES).optional(),
 });
@@ -40,20 +40,20 @@ export async function deliveryTimelineRoutes(app: FastifyInstance) {
       const query = timelineQuerySchema.safeParse(req.query ?? {});
       if (!query.success) throw app.httpErrors.badRequest("timeline query 非法");
       const scope = { workspaceId: req.session.workspaceId, userId: req.session.userId };
-      const deliveries = await withWorkspaceTransaction(scope, (tx) =>
-        listInbox(tx, scope, {
-          afterSequence: query.data.after ?? 0,
+      const timeline = await withWorkspaceTransaction(scope, (tx) =>
+        listDeliveryTimeline(tx, scope, {
+          beforeSequence: query.data.before,
           limit: query.data.limit ?? 50,
           kind: query.data.kind,
         }),
       );
-      const items: Array<AssistantDeliveryV2 & { expired: boolean }> = deliveries.map((d) => ({
+      const items: Array<AssistantDeliveryV2 & { expired: boolean }> = timeline.items.map((d) => ({
         ...d,
         expired: d.expiresAt !== null && new Date(d.expiresAt).getTime() <= Date.now(),
       }));
       return {
         items,
-        nextCursor: items.length > 0 ? items[items.length - 1].inboxSequence : (query.data.after ?? 0),
+        nextCursor: timeline.nextCursor,
         serverTime: new Date().toISOString(),
       };
     },

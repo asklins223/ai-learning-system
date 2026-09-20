@@ -4,7 +4,7 @@ import { createRequestMeta, gatewayErrorMessage, unwrapGatewayResult } from "../
 import { useRoomStore } from "../../app/room-store";
 import { mediaAssetUrl, useLearningRoomManifest } from "../../media/learning-room-manifest";
 import { HOME_V2_ENABLED } from "../home-v2/home-v2";
-import { CompanionRoot } from "../companion/CompanionPresence";
+import { CompanionPresence } from "../companion/CompanionPresence";
 import { DirectoryRail } from "../DirectoryRail";
 import { HudRoomControl } from "./HudRoomControl";
 import { useHudPage } from "./use-hud-page";
@@ -233,7 +233,7 @@ export function HudFirstSpaceScene({
         {nightPlate ? <img className="room-backplate room-backplate--home-night" src={nightPlate} alt="" draggable={false} /> : null}
       </div>
       <DirectoryRail readOnly />
-      <CompanionRoot />
+      <CompanionPresence />
       <HudRoomControl readOnly />
       <HudFirstSpace
         workspaces={workspaces}

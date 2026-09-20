@@ -24,6 +24,7 @@ const {
   claimDisplayLease,
   ackDelivery,
   listInbox,
+  listDeliveryTimeline,
 } = await import("../modules/companion-conversation/delivery-service.ts");
 
 after(async () => {
@@ -159,6 +160,19 @@ test("P8 delivery 纵切：dedupe → lease 竞争 → ACK 状态机 → inbox �
     );
     assert.equal(inbox.length, 2);
     assert.equal(inbox[0].inboxSequence, first.inboxSequence);
+
+    // 5) 用户可见时间线与 SSE 增量游标语义分离：首屏最新优先，before 向过去翻页。
+    const latest = await withWorkspaceTransaction(scope, (tx) =>
+      listDeliveryTimeline(tx, scope, { limit: 1 }),
+    );
+    assert.equal(latest.items.length, 1);
+    assert.equal(latest.items[0].inboxSequence, second.inboxSequence);
+    assert.equal(latest.nextCursor, second.inboxSequence);
+    const older = await withWorkspaceTransaction(scope, (tx) =>
+      listDeliveryTimeline(tx, scope, { beforeSequence: latest.nextCursor, limit: 1 }),
+    );
+    assert.equal(older.items[0].inboxSequence, first.inboxSequence);
+    assert.equal(older.nextCursor, 0);
   } finally {
     await seeded.cleanup();
   }

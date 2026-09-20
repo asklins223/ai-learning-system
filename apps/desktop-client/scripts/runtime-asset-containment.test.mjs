@@ -6,9 +6,12 @@ import { describe, expect, it } from 'vitest'
 const appRoot = resolve(import.meta.dirname, '..')
 const runtimeRoot = resolve(appRoot, 'src/renderer/public/assets/learning-room/v1')
 const rendererOut = resolve(appRoot, 'out/renderer')
-const activeLive2dSourceRoot = resolve(appRoot, 'src/renderer/public/assets/companion/live2d-v2/seethrough')
-const activeLive2dOutRoot = resolve(rendererOut, 'assets/companion/live2d-v2/seethrough')
-const activeLive2dModel = 'seethrough_output.model3.json'
+// 2026-09-19 方案收尾：休眠的 live2d-v2/seethrough 已整体移除，运行时唯一模型是
+// live2d-v1/mao-pro（`window-live2d-contract.ts` 的 WINDOW_LIVE2D_ASSETS 是唯一真话）。
+const activeLive2dSourceRoot = resolve(appRoot, 'src/renderer/public/assets/companion/live2d-v1/mao-pro/runtime')
+const activeLive2dOutRoot = resolve(rendererOut, 'assets/companion/live2d-v1/mao-pro/runtime')
+const activeLive2dModel = 'mao_pro.model3.json'
+const removedLive2dModelPath = 'assets/companion/live2d-v2/seethrough/seethrough_output.model3.json'
 const rejectedRuntimeMedia = [
   'graph-entry-fog-v1.mp4',
   'validation-ink-bloom-v1.mp4',
@@ -42,7 +45,8 @@ describe('runtime asset containment', () => {
     }
     // 2026-09-16 裁决移除 orb：它不得再进入 runtime 产物。
     expect(outFiles).not.toContain('assets/learning-room/v1/objects/companion-orb.webp')
-    expect(outFiles).toContain('assets/companion/live2d-v2/seethrough/seethrough_output.model3.json')
+    // 2026-09-19 移除休眠的 seethrough 包：mao-pro 是唯一打进的 Live2D 模型。
+    expect(outFiles).not.toContain(removedLive2dModelPath)
     expect(outFiles).toContain('assets/companion/live2d-v1/mao-pro/runtime/mao_pro.model3.json')
     expect(outFiles).toContain('assets/companion/vendor/pixi.min.js')
   })
@@ -54,31 +58,19 @@ describe('runtime asset containment', () => {
     expect(sourceModel.Version).toBe(3)
     expect(sourceModel.Groups).toEqual(expect.arrayContaining([
       { Target: 'Parameter', Name: 'EyeBlink', Ids: ['ParamEyeLOpen', 'ParamEyeROpen'] },
-      { Target: 'Parameter', Name: 'LipSync', Ids: ['ParamMouthOpenY'] },
+      { Target: 'Parameter', Name: 'LipSync', Ids: ['ParamA'] },
     ]))
     expect(Object.keys(sourceModel.FileReferences.Motions)).toEqual(expect.arrayContaining([
-      'Idle', 'Blink', 'Nod', 'Shake', 'Think', 'Happy', 'Surprised', 'Sleepy',
+      'Idle',
     ]))
-
-    const displayInfo = JSON.parse(readFileSync(resolve(activeLive2dSourceRoot, 'seethrough_output.cdi3.json'), 'utf8'))
-    expect(displayInfo.Parameters.map((parameter) => parameter.Id)).toEqual(expect.arrayContaining([
-      'ParamArmL', 'ParamArmR', 'ParamLegL', 'ParamLegR',
-    ]))
-
-    for (const motionName of ['idle', 'think', 'happy', 'surprised', 'sleepy']) {
-      const motionFile = `seethrough_output.${motionName}.motion3.json`
-      const motion = JSON.parse(readFileSync(resolve(activeLive2dSourceRoot, motionFile), 'utf8'))
-      expect(motion.Curves.map((curve) => curve.Id)).toEqual(expect.arrayContaining([
-        'ParamArmL',
-        'ParamArmR',
-      ]))
-    }
 
     const references = [
       sourceModel.FileReferences.Moc,
       ...sourceModel.FileReferences.Textures,
       sourceModel.FileReferences.Physics,
+      sourceModel.FileReferences.Pose,
       sourceModel.FileReferences.DisplayInfo,
+      ...(sourceModel.FileReferences.Expressions ?? []).map((expression) => expression.File),
       ...Object.values(sourceModel.FileReferences.Motions).flat().map((motion) => motion.File),
     ]
     expect(references.filter((reference) => !existsSync(resolve(activeLive2dSourceRoot, reference)))).toEqual([])

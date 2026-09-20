@@ -7,12 +7,12 @@ import {
 } from "@ailearn/shared/desktop-ipc-contracts";
 import {
   companionDailySummaryV1Schema,
+  companionHistoryPageV1Schema,
   companionMemoryItemV1Schema,
   companionMemoryListV1Schema,
-  companionMemoryStarMapV1Schema,
+  companionMemoryStarMapV2Schema,
   companionPersonaV1Schema,
 } from "@ailearn/shared/companion-memory-desktop-contracts";
-import { companionConversationListV1Schema } from "@ailearn/shared/companion-memory-desktop-contracts";
 import type { DesktopGateway } from "./desktop-gateway";
 
 type InvokeHandler = (
@@ -71,14 +71,22 @@ const memoryItem = companionMemoryItemV1Schema.parse({
 
 const memoryList = companionMemoryListV1Schema.parse({ version: 2, items: [memoryItem] });
 
-const starMap = companionMemoryStarMapV1Schema.parse({
-  version: 1,
+const starMap = companionMemoryStarMapV2Schema.parse({
+  version: 2,
   nodes: [{
     memoryId: MEMORY_ID,
     kind: "preference",
     content: "我开始能区分熟悉和理解",
     state: "active",
-    entityLinks: [{ entityType: "note", entityId: "44444444-4444-4444-8444-444444444444", orphaned: false }],
+    importance: 0.6,
+    updatedAt: "2026-09-15T00:00:00.000Z",
+    entityLinks: [{
+      entityType: "note",
+      entityId: "44444444-4444-4444-8444-444444444444",
+      label: "牛顿第二定律笔记",
+      target: { kind: "note", noteId: "44444444-4444-4444-8444-444444444444" },
+      orphaned: false,
+    }],
   }],
   cursor: null,
 });
@@ -118,20 +126,17 @@ const persona = companionPersonaV1Schema.parse({
   activePreset: null,
 });
 
-const conversations = companionConversationListV1Schema.parse({
+const history = companionHistoryPageV1Schema.parse({
   version: 1,
   items: [{
     version: 1,
-    id: "9a67250d-906e-42b7-8f6a-c4c3ef5207f7",
-    workspaceId: WORKSPACE_ID,
-    userId: "11111111-1111-4111-8111-111111111111",
-    kind: "dialogue",
-    title: "请用一句话解释牛顿第二定律",
-    titleSource: "auto",
-    status: "active",
+    messageId: "9a67250d-906e-42b7-8f6a-c4c3ef5207f7",
+    role: "user",
+    kind: "text",
+    blocks: [{ type: "text", text: "请用一句话解释牛顿第二定律" }],
+    runId: null,
     createdAt: "2026-08-20T01:33:39.102Z",
-    updatedAt: "2026-08-20T01:41:43.279Z",
-    lastMessageAt: "2026-08-20T01:41:49.997Z",
+    editedAt: null,
   }],
   nextCursor: null,
 });
@@ -191,7 +196,7 @@ describe("companion centre desktop IPC", () => {
       getCompanionMemoryStarMap: vi.fn().mockResolvedValue(starMap),
       getCompanionDailySummary: vi.fn().mockResolvedValue(daily),
       getCompanionPersona: vi.fn().mockResolvedValue(persona),
-      listCompanionConversations: vi.fn().mockResolvedValue(conversations),
+      listCompanionHistory: vi.fn().mockResolvedValue(history),
     } as unknown as DesktopGateway;
     await register(gateway);
 
@@ -216,10 +221,13 @@ describe("companion centre desktop IPC", () => {
     const personaResult = await requiredHandler(DESKTOP_IPC_CHANNELS.companionPersonaGet)(event, { meta: scopedMeta });
     expect(personaResult).toMatchObject({ ok: true, data: persona, workspaceEpoch: 9 });
 
-    const dialogue = await requiredHandler(DESKTOP_IPC_CHANNELS.companionConversationsList)(event, { meta: scopedMeta, limit: 20 });
-    expect(dialogue).toMatchObject({ ok: true, data: conversations, workspaceEpoch: 9 });
-    expect((gateway as unknown as { listCompanionConversations: ReturnType<typeof vi.fn> }).listCompanionConversations)
-      .toHaveBeenCalledWith(20, meta.requestId);
+    const dialogue = await requiredHandler(DESKTOP_IPC_CHANNELS.companionHistoryList)(event, {
+      meta: scopedMeta,
+      query: { limit: 20 },
+    });
+    expect(dialogue).toMatchObject({ ok: true, data: history, workspaceEpoch: 9 });
+    expect((gateway as unknown as { listCompanionHistory: ReturnType<typeof vi.fn> }).listCompanionHistory)
+      .toHaveBeenCalledWith({ limit: 20 }, meta.requestId);
   });
 
   it("routes each verdict to its own gateway method and rejects malformed ids", async () => {

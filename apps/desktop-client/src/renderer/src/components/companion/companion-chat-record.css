@@ -1,84 +1,5 @@
-/* 「聊天记录」子级页面（2026-09-19）：全部自绘组件，同一套纸面语言。
-   层级在历史抽屉（z-index 210）之上。 */
-
-.companion-record {
-  --companion-ivory: #fff9e9;
-  --companion-cream: #fff1cf;
-  --companion-mint: #cdebd9;
-  --companion-mint-strong: #acd8c0;
-  --companion-ink: #5c4638;
-  --companion-muted: #876f5f;
-  --companion-line: #c9a47e;
-  --companion-peach: #f5b574;
-  --companion-peach-strong: #e68f51;
-  --ease-drawer: cubic-bezier(.22, .75, .2, 1);
-  --ease-out: cubic-bezier(.23, 1, .32, 1);
-  position: fixed;
-  z-index: 220;
-  top: 10px;
-  right: 10px;
-  bottom: 10px;
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
-  width: min(410px, calc(100vw - 20px));
-  overflow: hidden;
-  color: var(--companion-ink);
-  border: 2px solid var(--companion-line);
-  border-radius: 28px 31px 25px 29px;
-  background: var(--companion-ivory);
-  box-shadow: -14px 18px 46px rgba(91, 62, 39, .18);
-  animation: companion-record-in 260ms var(--ease-drawer) both;
-}
-
-.companion-record[data-stage="exiting"] {
-  animation: companion-record-out 240ms var(--ease-drawer) both;
-  pointer-events: none;
-}
-
-@keyframes companion-record-in {
-  from { opacity: 0; transform: translateX(26px) scale(.985); }
-  to { opacity: 1; transform: translateX(0) scale(1); }
-}
-
-@keyframes companion-record-out {
-  from { opacity: 1; transform: translateX(0) scale(1); }
-  to { opacity: 0; transform: translateX(26px) scale(.985); }
-}
-
-.companion-record > header {
-  display: grid;
-  grid-template-columns: 38px minmax(0, 1fr) 38px;
-  align-items: center;
-  gap: 8px;
-  padding: 15px 16px 13px;
-  border-bottom: 1px solid rgba(201, 164, 126, .45);
-  background: rgba(255, 241, 207, .58);
-}
-
-.companion-record > header div { display: grid; gap: 2px; }
-.companion-record > header strong { font-size: 15px; }
-.companion-record > header span { color: var(--companion-muted); font-size: 10px; }
-
-.companion-record > header button {
-  display: grid;
-  width: 36px;
-  height: 36px;
-  place-items: center;
-  padding: 0;
-  border: 1.5px solid rgba(201, 164, 126, .7);
-  border-radius: 50%;
-  background: rgba(255, 255, 255, .6);
-  cursor: pointer;
-}
-
-/* 工具行：搜索框 + 日期按钮（都是自绘） */
-.companion-record__toolbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
-  border-bottom: 1px solid rgba(201, 164, 126, .32);
-}
+/* 连续对话抽屉里的查找控件。外层抽屉与时间线由 companion-hud.css 负责，
+   这里仅保留搜索、日期、过程与动作建议等真正复用的子组件样式。 */
 
 .companion-record__search {
   display: flex;
@@ -179,8 +100,8 @@
 
 .companion-record__calendar-head button {
   display: grid;
-  width: 26px;
-  height: 26px;
+  width: 32px;
+  height: 32px;
   place-items: center;
   padding: 0;
   border: 1.5px solid rgba(201, 164, 126, .6);
@@ -197,7 +118,7 @@
 
 .companion-record__calendar-wd {
   color: var(--companion-muted);
-  font-size: 9px;
+  font-size: 10px;
   text-align: center;
 }
 
@@ -238,103 +159,10 @@
   font-style: normal;
 }
 
-/* 列表 */
-.companion-record__list {
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-  padding: 14px;
-  overflow: auto;
-}
-
-.companion-record__list article {
-  width: fit-content;
-  max-width: 88%;
-  padding: 10px 12px;
-  border: 1.5px solid rgba(201, 164, 126, .58);
-  border-radius: 17px 20px 17px 6px;
-  background: var(--companion-cream);
-}
-
-.companion-record__list article[data-role="user"] {
-  align-self: flex-end;
-  border-color: rgba(145, 195, 168, .74);
-  border-radius: 20px 17px 6px 17px;
-  background: rgba(205, 235, 217, .72);
-}
-
-.companion-record__list article > header {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 5px;
-  color: var(--companion-muted);
-  font-size: 9px;
-}
-
-.companion-record__list article > p {
-  margin: 0;
-  font-size: 12px;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-}
-
 .companion-record__stopped {
   margin: 5px 0 0;
   color: var(--companion-peach-strong);
   font-size: 10px;
-}
-
-.companion-record__proposal {
-  display: block;
-  margin-top: 6px;
-  color: var(--companion-muted);
-  font-size: 10px;
-}
-
-.companion-record__trace {
-  margin-top: 6px;
-  font-size: 10px;
-}
-
-.companion-record__trace summary { cursor: pointer; }
-
-.companion-record__trace-expired { color: var(--companion-muted); }
-
-.companion-record__system {
-  margin: 2px 0;
-  color: var(--companion-muted);
-  font-size: 10px;
-  text-align: center;
-}
-
-/* 日期分组头 */
-.companion-record__day {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  margin: 6px 0 1px;
-  color: var(--companion-muted);
-  font-size: 10px;
-}
-
-.companion-record__day--filter {
-  justify-content: space-between;
-  padding: 4px 8px;
-  border: 1.5px dashed rgba(201, 164, 126, .6);
-  border-radius: 12px;
-  background: rgba(255, 248, 220, .6);
-}
-
-.companion-record__day--filter button {
-  padding: 3px 9px;
-  color: var(--companion-ink);
-  font-size: 10px;
-  border: 1.5px solid rgba(145, 195, 168, .8);
-  border-radius: 10px;
-  background: rgba(205, 235, 217, .6);
-  cursor: pointer;
 }
 
 /* 搜索命中 */
@@ -357,7 +185,7 @@
   justify-content: space-between;
   gap: 12px;
   color: var(--companion-muted);
-  font-size: 9px;
+  font-size: 10.5px;
 }
 
 .companion-record__hit p {
@@ -370,41 +198,22 @@
   -webkit-box-orient: vertical;
 }
 
-.companion-record__hit mark,
-.companion-record__list mark {
+.companion-record__hit mark {
   padding: 0 1px;
   border-radius: 3px;
   background: rgba(245, 181, 116, .55);
   color: inherit;
 }
 
-/* 跳转至最新 */
-.companion-record__jump {
-  position: absolute;
-  right: 16px;
-  bottom: 16px;
-  z-index: 3;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 6px 12px;
+.companion-record__retry {
+  min-height: 32px;
+  margin-left: 8px;
+  padding: 5px 10px;
   color: var(--companion-ink);
   font-size: 11px;
-  border: 1.5px solid rgba(201, 164, 126, .75);
-  border-radius: 15px;
-  background: rgba(255, 249, 233, .96);
-  box-shadow: 0 6px 16px rgba(91, 62, 39, .16);
+  font-weight: 650;
+  border: 1.5px solid rgba(145, 195, 168, .8);
+  border-radius: 11px;
+  background: rgba(205, 235, 217, .58);
   cursor: pointer;
-}
-
-.companion-record__jump:hover { background: var(--companion-cream); }
-
-/* 命中跳回上下文的闪烁 */
-.companion-record__list article[data-flash="true"] {
-  animation: companion-record-flash 1.6s ease-out;
-}
-
-@keyframes companion-record-flash {
-  0%, 55% { border-color: var(--companion-peach-strong); box-shadow: 0 0 0 3px rgba(245, 181, 116, .35); }
-  100% { border-color: rgba(201, 164, 126, .58); box-shadow: none; }
 }

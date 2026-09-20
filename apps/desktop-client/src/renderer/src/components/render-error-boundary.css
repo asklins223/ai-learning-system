@@ -1,0 +1,55 @@
+/* 渲染失败兜底层（见 RenderErrorBoundary.tsx）。
+
+   页面级形态复用 `.content` 版心与 `.pinboard` 纸张，等于"同一张纸换了一页内容"；
+   外壳级形态没有版心可套（门禁/场景崩溃时整棵树都在这一层），所以自己居中。 */
+
+.render-error-boundary {
+  pointer-events: auto;
+}
+
+.render-error-boundary--shell {
+  display: grid;
+  place-items: center;
+  min-height: 100%;
+  padding: 32px;
+}
+
+.render-error-boundary--shell .pinboard {
+  width: min(520px, 100%);
+  height: auto;
+}
+
+/* 出错的原始信息保持等宽，方便用户原样抄给开发者；长句必须在纸内折行，
+   不能撑破版心。 */
+.render-error-boundary__reason {
+  max-width: 46ch;
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  opacity: 0.86;
+  overflow-wrap: anywhere;
+}
+
+.render-error-boundary__stack {
+  max-width: 52ch;
+  text-align: left;
+  font-size: 11px;
+}
+
+.render-error-boundary__stack pre {
+  max-height: 180px;
+  margin: 6px 0 0;
+  overflow: auto;
+  font-size: 10px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.render-error-boundary__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+}

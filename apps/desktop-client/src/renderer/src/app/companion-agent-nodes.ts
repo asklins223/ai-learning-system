@@ -49,6 +49,13 @@ export interface CompanionAgentNode {
   readonly toolName: string | null;
   /** `agent.tool.safeSummary`，可有可无。 */
   readonly summary: string | null;
+  /**
+   * 需要用户确认的工具节点所绑定的真实提案。
+   *
+   * 服务端 `agent.tool` 已经显式下发这个字段；保留到节点投影后，历史记录才能把
+   * 选择卡放回触发它的那一步，而不是在整条 assistant 消息末尾猜位置。
+   */
+  readonly proposalId: string | null;
 }
 
 /** 只读快照，避免渲染层拿到可变数组。 */
@@ -104,6 +111,7 @@ function appendStatusNode(nodes: CompanionAgentNodes, payload: unknown): Compani
     state: "running",
     toolName: null,
     summary: null,
+    proposalId: null,
   }];
 }
 
@@ -121,12 +129,12 @@ function appendSkillNode(nodes: CompanionAgentNodes, payload: unknown): Companio
     if (nodes[index].state === state) return nodes;
     return nodes.map((node, at) => (at === index ? { ...node, state, label: skill.name as string } : node));
   }
-  return [...nodes, { key, kind: "skill", label: skill.name, state, toolName: null, summary: null }];
+  return [...nodes, { key, kind: "skill", label: skill.name, state, toolName: null, summary: null, proposalId: null }];
 }
 
 function appendToolNode(nodes: CompanionAgentNodes, payload: unknown): CompanionAgentNodes {
   const tool = (payload as { tool?: unknown })?.tool as
-    | { toolCallId?: unknown; name?: unknown; status?: unknown; safeLabel?: unknown; safeSummary?: unknown }
+    | { toolCallId?: unknown; name?: unknown; status?: unknown; safeLabel?: unknown; safeSummary?: unknown; proposalId?: unknown }
     | undefined;
   if (!tool) return nodes;
   if (typeof tool.toolCallId !== "string" || tool.toolCallId.length === 0) return nodes;
@@ -134,16 +142,18 @@ function appendToolNode(nodes: CompanionAgentNodes, payload: unknown): Companion
   const name = typeof tool.name === "string" && tool.name.length > 0 ? tool.name : null;
   const state = TOOL_STATE[typeof tool.status === "string" ? tool.status : ""] ?? "running";
   const summary = typeof tool.safeSummary === "string" && tool.safeSummary.length > 0 ? tool.safeSummary : null;
+  const proposalId = typeof tool.proposalId === "string" && tool.proposalId.length > 0 ? tool.proposalId : null;
   const key = `tool:${tool.toolCallId}`;
   const index = nodes.findIndex((node) => node.key === key);
   if (index >= 0) {
     const existing = nodes[index];
-    if (existing.state === state && existing.label === tool.safeLabel && existing.summary === summary) return nodes;
+    if (existing.state === state && existing.label === tool.safeLabel && existing.summary === summary
+      && existing.proposalId === proposalId) return nodes;
     return nodes.map((node, at) => (at === index
-      ? { ...node, state, label: tool.safeLabel as string, toolName: name, summary }
+      ? { ...node, state, label: tool.safeLabel as string, toolName: name, summary, proposalId }
       : node));
   }
-  return [...nodes, { key, kind: "tool", label: tool.safeLabel, state, toolName: name, summary }];
+  return [...nodes, { key, kind: "tool", label: tool.safeLabel, state, toolName: name, summary, proposalId }];
 }
 
 /** 轨道只显示最近几步，更早的折成左端 `…+N`（方案 §1 第一层）。 */

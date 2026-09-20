@@ -91,7 +91,7 @@
   /* The companion keeps her seat on the left of page 19, so the bottom plates
      step past her by this much. The compact breakpoint keeps its own, smaller
      seat width — see the 760px block. */
-  --universe-seat-gutter: 340px;
+  --universe-seat-gutter: var(--companion-universe-seat-gutter, 340px);
   /* Bottom instrument grid: one baseline for the lower row, one for the upper,
      and one gap between them. Row heights are 54px (the tallest plate), so the
      upper row sits exactly 64px above the lower one. */
@@ -1494,7 +1494,7 @@
      with the old 64 / 112 / 120px offsets the layer dock overlapped the zoom
      controls by 2px and the key by 24px. */
   .hud-surface.page-19 .universe-page {
-    --universe-seat-gutter: 250px;
+    --universe-seat-gutter: var(--companion-universe-seat-gutter-compact, 250px);
   }
 
   /* Both keep the left / right edge the wide grid gives them — the layer dock

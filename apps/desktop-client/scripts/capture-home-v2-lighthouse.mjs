@@ -466,9 +466,9 @@ async function captureCompanionInteraction(page, app) {
     || !contract.composerVisible
     || !contract.inputVisible
     || contract.controlCount !== 3
-    || !contract.labels.includes("语音")
-    || !contract.labels.includes("文字")
-    || !contract.labels.includes("更多")
+    || !contract.labels.includes("语音输入")
+    || !contract.labels.includes("文字输入")
+    || !contract.labels.includes("更多功能")
     || contract.overlapsActor
   ) {
     throw new Error(`Home V2 companion interaction did not expose real controls: ${JSON.stringify(contract)}`);
@@ -509,7 +509,7 @@ async function captureCompanionInteraction(page, app) {
   await page.locator(".companion-hud__more").waitFor({ state: "detached" });
 
   await page.getByRole("button", { name: "更多功能", exact: true }).click();
-  await page.getByRole("button", { name: /历史会话/ }).click();
+  await page.getByRole("button", { name: /对话记录/ }).click();
   await page.locator(".companion-history").waitFor({ state: "visible" });
   const historyState = await page.evaluate(() => {
     const drawer = document.querySelector(".companion-history");

@@ -45,9 +45,14 @@ export type ParseSourceJobPayload = {
   fetchUrlContent?: true;
 };
 
+export type CompanionThoughtJobPayload = {
+  userId: string;
+};
+
 /** 已强类型化的作业类型 → payload 契约映射（目前只有非 companion 的 parse_source）。 */
 export type TypedJobPayloadByType = {
   [JobType.PARSE_SOURCE]: ParseSourceJobPayload;
+  [JobType.COMPANION_THOUGHT]: CompanionThoughtJobPayload;
 };
 
 export type TypedJobType = keyof TypedJobPayloadByType;
@@ -103,4 +108,17 @@ export function readParseSourceJobPayload(
     fetchUrlContent:
       payload[PARSE_SOURCE_JOB_PAYLOAD_FIELDS.fetchUrlContent] === true,
   };
+}
+
+export function readCompanionThoughtJobPayload(
+  payload: Record<string, unknown> | null | undefined,
+): CompanionThoughtJobPayload {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new JobPayloadContractError(JobType.COMPANION_THOUGHT, "payload must be a JSON object");
+  }
+  const userId = payload.userId;
+  if (typeof userId !== "string" || userId.trim() === "") {
+    throw new JobPayloadContractError(JobType.COMPANION_THOUGHT, "payload.userId must be a non-empty string");
+  }
+  return { userId };
 }

@@ -100,7 +100,9 @@ test("activeMemories 注入 system 的 <memory_data> 数据块（桌宠记得长
   assert.match(system, /<memory_data>/);
   assert.match(system, /\[preference\] 喜欢用语音交流/);
   assert.match(system, /\[goal\] 这周想掌握光合作用/);
-  assert.match(system, /# Memory Data Safety/);
+  // 2026-09-19 D：安全声明收拢进 OUTPUT_SAFETY_GUARD 的数据边界条目。
+  assert.match(system, /Memory Data Safety/);
+  assert.match(system, /<memory_data> 是用户的历史记忆/);
 });
 
 test("persona 输入边界：整段历史 ≤24k 字符（从最新消息向前累计）", () => {

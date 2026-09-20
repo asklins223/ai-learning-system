@@ -8,7 +8,11 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { CompanionMessageV1, CompanionPageContextV1 } from "@ailearn/shared/companion-conversation-contracts";
+import type {
+  CharacterCuePayloadV1,
+  CompanionMessageV1,
+  CompanionPageContextV1,
+} from "@ailearn/shared/companion-conversation-contracts";
 import type {
   CompanionAgentRouteEventV1,
   CompanionChatConversationV1,
@@ -102,6 +106,7 @@ export interface CompanionChatLiveReply {
   readonly messageId: string;
   readonly text: string;
   readonly hasActionBlocks: boolean;
+  readonly proposalIds: readonly string[];
 }
 
 /**
@@ -223,7 +228,8 @@ export interface CompanionChatSession {
    * 最近一条助手消息的语气情绪（2026-09-18 情绪接表情）。抽屉不再自己算——
    * 消息已经住在这里，情绪也就跟着上来，气泡层与表情共用同一个来源。
    */
-  readonly assistantEmotion: string | null;
+  /** 当前实时语义 cue；历史消息不会在重载后重新驱动角色表情。 */
+  readonly assistantCue: (CharacterCuePayloadV1 & { readonly seq: number }) | null;
   /**
    * 发一轮对话；返回 false 表示这次没有发出去（输入为空、被更新的发送取代，
    * 或缺少 AI 同意被门禁拦下——内容留在输入框，签署后可以原样再发）。
@@ -388,7 +394,7 @@ function bridgePageContext(input: {
   activeReviewScheduleId: string | null;
   settingsSection: string;
 }): MainPageContextInputV2 {
-  const base = {
+  const base: Pick<MainPageContextInputV2, "interactionState" | "capabilityHints" | "sensitivity"> = {
     interactionState: input.hudPage === "note-edit"
       ? "editing" as const
       : input.hudPage === "assessment"
@@ -396,7 +402,7 @@ function bridgePageContext(input: {
         : input.hudPage === "generating"
           ? "processing" as const
           : "idle" as const,
-    capabilityHints: ["open_route"] as const,
+    capabilityHints: ["open_route"],
     sensitivity: input.hudPage === "assessment"
       ? "formal_assessment" as const
       : input.hudPage === "login" || input.hudPage === "register"
@@ -550,7 +556,7 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
   const [feedSelection, setFeedSelection] = useState<string | null>(null);
   const [proposalStates, setProposalStates] = useState<Record<string, CompanionProposalUiState>>({});
   const [navChips, setNavChips] = useState<CompanionNavChip[]>([]);
-  const [streamCue, setStreamCue] = useState<{ readonly emotion: string; readonly seq: number } | null>(null);
+  const [streamCue, setStreamCue] = useState<(CharacterCuePayloadV1 & { readonly seq: number }) | null>(null);
 
   /**
    * 追加导航 chip（SSE 实时流、抽屉轮询与提案确认共用，2026-09-19）。
@@ -879,14 +885,17 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
   // ── 提案快照拉取 ──────────────────────────────────────────────────────
   // 消息流里出现 action_ref 就取快照（拿 payloadSha256 与当前状态）。
   useEffect(() => {
-    if (mode !== "history" || !conversation) return;
+    if (!conversation) return;
     const ids = new Set<string>();
-    for (const message of messages) {
-      if (message.role !== "assistant") continue;
-      for (const block of message.blocks) {
-        if (block.type === "action_ref") ids.add(block.proposalId);
+    if (mode === "history") {
+      for (const message of messages) {
+        if (message.role !== "assistant") continue;
+        for (const block of message.blocks) {
+          if (block.type === "action_ref") ids.add(block.proposalId);
+        }
       }
     }
+    for (const proposalId of liveReply?.proposalIds ?? []) ids.add(proposalId);
     const missing = [...ids].filter((id) => !(id in proposalStates));
     if (missing.length === 0) return;
     let cancelled = false;
@@ -912,7 +921,11 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
       }
     })();
     return () => { cancelled = true; };
-  }, [conversation, messages, mode, proposalStates]);
+  // proposalStates 刻意不进依赖：effect 先写 loading、再异步写 ready；若把它放进依赖，
+  // loading 会触发 cleanup，把自己刚发出的快照请求标成 cancelled，卡片便永久停在加载态。
+  // 新 proposal 的触发源始终是消息、liveReply 或 mode 变化。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversation, liveReply, messages, mode]);
 
   /**
    * 读本轮 run 的终态（只读端点 `listRunNodes` 的 `runs[]` 摘要，2026-09-19 ②）。
@@ -1061,6 +1074,8 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
       let settled = false;
       let timer = 0;
       let idleTimer = 0;
+      let finalDrainTimer = 0;
+      let finalSeen = false;
       let detach: (() => void) | null = null;
       let subscriptionId: string | null = null;
       const settle = (outcome: CompanionReplyStreamOutcome): void => {
@@ -1068,6 +1083,7 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
         settled = true;
         window.clearTimeout(timer);
         window.clearTimeout(idleTimer);
+        window.clearTimeout(finalDrainTimer);
         detach?.();
         if (subscriptionId) {
           void subscriptions.unsubscribe({
@@ -1155,9 +1171,23 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
             setPhase("sending");
           }
           if (streamed.eventType === "character.cue") {
-            const cue = streamed.payload.cue as { emotion?: unknown } | undefined;
-            if (cue && typeof cue.emotion === "string") {
-              setStreamCue({ emotion: cue.emotion, seq: streamed.seq });
+            const cue = streamed.payload.cue as Partial<CharacterCuePayloadV1> | undefined;
+            if (cue?.version === 1 && typeof cue.intent === "string" && typeof cue.emotion === "string"
+              && typeof cue.intensity === "number") {
+              setStreamCue({
+                version: 1,
+                intent: cue.intent as CharacterCuePayloadV1["intent"],
+                emotion: cue.emotion as CharacterCuePayloadV1["emotion"],
+                intensity: Math.min(1, Math.max(0, cue.intensity)),
+                ...(typeof cue.durationMs === "number" ? { durationMs: cue.durationMs } : {}),
+                seq: streamed.seq,
+              });
+            }
+            // 成功事务中 assistant.final 后面紧跟最终 character.cue。先处理 cue
+            // 再收流，避免 final 一到就退订，把角色的最终表演帧丢掉。
+            if (finalSeen) {
+              settle({ kind: "final" });
+              return;
             }
           }
           if (streamed.eventType === "action.proposed") {
@@ -1211,7 +1241,12 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
           }
           if (streamed.eventType === "voice.segment.ready") {
             window.dispatchEvent(new CustomEvent("ailearn:companion-voice-segment-ready", {
-              detail: { runId: streamed.runId, ...streamed.payload },
+              detail: {
+                conversationId: args.conversationId,
+                runId: streamed.runId,
+                generation: streamed.generation,
+                ...streamed.payload,
+              },
             }));
           }
           if (streamed.eventType === "assistant.delta") {
@@ -1226,7 +1261,9 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
             return;
           }
           if (streamed.eventType === "assistant.final") {
-            settle({ kind: "final" });
+            finalSeen = true;
+            // 兼容没有尾随 cue 的旧服务：短暂排空同一批 SSE 后仍会正常收尾。
+            finalDrainTimer = window.setTimeout(() => settle({ kind: "final" }), 220);
             return;
           }
         if (streamed.eventType === "turn.cancelled") {
@@ -1337,6 +1374,7 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
       messageId: `consent-guidance:${crypto.randomUUID()}`,
       text: COMPANION_CONSENT_REQUIRED_LINE,
       hasActionBlocks: false,
+      proposalIds: [],
     });
     setPhase("ready");
     const store = useRoomStore.getState();
@@ -1516,10 +1554,12 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
       if (reply) {
         draftRef.current = "";
         setDraft(null);
+        const proposalIds = reply.blocks.flatMap((block) => block.type === "action_ref" ? [block.proposalId] : []);
         setLiveReply({
           messageId: reply.id,
           text: companionMessageText(reply),
-          hasActionBlocks: reply.blocks.some((block) => block.type === "action_ref"),
+          hasActionBlocks: proposalIds.length > 0,
+          proposalIds,
         });
       } else {
         cancelRunInBackground(sent.runId, sent.generation, epoch);
@@ -1603,17 +1643,7 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
     setNavChips((current) => current.filter((chip) => chip.id !== id));
   }, []);
 
-  const assistantEmotion = useMemo(() => {
-    if (streamCue?.emotion && streamCue.emotion !== "neutral") return streamCue.emotion;
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const message = messages[index];
-      if (message.role !== "assistant") continue;
-      for (const block of message.blocks) {
-        if (block.type === "text" && block.emotion && block.emotion !== "neutral") return block.emotion;
-      }
-    }
-    return null;
-  }, [messages, streamCue]);
+  const assistantCue = streamCue;
 
   const decideProposal = useCallback(async (proposalId: string, decision: "confirm" | "reject") => {
     const state = proposalStates[proposalId];
@@ -1735,7 +1765,7 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
     navChips,
     proposalStates,
     mode,
-    assistantEmotion,
+    assistantCue,
     send,
     cancel,
     cancelling,
@@ -1748,7 +1778,7 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
     decideProposal,
     goToRoute,
   }), [
-    assistantEmotion,
+    assistantCue,
     cancel,
     cancelling,
     conversation,

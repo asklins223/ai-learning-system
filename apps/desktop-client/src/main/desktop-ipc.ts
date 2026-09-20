@@ -1,6 +1,10 @@
 import { BrowserWindow, clipboard, dialog, ipcMain, type IpcMainInvokeEvent, type WebContents } from "electron";
 import { randomBytes } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
+import { rename, rm, stat, writeFile } from "node:fs/promises";
+import { basename } from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { z } from "zod";
 import {
   DESKTOP_API_SERVICE_ID,
@@ -10,7 +14,9 @@ import {
   type ActionCapability,
   apiHealthSnapshotSchema,
   apiConnectionStateSchema,
+  authSurfaceManifestResultV1Schema,
   capabilityProjectionSchema,
+  companionBridgeStateV1Schema,
   clipboardReadLinksResultSchema,
   desktopContractSnapshotSchema,
   desktopNamespaceM2Values,
@@ -81,6 +87,7 @@ import {
   searchReindexResultV1Schema,
   type DesktopRouteKindM2,
 } from "@ailearn/shared/desktop-ipc-contracts";
+import { mainPageContextInputV2Schema } from "@ailearn/shared/companion-bridge-contracts";
 import {
   desktopSourceListPageSchema,
   desktopSourceCreateRequestSchema,
@@ -115,6 +122,8 @@ import {
   companionAccountStateV1Schema,
   companionAnswerModePreferenceV1Schema,
   companionOverviewSchema,
+  onboardingTransitionRequestSchema,
+  onboardingTransitionResponseSchema,
 } from "@ailearn/shared/companion-shell-contracts";
 import {
   companionHomeProjectionV1Schema,
@@ -124,6 +133,7 @@ import {
 import {
   companionVoiceSpeakRequestV1Schema,
   companionVoiceSpeakResultV1Schema,
+  companionVoiceSpeakSegmentRequestV2Schema,
   companionVoiceTranscribeRequestV1Schema,
   companionVoiceTranscribeResultV1Schema,
 } from "@ailearn/shared/companion-voice-contracts";
@@ -150,6 +160,7 @@ import {
 } from "@ailearn/shared/companion-chat-desktop-contracts";
 import {
   companionGroundedTutorGrantV1Schema,
+  companionLearningContextV1Schema,
   companionLearningRunContextV1Schema,
   createCompanionLearningRunContextGrantRequestV1Schema,
 } from "@ailearn/shared/companion-conversation-contracts";
@@ -166,18 +177,41 @@ import {
   noteImageUploadResultV1Schema,
 } from "@ailearn/shared/note-image-upload-contracts";
 import {
-  companionConversationListV1Schema,
   companionDailyDateV1Schema,
   companionDailySummaryV1Schema,
+  companionActivityAckRequestV1Schema,
+  companionActivityDeliveryV1Schema,
+  companionActivityTimelineV1Schema,
+  companionAuditDeleteResultV1Schema,
+  companionExportKindV1Schema,
+  companionExportResultV1Schema,
+  companionHistoryClearResultV1Schema,
+  companionHistoryPageV1Schema,
+  companionHistoryQueryV1Schema,
+  companionHistorySearchQueryV1Schema,
+  companionHistorySearchV1Schema,
   companionMemoryItemV1Schema,
+  companionMemoryClearResultV1Schema,
+  companionMemoryConflictListV1Schema,
+  companionMemoryConflictResolveResultV1Schema,
+  companionMemoryCreateInputV1Schema,
+  companionMemoryCorrectInputV1Schema,
   companionMemoryListQuerySchema,
   companionMemoryListV1Schema,
-  companionMemoryStarMapV1Schema,
+  companionMemoryQueueResultV1Schema,
+  companionMemoryStarMapV2Schema,
   companionPersonaMutationV1Schema,
   companionPersonaPatchV1Schema,
   companionPersonaResetV1Schema,
   companionPersonaV1Schema,
 } from "@ailearn/shared/companion-memory-desktop-contracts";
+import {
+  companionInvitationActionRequestSchema,
+  companionInvitationSchema,
+  companionJourneyActionRequestSchema,
+  companionJourneyBootstrapSchema,
+  companionJourneySchema,
+} from "@ailearn/shared/companion-journey-contracts";
 import { noteDetailV1Schema } from "@ailearn/shared/note-projection-contracts";
 import { noteSaveReceiptV1Schema } from "@ailearn/shared/note-save-contracts";
 import {
@@ -268,6 +302,10 @@ const companionVoiceSpeakInputSchema = z.strictObject({
   ...m1InputBase,
   request: companionVoiceSpeakRequestV1Schema,
 });
+const companionVoiceSpeakSegmentInputSchema = z.strictObject({
+  meta: requestMetaSchema,
+  request: companionVoiceSpeakSegmentRequestV2Schema,
+});
 // 语音转文本 + 聊天链路的入参（2026-09-18）。转写的音频 base64 上限在 schema
 // 与 main 侧字节解码后双重收口（10MB，与 API multipart 全局上限一致）。
 const companionVoiceTranscribeInputSchema = z.strictObject({
@@ -324,6 +362,11 @@ const companionAccountPatchInputSchema = z.strictObject({
   ...m1InputBase,
   request: companionAccountPatchSchema,
 });
+const companionOnboardingTransitionInputSchema = z.strictObject({
+  ...m1InputBase,
+  version: z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+  request: onboardingTransitionRequestSchema,
+});
 // 伴星中心（页 20）：读取按 workspace 路由，裁决端点只带一个记忆 id。
 // 删除走 `DELETE`，服务端回答 204，因此回执在 main 侧自己拼。
 const companionMemoryListInputSchema = z.strictObject({
@@ -331,13 +374,50 @@ const companionMemoryListInputSchema = z.strictObject({
   query: companionMemoryListQuerySchema.optional(),
 });
 const companionMemoryIdInputSchema = z.strictObject({ ...m1InputBase, memoryId: uuidSchema });
+const companionMemoryCreateInputSchema = z.strictObject({ ...m1InputBase, request: companionMemoryCreateInputV1Schema });
+const companionMemoryCorrectInputSchema = z.strictObject({ ...m1InputBase, memoryId: uuidSchema, request: companionMemoryCorrectInputV1Schema });
+const companionMemoryResolveConflictInputSchema = z.strictObject({ ...m1InputBase, memoryId: uuidSchema, removeId: uuidSchema });
 const companionDailyGetInputSchema = z.strictObject({
   ...m1InputBase,
   date: companionDailyDateV1Schema.optional(),
 });
-const companionConversationsListInputSchema = z.strictObject({
+const companionHistoryListInputSchema = z.strictObject({
   ...m1InputBase,
-  limit: z.number().int().min(1).max(50).optional(),
+  query: companionHistoryQueryV1Schema.optional(),
+});
+const companionHistorySearchInputSchema = z.strictObject({
+  ...m1InputBase,
+  query: companionHistorySearchQueryV1Schema,
+});
+const companionInvitationActionInputSchema = z.strictObject({
+  ...m1InputBase,
+  request: companionInvitationActionRequestSchema,
+});
+const companionJourneyActionInputSchema = z.strictObject({
+  ...m1InputBase,
+  journeyId: uuidSchema,
+  request: companionJourneyActionRequestSchema,
+});
+const companionActivityTimelineInputSchema = z.strictObject({
+  ...m1InputBase,
+  before: z.number().int().positive().optional(),
+});
+const companionActivityPresentInputSchema = z.strictObject({
+  ...m1InputBase,
+  deliveryId: uuidSchema,
+  inboxSequence: z.number().int().min(0),
+});
+const companionActivityAckInputSchema = z.strictObject({
+  ...m1InputBase,
+  request: companionActivityAckRequestV1Schema,
+});
+const companionBridgeSetContextInputSchema = z.strictObject({
+  ...m1InputBase,
+  page: mainPageContextInputV2Schema,
+});
+const companionDataExportInputSchema = z.strictObject({
+  ...m1InputBase,
+  kind: companionExportKindV1Schema,
 });
 // 人格写入：请求体是整套档案（服务端不做字段级合并），main 侧照抄同一份 schema，
 // 让渲染层多带一个键也在到达服务端之前被拒。
@@ -805,6 +885,12 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
   const cardGenerationStreams = new Map<string, () => void>();
   /** 伴星会话事件流：conversationId → 停止函数（每个会话至多一条）。 */
   const companionChatStreams = new Map<string, () => void>();
+  let stopCompanionAccountEvents: (() => void) | null = null;
+  let stopCompanionInboxEvents: (() => void) | null = null;
+  let companionInboxCursor = 0;
+  let companionRuntimeFenceTimer: ReturnType<typeof setInterval> | null = null;
+  let companionLifecycleGeneration = 0;
+  let companionLifecycleWorkspaceEpoch = 0;
   const windowLifecycleBound = new WeakSet<BrowserWindow>();
 
   const clearSubscriptionsForWindow = (window: BrowserWindow): void => {
@@ -857,6 +943,76 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     stop();
   };
 
+  const stopCompanionLifecycle = (): void => {
+    const revokeBridge = gateway.clearCompanionBridgeContext?.();
+    if (revokeBridge) void revokeBridge.catch(() => undefined);
+    companionLifecycleGeneration += 1;
+    companionLifecycleWorkspaceEpoch = 0;
+    stopCompanionAccountEvents?.();
+    stopCompanionAccountEvents = null;
+    stopCompanionInboxEvents?.();
+    stopCompanionInboxEvents = null;
+    companionInboxCursor = 0;
+    if (companionRuntimeFenceTimer) clearInterval(companionRuntimeFenceTimer);
+    companionRuntimeFenceTimer = null;
+    gateway.clearCompanionRuntimeState?.();
+  };
+
+  const startCompanionLifecycle = async (workspaceEpoch: number): Promise<void> => {
+    if (workspaceEpoch <= 0) {
+      stopCompanionLifecycle();
+      return;
+    }
+    if (companionLifecycleWorkspaceEpoch === workspaceEpoch && stopCompanionAccountEvents) return;
+    stopCompanionLifecycle();
+    const generation = companionLifecycleGeneration;
+    companionLifecycleWorkspaceEpoch = workspaceEpoch;
+    try {
+      const overview = await gateway.getCompanionAccountOverview();
+      if (generation !== companionLifecycleGeneration || workspaceEpoch !== activeWorkspaceEpoch) return;
+      if (!overview.account.globalEnabled) {
+        emit("runtime", { kind: "snapshot_invalidated", scope: "runtime" }, workspaceEpoch);
+        return;
+      }
+      const renewFence = async () => {
+        await gateway.renewCompanionRuntimeFence(overview.account.epoch, 120);
+      };
+      await renewFence();
+      if (generation !== companionLifecycleGeneration || workspaceEpoch !== activeWorkspaceEpoch) return;
+      companionRuntimeFenceTimer = setInterval(() => {
+        if (generation !== companionLifecycleGeneration || workspaceEpoch !== activeWorkspaceEpoch) return;
+        void renewFence().catch(() => undefined);
+      }, 60_000);
+      stopCompanionAccountEvents = await gateway.watchCompanionAccountEvents(
+        overview.account.epoch,
+        (event) => {
+          if (generation !== companionLifecycleGeneration || workspaceEpoch !== activeWorkspaceEpoch) return;
+          stopCompanionChatStreams();
+          stopCompanionLifecycle();
+          emit("runtime", { kind: "snapshot_invalidated", scope: "runtime" }, workspaceEpoch);
+          void event;
+        },
+      );
+      if (generation !== companionLifecycleGeneration || workspaceEpoch !== activeWorkspaceEpoch) {
+        stopCompanionAccountEvents();
+        stopCompanionAccountEvents = null;
+        return;
+      }
+      stopCompanionInboxEvents = await gateway.watchCompanionInboxEvents(
+        companionInboxCursor,
+        (delivery) => {
+          if (generation !== companionLifecycleGeneration || workspaceEpoch !== activeWorkspaceEpoch) return;
+          companionInboxCursor = Math.max(companionInboxCursor, delivery.inboxSequence);
+          emit("runtime", { kind: "companion_activity_changed", inboxSequence: delivery.inboxSequence }, workspaceEpoch);
+        },
+      );
+    } catch {
+      if (generation === companionLifecycleGeneration) stopCompanionLifecycle();
+      // Companion capability failure must not turn a valid auth session into a
+      // false login failure. Individual surfaces expose the concrete reason.
+    }
+  };
+
   const releaseSubscriptionsForWindow = (window: BrowserWindow): void => {
     // Window destruction is a hard sensitivity boundary. Do not let a
     // main-owned formal-assessment state survive the renderer that held the
@@ -866,6 +1022,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     if (!hasLearningRunSubscription()) stopLearningRunStreams();
     if (!hasCardGenerationSubscription()) stopCardGenerationStreams();
     if (!hasCompanionChatSubscription()) stopCompanionChatStreams();
+    stopCompanionLifecycle();
   };
 
   const bindWindowLifecycle = (window: BrowserWindow): void => {
@@ -1197,8 +1354,14 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     activeWorkspaceEpoch = session.status === "authenticated" || session.status === "reauth_required" ? session.workspaceEpoch : 0;
     rememberSession(session);
     await recoverPersistedReturnMarker(input.meta.requestId);
+    if (session.status === "authenticated") void startCompanionLifecycle(session.workspaceEpoch);
+    else stopCompanionLifecycle();
     return session;
   }, (output) => safeWorkspaceEpoch(output), sessionContextSchema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.authGetSurfaceManifest, runtimeInputSchema, options, async (_event, _window, input) => {
+    return gateway.getAuthSurfaceManifest(input.meta.requestId);
+  }, undefined, authSurfaceManifestResultV1Schema);
 
   installHandler(DESKTOP_IPC_CHANNELS.authLogin, authLoginInputSchema, options, async (_event, _window, input) => {
     formalAssessmentGuard.failClosed("disconnected");
@@ -1206,6 +1369,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     activeWorkspaceEpoch = session.workspaceEpoch;
     rememberSession(session);
     await recoverPersistedReturnMarker(input.meta.requestId);
+    void startCompanionLifecycle(session.workspaceEpoch);
     emit("runtime", { kind: "snapshot_invalidated", scope: "runtime" }, activeWorkspaceEpoch);
     return session;
   }, (output) => safeWorkspaceEpoch(output), sessionContextSchema);
@@ -1216,6 +1380,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     activeWorkspaceEpoch = session.workspaceEpoch;
     rememberSession(session);
     await recoverPersistedReturnMarker(input.meta.requestId);
+    void startCompanionLifecycle(session.workspaceEpoch);
     return session;
   }, (output) => safeWorkspaceEpoch(output), sessionContextSchema);
 
@@ -1224,6 +1389,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     const session = await gateway.joinWorkspace(input.inviteToken, input.meta.requestId);
     activeWorkspaceEpoch = session.workspaceEpoch;
     rememberSession(session);
+    void startCompanionLifecycle(session.workspaceEpoch);
     return session;
   }, (output) => safeWorkspaceEpoch(output), sessionContextSchema);
 
@@ -1236,6 +1402,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
       stopCardGenerationStreams();
       trackedCardGenerationRunIds.clear();
       stopCompanionChatStreams();
+      stopCompanionLifecycle();
       activeWorkspaceEpoch = 0;
       if (activeSubjectId) await pendingReturnMarkerStore.clearSubject(activeSubjectId);
       activeSubjectId = null;
@@ -1251,6 +1418,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
       stopCardGenerationStreams();
       trackedCardGenerationRunIds.clear();
       stopCompanionChatStreams();
+      stopCompanionLifecycle();
       if (activeSubjectId) await pendingReturnMarkerStore.clearSubject(activeSubjectId);
       activeSubjectId = null;
       activeWorkspaceId = null;
@@ -1265,6 +1433,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     activeWorkspaceEpoch = session.workspaceEpoch;
     rememberSession(session);
     await recoverPersistedReturnMarker(input.meta.requestId);
+    void startCompanionLifecycle(session.workspaceEpoch);
     return session;
   }, (output) => safeWorkspaceEpoch(output), sessionContextSchema);
 
@@ -1272,6 +1441,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     assertEpoch(input.meta, activeWorkspaceEpoch);
     formalAssessmentGuard.failClosed("disconnected");
     const result = await gateway.changePassword(input.currentPassword, input.newPassword, input.meta.requestId);
+    stopCompanionLifecycle();
     activeWorkspaceEpoch = 0;
     return result;
   }, undefined, changePasswordOutputSchema);
@@ -1289,11 +1459,13 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     stopCardGenerationStreams();
     trackedCardGenerationRunIds.clear();
     stopCompanionChatStreams();
+    stopCompanionLifecycle();
     if (activeSubjectId && activeWorkspaceId) await pendingReturnMarkerStore.clear(activeSubjectId, activeWorkspaceId);
     const session = await gateway.switchWorkspace(input.workspaceId, input.meta.requestId);
     activeWorkspaceEpoch = session.workspaceEpoch;
     rememberSession(session);
     await recoverPersistedReturnMarker(input.meta.requestId);
+    void startCompanionLifecycle(session.workspaceEpoch);
     emit("workspace", { kind: "snapshot_invalidated", scope: "workspace" }, activeWorkspaceEpoch);
     return session;
   }, (output) => safeWorkspaceEpoch(output), sessionContextSchema);
@@ -1590,13 +1762,29 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
   installHandler(DESKTOP_IPC_CHANNELS.companionAccountPatchState, companionAccountPatchInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "room.home");
     assertEpoch(input.meta, activeWorkspaceEpoch);
-    return gateway.patchCompanionAccountState(input.request, input.meta.requestId);
+    const account = await gateway.patchCompanionAccountState(input.request, input.meta.requestId);
+    if (account.globalEnabled) void startCompanionLifecycle(activeWorkspaceEpoch);
+    else stopCompanionLifecycle();
+    emit("runtime", { kind: "snapshot_invalidated", scope: "runtime" }, activeWorkspaceEpoch);
+    return account;
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionAccountStateV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionOnboardingTransition, companionOnboardingTransitionInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.transitionCompanionOnboarding(input.version, input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, onboardingTransitionResponseSchema);
 
   installHandler(DESKTOP_IPC_CHANNELS.companionVoiceSpeak, companionVoiceSpeakInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "room.home");
     assertEpoch(input.meta, activeWorkspaceEpoch);
     return gateway.speakCompanionVoice(input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionVoiceSpeakResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionVoiceSpeakSegment, companionVoiceSpeakSegmentInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.speakCompanionVoiceSegment(input.request, input.meta.requestId);
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionVoiceSpeakResultV1Schema);
 
   // 语音转文本 + 聊天发送链路（2026-09-18）：与其余伴星通道同一路由门控。
@@ -1688,7 +1876,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     requireM2Route(contract, "room.home");
     assertEpoch(input.meta, activeWorkspaceEpoch);
     return gateway.getCompanionMemoryStarMap(input.meta.requestId);
-  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionMemoryStarMapV1Schema);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionMemoryStarMapV2Schema);
 
   for (const [channel, mutate] of [
     [DESKTOP_IPC_CHANNELS.companionMemoryConfirm, "confirmCompanionMemory"],
@@ -1709,6 +1897,54 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     assertEpoch(input.meta, activeWorkspaceEpoch);
     return gateway.deleteCompanionMemory(input.memoryId, input.meta.requestId);
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionMemoryDeleteOutputSchema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionMemoryCreate, companionMemoryCreateInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.createCompanionMemory(input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionMemoryItemV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionMemoryCorrect, companionMemoryCorrectInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.correctCompanionMemory(input.memoryId, input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionMemoryItemV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionMemoryDismiss, companionMemoryIdInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.dismissCompanionMemory(input.memoryId, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionMemoryItemV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionMemoryConflicts, runtimeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.listCompanionMemoryConflicts(input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionMemoryConflictListV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionMemoryResolveConflict, companionMemoryResolveConflictInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.resolveCompanionMemoryConflict(input.memoryId, input.removeId, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionMemoryConflictResolveResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionMemoryRebuildEmbeddings, runtimeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.rebuildCompanionMemoryEmbeddings(input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionMemoryQueueResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionMemoryClear, runtimeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.clearCompanionMemories(input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionMemoryClearResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionMemorySummarizeRecent, runtimeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.summarizeRecentCompanionHistory(input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionMemoryQueueResultV1Schema);
 
   installHandler(DESKTOP_IPC_CHANNELS.companionDailyGet, companionDailyGetInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "room.home");
@@ -1734,11 +1970,124 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     return gateway.resetCompanionPersona(input.meta.requestId);
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionPersonaResetV1Schema);
 
-  installHandler(DESKTOP_IPC_CHANNELS.companionConversationsList, companionConversationsListInputSchema, options, async (_event, _window, input) => {
+  installHandler(DESKTOP_IPC_CHANNELS.companionHistoryList, companionHistoryListInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "room.home");
     assertEpoch(input.meta, activeWorkspaceEpoch);
-    return gateway.listCompanionConversations(input.limit, input.meta.requestId);
-  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionConversationListV1Schema);
+    return gateway.listCompanionHistory(input.query ?? {}, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionHistoryPageV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionHistorySearch, companionHistorySearchInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.searchCompanionHistory(input.query, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionHistorySearchV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionHistoryClear, runtimeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.clearCompanionHistory(input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionHistoryClearResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionLearningContextGet, runtimeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.getCompanionLearningContext(input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionLearningContextV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionJourneyBootstrap, runtimeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.getCompanionJourneyBootstrap(input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionJourneyBootstrapSchema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionInvitationAction, companionInvitationActionInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.actOnCompanionInvitation(input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionInvitationSchema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionJourneyGet, companionJourneyActionInputSchema.pick({ meta: true, journeyId: true }), options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.getCompanionJourney(input.journeyId, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionJourneySchema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionJourneyAction, companionJourneyActionInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.actOnCompanionJourney(input.journeyId, input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionJourneySchema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionActivityTimeline, companionActivityTimelineInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.listCompanionActivityTimeline(input.before, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionActivityTimelineV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionActivityPresent, companionActivityPresentInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.presentCompanionDelivery(input.deliveryId, input.inboxSequence, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionActivityDeliveryV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionActivityAck, companionActivityAckInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.ackCompanionDelivery(input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionActivityDeliveryV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionBridgeSetContext, companionBridgeSetContextInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.setCompanionBridgeContext(input.page, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionBridgeStateV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionBridgeClearContext, runtimeInputSchema, options, async (_event, _window, input) => {
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.clearCompanionBridgeContext(input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionBridgeStateV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionDataExport, companionDataExportInputSchema, options, async (_event, window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    const date = new Date().toISOString().slice(0, 10);
+    const descriptor = input.kind === "all"
+      ? { title: "导出全部伴星数据", defaultPath: `ailearn-companion-${date}.ndjson`, name: "NDJSON", extension: "ndjson" }
+      : input.kind === "memory"
+        ? { title: "导出伴星记忆", defaultPath: `ailearn-companion-memory-${date}.json`, name: "JSON", extension: "json" }
+        : { title: "导出伴星审计记录", defaultPath: `ailearn-companion-audit-${date}.json`, name: "JSON", extension: "json" };
+    const selection = await dialog.showSaveDialog(window, {
+      title: descriptor.title,
+      defaultPath: descriptor.defaultPath,
+      filters: [{ name: descriptor.name, extensions: [descriptor.extension] }],
+    });
+    if (selection.canceled || !selection.filePath) {
+      return { version: 1 as const, saved: false, canceled: true, fileName: null, bytes: 0 };
+    }
+    const response = await gateway.openCompanionExport(input.kind, input.meta.requestId);
+    const partialPath = `${selection.filePath}.partial-${randomBytes(6).toString("hex")}`;
+    try {
+      await pipeline(Readable.fromWeb(response.body as never), createWriteStream(partialPath, { flags: "wx" }));
+      await rename(partialPath, selection.filePath);
+      const saved = await stat(selection.filePath);
+      return {
+        version: 1 as const,
+        saved: true,
+        canceled: false,
+        fileName: basename(selection.filePath),
+        bytes: saved.size,
+      };
+    } catch {
+      await rm(partialPath, { force: true }).catch(() => undefined);
+      throw new DesktopGatewayFailure("safe_internal_error", "user_action");
+    }
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionExportResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionAuditDelete, runtimeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.deleteCompanionAudit(input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionAuditDeleteResultV1Schema);
 
   installHandler(DESKTOP_IPC_CHANNELS.noteGet, noteGetInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "note.detail");

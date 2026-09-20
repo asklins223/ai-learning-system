@@ -19,13 +19,11 @@ if (!databaseUrl) {
 }
 const sql = postgres(databaseUrl, { max: 2 });
 
-import { createCompanionTurn, createCompanionConversation } from "../modules/companion-conversation/turn-service.ts";
+import { createCompanionTurn } from "../modules/companion-conversation/turn-service.ts";
 import { cancelCompanionRun } from "../modules/companion-conversation/companion-cancel.ts";
 import {
   ensureCompanionInbox,
-  listCompanionConversations,
   listCompanionMessages,
-  deleteCompanionConversation,
 } from "../modules/companion-conversation/companion-conversations-service.ts";
 import { openCompanionEventStream } from "../modules/companion-conversation/companion-events.ts";
 import { exportCompanionDataStream } from "../modules/companion-conversation/companion-export.ts";
@@ -383,67 +381,6 @@ test("P2 SSE：连接限制——同 conversation 第 4 条连接 429", async ()
   }
 });
 
-test("P2 §6.1：create dialogue conversation（201、默认/显式标题、RLS scope）", async () => {
-  const { workspaceId, userId, cleanup } = await seedConversation();
-  const createdIds: string[] = [];
-  try {
-    const created = await createCompanionConversation({ workspaceId, userId });
-    assert.equal(created.statusCode, 201);
-    const body = created.body as { id: string; kind: string; title: string; titleSource: string; lastMessageAt: string | null };
-    assert.equal(body.kind, "dialogue");
-    assert.equal(body.title, "新对话");
-    assert.equal(body.titleSource, "placeholder");
-    assert.equal(body.lastMessageAt, null);
-    createdIds.push(body.id);
-
-    const titled = await createCompanionConversation({ workspaceId, userId, title: "  我的标题  " });
-    assert.equal((titled.body as { title: string }).title, "我的标题");
-    assert.equal((titled.body as { titleSource: string }).titleSource, "user");
-    createdIds.push((titled.body as { id: string }).id);
-
-    // RLS scope：ailearn 是 superuser（bypass RLS），必须用 ailearn_worker 验证
-    const otherUserId = randomUUID();
-    // 允许通过 DATABASE_URL_WORKER 覆盖（默认 dev 拓扑），避免硬编码连接串。
-    const workerSql = postgres(
-      process.env.DATABASE_URL_WORKER ?? "postgres://ailearn_worker:ailearn_dev@localhost:5432/ailearn",
-      { max: 1 },
-    );
-    try {
-      const r0 = await workerSql`SELECT count(*)::int AS n FROM public.companion_conversations WHERE id = ${body.id}`;
-      assert.equal(r0[0].n, 0, "无 session context（ailearn_worker）不可见");
-      // set_config(..., true) 事务级——同一事务内 SET + SELECT
-      await workerSql.begin(async (tx) => {
-        await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-        await tx`SELECT set_config('app.user_id', ${otherUserId}, true)`;
-        const r1 = await tx`SELECT count(*)::int AS n FROM public.companion_conversations WHERE id = ${body.id}`;
-        assert.equal(r1[0].n, 0, "其他 user 在 RLS 下不可见该 conversation");
-        await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-        const r2 = await tx`SELECT count(*)::int AS n FROM public.companion_conversations WHERE id = ${body.id}`;
-        assert.equal(r2[0].n, 1, "本人（RLS context 匹配）可见");
-      });
-    } finally {
-      await Promise.race([
-        workerSql.end({ timeout: 2 }).catch(() => {}),
-        new Promise((resolve) => setTimeout(resolve, 1000)),
-      ]);
-    }
-  } finally {
-    if (createdIds.length > 0) {
-      await sql.begin(async (tx) => {
-        await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-        await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-        for (const id of createdIds) {
-          await tx`DELETE FROM companion_stream_events WHERE conversation_id = ${id}`;
-          await tx`DELETE FROM companion_messages WHERE conversation_id = ${id}`;
-          await tx`DELETE FROM companion_turn_runs WHERE conversation_id = ${id}`;
-          await tx`DELETE FROM companion_conversations WHERE id = ${id}`;
-        }
-      });
-    }
-    await cleanup();
-  }
-});
-
 test("P2 §6.2：inbox ensure 幂等唯一 + 无副作用", async () => {
   const { workspaceId, userId, cleanup } = await seedConversation();
   const inboxIds: string[] = [];
@@ -487,50 +424,6 @@ test("P2 §6.2：inbox ensure 幂等唯一 + 无副作用", async () => {
   }
 });
 
-test("P2 §6.3：list 签名分页（nextCursor 第二页 + 篡改 cursor 400）", async () => {
-  const { workspaceId, userId, cleanup } = await seedConversation();
-  const createdIds: string[] = [];
-  try {
-    const c1 = await createCompanionConversation({ workspaceId, userId, title: "A" });
-    const c2 = await createCompanionConversation({ workspaceId, userId, title: "B" });
-    createdIds.push((c1.body as { id: string }).id, (c2.body as { id: string }).id);
-
-    const page1 = await listCompanionConversations({
-      workspaceId, userId, limit: 1, cursor: null, kind: "dialogue", status: "active",
-    });
-    assert.equal(page1.statusCode, 200);
-    assert.equal(page1.body.items.length, 1);
-    assert.ok(page1.body.nextCursor, "有下一页应有 nextCursor");
-
-    const page2 = await listCompanionConversations({
-      workspaceId, userId, limit: 1, cursor: page1.body.nextCursor, kind: "dialogue", status: "active",
-    });
-    assert.equal(page2.body.items.length, 1);
-    assert.notEqual((page2.body.items[0] as { id: string }).id, (page1.body.items[0] as { id: string }).id);
-
-    // 篡改 cursor → INVALID_CURSOR（fail closed）
-    const tampered = page1.body.nextCursor!.slice(0, -2) + "aa";
-    await assert.rejects(
-      listCompanionConversations({ workspaceId, userId, limit: 1, cursor: tampered, kind: "dialogue", status: "active" }),
-      (err: { code?: string }) => err.code === "INVALID_CURSOR",
-    );
-  } finally {
-    if (createdIds.length > 0) {
-      await sql.begin(async (tx) => {
-        await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-        await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-        for (const id of createdIds) {
-          await tx`DELETE FROM companion_stream_events WHERE conversation_id = ${id}`;
-          await tx`DELETE FROM companion_messages WHERE conversation_id = ${id}`;
-          await tx`DELETE FROM companion_turn_runs WHERE conversation_id = ${id}`;
-          await tx`DELETE FROM companion_conversations WHERE id = ${id}`;
-        }
-      });
-    }
-    await cleanup();
-  }
-});
-
 test("P2 §6.4：messages 历史（升序 + beforeSeq 分页）", async () => {
   const { workspaceId, userId, conversationId, cleanup } = await seedConversation();
   try {
@@ -557,49 +450,6 @@ test("P2 §6.4：messages 历史（升序 + beforeSeq 分页）", async () => {
     });
     assert.equal(before.body.items.length, 0);
   } finally {
-    await cleanup();
-  }
-});
-
-test("P2 §12：delete 硬删除 + cascade + active run supersede fence", async () => {
-  const { workspaceId, userId, conversationId, cleanup } = await seedConversation();
-  try {
-    const created = await createCompanionTurn({
-      workspaceId, userId, conversationId,
-      idempotencyKey: randomUUID(),
-      body: turnBody(randomUUID()),
-    });
-    assert.equal(created.statusCode, 202);
-    const runId = (created.body as { runId: string }).runId;
-
-    const deleted = await deleteCompanionConversation({ workspaceId, userId, conversationId });
-    assert.equal(deleted.statusCode, 204);
-
-    const rows = await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-      const conv = await tx`SELECT count(*)::int AS n FROM companion_conversations WHERE id = ${conversationId}`;
-      const msgs = await tx`SELECT count(*)::int AS n FROM companion_messages WHERE conversation_id = ${conversationId}`;
-      const events = await tx`SELECT count(*)::int AS n FROM companion_stream_events WHERE conversation_id = ${conversationId}`;
-      const run = await tx`SELECT count(*)::int AS n FROM companion_turn_runs WHERE id = ${runId}`;
-      return { conv: conv[0].n, msgs: msgs[0].n, events: events[0].n, run: run[0].n };
-    });
-    assert.equal(rows.conv, 0, "conversation 已硬删除");
-    assert.equal(rows.msgs, 0, "messages cascade");
-    assert.equal(rows.events, 0, "events cascade");
-    assert.equal(rows.run, 0, "turn run 随 cascade 删除（worker 迟到写时 parent/run 不存在 → fail closed）");
-
-    // 再删 → 404
-    await assert.rejects(
-      deleteCompanionConversation({ workspaceId, userId, conversationId }),
-      (err: { code?: string }) => err.code === "NOT_FOUND",
-    );
-  } finally {
-    await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-      await tx`DELETE FROM companion_voice_artifacts WHERE workspace_id = ${workspaceId}`;
-    });
     await cleanup();
   }
 });
@@ -979,77 +829,6 @@ test("P3 §11.3：Companion TTS 合成（strict ref 重读 event）", async () =
     });
     assert.equal(cancelled.statusCode, 409);
     assert.equal(cancelled.error?.code, "TURN_CANCELLED");
-  } finally {
-    await cleanup();
-  }
-});
-
-test("H1 回归：DELETE 带 P5 proposal 的 conversation 不触发 FK violation", async () => {
-  const { workspaceId, userId, conversationId, cleanup } = await seedConversation();
-  const messageId = randomUUID();
-  const proposalId = randomUUID();
-  try {
-    await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-      await tx`INSERT INTO companion_messages
-        (id, workspace_id, user_id, conversation_id, seq, role, kind, blocks, content_sha256)
-        VALUES (${messageId}, ${workspaceId}, ${userId}, ${conversationId}, 1, 'user', 'action',
-                ${JSON.stringify([{ type: "text", text: "请继续当前学习" }])}, ${"a".repeat(64)})`;
-      await tx`INSERT INTO companion_action_proposals
-        (id, workspace_id, user_id, conversation_id, source_message_id, source_generation,
-         payload, payload_sha256, title, target_summary, impact_summary, status,
-         decision_key_hash, idempotency_key_hash, expires_at)
-        VALUES (${proposalId}, ${workspaceId}, ${userId}, ${conversationId}, ${messageId}, 0,
-                ${{ kind: "open_review" } as never},
-                ${"b".repeat(64)}, '打开复习', '今日复习', '打开复习页', 'pending',
-                ${randomUUID().replaceAll("-", "") + randomUUID().replaceAll("-", "")},
-                ${randomUUID().replaceAll("-", "") + randomUUID().replaceAll("-", "")},
-                now() + interval '30 minutes')`;
-      await tx`UPDATE companion_messages SET action_ref = ${proposalId} WHERE id = ${messageId}`;
-    });
-
-    // 删除前先记录 proposal 存在（证明前置条件成立）
-    const pre = await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-      return tx`SELECT count(*)::int AS n FROM companion_action_proposals WHERE conversation_id = ${conversationId}`;
-    });
-    assert.equal(pre[0].n, 1, "前置条件：conversation 存在 1 个 proposal");
-
-    const { deleteCompanionConversation } = await import(
-      "../modules/companion-conversation/companion-conversations-service.ts"
-    );
-    const result = await deleteCompanionConversation({ workspaceId, userId, conversationId });
-    assert.equal(result.statusCode, 204, "DELETE 不再因 FK violation 500");
-
-    const remaining = await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
-      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-      return tx`SELECT
-        (SELECT count(*)::int FROM companion_messages WHERE conversation_id = ${conversationId}) AS messages,
-        (SELECT count(*)::int FROM companion_action_proposals WHERE conversation_id = ${conversationId}) AS proposals`;
-    });
-    assert.equal(remaining[0].messages, 0, "messages 级联清除");
-    assert.equal(remaining[0].proposals, 0, "proposals 级联清除");
-  } finally {
-    // conversation 已删，cleanup 需容忍缺行（各 DELETE 均幂等）
-    await cleanup();
-  }
-});
-
-test("H2 回归：GET conversation snapshot 不再因 SET TRANSACTION 顺序抛错（withWorkspaceTransaction 在事务首条语句前设置 isolation）", async () => {
-  const { workspaceId, userId, conversationId, cleanup } = await seedConversation();
-  try {
-    const { getCompanionConversationSnapshot } = await import(
-      "../modules/companion-conversation/companion-conversations-service.ts"
-    );
-    const result = await getCompanionConversationSnapshot({ workspaceId, userId, conversationId });
-    assert.equal(result.statusCode, 200, "snapshot 端点正常返回（不再 500）");
-    const body = result.body as { version: number; conversation: { id: string }; latestEventSeq: number };
-    assert.equal(body.version, 1);
-    assert.equal(body.conversation.id, conversationId);
-    assert.equal(body.latestEventSeq, 0, "无事件时 cursor 为 0");
   } finally {
     await cleanup();
   }

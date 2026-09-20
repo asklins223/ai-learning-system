@@ -650,6 +650,10 @@ export class OpenAICompatibleProvider implements AIProvider {
         userMsgLen: (requestBody.messages as Array<{content:string}>).map(m => (m.content ?? "").length),
         systemLen: ((requestBody.messages as Array<{role:string,content:string}>).find(m=>m.role==="system")?.content ?? "").length,
         userContentSha256: createHash("sha256").update(firstUserContent).digest("hex").slice(0, 16),
+        providerId: this.id,
+        platformOptions: this.platformOptions,
+        extraRequestParams: this.extraRequestParams,
+        maxTokensStrategy: this.maxTokensStrategy,
       }));
     }
     const response = await this.request(

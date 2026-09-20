@@ -30,6 +30,7 @@ export interface GraphEdge {
   from: string;
   to: string;
   type: GraphEdgeType;
+  metadata?: Record<string, unknown>;
 }
 
 /**
@@ -841,4 +842,3 @@ export function createUniverseLayout(graph: UnderstandingGraph): UniverseLayout 
     clusterCenters,
   };
 }
-

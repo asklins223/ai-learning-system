@@ -28,6 +28,12 @@ import {
 } from '../shared/window-geometry'
 import { registerM1DesktopIpc } from './desktop-ipc'
 import { FilePendingReturnMarkerStore } from './pending-return-marker-store'
+import { guardProcessOutputStreams } from './output-stream-guard'
+
+// 主进程的第一件事：stdout/stderr 的写失败（终端关掉后的 EIO/EPIPE）不能再升级成
+// 未捕获异常——那会弹出一个阻塞整个应用的模态框，而原因只是"没人再读日志"。
+// 现场与理由见 output-stream-guard.ts。
+guardProcessOutputStreams(process.stdout, process.stderr)
 
 const APP_SCHEME = 'ailearn-app'
 const APP_HOST = 'bundle'

@@ -19,6 +19,8 @@ import {
   type CompanionEquippedDecorBySlotV1,
   type CompanionRoomSlotV1,
 } from "@ailearn/shared/companion-home-contracts";
+import type { CompanionOnboardingStateV1 } from "@ailearn/shared/companion-shell-contracts";
+import { createRequestMeta, unwrapGatewayResult } from "../../app/desktop-client";
 import { useCompanionHomeProjection } from "../../app/companion-home-projection";
 import { useHomeProjection } from "../../app/home-projection";
 import { homePresentation } from "../../app/home-presentation";
@@ -66,6 +68,7 @@ type HomeV2ContextValue = {
 };
 
 const HOME_V2_INTRO_KEY = "ailearn.home-v2.intro-seen.v1";
+const HOME_V2_ONBOARDING_VERSION = "home-v2-v1";
 const HOME_V2_REGION_TRIGGER_IDS: Readonly<Record<Exclude<HomeV2Zone, "wide">, string>> = Object.freeze({
   desk: "home-v2-object-desk-book",
   shelf: "home-v2-object-magic-catalog",
@@ -123,6 +126,8 @@ export function HomeV2Provider({ children }: { readonly children: ReactNode }) {
   const catalogReturnZoneRef = useRef<HomeV2Zone>("wide");
   const catalogTriggerRef = useRef<HTMLElement | null>(null);
   const featureTriggerRef = useRef<HTMLElement | null>(null);
+  const onboardingStateRef = useRef<CompanionOnboardingStateV1 | null>(null);
+  const onboardingEpochRef = useRef<number | undefined>(undefined);
   const surface = useRoomStore((state) => state.surface);
   const applyTimeTheme = useRoomStore((state) => state.applyTimeTheme);
   const theme = useRoomStore((state) => state.theme);
@@ -219,6 +224,22 @@ export function HomeV2Provider({ children }: { readonly children: ReactNode }) {
     } catch {
       // First-entry guidance remains a progressive enhancement.
     }
+    const state = onboardingStateRef.current;
+    if (!state?.activeRun || !window.ailearn) return;
+    void window.ailearn.companion.account.transitionOnboarding({
+      meta: createRequestMeta(onboardingEpochRef.current),
+      version: HOME_V2_ONBOARDING_VERSION,
+      request: {
+        action: "complete",
+        revision: state.revision,
+        runId: state.activeRun.runId,
+      },
+    }).then((result) => {
+      onboardingStateRef.current = unwrapGatewayResult(result).state;
+    }).catch(() => {
+      // The intro is never allowed to trap the room. Account SSE will reconcile
+      // a successful transition from another device, and replay remains explicit.
+    });
   }, []);
 
   const replayIntro = useCallback(() => {
@@ -243,21 +264,51 @@ export function HomeV2Provider({ children }: { readonly children: ReactNode }) {
       // Consume the request so returning from a normal task surface does not
       // replay the guide again.
       setIntroReplayPending(false);
-    } else {
-      try {
-        if (window.localStorage.getItem(HOME_V2_INTRO_KEY) === "seen") return;
-      } catch {
-        // Storage can be unavailable in hardened/privacy-restricted sessions.
-      }
     }
-    const introTimeline = gsap.timeline();
-    introTimeline.call(() => {
-      const app = document.querySelector<HTMLElement>(".desktop-app");
-      if (app) app.dataset.homeV2Intro = "true";
-      setIntroVisible(true);
-    }, undefined, replay ? 0 : 1.1);
-    introTimeline.call(markIntroSeen, undefined, replay ? 5.1 : 6.2);
-    return () => { introTimeline.kill(); };
+    let cancelled = false;
+    let introTimeline: gsap.core.Timeline | null = null;
+    const prepare = async (): Promise<boolean> => {
+      try {
+        const session = unwrapGatewayResult(await window.ailearn.auth.getState({ meta: createRequestMeta() }));
+        if (session.status !== "authenticated" || !session.workspace) return false;
+        onboardingEpochRef.current = session.workspace.workspaceEpoch;
+        const overview = unwrapGatewayResult(await window.ailearn.companion.account.getState({
+          meta: createRequestMeta(session.workspace.workspaceEpoch),
+        }));
+        const current = overview.onboardingStates.find((item) => item.onboardingVersion === HOME_V2_ONBOARDING_VERSION) ?? null;
+        onboardingStateRef.current = current;
+        if (!replay && current?.offerStatus === "consumed") return false;
+        if (!replay && current?.offerStatus === "offered") return false;
+        const response = unwrapGatewayResult(await window.ailearn.companion.account.transitionOnboarding({
+          meta: createRequestMeta(session.workspace.workspaceEpoch),
+          version: HOME_V2_ONBOARDING_VERSION,
+          request: {
+            action: replay && current ? "replay" : "start",
+            revision: current?.revision,
+          },
+        }));
+        onboardingStateRef.current = response.state;
+        return response.won !== false;
+      } catch {
+        if (replay) return true;
+        try { return window.localStorage.getItem(HOME_V2_INTRO_KEY) !== "seen"; }
+        catch { return true; }
+      }
+    };
+    void prepare().then((shouldShow) => {
+      if (cancelled || !shouldShow) return;
+      introTimeline = gsap.timeline();
+      introTimeline.call(() => {
+        const app = document.querySelector<HTMLElement>(".desktop-app");
+        if (app) app.dataset.homeV2Intro = "true";
+        setIntroVisible(true);
+      }, undefined, replay ? 0 : 1.1);
+      introTimeline.call(markIntroSeen, undefined, replay ? 5.1 : 6.2);
+    });
+    return () => {
+      cancelled = true;
+      introTimeline?.kill();
+    };
   }, [introReplayPending, markIntroSeen, surface]);
 
   const featurePresentation = useCallback((featureId: HomeFeatureId): HomeFeatureRuntimeV1 => {

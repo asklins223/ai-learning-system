@@ -114,6 +114,9 @@ const GEOM = `(() => {
   const vb = shell ? shell.getBoundingClientRect() : null;
   if (vb && hit(rail?.getBoundingClientRect(), vb)) problems.push('rail:压住角色');
   if (vb && hit(bubble?.getBoundingClientRect(), vb)) problems.push('bubble:压住角色');
+  // 轨道与气泡是最容易互相遮挡的一对：气泡逐行长高、轨道按 --companion-bubble-h 往上让位，
+  // 两者相交就是用户说的"你遮挡我、我遮挡你"（2026-09-20 反馈）。这条以前没人断言过。
+  if (hit(rail?.getBoundingClientRect(), bubble?.getBoundingClientRect())) problems.push('rail:压住气泡');
   const steps = [...document.querySelectorAll('.companion-hud__rail-steps > li')];
   // 「…+N」那行是折叠提示，不是节点：它没有 data-state，混进来会假报「未知状态」。
   const overflowRow = steps.filter((n) => n.classList.contains('companion-hud__rail-overflow'));
@@ -378,7 +381,7 @@ if (SKIP_TURN) {
 }
 
 // ── D. 历史抽屉（§2 / §1 历史侧） ─────────────────────────────────────────
-console.log("\n[D] 历史会话抽屉");
+console.log("\n[D] 连续对话抽屉");
 // 入口在「更多功能」里，而这个按钮是 toggle（`actions → closed`），点几次都不一定落在
 // actions 上；循环到 mode 真的是 actions 为止，比"猜它现在在哪个态"稳。
 const clickMore = `(() => { const m = document.querySelector('.companion-hud__controls button[aria-label="更多功能"]'); if (!m) return 'NO_BUTTON'; m.click(); return 'ok'; })()`;
@@ -390,7 +393,7 @@ const enteredActions = await modeOf();
 // 菜单页是 `moreView` 的默认值，但它是组件 state（面板关闭不重置），所以找不到入口时
 // 先点「返回更多功能」退回菜单页再找一次。
 const findHistory = `(() => {
-  const b = [...document.querySelectorAll('.companion-hud__panel button')].find((x) => (x.textContent || '').includes('历史会话'));
+  const b = [...document.querySelectorAll('.companion-hud__panel button')].find((x) => (x.textContent || '').includes('对话记录'));
   if (!b) return 'NO_ENTRY';
   b.click(); return 'ok';
 })()`;
@@ -400,7 +403,7 @@ if (clickedHistory === "NO_ENTRY") {
   await sleep(500);
   clickedHistory = await ev(findHistory);
 }
-console.log(`   更多功能=${enteredActions} / 点历史会话=${clickedHistory}`);
+console.log(`   更多功能=${enteredActions} / 点对话记录=${clickedHistory}`);
 await sleep(1400);
 const drawer = await ev(`(() => {
   const d = document.querySelector('.companion-history');
@@ -443,7 +446,7 @@ await shot("07-drawer");
 
 // ── E. 紧凑视口（桌面壳文档尺寸下限，按 skill 分档只报不拦） ──────────────
 console.log("\n[E] 紧凑视口 720x405（= 桌面壳文档尺寸下限）");
-await ev(`(() => { const b = document.querySelector('.companion-history button[aria-label="关闭历史会话"]'); b?.click(); return 1; })()`);
+await ev(`(() => { const b = document.querySelector('.companion-history button[aria-label="关闭对话记录"]'); b?.click(); return 1; })()`);
 await sleep(400);
 await send("Emulation.setDeviceMetricsOverride", { width: 720, height: 405, deviceScaleFactor: 1, mobile: false });
 await sleep(1200);

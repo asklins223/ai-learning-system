@@ -6,9 +6,11 @@ import { SceneStatus } from "./components/SceneStatus";
 import { TaskSurface } from "./components/TaskSurface";
 import { SourceIntakeHost } from "./components/SourceIntake";
 import { RunRecoveryNotice } from "./components/RunRecoveryNotice";
-import { CompanionRoot } from "./components/companion/CompanionPresence";
+import { CompanionPresence } from "./components/companion/CompanionPresence";
 import { CompanionFeedMenu } from "./components/companion/CompanionFeedMenu";
 import { DesktopAccessGate } from "./components/DesktopAccessGate";
+import { CompanionChatProvider } from "./app/companion-chat-session";
+import { RenderErrorBoundary } from "./components/RenderErrorBoundary";
 import { useRoomStore } from "./app/room-store";
 import { resolveSceneMotionMode } from "./scene/scene-motion";
 import { HomeProjectionProvider, useHomeProjection } from "./app/home-projection";
@@ -161,7 +163,7 @@ export function RoomExperience() {
       >
         <RoomStage />
       </div>
-      <CompanionRoot />
+      <CompanionPresence />
       <CompanionFeedMenu />
       <DirectoryRail />
       {HOME_V2_ENABLED ? null : <RunRecoveryNotice />}
@@ -239,20 +241,36 @@ export function App() {
       data-motion-mode={motionMode}
       data-window-state={windowState}
     >
-      <DesktopAccessGate
-        motionMode={motionMode}
-        onWorkspaceBoundaryReset={resetWorkspaceScope}
-      >
-        <HomeProjectionProvider>
-          {HOME_V2_ENABLED
-            ? (
-                <HomeCapabilityProjectionProvider>
-                  <CompanionHomeProjectionProvider><RoomExperience /></CompanionHomeProjectionProvider>
-                </HomeCapabilityProjectionProvider>
-              )
-            : <RoomExperience />}
-        </HomeProjectionProvider>
-      </DesktopAccessGate>
+      {/*
+        外壳级兜底（2026-09-20）：门禁、场景或伴星自身崩了时的最后一道。没有它，
+        渲染期抛错会让 React 卸载整棵树，用户看到的只是一片黑；有了它，最坏情况下
+        也有一张能读、能重试、能重载的纸。页面级兜底见 TaskSurface。
+      */}
+      <RenderErrorBoundary label="理解书房" shell>
+        {/*
+          伴星会话（CompanionChatProvider）挂在门禁**之上**：它的消费方横跨两棵互不
+          包含的子树——伴星叠加层本身，以及任务面里的伴星中心（CompanionCenterSurface
+          要借它打开交互台）。挂进任何一棵子树，另一棵都会在渲染时抛错并整页黑屏，
+          所以这里只留一处、且是全应用唯一的一处来源。工作区选择页
+          （HudFirstSpaceScene）也在门禁内部，同样由它覆盖。
+        */}
+        <CompanionChatProvider>
+          <DesktopAccessGate
+            motionMode={motionMode}
+            onWorkspaceBoundaryReset={resetWorkspaceScope}
+          >
+            <HomeProjectionProvider>
+              {HOME_V2_ENABLED
+                ? (
+                    <HomeCapabilityProjectionProvider>
+                      <CompanionHomeProjectionProvider><RoomExperience /></CompanionHomeProjectionProvider>
+                    </HomeCapabilityProjectionProvider>
+                  )
+                : <RoomExperience />}
+            </HomeProjectionProvider>
+          </DesktopAccessGate>
+        </CompanionChatProvider>
+      </RenderErrorBoundary>
     </div>
   );
 }

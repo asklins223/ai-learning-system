@@ -33,7 +33,13 @@ import {
   sourceImageGetResultV1Schema,
 } from "@ailearn/shared/source-image-contracts";
 import type { GatewayErrorCode } from "@ailearn/shared/desktop-ipc-contracts";
-import { DesktopGateway, DesktopGatewayFailure, parseCompanionSseFrame } from "./desktop-gateway";
+import {
+  DesktopGateway,
+  DesktopGatewayFailure,
+  parseCompanionAccountSseFrame,
+  parseCompanionInboxSseFrame,
+  parseCompanionSseFrame,
+} from "./desktop-gateway";
 
 const pairingSecret = Buffer.alloc(32, 9);
 const pairingSecretEncoded = pairingSecret.toString("base64url");
@@ -355,11 +361,14 @@ describe("parseCompanionSseFrame（伴星 SSE 帧的过桥门槛）", () => {
     expect(parseCompanionSseFrame("")).toBeNull();
   });
 
-  it("畸形 JSON / 缺字段 / payload 非对象一律丢弃（不透传原始帧）", () => {
+  it("畸形 JSON / 缺字段 / payload 不合分支合同一律丢弃（不透传原始帧）", () => {
     expect(parseCompanionSseFrame("data: {not json}\n\n")).toBeNull();
-    // 事件类型缺失同样丢弃（没有类型的帧渲染层无从处理）；payload 内部字段由渲染层收窄。
+    // 事件类型缺失同样丢弃（没有类型的帧渲染层无从处理）。
     expect(parseCompanionSseFrame(frame({ payload: { textDelta: "x" } }))).toBeNull();
-    expect(parseCompanionSseFrame(frame({ type: "assistant.delta", payload: { textDelta: "x" } }))?.seq).toBe(7);
+    // 主进程按 shared 分支 schema 严格校验 payload：assistant.delta 缺 appendFrom
+    // 不再"放行给渲染层收窄"，而是整个丢弃（方案 §5 过桥门槛）。
+    expect(parseCompanionSseFrame(frame({ type: "assistant.delta", payload: { textDelta: "x" } }))).toBeNull();
+    expect(parseCompanionSseFrame(frame({ type: "assistant.delta", payload: { appendFrom: 0, textDelta: "x" } }))?.seq).toBe(7);
     expect(parseCompanionSseFrame('data: {"seq":1}\n\n')).toBeNull();
     expect(parseCompanionSseFrame(frame({ type: "assistant.delta", payload: "不是对象" }))).toBeNull();
     expect(parseCompanionSseFrame(frame({ type: "assistant.delta", payload: null }))).toBeNull();
@@ -368,6 +377,40 @@ describe("parseCompanionSseFrame（伴星 SSE 帧的过桥门槛）", () => {
   it("payload 超过 16KB 的异常帧被拦下", () => {
     const huge = { type: "assistant.delta", payload: { appendFrom: 0, textDelta: "甲".repeat(20_000) } };
     expect(parseCompanionSseFrame(frame(huge))).toBeNull();
+  });
+});
+
+describe("伴星壳层 SSE 帧校验", () => {
+  it("只接受严格的账号关闭事件", () => {
+    const event = {
+      version: 1,
+      type: "account.global_off",
+      userId: "00000000-0000-4000-8000-000000000011",
+      epoch: 4,
+    };
+    expect(parseCompanionAccountSseFrame(`data: ${JSON.stringify(event)}\n\n`)?.epoch).toBe(4);
+    expect(parseCompanionAccountSseFrame(`data: ${JSON.stringify({ ...event, token: "leak" })}\n\n`)).toBeNull();
+  });
+
+  it("只接受严格的 durable inbox delivery", () => {
+    const delivery = {
+      version: 2,
+      deliveryId: "00000000-0000-4000-8000-000000000021",
+      assistantSessionId: null,
+      userId: "00000000-0000-4000-8000-000000000011",
+      workspaceId: "00000000-0000-4000-8000-000000000012",
+      inboxSequence: 9,
+      dedupeKey: "delivery:test:9",
+      state: "queued",
+      kind: "system_event",
+      payloadRef: { kind: "system_event", systemEventId: "companion.updated:9", text: "状态已更新" },
+      displayLease: null,
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    expect(parseCompanionInboxSseFrame(`id: 9\nevent: assistant.delivery\ndata: ${JSON.stringify(delivery)}\n\n`)?.inboxSequence).toBe(9);
+    expect(parseCompanionInboxSseFrame(`data: ${JSON.stringify({ ...delivery, authToken: "leak" })}\n\n`)).toBeNull();
+    expect(parseCompanionInboxSseFrame("data: {broken}\n\n")).toBeNull();
   });
 });
 
@@ -1100,6 +1143,86 @@ describe("DesktopGateway", () => {
     homeProjectionBody = { ...COMPANION_HOME_PROJECTION, memoryText: "must stay server-side" };
     await expect(gateway.getCompanionHomeProjection("request-companion-invalid"))
       .rejects.toMatchObject({ code: "unsupported_contract", retry: "user_action" });
+  });
+
+  it("routes companion onboarding through the strict account CAS transition", async () => {
+    const sent: unknown[] = [];
+    const state = {
+      onboardingVersion: "home-v2-v1",
+      revision: 1,
+      offerStatus: "offered",
+      activeRun: {
+        runId: "run-home-v2-1",
+        entryMode: "first_run",
+        runStatus: "in_progress",
+        stepId: "welcome",
+        resumeTokenRef: "resume-home-v2-1",
+        resumeWorkspaceRef: "00000000-0000-4000-8000-000000000099",
+        expiresAt: "2026-09-19T01:00:00.000Z",
+      },
+      updatedAt: "2026-09-19T00:00:00.000Z",
+    } as const;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/challenge")) return trustResponse(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      if (url.pathname.endsWith("/health")) return healthResponse();
+      if (url.pathname === "/me/companion/onboarding/home-v2-v1/transition") {
+        sent.push(JSON.parse(String(init?.body)));
+        return new Response(JSON.stringify({ won: true, state }), { status: 200 });
+      }
+      throw new Error(`unexpected URL ${url}`);
+    });
+
+    const gateway = new DesktopGateway(environment());
+    await gateway.connect();
+    await expect(gateway.transitionCompanionOnboarding("home-v2-v1", { action: "start" }))
+      .resolves.toEqual({ won: true, state });
+    expect(sent).toEqual([{ action: "start" }]);
+  });
+
+  it("loads the companion activity timeline newest-first without reusing the inbox after cursor", async () => {
+    const requested: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/challenge")) return trustResponse(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      if (url.pathname.endsWith("/health")) return healthResponse();
+      if (url.pathname === "/companion/deliveries/timeline") {
+        requested.push(url.search);
+        return new Response(JSON.stringify({ items: [], nextCursor: 0, serverTime: "2026-09-19T00:00:00.000Z" }), { status: 200 });
+      }
+      throw new Error(`unexpected URL ${url}`);
+    });
+
+    const gateway = new DesktopGateway(environment());
+    await gateway.connect();
+    await expect(gateway.listCompanionActivityTimeline()).resolves.toMatchObject({ version: 1, items: [], nextCursor: 0 });
+    await expect(gateway.listCompanionActivityTimeline(42)).resolves.toMatchObject({ version: 1, items: [], nextCursor: 0 });
+    expect(requested).toEqual(["?limit=50", "?limit=50&before=42"]);
+  });
+
+  it("reads the strict, side-effect-free companion learning context", async () => {
+    const requested: string[] = [];
+    const context = {
+      version: 1,
+      contextRevision: "a".repeat(64),
+      learningRunResumeCandidate: null,
+      learningRunStartCandidate: null,
+    } as const;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/challenge")) return trustResponse(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      if (url.pathname.endsWith("/health")) return healthResponse();
+      if (url.pathname === "/companion/learning-context") {
+        requested.push(init?.method ?? "GET");
+        return new Response(JSON.stringify(context), { status: 200 });
+      }
+      throw new Error(`unexpected URL ${url}`);
+    });
+
+    const gateway = new DesktopGateway(environment());
+    await gateway.connect();
+    await expect(gateway.getCompanionLearningContext()).resolves.toEqual(context);
+    expect(requested).toEqual(["GET"]);
   });
 
   it("speaks companion cues through POST /voice/tts with raw audio-only wire rules", async () => {

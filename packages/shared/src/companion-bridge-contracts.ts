@@ -38,13 +38,13 @@ export type AllowedMainRouteV2 =
   | { kind: "today" }
   | { kind: "source"; sourceId?: string }
   | { kind: "note"; noteId: string }
-  | { kind: "card"; cardId: string }
+  | { kind: "card"; cardId: string; objectiveId: string }
   | { kind: "review"; scheduleId?: string }
   // 方案 16 §18.1：focus_graph_node（lens）与 restore_graph_viewport
   // （restoreRun）复用 star_map 路由（graph 页按参数聚焦/恢复）。
   | { kind: "star_map"; keyPointId?: string; lens?: "current_target" | "evidence" | "provenance" | "issues"; restoreRun?: string }
   | { kind: "learning_run"; runId: string }
-  | { kind: "conversation"; assistantSessionId?: string }
+  | { kind: "conversation" }
   | { kind: "settings"; section?: "companion" | "privacy" | "voice" | "accessibility" | "pet" | "model" };
 
 export type UiTargetRefV2 =
@@ -200,7 +200,8 @@ export type AssistantDeliveryKindV2 = (typeof ASSISTANT_DELIVERY_KIND_VALUES)[nu
 export type AssistantDeliveryV2 = {
   version: 2;
   deliveryId: string;
-  assistantSessionId: string;
+  /** Internal delivery segment. Some account-level deliveries are not tied to one. */
+  assistantSessionId: string | null;
   userId: string;
   workspaceId: string;
   inboxSequence: number;
@@ -307,7 +308,7 @@ export const allowedMainRouteV2Schema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("today") }),
   z.strictObject({ kind: z.literal("source"), sourceId: z.string().uuid().optional() }),
   z.strictObject({ kind: z.literal("note"), noteId: z.string().uuid() }),
-  z.strictObject({ kind: z.literal("card"), cardId: z.string().uuid() }),
+  z.strictObject({ kind: z.literal("card"), cardId: z.string().uuid(), objectiveId: z.string().uuid() }),
   z.strictObject({ kind: z.literal("review"), scheduleId: z.string().uuid().optional() }),
   z.strictObject({
     kind: z.literal("star_map"),
@@ -316,7 +317,7 @@ export const allowedMainRouteV2Schema = z.discriminatedUnion("kind", [
     restoreRun: z.string().uuid().optional(),
   }),
   z.strictObject({ kind: z.literal("learning_run"), runId: z.string().uuid() }),
-  z.strictObject({ kind: z.literal("conversation"), assistantSessionId: z.string().uuid().optional() }),
+  z.strictObject({ kind: z.literal("conversation") }),
   z.strictObject({
     kind: z.literal("settings"),
     section: z.enum(["companion", "privacy", "voice", "accessibility", "pet", "model"]).optional(),
@@ -418,7 +419,7 @@ export const companionSystemEventV2Schema = z.strictObject({
 export const assistantDeliveryV2Schema = z.strictObject({
   version: z.literal(2),
   deliveryId: z.string().min(1),
-  assistantSessionId: z.string().uuid(),
+  assistantSessionId: z.string().uuid().nullable(),
   userId: z.string().uuid(),
   workspaceId: z.string().uuid(),
   inboxSequence: z.number().int().min(0),

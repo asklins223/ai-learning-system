@@ -12,6 +12,7 @@
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { sha256Utf8V1 } from "@ailearn/shared/content-hash";
+import { companionVoiceSegmentReadyPayloadV2Schema } from "@ailearn/shared/companion-conversation-contracts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
 import { CompanionConversationError } from "../companion-conversation/turn-service.ts";
 import { probeAudioDurationMs } from "./ffprobe.ts";
@@ -149,7 +150,7 @@ export async function synthesizeCompanionTtsSegment(args: {
   const staged = await withWorkspaceTransaction(
     { workspaceId: args.workspaceId, userId: args.userId },
     async (tx): Promise<{ text: string } | { statusCode: number; error: { code: string; message: string } }> => {
-      const events = await tx.execute<{ payload: { segmentId: string; text: string } }>(
+      const events = await tx.execute<{ payload: unknown }>(
         sql`
           SELECT payload
           FROM companion_stream_events
@@ -168,10 +169,23 @@ export async function synthesizeCompanionTtsSegment(args: {
           error: { code: "NOT_FOUND", message: "voice segment not found" },
         };
       }
-      if (event.payload.segmentId !== args.ref.segmentId) {
+      const parsedPayload = companionVoiceSegmentReadyPayloadV2Schema.safeParse(event.payload);
+      if (!parsedPayload.success) {
+        return {
+          statusCode: 409,
+          error: { code: "UNSUPPORTED_CONTRACT", message: "voice segment contract is invalid" },
+        };
+      }
+      if (parsedPayload.data.segmentId !== args.ref.segmentId) {
         return {
           statusCode: 400,
           error: { code: "INVALID_REQUEST", message: "segmentId mismatch" },
+        };
+      }
+      if (sha256Utf8V1(parsedPayload.data.synthesisText) !== parsedPayload.data.synthesisTextSha256) {
+        return {
+          statusCode: 409,
+          error: { code: "UNSUPPORTED_CONTRACT", message: "voice segment digest mismatch" },
         };
       }
       const runs = await tx.execute<{ status: string }>(
@@ -185,7 +199,7 @@ export async function synthesizeCompanionTtsSegment(args: {
           error: { code: "TURN_CANCELLED", message: "run is not playable" },
         };
       }
-      return { text: event.payload.text };
+      return { text: parsedPayload.data.synthesisText };
     },
   );
   if ("error" in staged) {

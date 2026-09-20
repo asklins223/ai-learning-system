@@ -77,6 +77,7 @@ const desktopApi: AILearnDesktopApiM2 = {
     restore: (input) => invoke(DESKTOP_IPC_CHANNELS.navigationRestore, input)
   },
   auth: {
+    getSurfaceManifest: (input) => invoke(DESKTOP_IPC_CHANNELS.authGetSurfaceManifest, input),
     getState: (input) => invoke(DESKTOP_IPC_CHANNELS.authGetState, input),
     login: (input) => invoke(DESKTOP_IPC_CHANNELS.authLogin, input),
     register: (input) => invoke(DESKTOP_IPC_CHANNELS.authRegister, input),
@@ -153,6 +154,7 @@ const desktopApi: AILearnDesktopApiM2 = {
     },
     voice: {
       speak: (input) => invoke(DESKTOP_IPC_CHANNELS.companionVoiceSpeak, input),
+      speakSegment: (input) => invoke(DESKTOP_IPC_CHANNELS.companionVoiceSpeakSegment, input),
       // 语音转文本（2026-09-18）：本地 SenseVoice 优先，这条云通道是兜底。
       transcribe: (input) => invoke(DESKTOP_IPC_CHANNELS.companionVoiceTranscribe, input)
     },
@@ -178,7 +180,8 @@ const desktopApi: AILearnDesktopApiM2 = {
     },
     account: {
       getState: (input) => invoke(DESKTOP_IPC_CHANNELS.companionAccountGetState, input),
-      patchState: (input) => invoke(DESKTOP_IPC_CHANNELS.companionAccountPatchState, input)
+      patchState: (input) => invoke(DESKTOP_IPC_CHANNELS.companionAccountPatchState, input),
+      transitionOnboarding: (input) => invoke(DESKTOP_IPC_CHANNELS.companionOnboardingTransition, input)
     },
     // 伴星中心（页 20）：共同记录的读取与记忆裁决。这里没有对话发送通道。
     memory: {
@@ -189,7 +192,15 @@ const desktopApi: AILearnDesktopApiM2 = {
       unpin: (input) => invoke(DESKTOP_IPC_CHANNELS.companionMemoryUnpin, input),
       archive: (input) => invoke(DESKTOP_IPC_CHANNELS.companionMemoryArchive, input),
       restore: (input) => invoke(DESKTOP_IPC_CHANNELS.companionMemoryRestore, input),
-      remove: (input) => invoke(DESKTOP_IPC_CHANNELS.companionMemoryDelete, input)
+      remove: (input) => invoke(DESKTOP_IPC_CHANNELS.companionMemoryDelete, input),
+      create: (input) => invoke(DESKTOP_IPC_CHANNELS.companionMemoryCreate, input),
+      correct: (input) => invoke(DESKTOP_IPC_CHANNELS.companionMemoryCorrect, input),
+      dismiss: (input) => invoke(DESKTOP_IPC_CHANNELS.companionMemoryDismiss, input),
+      conflicts: (input) => invoke(DESKTOP_IPC_CHANNELS.companionMemoryConflicts, input),
+      resolveConflict: (input) => invoke(DESKTOP_IPC_CHANNELS.companionMemoryResolveConflict, input),
+      rebuildEmbeddings: (input) => invoke(DESKTOP_IPC_CHANNELS.companionMemoryRebuildEmbeddings, input),
+      clear: (input) => invoke(DESKTOP_IPC_CHANNELS.companionMemoryClear, input),
+      summarizeRecent: (input) => invoke(DESKTOP_IPC_CHANNELS.companionMemorySummarizeRecent, input)
     },
     daily: {
       get: (input) => invoke(DESKTOP_IPC_CHANNELS.companionDailyGet, input)
@@ -199,8 +210,32 @@ const desktopApi: AILearnDesktopApiM2 = {
       patch: (input) => invoke(DESKTOP_IPC_CHANNELS.companionPersonaPatch, input),
       reset: (input) => invoke(DESKTOP_IPC_CHANNELS.companionPersonaReset, input)
     },
-    conversations: {
-      list: (input) => invoke(DESKTOP_IPC_CHANNELS.companionConversationsList, input)
+    history: {
+      list: (input) => invoke(DESKTOP_IPC_CHANNELS.companionHistoryList, input),
+      search: (input) => invoke(DESKTOP_IPC_CHANNELS.companionHistorySearch, input),
+      clear: (input) => invoke(DESKTOP_IPC_CHANNELS.companionHistoryClear, input)
+    },
+    learningContext: {
+      get: (input) => invoke(DESKTOP_IPC_CHANNELS.companionLearningContextGet, input)
+    },
+    journey: {
+      bootstrap: (input) => invoke(DESKTOP_IPC_CHANNELS.companionJourneyBootstrap, input),
+      get: (input) => invoke(DESKTOP_IPC_CHANNELS.companionJourneyGet, input),
+      actOnInvitation: (input) => invoke(DESKTOP_IPC_CHANNELS.companionInvitationAction, input),
+      act: (input) => invoke(DESKTOP_IPC_CHANNELS.companionJourneyAction, input)
+    },
+    activity: {
+      timeline: (input) => invoke(DESKTOP_IPC_CHANNELS.companionActivityTimeline, input),
+      present: (input) => invoke(DESKTOP_IPC_CHANNELS.companionActivityPresent, input),
+      ack: (input) => invoke(DESKTOP_IPC_CHANNELS.companionActivityAck, input)
+    },
+    bridge: {
+      setContext: (input) => invoke(DESKTOP_IPC_CHANNELS.companionBridgeSetContext, input),
+      clearContext: (input) => invoke(DESKTOP_IPC_CHANNELS.companionBridgeClearContext, input)
+    },
+    data: {
+      export: (input) => invoke(DESKTOP_IPC_CHANNELS.companionDataExport, input),
+      deleteAudit: (input) => invoke(DESKTOP_IPC_CHANNELS.companionAuditDelete, input)
     },
     // 任务 14：作答模态偏好（账号级跨设备）。
     answerMode: {

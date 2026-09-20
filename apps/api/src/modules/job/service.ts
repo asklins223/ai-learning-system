@@ -101,6 +101,7 @@ function jobScheduling(type: JobType): { priority: number; resourceClass: string
     case JobType.COMPANION_SUMMARIZER:
     case JobType.COMPANION_DAILY_SUMMARY:
     case JobType.COMPANION_MEMORY_EMBEDDING_REBUILD:
+    case JobType.COMPANION_THOUGHT:
       return { priority: 10, resourceClass: JobResourceClass.MAINTENANCE };
     default:
       return { priority: 40, resourceClass: JobResourceClass.MAINTENANCE };

@@ -167,8 +167,10 @@ async function inspectPackagedArtifact(executable) {
   // 2026-09-16 裁决移除 orb：打包产物不得再包含它（Live2D 是唯一形态）。
   const removedOrb = 'out/renderer/assets/learning-room/v1/objects/companion-orb.webp'
   if (archiveEntrySet.has(removedOrb)) throw new Error(`Removed orb asset still packaged: ${removedOrb}`)
+  // 2026-09-19 移除休眠的 seethrough 包：mao-pro 是唯一打进的 Live2D 模型。
+  const removedSeethroughModel = 'out/renderer/assets/companion/live2d-v2/seethrough/seethrough_output.model3.json'
+  if (archiveEntrySet.has(removedSeethroughModel)) throw new Error(`Removed seethrough asset still packaged: ${removedSeethroughModel}`)
   const requiredLive2dAssets = [
-    'out/renderer/assets/companion/live2d-v2/seethrough/seethrough_output.model3.json',
     'out/renderer/assets/companion/live2d-v1/mao-pro/runtime/mao_pro.model3.json',
     'out/renderer/assets/companion/vendor/pixi.min.js',
     'out/renderer/assets/companion/vendor/live2dcubismcore.min.js',

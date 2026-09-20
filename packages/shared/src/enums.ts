@@ -66,6 +66,8 @@ export const JobType = {
   COMPANION_SUMMARIZER: "companion_summarizer",
   COMPANION_DAILY_SUMMARY: "companion_daily_summary",
   COMPANION_MEMORY_EMBEDDING_REBUILD: "companion_memory_embedding_rebuild",
+  // 基础主动念头调度；LLM 只增强措辞，不改变 job 合同与可降级语义。
+  COMPANION_THOUGHT: "companion_thought",
 } as const;
 export type JobType = (typeof JobType)[keyof typeof JobType];
 

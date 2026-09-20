@@ -201,6 +201,28 @@
 .desktop-app.hud-surface .content {
   transition: left 420ms var(--hud-ease-out), right 420ms var(--hud-ease-out);
 }
+
+/* 伴星缩放不是纯视觉设置：角色的可见占地会跟着变化，任务版心必须消费运行时
+   发布的座位预算。默认值保持 100% 时的既有几何，只有放大后才额外让位。 */
+.desktop-app.hud-surface:not(.companion-absent):not(.comp-left):not(.page-19) .content {
+  right: var(--companion-seat-right, 245px);
+}
+.desktop-app.hud-surface.comp-left:not(.companion-absent):not(.page-19) .content {
+  left: var(--companion-seat-left, 365px);
+}
+.desktop-app.hud-surface.nav-collapsed.comp-left:not(.companion-absent):not(.page-19) .content {
+  left: var(--companion-seat-left-collapsed, 335px);
+}
+
+.desktop-app.hud-surface:not(.companion-absent):not(.comp-left) .approved-surface__content {
+  right: var(--companion-seat-right, 245px);
+}
+.desktop-app.hud-surface.comp-left:not(.companion-absent) .approved-surface__content {
+  left: var(--companion-seat-left, 365px);
+}
+.desktop-app.hud-surface[data-directory-rail="collapsed"].comp-left:not(.companion-absent) .approved-surface__content {
+  left: var(--companion-seat-left-collapsed, 335px);
+}
 /* 右侧座位页缺席：恢复 88px。:not(.drawer-open) 让聊天抽屉的 405px/205px
    预留继续优先；:not(.page-19) 让星图的全出血版心（inset:0）不受影响。 */
 .desktop-app.hud-surface.companion-absent:not(.drawer-open):not(.page-19) .content {
@@ -217,6 +239,24 @@
   left: 92px;
 }
 @media (max-width: 760px) {
+  .desktop-app.hud-surface:not(.companion-absent):not(.comp-left):not(.page-19) .content {
+    right: var(--companion-seat-right-compact, 124px);
+  }
+  .desktop-app.hud-surface.comp-left:not(.companion-absent):not(.page-19) .content {
+    left: var(--companion-seat-left-compact, 194px);
+  }
+  .desktop-app.hud-surface.nav-collapsed.comp-left:not(.companion-absent):not(.page-19) .content {
+    left: var(--companion-seat-left-collapsed-compact, 178px);
+  }
+  .desktop-app.hud-surface:not(.companion-absent):not(.comp-left) .approved-surface__content {
+    right: var(--companion-seat-right-compact, 124px);
+  }
+  .desktop-app.hud-surface.comp-left:not(.companion-absent) .approved-surface__content {
+    left: var(--companion-seat-left-compact, 194px);
+  }
+  .desktop-app.hud-surface[data-directory-rail="collapsed"].comp-left:not(.companion-absent) .approved-surface__content {
+    left: var(--companion-seat-left-collapsed-compact, 178px);
+  }
   .desktop-app.hud-surface.companion-absent:not(.drawer-open):not(.page-19) .content {
     right: 44px;
   }
@@ -253,7 +293,7 @@
    通用缺席规则同特异性，靠声明顺序在其后取胜）。 */
 .desktop-app.hud-surface.page-16 .content.full,
 .desktop-app.hud-surface.page-17 .content.full {
-  right: 245px;
+  right: var(--companion-seat-right, 245px);
 }
 .desktop-app.hud-surface.page-16.companion-absent .content.full,
 .desktop-app.hud-surface.page-17.companion-absent .content.full {
@@ -261,7 +301,7 @@
 }
 @media (max-width: 760px) {
   .desktop-app.hud-surface.page-16 .content.full,
-  .desktop-app.hud-surface.page-17 .content.full { right: 124px; }
+  .desktop-app.hud-surface.page-17 .content.full { right: var(--companion-seat-right-compact, 124px); }
   .desktop-app.hud-surface.page-16.companion-absent .content.full,
   .desktop-app.hud-surface.page-17.companion-absent .content.full { right: 28px; }
 }
@@ -2258,1043 +2298,432 @@
   .hud-surface .notebook { overflow-x: hidden; }
 }
 
-/* ---------------------------------------------------------------------------
- * Companion centre (page 20): the shared record card and the memory star trail.
- *
- * The mockup hangs `.companion-room` and `.memory-field` directly off `.scene`,
- * so their rectangles are viewport-absolute. In the client they are children of
- * `main.content`, so the same viewport rectangles are re-expressed against that
- * box: 104-contentLeft, 102-94 = 8, 66-62 = 4, 382-contentLeft, 286-245 = 41.
- *
- * The two panels must *not* follow `.content` when the directory rail collapses:
- * in the mockup they hang off `.scene`, so they stay put while `.content` moves
- * out from under the rail. Each content-left state therefore gets its own
- * offset — 128 expanded and 92 collapsed at full size, 64 and 46 at the compact
- * 720x405 viewport. Without those variants the card would slide 36px left and
- * end up underneath the rail.
- *
- * The card is a fixed header plus a scrolling record body: at 258px wide and
- * ~640px tall, four record families never fit at once, and the mockup's own
- * `.companion-room{overflow:auto}` would scroll the tabs out of reach.
- * ------------------------------------------------------------------------- */
-
-.hud-surface[data-hud-page="20"] .companion-room {
-  left: -24px;
-  top: 8px;
-  bottom: 4px;
-  width: 258px;
-  display: flex;
-  flex-direction: column;
-  gap: 0;
+/* Companion centre V2 — persistent workbench + real relation universe. */
+.hud-surface[data-hud-page="20"] .content {
   overflow: hidden;
 }
 
-.hud-surface[data-hud-page="20"] .memory-field {
-  left: 254px;
-  right: 41px;
-  top: 8px;
-  bottom: 4px;
-  /* The plate is a centred square sized from this box, so the orbit radii are
-     one length instead of a width-percent and a height-percent. Without that,
-     every orbit is stretched by the field's aspect ratio and three concentric
-     rings read as a ripple instead of a sky. */
-  container-type: size;
-}
-
-.hud-surface.nav-collapsed[data-hud-page="20"] .companion-room { left: 12px; }
-.hud-surface.nav-collapsed[data-hud-page="20"] .memory-field { left: 290px; }
-
-@media (max-width: 760px) {
-  .hud-surface[data-hud-page="20"] .companion-room { left: -12px; top: 3px; bottom: 1px; width: 129px; }
-  .hud-surface[data-hud-page="20"] .memory-field { left: 127px; right: 19px; top: 3px; bottom: 1px; }
-  .hud-surface.nav-collapsed[data-hud-page="20"] .companion-room { left: 6px; }
-  .hud-surface.nav-collapsed[data-hud-page="20"] .memory-field { left: 145px; }
-}
-
-/* The record body is the only scrolling region, and it keeps the card's own
-   dark track instead of the browser default. */
-.hud-surface .record-scroll {
-  flex: 1 1 auto;
+.hud-surface .companion-center {
+  --companion-ink: #35291f;
+  --companion-soft: #715f50;
+  --companion-paper: rgba(255, 247, 226, 0.96);
+  --companion-paper-quiet: rgba(255, 247, 226, 0.82);
+  --companion-line: rgba(87, 67, 49, 0.2);
+  --companion-accent: #287687;
+  --companion-accent-strong: #185868;
+  --companion-danger: #a24434;
+  --companion-map-deep: #071827;
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: clamp(320px, 35vw, 400px) minmax(0, 1fr);
+  gap: 12px;
+  min-width: 0;
   min-height: 0;
-  margin-right: -4px;
-  padding-right: 4px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(233, 214, 178, 0.35) transparent;
+  color: var(--companion-ink);
+  font-family: "Noto Sans SC Variable", "Noto Sans SC", "PingFang SC", sans-serif;
 }
 
-.hud-surface .record-scroll::-webkit-scrollbar { width: 5px; }
-.hud-surface .record-scroll::-webkit-scrollbar-thumb {
-  border-radius: 3px;
-  background: rgba(233, 214, 178, 0.32);
+.hud-surface .companion-workbench,
+.hud-surface .companion-map {
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--companion-line);
+  border-radius: 14px;
+  box-shadow: 0 14px 34px rgba(31, 19, 10, 0.2);
 }
 
-/* The mockup draws the tabs as decorative spans; the client needs real buttons,
-   so the geometry moves to the button and the span keeps the mockup's skin.
-   `inline-flex` makes the button's box the span's box: the default anonymous
-   button layout measured 2px shorter than the span it wrapped, leaving the
-   label painting outside the hit target. */
-.hud-surface .memory-tabs button {
-  display: inline-flex;
-  align-items: center;
-  padding: 0;
-  color: inherit;
-  font-family: inherit;
-  border: 0;
-  background: none;
-  appearance: none;
-  cursor: pointer;
-}
-
-.hud-surface .memory-tabs button:focus-visible {
-  border-radius: 13px;
-  outline: 2px solid rgba(255, 244, 214, 0.8);
-  outline-offset: 2px;
-}
-
-/* One record row: the mockup's `.diary-entry`, now a real target that either
-   opens the memory on the star trail or lists a conversation / diary line. */
-.hud-surface button.diary-entry {
-  display: block;
-  width: 100%;
-  color: inherit;
-  font-family: inherit;
-  text-align: left;
-  border: 0;
-  cursor: pointer;
-  transition: background-color 140ms ease, box-shadow 140ms ease, transform 140ms var(--hud-ease-out);
-}
-
-.hud-surface button.diary-entry:hover { background: rgba(255, 255, 255, 0.13); }
-.hud-surface button.diary-entry:active { transform: scale(0.985); }
-.hud-surface button.diary-entry:focus-visible { outline: 2px solid rgba(255, 244, 214, 0.75); outline-offset: 1px; }
-.hud-surface .diary-entry small { display: block; margin-top: 3px; line-height: 1.5; }
-
-.hud-surface .diary-entry.is-selected {
-  background: rgba(243, 214, 120, 0.2);
-  box-shadow: inset 0 0 0 1px rgba(243, 214, 120, 0.45);
-}
-
-.hud-surface .diary-entry__top {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 7px;
-}
-
-.hud-surface .diary-entry__top b { min-width: 0; }
-/* `time` 之外，人格卡与预设卡把「安静 / 适度 / 活跃」放在同一列：
-   同一版式，但只有真正的时间才配 `<time>` 语义。 */
-.hud-surface .diary-entry__top :is(time, .entry-flag) { flex: none; color: #9fb6bb; font-size: 8px; }
-.hud-surface .diary-entry__body {
-  display: -webkit-box;
+.hud-surface .companion-workbench {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  background: var(--companion-paper);
 }
 
-.hud-surface .diary-entry.is-selected .diary-entry__body { -webkit-line-clamp: 4; }
-
-/* 记忆正文里会出现没有断点的长英文串（笔记名、URL、标识符）：
-   中文按自然断行没问题，长拉丁串必须允许在任意字符处折行，
-   否则会把 258px 的卡面横向撑破。 */
-.hud-surface .diary-entry__body,
-.hud-surface .diary-entry__top b { overflow-wrap: anywhere; }
-
-/* Honest empty and pending notes inside the card. */
-.hud-surface .record-empty {
-  margin-top: 9px;
-  padding: 12px;
-  border-radius: 14px 17px 13px 16px;
-  background: rgba(255, 255, 255, 0.05);
-  color: #b3c9cd;
-  font-size: 9.5px;
-  line-height: 1.65;
+.hud-surface .companion-workbench__header,
+.hud-surface .companion-map__header {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
 }
 
-.hud-surface .record-empty b {
-  display: block;
-  margin-bottom: 4px;
-  color: #eef3ea;
-  font: 650 11.5px "Noto Serif SC", "Songti SC", serif;
+.hud-surface .companion-workbench__header {
+  padding: 16px 16px 12px;
 }
 
-.hud-surface .record-foot {
-  flex: none;
-  margin: 9px 0 0;
-  color: #9db4b9;
-  font-size: 8.5px;
+.hud-surface .companion-workbench__header h2,
+.hud-surface .companion-map__header h2,
+.hud-surface .companion-panel-heading h3,
+.hud-surface .companion-persona-groups h3 {
+  margin: 0;
+  font-family: "Noto Serif SC", "Songti SC", serif;
+  color: inherit;
+}
+
+.hud-surface .companion-workbench__header h2 { font-size: 21px; line-height: 1.2; }
+.hud-surface .companion-workbench__header p,
+.hud-surface .companion-map__header p,
+.hud-surface .companion-panel-heading p,
+.hud-surface .companion-persona-groups section > p {
+  margin: 5px 0 0;
+  color: var(--companion-soft);
+  font-size: 11px;
   line-height: 1.55;
 }
 
-/* 分节标题，不是脚注：人格与日记里把一屏内容串起来的行（活跃度、边界、
-   预设、原话）此前借用了 record-foot 的弱化样式，层级倒置 —— 标题比它的
-   内容还轻。这里给它们自己的样式：比脚注大一号、亮一档，节前多留空。 */
-.hud-surface .record-heading {
-  flex: none;
-  margin: 14px 0 0;
-  color: #b9ced2;
-  font-size: 10px;
-  font-weight: 650;
-  line-height: 1.5;
+.hud-surface .companion-icon-button,
+.hud-surface .companion-center button,
+.hud-surface .companion-center select,
+.hud-surface .companion-center input,
+.hud-surface .companion-center textarea {
+  font: inherit;
 }
 
-.hud-surface .record-chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 2px 0 8px; }
-
-.hud-surface .record-chips button {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  padding: 4px 8px;
-  color: #a9c2c7;
-  font-family: inherit;
-  font-size: 9px;
-  font-weight: 600;
-  border: 0;
-  border-radius: 11px;
-  background: rgba(255, 255, 255, 0.07);
-  cursor: pointer;
-  transition: background-color 140ms ease, color 140ms ease;
-}
-
-.hud-surface .record-chips button.is-on { color: #49372a; background: var(--hud-butter); }
-.hud-surface .record-chips button:hover { background: rgba(255, 255, 255, 0.15); }
-.hud-surface .record-chips button.is-on:hover { background: var(--hud-butter); }
-.hud-surface .record-chips button:focus-visible { outline: 2px solid rgba(255, 244, 214, 0.75); outline-offset: 2px; }
-
-/* 与星图 legend / 记忆带同一种计数排版：数字是标签后的一个弱化粗体，
-   而不是和标签混排的普通文本 —— 两处是同一份筛选词汇表。 */
-.hud-surface .record-chips button b { font-weight: 700; opacity: 0.75; }
-
-/* Diary counts and persona tags read as small ledger facts, not as prose. */
-.hud-surface .record-facts {
+.hud-surface .companion-icon-button {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 5px;
-  margin-top: 9px;
-}
-
-.hud-surface .record-facts > div {
-  min-width: 0;
-  padding: 6px 8px;
-  border-radius: 12px 14px 11px 13px;
-  background: rgba(255, 255, 255, 0.06);
-}
-
-.hud-surface .record-facts b {
-  display: block;
-  color: #f4e8ca;
-  font: 650 13px "Noto Serif SC", "Songti SC", serif;
-}
-
-/* A caption stays one line: in a three-column grid a two-character difference
-   between labels otherwise makes one cell twice as tall as its neighbours. */
-.hud-surface .record-facts small {
-  display: block;
-  overflow: hidden;
-  color: #aec5c9;
-  font-size: 8.5px;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.hud-surface .record-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
-.hud-surface .record-tags span {
-  padding: 3px 7px;
-  color: #49372a;
-  font-size: 8.5px;
-  font-weight: 700;
-  border-radius: 10px 12px 9px 11px;
-  background: var(--hud-butter);
-}
-
-.hud-surface .record-quote {
-  margin: 8px 0 0;
-  padding-left: 9px;
-  color: #c9dadd;
-  font: 500 10px/1.7 "Noto Serif SC", "Songti SC", serif;
-  border-left: 2px solid rgba(233, 198, 111, 0.45);
-}
-
-/* --- the star trail ------------------------------------------------------ */
-
-/* The plate: a square, centred in the field. `min(100cqh, 100cqw)` is the only
-   way to say "as tall as the shorter side" in CSS, and it is what keeps every
-   orbit a circle at any window size. Centering is `inset + margin:auto`, not a
-   transform on purpose: a transform would stack this whole subtree under the
-   focus card, and the hover card on the sky must be allowed to sit on top. */
-.hud-surface .memory-sky {
-  position: absolute;
-  inset: 0;
-  margin: auto;
-  width: 100%;
-  height: 100%;
-  aspect-ratio: 1 / 1;
-}
-
-@supports (container-type: size) {
-  .hud-surface .memory-sky {
-    width: min(100cqh, 100cqw);
-    height: min(100cqh, 100cqw);
-  }
-}
-
-.hud-surface .memory-orbits {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-}
-
-/* Guide rings are dotted and faded toward the horizon: a solid ring through a
-   caption is what made the old sky unreadable, and an orbit drawn as an orbit
-   (rather than a target) is the difference between a map and a bullseye. */
-.hud-surface .memory-orbits .is-band {
-  fill: none;
-  stroke: url(#memoryRing);
-  stroke-width: 1;
-  stroke-dasharray: 1 6;
-  stroke-linecap: round;
-}
-
-/* Provenance reads in two strengths: faint ticks mark every memory that came
-   from real learning content, and the selected memory's links are drawn bright. */
-.hud-surface .memory-orbits line.is-anchor { stroke: rgba(233, 198, 111, 0.3); stroke-width: 1; stroke-dasharray: 2 6; }
-.hud-surface .memory-orbits line.is-anchor.is-orphan { stroke: rgba(200, 124, 106, 0.4); }
-.hud-surface .memory-orbits line.is-live { stroke: rgba(255, 231, 168, 0.92); stroke-width: 1.5; stroke-dasharray: 5 5; }
-.hud-surface .memory-orbits line.is-live.is-orphan { stroke: rgba(228, 134, 110, 0.92); }
-
-/* Selected links are curved, the way the web star map bent its relation edges
-   so parallel links stayed readable, and a comet rides each curve. */
-.hud-surface .memory-orbits g.is-live path {
-  fill: none;
-  stroke: rgba(255, 231, 168, 0.92);
-  stroke-width: 1.5;
-  stroke-dasharray: 5 5;
-  stroke-linecap: round;
-}
-
-.hud-surface .memory-orbits g.is-live.is-orphan path { stroke: rgba(228, 134, 110, 0.92); }
-
-.hud-surface .memory-orbits g.is-live .is-comet {
-  fill: #fff3c2;
-  filter: drop-shadow(0 0 2px rgba(255, 236, 170, 0.95));
-}
-
-/* The selection crown: a slow dashed orbit with one satellite riding it. A
-   static halo says "lit"; something circling says "you are working on this". */
-.hud-surface .memory-orbits g.is-crown circle {
-  fill: none;
-  stroke: rgba(255, 243, 166, 0.75);
-  stroke-width: 1;
-  stroke-dasharray: 2 5;
-  stroke-linecap: round;
-}
-
-.hud-surface .memory-orbits g.is-crown .is-crown-satellite {
-  fill: #fff3c2;
-  filter: drop-shadow(0 0 2.5px rgba(255, 236, 170, 1));
-  stroke: none;
-}
-
-.hud-surface .memory-orbits g.is-crown { animation: crown-spin 26s linear infinite; }
-
-@keyframes crown-spin {
-  to { transform: rotate(360deg); }
-}
-
-/* --- sky atmosphere -------------------------------------------------------
-   Inherited from the web star map ("理解星图"): a deep gradient, two nebula
-   glows and a field of twinkling dust give the plate a sky to live in instead
-   of floating over bare furniture. Everything here is decoration only — dust
-   is never interactive and never a record — and the radial mask fades the
-   whole layer into the room scene instead of drawing a hard panel edge. */
-.hud-surface .sky-backdrop {
-  position: absolute;
-  inset: -2%;
-  pointer-events: none;
-  /* A whisper, not a veil: the room's own night scene is the sky — this only
-     deepens it slightly toward the plate and adds two nebula hints. Stronger
-     values read as a dirty pane of glass over the lighthouse. */
-  background:
-    radial-gradient(58% 52% at 24% 26%, rgba(121, 206, 220, 0.05), rgba(121, 206, 220, 0) 70%),
-    radial-gradient(52% 46% at 79% 74%, rgba(233, 198, 111, 0.045), rgba(233, 198, 111, 0) 70%),
-    linear-gradient(168deg, rgba(7, 20, 42, 0.2), rgba(4, 12, 28, 0.05) 62%, rgba(7, 20, 42, 0.16));
-  -webkit-mask-image: radial-gradient(62% 58% at 50% 50%, #000 46%, transparent 96%);
-  mask-image: radial-gradient(62% 58% at 50% 50%, #000 46%, transparent 96%);
-}
-
-.hud-surface .sky-dust {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-}
-
-.hud-surface .sky-dust circle {
-  fill: #ffe9b8;
-  animation: sky-twinkle var(--twinkle-duration, 4s) ease-in-out var(--twinkle-delay, 0s) infinite alternate;
-}
-
-@keyframes sky-twinkle {
-  from { opacity: 0.06; }
-  to { opacity: var(--twinkle-max, 0.5); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .hud-surface .sky-dust circle { animation: none; }
-  .hud-surface .memory-orbits g.is-crown { animation: none; }
-}
-
-/* Every star is a real button: the trail is a way to read and act on memories,
-   not decoration. Only the button chrome is reset here — restating `color` or
-   `font` would out-specify the mockup's own `.star-node` rule and repaint every
-   label in inherited 16px body text.
-
-   The button's own box is the dot, and the caption is taken out of flow below
-   it. The mockup centres the whole (dot + caption) box on the star's point,
-   which pushes the dot above its own orbit by half a caption — the one thing a
-   star chart cannot do. */
-/* The memory field places every star with inline `left`/`top` percentages, so
-   the button owns its own absolute positioning and centring transform. These
-   declarations used to be inherited from page 19's now-deleted star map, which
-   quietly left the memory planets stacked in a column once it went away. */
-.hud-surface .memory-field .star-node {
-  position: absolute;
-  transform: translate(-50%, -50%);
-  color: #eef5ec;
-  font-size: 9px;
-  text-align: center;
-  text-shadow: 0 2px 8px #001326;
-}
-
-.hud-surface .memory-field .star-node {
-  display: grid;
-  width: 22px;
-  height: 22px;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
   place-items: center;
-  padding: 0;
-  font-family: inherit;
+  border: 1px solid var(--companion-line);
+  border-radius: 10px;
+  background: rgba(255,255,255,0.48);
+  color: var(--companion-soft);
+}
+
+.hud-surface .companion-tabs {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 2px;
+  padding: 0 12px 10px;
+  border-bottom: 1px solid var(--companion-line);
+}
+
+.hud-surface .companion-tabs button {
+  min-width: 0;
+  min-height: 34px;
   border: 0;
-  background: none;
-  appearance: none;
-  cursor: pointer;
-}
-
-/* A caption wraps to two short lines instead of being chopped at a character
-   count: a Chinese sentence wrapped reads as text, the same sentence cut reads
-   as a broken string. The halo is what keeps it legible over a guide ring. */
-.hud-surface .memory-field .star-node span {
-  position: absolute;
-  left: 50%;
-  top: 100%;
-  width: 104px;
-  margin-top: 6px;
-  overflow: hidden;
-  transform: translateX(-50%);
-  white-space: normal;
-  line-height: 1.35;
-  text-align: center;
-  text-shadow: 0 1px 3px #041020, 0 0 5px rgba(4, 16, 32, 0.95), 0 0 9px rgba(4, 16, 32, 0.8);
-  transition: color 150ms ease, opacity 150ms ease;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow-wrap: anywhere;
-}
-
-/* A star at the bottom of the plate hangs its caption upward. */
-.hud-surface .memory-field .star-node.caption-above span {
-  top: auto;
-  bottom: 100%;
-  margin-top: 0;
-  margin-bottom: 6px;
-}
-
-/* Star bodies stay crisp, as the mockup drew them: a flat dot inside a tight
-   double halo reads as a star at 9–15px, while a soft gradient ball reads as a
-   blur. The shaded sphere is reserved for the few stars big enough to carry it
-   (major, pinned), and the breathing aura only for the tiers it is worth —
-   otherwise eleven pulsing blobs drown the semantics the colours carry. */
-.hud-surface .memory-field .star-node i {
-  /* Page 19's star map used to supply the dot body from a shared `.star-node i`
-     rule. The map draws on a canvas now, so the memory field declares its own
-     sizing and halo instead of silently losing them. */
-  display: block;
-  width: 12px;
-  height: 12px;
-  margin: auto;
-  border-radius: 50%;
-  box-shadow: 0 0 0 7px rgba(232, 194, 107, 0.12), 0 0 22px rgba(232, 194, 107, 0.65);
-  position: relative;
-  transition: transform 170ms var(--hud-ease-out), opacity 150ms ease;
-}
-
-.hud-surface .memory-field .star-node.is-major i {
-  width: 15px;
-  height: 15px;
-  background: radial-gradient(circle at 32% 30%, #fdfff2 0%, #9fd8e4 44%, #33657c 130%);
-}
-
-.hud-surface .memory-field .star-node.is-minor i { width: 9px; height: 9px; }
-
-.hud-surface .memory-field .star-node.is-pinned i {
-  background: radial-gradient(circle at 32% 30%, #fff8dd 0%, var(--hud-gold) 46%, #8a6420 135%);
-  box-shadow: 0 0 0 7px rgba(233, 198, 111, 0.14), 0 0 22px rgba(233, 198, 111, 0.7);
-}
-
-.hud-surface .memory-field .star-node.is-candidate i {
+  border-radius: 9px;
   background: transparent;
-  /* The waiting star breathes through its own ring — the "not written yet"
-     state is the one thing on the sky that should visibly pulse. */
-  animation: candidate-breathe 3.2s ease-in-out infinite alternate;
-}
-
-@keyframes candidate-breathe {
-  from { box-shadow: inset 0 0 0 1.5px rgba(233, 198, 111, 0.5), 0 0 7px rgba(233, 198, 111, 0.2); }
-  to { box-shadow: inset 0 0 0 2.5px rgba(233, 198, 111, 0.95), 0 0 18px rgba(233, 198, 111, 0.5); }
-}
-
-/* The breathing aura lives on a pseudo-element so each state's own box-shadow
-   stays still, and only on the stars worth the motion. */
-.hud-surface .memory-field .star-node.is-major i::after,
-.hud-surface .memory-field .star-node.is-pinned i::after,
-.hud-surface .memory-field .star-node.is-selected i::after {
-  content: "";
-  position: absolute;
-  inset: -6px;
-  border-radius: 50%;
-  background: radial-gradient(circle, rgba(158, 219, 231, 0.26), rgba(158, 219, 231, 0) 70%);
-  animation: star-breathe 5.2s ease-in-out infinite alternate;
-  pointer-events: none;
-}
-
-.hud-surface .memory-field .star-node.is-pinned i::after {
-  background: radial-gradient(circle, rgba(233, 198, 111, 0.3), rgba(233, 198, 111, 0) 70%);
-}
-
-@keyframes star-breathe {
-  from { opacity: 0.35; transform: scale(0.92); }
-  to { opacity: 0.8; transform: scale(1.08); }
-}
-
-/* Hover and keyboard focus speed the breath up instead of only scaling the dot:
-   the star answers "I am the one you are pointing at" in motion, not just size. */
-.hud-surface .memory-field .star-node.is-hover i::after,
-.hud-surface .memory-field .star-node:focus-visible i::after { animation-duration: 1.8s; }
-
-@media (prefers-reduced-motion: reduce) {
-  .hud-surface .memory-field .star-node.is-candidate i { animation: none; }
-  .hud-surface .memory-field .star-node.is-major i::after,
-  .hud-surface .memory-field .star-node.is-pinned i::after,
-  .hud-surface .memory-field .star-node.is-selected i::after { animation: none; opacity: 0.5; }
-}
-
-.hud-surface .memory-field .star-node.is-selected i {
-  box-shadow: 0 0 0 10px rgba(255, 241, 183, 0.18), 0 0 32px rgba(255, 228, 135, 0.9);
-}
-
-.hud-surface .memory-field .star-node:hover i { transform: scale(1.3); }
-.hud-surface .memory-field .star-node:focus-visible { border-radius: 50%; outline: 2px solid rgba(255, 241, 183, 0.85); outline-offset: 4px; }
-
-/* Filters dim a star instead of removing it: the sky is a map of what the
-   companion knows, and a filter must not redraw the map. */
-.hud-surface .memory-field .star-node.is-muted { opacity: 0.22; }
-.hud-surface .memory-field .star-node.is-selected { opacity: 1; }
-.hud-surface .memory-field .star-node.is-selected span { color: #fff6da; }
-.hud-surface .memory-field .star-node:hover { opacity: 1; }
-
-/* The hover card replaces the browser tooltip: the same drawn glass the legend
-   and band strip use, naming the record's state and kind before its content.
-   It hangs over the star's point and steps below when the star sits at the
-   bottom of the plate; it never shows for the already-selected star, whose
-   focus card carries the same context. */
-.hud-surface .sky-tip {
-  position: absolute;
-  z-index: 3;
-  display: grid;
-  gap: 1px;
-  justify-items: center;
-  max-width: 200px;
-  padding: 6px 11px;
-  border: 1px solid rgba(255, 252, 235, 0.55);
-  border-radius: 12px 15px 11px 14px;
-  background: rgba(6, 22, 40, 0.9);
-  box-shadow: 0 10px 22px rgba(1, 12, 25, 0.45);
-  color: #eef5ec;
-  text-align: center;
-  pointer-events: none;
-  transform: translate(-50%, calc(-100% - 16px));
-  animation: sky-tip-in 140ms var(--hud-ease-out);
-}
-
-.hud-surface .sky-tip.is-below { transform: translate(-50%, 16px); }
-
-.hud-surface .sky-tip b {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow: hidden;
-  font: 650 10px/1.45 "Noto Serif SC", "Songti SC", serif;
-  color: #fff3c2;
-  overflow-wrap: anywhere;
-}
-
-.hud-surface .sky-tip span { font-size: 8.5px; color: #b7cbd0; }
-
-@keyframes sky-tip-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .hud-surface .sky-tip { animation: none; }
-}
-
-/* The legend is a control, not a caption: it carries the same state filter the
-   memory list uses, so the sky can answer "show me only what is waiting for me"
-   without the list and the plate ever disagreeing. */
-.hud-surface .memory-legend {
-  position: absolute;
-  left: 0;
-  top: 0;
-  display: flex;
-  gap: 2px;
-  padding: 4px 6px;
-  border: 1px solid rgba(205, 228, 230, 0.18);
-  border-radius: 13px 16px 12px 15px;
-  background: rgba(5, 24, 43, 0.34);
-  backdrop-filter: blur(3px);
-  color: #b7cbd0;
-  font-size: 8.5px;
-}
-
-.hud-surface .memory-legend button {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 7px;
-  color: inherit;
-  font-family: inherit;
-  font-size: inherit;
-  border: 0;
-  border-radius: 9px 11px 8px 10px;
-  background: none;
+  color: var(--companion-soft);
+  font-size: 11px;
   cursor: pointer;
-  transition: background-color 140ms ease, color 140ms ease;
+  transition: background-color 160ms var(--hud-ease-out), color 160ms var(--hud-ease-out);
 }
 
-.hud-surface .memory-legend button:hover { background: rgba(255, 255, 255, 0.12); }
-.hud-surface .memory-legend button.is-on { color: #49372a; background: var(--hud-butter); }
-.hud-surface .memory-legend button:focus-visible { outline: 2px solid rgba(255, 244, 214, 0.8); outline-offset: 1px; }
-.hud-surface .memory-legend button b { font-weight: 700; opacity: 0.75; }
-
-.hud-surface .memory-legend i {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  vertical-align: middle;
+.hud-surface .companion-tabs button.is-active {
+  background: #294b50;
+  color: #fff8e9;
 }
 
-.hud-surface .memory-legend .is-pinned i { background: var(--hud-gold); box-shadow: 0 0 9px rgba(233, 198, 111, 0.75); }
-.hud-surface .memory-legend .is-active i { background: var(--hud-star); box-shadow: 0 0 9px rgba(121, 206, 220, 0.6); }
-.hud-surface .memory-legend .is-candidate i { background: transparent; box-shadow: inset 0 0 0 2px rgba(233, 198, 111, 0.85); }
+.hud-surface .companion-tab-panel {
+  min-height: 0;
+  overflow: auto;
+  padding: 14px;
+  scrollbar-color: rgba(50, 89, 95, 0.45) transparent;
+  scrollbar-width: thin;
+}
 
-/* The band strip is the trail's index: it names the three orbits and filters the
-   records by the family each one stands for. It sits on the sea like the graph
-   page's own index, so it stays legible over water instead of floating on sky. */
-.hud-surface .memory-bands {
-  position: absolute;
-  left: 0;
-  bottom: 0;
+.hud-surface .companion-panel-stack { display: grid; align-content: start; gap: 12px; }
+.hud-surface .companion-panel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.hud-surface .companion-heading-actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.hud-surface .companion-panel-heading h3,
+.hud-surface .companion-persona-groups h3 { font-size: 16px; }
+
+.hud-surface .companion-center button {
+  min-height: 32px;
+  border: 1px solid var(--companion-line);
+  border-radius: 9px;
+  padding: 6px 10px;
+  background: rgba(255,255,255,0.5);
+  color: var(--companion-ink);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background-color 150ms var(--hud-ease-out), color 150ms var(--hud-ease-out), border-color 150ms var(--hud-ease-out), transform 150ms var(--hud-ease-out);
+}
+.hud-surface .companion-center button.primary { border-color: #294b50; background: #294b50; color: #fff8e9; }
+.hud-surface .companion-center button.danger { border-color: var(--companion-danger); background: var(--companion-danger); color: #fff; }
+.hud-surface .companion-center button.danger-quiet { border-color: rgba(162,68,52,0.28); color: var(--companion-danger); }
+.hud-surface .companion-center button:disabled { cursor: not-allowed; opacity: 0.48; }
+.hud-surface .companion-center button:focus-visible,
+.hud-surface .companion-center input:focus-visible,
+.hud-surface .companion-center select:focus-visible,
+.hud-surface .companion-center textarea:focus-visible {
+  outline: 3px solid rgba(88, 174, 190, 0.42);
+  outline-offset: 2px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .hud-surface .companion-center button:not(:disabled):hover { background: #fffdf5; border-color: rgba(40,118,135,0.42); }
+  .hud-surface .companion-center button.primary:not(:disabled):hover { background: var(--companion-accent-strong); color: #fff; transform: translateY(-1px); }
+}
+
+.hud-surface .companion-filter-row,
+.hud-surface .companion-map__filters,
+.hud-surface .companion-action-row,
+.hud-surface .companion-segmented,
+.hud-surface .companion-date-nav,
+.hud-surface .companion-day-strip {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 2px;
-  max-width: 100%;
-  padding: 4px 6px;
-  border: 1px solid rgba(205, 228, 230, 0.18);
-  border-radius: 13px 16px 12px 15px;
-  background: rgba(5, 24, 43, 0.34);
-  backdrop-filter: blur(3px);
-  font-size: 8.5px;
-  color: #b7cbd0;
+  gap: 7px;
 }
 
-.hud-surface .memory-bands button {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 7px;
-  color: inherit;
-  font-family: inherit;
-  font-size: inherit;
-  border: 0;
-  border-radius: 9px 11px 8px 10px;
-  background: none;
-  cursor: pointer;
-  transition: background-color 140ms ease, color 140ms ease;
+.hud-surface .companion-center select,
+.hud-surface .companion-center input,
+.hud-surface .companion-center textarea {
+  min-height: 32px;
+  border: 1px solid var(--companion-line);
+  border-radius: 9px;
+  padding: 6px 9px;
+  background: rgba(255,255,255,0.66);
+  color: var(--companion-ink);
+  font-size: 11px;
 }
 
-.hud-surface .memory-bands button:hover { background: rgba(255, 255, 255, 0.12); }
-.hud-surface .memory-bands button.is-on { color: #49372a; background: var(--hud-butter); }
-.hud-surface .memory-bands button b { font-weight: 700; opacity: 0.75; }
-.hud-surface .memory-bands button:focus-visible { outline: 2px solid rgba(255, 244, 214, 0.8); outline-offset: 1px; }
-.hud-surface .memory-bands__more { color: #f3d678; text-decoration: underline; text-underline-offset: 2px; }
-
-.hud-surface .memory-field__foot {
-  position: absolute;
-  right: 4px;
-  bottom: 26px;
-  max-width: 40%;
-  color: #9db4b9;
-  font-size: 8.5px;
-  line-height: 1.5;
-  text-align: right;
-  pointer-events: none;
-}
-
-/* The focus card is the mockup's `.memory-focus`, carrying the selected memory
-   instead of a decorative summary. */
-.hud-surface .memory-field .memory-focus {
+.hud-surface .companion-inline-form {
   display: grid;
-  width: 272px;
-  gap: 6px;
-  padding: 15px 17px 14px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 11px;
+  border-radius: 12px;
+  background: rgba(232, 218, 186, 0.5);
 }
+.hud-surface .companion-inline-form textarea { grid-column: 1 / -1; min-height: 74px; resize: vertical; line-height: 1.55; }
 
-.hud-surface .memory-focus__kicker {
-  color: #7f6c59;
-  font-size: 8px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
+.hud-surface .companion-memory-detail,
+.hud-surface .companion-activity-card,
+.hud-surface .companion-diary-entry {
+  display: grid;
+  gap: 9px;
+  border-radius: 13px;
+  padding: 13px;
+  background: rgba(224, 238, 226, 0.68);
 }
+.hud-surface .companion-memory-detail > strong,
+.hud-surface .companion-diary-entry > strong { font: 650 13px/1.65 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .companion-memory-detail > small,
+.hud-surface .companion-diary-entry > small { color: var(--companion-soft); font-size: 11px; }
+.hud-surface .companion-memory-detail__meta { display: flex; flex-wrap: wrap; gap: 6px; }
+.hud-surface .companion-memory-detail__meta span { border-radius: 999px; padding: 3px 7px; background: rgba(255,255,255,0.58); color: var(--companion-soft); font-size: 11px; }
 
-.hud-surface .memory-focus b {
-  display: -webkit-box;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  overflow-wrap: anywhere;
-}
-
-.hud-surface .memory-focus__meta { color: #6f5d4e; font-size: 8.5px; line-height: 1.6; }
-.hud-surface .memory-focus__links { color: #5c6f57; font-size: 8.5px; line-height: 1.6; }
-.hud-surface .memory-focus__links .is-orphan { color: #8a4a3a; }
-
-.hud-surface .memory-focus__actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
+.hud-surface .companion-record-list { display: grid; gap: 7px; }
+.hud-surface .companion-record-list > button {
+  display: grid;
   gap: 5px;
-  margin-top: 2px;
-}
-
-.hud-surface .memory-focus__actions button {
-  min-height: 24px;
-  padding: 0 10px;
-  color: #4c3a2c;
-  font-family: inherit;
-  font-size: 9px;
-  font-weight: 650;
-  border: 2px solid rgba(255, 252, 235, 0.75);
-  border-radius: 13px 15px 12px 14px;
-  background: rgba(255, 255, 255, 0.55);
-  cursor: pointer;
-  transition: transform 140ms var(--hud-ease-out), background-color 140ms ease;
-}
-
-.hud-surface .memory-focus__actions button.primary { border-color: #af522c; background: var(--hud-peach); }
-.hud-surface .memory-focus__actions button.danger { color: #7b3f31; border-color: rgba(169, 83, 62, 0.55); }
-.hud-surface .memory-focus__actions button:hover { background: #fff; transform: translateY(-1px); }
-.hud-surface .memory-focus__actions button:active { transform: scale(0.96); }
-.hud-surface .memory-focus__actions button:disabled { opacity: 0.55; cursor: default; transform: none; }
-.hud-surface .memory-focus__actions button:focus-visible { outline: 2px solid rgba(57, 103, 132, 0.5); outline-offset: 2px; }
-
-.hud-surface .memory-focus__error { color: #8a3f2e; font-size: 9px; line-height: 1.5; }
-
-/* How many decisions the card is offering, so the row of buttons is not a
-   surprise. It is a hint, not a control, and it never claims an action the
-   current state does not have. */
-.hud-surface .memory-focus__hint {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  color: #8a7864;
-  font-size: 8px;
-}
-
-/* --- the record card's own controls -------------------------------------- */
-
-/* Search filters the records already read, so it is a field on the card, not a
-   page-level command bar. It reads as the same paper as the chips below it. */
-.hud-surface .record-search {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 2px 0 8px;
-  padding: 5px 9px;
-  border-radius: 12px 14px 11px 13px;
-  background: rgba(255, 255, 255, 0.07);
-  color: #a9c2c7;
-}
-
-.hud-surface .record-search input {
   width: 100%;
-  min-width: 0;
-  padding: 0;
-  color: #eef3ea;
-  font-family: inherit;
-  font-size: 9.5px;
-  border: 0;
-  outline: none;
-  background: none;
-}
-
-.hud-surface .record-search input::placeholder { color: #8ba3a8; }
-.hud-surface .record-search:focus-within { box-shadow: inset 0 0 0 1px rgba(243, 214, 120, 0.5); }
-
-/* 第 18 页对 `input[type=search]` 的同一裁决：UA 自绘的 ✕ 不属于这套设计，
-   而且空态文案明确让用户「清空搜索词」，所以给一颗同语言的清除钮补上位。 */
-.hud-surface .record-search input::-webkit-search-cancel-button,
-.hud-surface .record-search input::-webkit-search-decoration {
-  appearance: none;
-  display: none;
-}
-
-.hud-surface .record-search__clear {
-  display: grid;
-  place-items: center;
-  flex: none;
-  width: 16px;
-  height: 16px;
-  padding: 0;
-  color: #a9c2c7;
-  border: 0;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.1);
-  cursor: pointer;
-  transition: background-color 140ms ease, color 140ms ease;
-}
-
-.hud-surface .record-search__clear:hover { color: #eef3ea; background: rgba(255, 255, 255, 0.2); }
-.hud-surface .record-search__clear:focus-visible { outline: 2px solid rgba(255, 244, 214, 0.75); outline-offset: 1px; }
-
-/* The retry beside the failure it belongs to, instead of a page-level reload. */
-.hud-surface .record-retry {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  margin-top: 7px;
-  padding: 3px 8px;
-  color: #f3d678;
-  font-family: inherit;
-  font-size: 9px;
-  font-weight: 650;
-  border: 1px solid rgba(243, 214, 120, 0.45);
-  border-radius: 10px 12px 9px 11px;
-  background: rgba(243, 214, 120, 0.1);
-  cursor: pointer;
-  transition: background-color 140ms ease;
-}
-
-.hud-surface .record-retry:hover { background: rgba(243, 214, 120, 0.2); }
-.hud-surface .record-retry:focus-visible { outline: 2px solid rgba(255, 244, 214, 0.75); outline-offset: 2px; }
-
-.hud-surface .record-alert {
-  margin: 0 0 8px;
-  padding: 7px 9px;
-  color: #ffd9c6;
-  font-size: 9px;
-  line-height: 1.5;
-  border-radius: 12px 14px 11px 13px;
-  background: rgba(169, 83, 62, 0.32);
-}
-
-.hud-surface .record-chips button.is-family { color: #49372a; background: var(--hud-sky); }
-
-.hud-surface .diary-entry__detail { display: block; margin-top: 5px; padding-top: 5px; border-top: 1px dashed rgba(205, 228, 230, 0.22); }
-.hud-surface .diary-entry__detail small { margin-top: 2px; color: #b9ced2; }
-
-/* Three switches, each a real toggle: 未设定 is a state the server allows, so it
-   is drawn as its own state rather than being silently read as "off". */
-.hud-surface .record-switches { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; margin-top: 8px; }
-
-.hud-surface .record-switches button {
-  display: grid;
-  gap: 2px;
-  justify-items: center;
-  padding: 7px 5px;
-  color: #c2d6d9;
-  font-family: inherit;
-  font-size: 9px;
-  border: 1px solid rgba(205, 228, 230, 0.2);
-  border-radius: 12px 14px 11px 13px;
-  background: rgba(255, 255, 255, 0.06);
-  cursor: pointer;
-  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
-}
-
-.hud-surface .record-switches button i {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.2);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3);
-}
-
-.hud-surface .record-switches button small { color: inherit; opacity: 0.8; font-size: 8.5px; }
-.hud-surface .record-switches button.is-on { color: #49372a; border-color: transparent; background: var(--hud-mint); }
-.hud-surface .record-switches button.is-on i { background: #556c55; box-shadow: none; }
-.hud-surface .record-switches button.is-off { color: #d7b7ad; border-color: rgba(169, 83, 62, 0.45); background: rgba(169, 83, 62, 0.18); }
-.hud-surface .record-switches button.is-off i { background: var(--hud-red); box-shadow: none; }
-.hud-surface .record-switches button:hover { border-color: rgba(255, 244, 214, 0.5); }
-.hud-surface .record-switches button:disabled { opacity: 0.55; cursor: default; }
-.hud-surface .record-switches button:focus-visible { outline: 2px solid rgba(255, 244, 214, 0.75); outline-offset: 2px; }
-
-/* 日期条是一条日历：一行、按时间序、箭头收在两端。换行会把 7 天折成两三排、
-   让「后一天」孤悬在末行尾，所以放不下时横向滚动 —— 键盘聚焦时浏览器会把
-   离屏的日期滚进视野。两侧的负 margin 抵消内边距，焦点环不进滚动裁剪区。 */
-.hud-surface .diary-days {
-  display: flex;
-  flex-wrap: nowrap;
-  align-items: center;
-  gap: 3px;
-  margin: 0 -2px 7px;
-  padding: 2px;
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-  scrollbar-width: none;
-}
-
-.hud-surface .diary-days::-webkit-scrollbar { display: none; }
-
-.hud-surface .diary-days button {
-  flex: none;
-  padding: 3px 6px;
-  color: #a9c2c7;
-  font-family: inherit;
-  font-size: 9px;
-  font-weight: 600;
-  border: 0;
-  border-radius: 10px 12px 9px 11px;
-  background: rgba(255, 255, 255, 0.07);
-  cursor: pointer;
-  transition: background-color 140ms ease, color 140ms ease;
-}
-
-.hud-surface .diary-days button:hover { background: rgba(255, 255, 255, 0.15); }
-.hud-surface .diary-days button.is-on { color: #49372a; background: var(--hud-butter); }
-.hud-surface .diary-days button.is-away { box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.35) inset; }
-.hud-surface .diary-days button:disabled { opacity: 0.4; cursor: default; }
-.hud-surface .diary-days button:focus-visible { outline: 2px solid rgba(255, 244, 214, 0.75); outline-offset: 2px; }
-.hud-surface .diary-days__reset { color: #f3d678; background: none; text-decoration: underline; text-underline-offset: 2px; }
-
-.hud-surface .persona-presets { display: grid; gap: 6px; }
-
-.hud-surface .persona-presets button {
-  display: block;
-  width: 100%;
-  padding: 9px 10px;
-  color: #eef3ea;
-  font-family: inherit;
+  min-height: 0;
+  padding: 10px 11px;
   text-align: left;
-  border: 1px solid rgba(205, 228, 230, 0.18);
-  border-radius: 14px 17px 13px 16px;
-  background: rgba(255, 255, 255, 0.06);
-  cursor: pointer;
-  transition: background-color 140ms ease, border-color 140ms ease;
 }
+.hud-surface .companion-record-list > button.is-selected { border-color: rgba(40,118,135,0.7); background: rgba(219, 240, 240, 0.72); }
+.hud-surface .companion-record-list > button > span { display: flex; justify-content: space-between; gap: 8px; color: var(--companion-soft); font-size: 11px; }
+.hud-surface .companion-record-list > button i { font-style: normal; }
+.hud-surface .companion-record-list > button > strong { font-size: 11px; line-height: 1.55; }
+.hud-surface .companion-record-list > button > small { color: var(--companion-soft); font-size: 11px; }
 
-.hud-surface .persona-presets button:hover:not(:disabled) { background: rgba(255, 255, 255, 0.13); }
-.hud-surface .persona-presets button.is-on { border-color: rgba(243, 214, 120, 0.6); background: rgba(243, 214, 120, 0.16); }
-.hud-surface .persona-presets button:disabled { opacity: 0.6; cursor: default; }
-.hud-surface .persona-presets button:focus-visible { outline: 2px solid rgba(255, 244, 214, 0.75); outline-offset: 2px; }
-.hud-surface .persona-presets button small:last-child { color: #f3d678; }
+.hud-surface .companion-section-state { display: grid; place-content: center; justify-items: start; gap: 7px; min-height: 112px; color: var(--companion-soft); }
+.hud-surface .companion-section-state strong { color: inherit; font-size: 12px; }
+.hud-surface .companion-section-state span { max-width: 56ch; font-size: 11px; line-height: 1.55; }
+.hud-surface .companion-section-state button { display: inline-flex; align-items: center; gap: 6px; }
+.hud-surface .companion-error { margin: 0; border-radius: 10px; padding: 8px 10px; background: rgba(162,68,52,0.1); color: #8a3024; font-size: 11px; line-height: 1.5; }
+.hud-surface .companion-notice { margin: 0; border-radius: 10px; padding: 8px 10px; background: rgba(40,118,135,0.1); color: #245260; font-size: 11px; line-height: 1.5; }
 
-.hud-surface .persona-reset { display: flex; gap: 5px; margin-top: 10px; }
-
-.hud-surface .persona-reset button {
-  display: inline-flex;
+.hud-surface .companion-search-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 5px;
-  padding: 4px 9px;
-  color: #c2d6d9;
-  font-family: inherit;
-  font-size: 9px;
-  font-weight: 650;
-  border: 1px solid rgba(205, 228, 230, 0.24);
-  border-radius: 11px 13px 10px 12px;
-  background: rgba(255, 255, 255, 0.06);
-  cursor: pointer;
-  transition: background-color 140ms ease, color 140ms ease;
+  gap: 7px;
+}
+.hud-surface .companion-search-row input { width: 100%; }
+.hud-surface .companion-load-more { justify-self: center; }
+.hud-surface .companion-history { display: grid; gap: 8px; }
+.hud-surface .companion-history article { display: grid; gap: 5px; max-width: 94%; border-radius: 12px; padding: 10px 11px; background: rgba(255,255,255,0.62); }
+.hud-surface .companion-history article.is-user { justify-self: end; background: rgba(204, 230, 228, 0.7); }
+.hud-surface .companion-history article > span { display: flex; justify-content: space-between; gap: 10px; color: var(--companion-soft); font-size: 11px; }
+.hud-surface .companion-history article p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; line-height: 1.6; }
+.hud-surface .companion-history article small { color: #8a4939; font-size: 11px; }
+
+.hud-surface .companion-activity-card { grid-template-columns: auto minmax(0, 1fr); align-items: start; }
+.hud-surface .companion-activity-card > button,
+.hud-surface .companion-activity-card > .companion-action-row { grid-column: 1 / -1; justify-self: start; }
+.hud-surface .companion-activity-card p { margin: 4px 0 0; color: var(--companion-soft); font-size: 11px; line-height: 1.55; }
+.hud-surface .companion-activity-feed { display: grid; gap: 8px; }
+.hud-surface .companion-activity-feed h4 { margin: 2px 0 0; font: 650 13px/1.35 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .companion-delivery-card { display: grid; gap: 8px; border: 1px solid var(--companion-line); border-radius: 11px; padding: 10px; background: rgba(255,255,255,0.5); }
+.hud-surface .companion-delivery-card > div:first-child { display: grid; gap: 4px; }
+.hud-surface .companion-delivery-card small { color: var(--companion-soft); font-size: 11px; }
+.hud-surface .companion-delivery-card.is-acted,
+.hud-surface .companion-delivery-card.is-dismissed { opacity: 0.72; }
+.hud-surface .companion-date-nav { justify-content: space-between; }
+.hud-surface .companion-date-nav button { display: inline-flex; align-items: center; gap: 4px; }
+.hud-surface .companion-day-strip { display: grid; grid-template-columns: repeat(5, 1fr); }
+.hud-surface .companion-day-strip button.is-active { background: #294b50; color: #fff; }
+.hud-surface .companion-diary-entry dl,
+.hud-surface .companion-diagnostics { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 6px; margin: 0; }
+.hud-surface .companion-diary-entry dl div,
+.hud-surface .companion-diagnostics div { display: flex; justify-content: space-between; gap: 8px; border-radius: 8px; padding: 6px 8px; background: rgba(255,255,255,0.5); font-size: 11px; }
+.hud-surface .companion-diary-entry dt,
+.hud-surface .companion-diary-entry dd,
+.hud-surface .companion-diagnostics dt,
+.hud-surface .companion-diagnostics dd { margin: 0; }
+
+.hud-surface .companion-persona-groups > section { display: grid; gap: 9px; padding-bottom: 15px; border-bottom: 1px solid var(--companion-line); }
+.hud-surface .companion-persona-groups > section:last-child { border-bottom: 0; }
+.hud-surface .companion-choice-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 7px; }
+.hud-surface .companion-choice-grid button { display: grid; gap: 5px; text-align: left; }
+.hud-surface .companion-choice-grid button span { color: var(--companion-soft); font-size: 11px; line-height: 1.45; }
+.hud-surface .companion-choice-grid button.is-selected,
+.hud-surface .companion-segmented button.is-selected { border-color: rgba(40,118,135,0.65); background: rgba(204,230,228,0.7); }
+.hud-surface .companion-segmented { display: grid; grid-template-columns: repeat(3, 1fr); }
+.hud-surface .companion-boundaries,
+.hud-surface .companion-data-actions { display: grid; gap: 7px; }
+.hud-surface .companion-boundaries > button,
+.hud-surface .companion-data-actions > button,
+.hud-surface .companion-danger-action { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 9px; text-align: left; }
+.hud-surface .companion-boundaries > button span,
+.hud-surface .companion-data-actions > button span,
+.hud-surface .companion-danger-action > span { display: grid; gap: 3px; }
+.hud-surface .companion-boundaries small,
+.hud-surface .companion-data-actions small,
+.hud-surface .companion-danger-action small { color: var(--companion-soft); font-size: 11px; line-height: 1.45; }
+.hud-surface .companion-boundaries i { min-width: 28px; border-radius: 999px; padding: 4px 7px; background: rgba(0,0,0,0.06); text-align: center; font-style: normal; font-size: 11px; }
+.hud-surface .companion-boundaries button[aria-checked="true"] i { background: #294b50; color: #fff; }
+.hud-surface .companion-danger-action { border-radius: 10px; padding: 9px 10px; background: rgba(162,68,52,0.07); }
+.hud-surface .companion-danger-action > div { display: flex; flex-wrap: wrap; gap: 5px; }
+.hud-surface .companion-conflict-group { display: grid; gap: 6px; border: 1px solid rgba(190,134,62,0.25); border-radius: 10px; padding: 9px; background: rgba(255,241,205,0.38); }
+.hud-surface .companion-conflict-group > strong { color: #76531f; font-size: 11px; }
+.hud-surface .companion-conflict-group > button { display: flex; min-height: 38px; align-items: center; justify-content: space-between; gap: 9px; text-align: left; }
+.hud-surface .companion-conflict-group > button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.hud-surface .companion-conflict-group > button small { flex: 0 0 auto; color: #287687; }
+
+.hud-surface .companion-map {
+  --color-text: #fff3df;
+  --color-evidence: #79cedc;
+  --color-warning: #e9c66f;
+  --color-highlight: #ffe4a3;
+  --color-running: #8fc7a7;
+  --color-danger: #df7657;
+  --color-success: #9fc28a;
+  --color-text-tertiary: #a89782;
+  --color-focus-ring: #83d8e7;
+  --universe-void-deep: #081827;
+  --universe-surface: rgba(13,35,49,0.94);
+  --universe-surface-raised: #163348;
+  --universe-ink: #fff3df;
+  --universe-muted: rgba(214,235,235,0.88);
+  --universe-faint: rgba(190,216,220,0.76);
+  --universe-line: rgba(121,206,220,0.2);
+  --universe-line-strong: rgba(121,206,220,0.38);
+  --universe-shadow: rgba(2,8,14,0.62);
+  --universe-envelope-a: rgba(121,206,220,0.19);
+  --universe-envelope-b: rgba(233,198,111,0.1);
+  --universe-label: #fff3df;
+  --universe-label-muted: rgba(214,235,235,0.88);
+  --universe-label-backdrop: rgba(8,24,39,0.96);
+  --universe-edge: rgba(121,206,220,0.78);
+  --universe-edge-glow: #79cedc;
+  --universe-source: #e9c66f;
+  --universe-note: #8fc7a7;
+  --universe-card: #ffe4a3;
+  --universe-key-point: #79cedc;
+  --universe-orbit: rgba(121,206,220,0.34);
+  --universe-evidence-track: rgba(121,206,220,0.2);
+  --universe-selected: #ffe4a3;
+  --universe-state-active: #79cedc;
+  --universe-state-pinned: #ffe4a3;
+  --universe-state-candidate: #a89782;
+  --universe-state-linked: #8fc7a7;
+  --universe-state-orphaned: #df7657;
+  --universe-shell-right: 12px;
+  --universe-bar-bottom: 12px;
+  --universe-motion-feedback: 120ms;
+  --universe-motion-panel: 180ms;
+  --ease-standard: cubic-bezier(.22,1,.36,1);
+  position: relative;
+  display: grid;
+  grid-template-rows: auto auto minmax(0,1fr);
+  overflow: hidden;
+  background: rgba(7,24,39,0.93);
+  color: #fff3df;
 }
 
-.hud-surface .persona-reset button:hover:not(:disabled) { background: rgba(255, 255, 255, 0.15); }
-.hud-surface .persona-reset button.danger { color: #ffd9c6; border-color: rgba(169, 83, 62, 0.5); background: rgba(169, 83, 62, 0.24); }
-.hud-surface .persona-reset button:disabled { opacity: 0.55; cursor: default; }
-.hud-surface .persona-reset button:focus-visible { outline: 2px solid rgba(255, 244, 214, 0.75); outline-offset: 2px; }
+.hud-surface .companion-map__header { z-index: 24; padding: 14px 16px 8px; }
+.hud-surface .companion-map__header h2 { font-size: 18px; }
+.hud-surface .companion-map__header p { color: rgba(214,235,235,0.78); }
+.hud-surface .companion-map__header > span { flex: 0 0 auto; margin-top: 3px; color: rgba(214,235,235,0.82); font-size: 11px; }
+.hud-surface .companion-map__filters { z-index: 24; flex-wrap: nowrap; padding: 0 14px 10px; }
+.hud-surface .companion-map__filters label { display: grid; grid-template-columns: auto minmax(0,1fr) auto; flex: 1 1 220px; min-width: 150px; align-items: center; gap: 6px; border: 1px solid var(--universe-line); border-radius: 9px; padding: 0 8px; background: rgba(8,24,39,0.78); }
+.hud-surface .companion-map__filters label input { width: 100%; border: 0; padding-inline: 0; background: transparent; color: #fff3df; }
+.hud-surface .companion-map__filters label input:focus-visible { outline: 0; }
+.hud-surface .companion-map__filters label button { min-width: 32px; border: 0; padding: 0; background: transparent; color: #fff3df; }
+.hud-surface .companion-map__filters select { min-width: 92px; border-color: var(--universe-line); background: #163348; color: #fff3df; }
+.hud-surface .companion-map__canvas { position: relative; min-height: 0; overflow: hidden; }
+.hud-surface .companion-map__canvas .universe-canvas-root { position: absolute; inset: 0; }
+.hud-surface .companion-map__canvas .companion-section-state { height: 100%; place-items: center; text-align: center; color: rgba(214,235,235,0.82); }
+.hud-surface .companion-map .universe-canvas-controls { right: 12px; bottom: 12px; }
+.hud-surface .companion-map .universe-canvas-control { min-height: 44px; border-radius: 0; padding: 0; color: #fff3df; }
+.hud-surface .companion-map__legend { position: absolute; z-index: 25; bottom: 14px; left: 14px; display: flex; flex-wrap: wrap; max-width: calc(100% - 250px); gap: 8px 12px; border-radius: 10px; padding: 7px 9px; background: rgba(8,24,39,0.84); color: rgba(214,235,235,0.88); font-size: 11px; }
+.hud-surface .companion-map__legend span { display: inline-flex; align-items: center; gap: 5px; }
+.hud-surface .companion-map__legend i { width: 8px; height: 8px; border-radius: 50%; background: #79cedc; }
+.hud-surface .companion-map__legend .is-pinned i { background: #ffe4a3; }
+.hud-surface .companion-map__legend .is-entity i { background: #8fc7a7; }
+.hud-surface .companion-map__legend .is-orphan i { border: 1px dashed #df7657; background: transparent; }
+.hud-surface .companion-map__index { position: absolute; z-index: 22; top: 102px; right: 12px; display: grid; gap: 4px; width: min(188px, 28%); max-height: calc(100% - 180px); overflow: auto; padding: 5px; border-radius: 10px; background: rgba(8,24,39,0.74); scrollbar-width: thin; }
+.hud-surface .companion-map__index button { display: grid; grid-template-columns: auto minmax(0,1fr); min-height: 32px; align-items: center; gap: 6px; border-color: transparent; padding: 5px 7px; background: transparent; color: rgba(214,235,235,0.82); text-align: left; }
+.hud-surface .companion-map__index button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hud-surface .companion-map__index button[aria-selected="true"] { border-color: rgba(255,228,163,0.48); background: rgba(255,228,163,0.12); color: #fff3df; }
+.hud-surface .companion-map__selection { position: absolute; z-index: 26; right: 14px; bottom: 66px; display: flex; max-width: min(360px, calc(100% - 28px)); align-items: center; gap: 12px; border: 1px solid var(--universe-line); border-radius: 12px; padding: 10px 11px; background: rgba(13,35,49,0.96); box-shadow: 0 12px 30px rgba(0,0,0,0.34); }
+.hud-surface .companion-map__selection > div { display: grid; flex: 1 1 auto; min-width: 0; gap: 3px; }
+.hud-surface .companion-map__selection strong,
+.hud-surface .companion-map__selection span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hud-surface .companion-map__selection span { color: rgba(214,235,235,0.76); font-size: 11px; }
+.hud-surface .companion-map__selection button { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; border-color: var(--universe-line-strong); background: #245260; color: #fff; }
+
+@media (max-width: 940px) {
+  .hud-surface .companion-center { grid-template-columns: 280px minmax(0, 1fr); gap: 8px; }
+  .hud-surface .companion-workbench__header p,
+  .hud-surface .companion-map__header p { display: none; }
+  .hud-surface .companion-map__filters select:nth-of-type(1) { display: none; }
+  .hud-surface .companion-map__index { width: 146px; }
+}
 
 @media (max-width: 760px) {
-  .hud-surface .record-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .hud-surface .memory-field .memory-focus { width: 142px; gap: 3px; padding: 8px 9px; }
-  .hud-surface .memory-focus__kicker { font-size: 5px; }
-  .hud-surface .memory-focus__meta,
-  .hud-surface .memory-focus__links,
-  .hud-surface .memory-focus__hint { font-size: 5px; }
-  .hud-surface .memory-focus__actions button { min-height: 16px; padding: 0 5px; font-size: 5px; border-width: 1px; }
-  .hud-surface .memory-legend,
-  .hud-surface .memory-bands { gap: 1px; padding: 2px 4px; font-size: 5px; }
-  .hud-surface .memory-legend button,
-  .hud-surface .memory-bands button { gap: 2px; padding: 2px 4px; }
-  .hud-surface .memory-legend i { width: 5px; height: 5px; }
-  .hud-surface .memory-field__foot { font-size: 5px; bottom: 16px; }
-  .hud-surface .memory-field .star-node { font-size: 5px; }
-  .hud-surface .memory-field .star-node span { width: 56px; margin-top: 4px; }
-  .hud-surface .memory-field .star-node.caption-above span { margin-bottom: 4px; }
-  .hud-surface .memory-field .star-node i { width: 6px; height: 6px; }
-  .hud-surface .record-empty { font-size: 5.5px; padding: 6px; }
-  .hud-surface .record-empty b { font-size: 7px; }
-  .hud-surface .record-foot { font-size: 5px; }
-  .hud-surface .record-heading { font-size: 6px; margin-top: 9px; }
-  .hud-surface .record-chips button,
-  .hud-surface .record-retry,
-  .hud-surface .diary-days button { font-size: 5px; padding: 2px 4px; }
-  .hud-surface .record-search { padding: 3px 5px; }
-  .hud-surface .record-search input { font-size: 5.5px; }
-  .hud-surface .record-switches button { font-size: 5px; padding: 4px 3px; }
-  .hud-surface .record-switches button small,
-  .hud-surface .diary-entry__detail small { font-size: 4.5px; }
-  .hud-surface .record-facts b { font-size: 8px; }
-  .hud-surface .record-facts small { font-size: 5px; }
-  .hud-surface .record-tags span { font-size: 5px; }
-  .hud-surface .record-quote { font-size: 6px; }
-  .hud-surface .diary-entry__top time { font-size: 5px; }
-  .hud-surface .persona-presets button { padding: 5px; }
-  .hud-surface .persona-presets button small:last-child,
-  .hud-surface .persona-reset button { font-size: 5px; }
+  .hud-surface .companion-center { grid-template-columns: 238px minmax(0, 1fr); gap: 6px; }
+  .hud-surface .companion-workbench,
+  .hud-surface .companion-map { border-radius: 11px; }
+  .hud-surface .companion-workbench__header { padding: 9px 10px 7px; }
+  .hud-surface .companion-workbench__header h2 { font-size: 16px; }
+  .hud-surface .companion-tabs { gap: 1px; padding: 0 7px 6px; }
+  .hud-surface .companion-tabs button { min-height: 32px; padding: 4px 2px; font-size: 11px; }
+  .hud-surface .companion-tab-panel { padding: 8px; }
+  .hud-surface .companion-panel-stack { gap: 8px; }
+  .hud-surface .companion-panel-heading { display: grid; }
+  .hud-surface .companion-heading-actions { justify-content: flex-start; }
+  .hud-surface .companion-panel-heading p,
+  .hud-surface .companion-persona-groups section > p { display: none; }
+  .hud-surface .companion-panel-heading h3,
+  .hud-surface .companion-persona-groups h3 { font-size: 13px; }
+  .hud-surface .companion-choice-grid { grid-template-columns: 1fr; }
+  .hud-surface .companion-map__header { padding: 8px 9px 5px; }
+  .hud-surface .companion-map__header h2 { font-size: 13px; }
+  .hud-surface .companion-map__header > span { font-size: 11px; }
+  .hud-surface .companion-map__filters { padding: 0 8px 6px; }
+  .hud-surface .companion-map__filters select { display: none; }
+  .hud-surface .companion-map__index { top: 72px; right: 7px; width: 112px; max-height: calc(100% - 144px); }
+  .hud-surface .companion-map__legend { bottom: 8px; left: 8px; max-width: calc(100% - 144px); gap: 4px 7px; padding: 5px 7px; font-size: 11px; }
+  .hud-surface .companion-map .universe-canvas-controls { right: 7px; bottom: 7px; }
+  .hud-surface .companion-map .universe-canvas-control { width: 34px; height: 34px; min-height: 34px; }
+  .hud-surface .companion-map .universe-canvas-control-label { width: 44px; font-size: 11px; }
+  .hud-surface .companion-map__selection { right: 7px; bottom: 48px; max-width: calc(100% - 14px); padding: 7px 8px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .hud-surface .memory-field .star-node i,
-  .hud-surface .memory-field .star-node span,
-  .hud-surface .memory-focus__actions button,
-  .hud-surface .memory-legend button,
-  .hud-surface .memory-bands button,
-  .hud-surface .record-switches button,
-  .hud-surface .record-chips button,
-  .hud-surface .diary-days button,
-  .hud-surface .persona-presets button,
-  .hud-surface .persona-reset button,
-  .hud-surface .record-retry,
-  .hud-surface .record-search__clear,
-  .hud-surface button.diary-entry { transition: none; }
-  .hud-surface .memory-field .star-node:hover i { transform: none; }
+  .hud-surface .companion-center button { transition-duration: 0.01ms; }
+  .hud-surface .companion-center button:hover { transform: none; }
 }
 
 /* ---------------------------------------------------------------------------

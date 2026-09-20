@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { CompanionVoiceSpeakSegmentRequestV2 } from "@ailearn/shared/companion-voice-contracts";
 import {
+  beginCompanionSpeechLine,
   resetCompanionVoicePlayback,
   setCompanionVoiceHost,
   speakCompanionLine,
@@ -38,6 +40,11 @@ class FakeHost implements CompanionVoiceHost {
     this.synthesized.push(text);
     if (this.failFor.has(text)) return Promise.reject(new Error("合成失败"));
     return Promise.resolve(buffer(text));
+  }
+
+  /** 严格片段通道：测试里以 segmentId 为键，与 synthesize 共用失败表。 */
+  synthesizeSegment(ref: CompanionVoiceSpeakSegmentRequestV2): Promise<AudioBuffer> {
+    return this.synthesize(ref.segmentId);
   }
 
   play(value: AudioBuffer, onProgress: (fraction: number) => void): Promise<void> {
@@ -189,7 +196,9 @@ describe("speakCompanionLine", () => {
     expect(host.synthesized.filter((text) => text === THREE_LINE.slice(61, 122))).toHaveLength(2);
   });
 
-  it("reports a failure the bubble can fall back from", async () => {
+  it("skips a segment whose synthesis keeps failing instead of killing the line", async () => {
+    // 2026-09-19 语义变更：单段合成反复失败曾把整轮语音判死（用户实测
+    // "只读第一句甚至前几个字"）。现在失败段跳过，后面的段照常念。
     const host = new FakeHost();
     host.failFor.add(THREE_LINE.slice(0, 61));
     setCompanionVoiceHost(host);
@@ -197,11 +206,14 @@ describe("speakCompanionLine", () => {
 
     speakCompanionLine(THREE_LINE);
     await flush();
+    host.finishSegment();
+    await flush();
+    host.finishSegment();
+    await flush();
 
-    const failure = events.at(-1);
-    expect(failure?.phase).toBe("failed");
-    expect(failure?.failure).toBeTruthy();
-    expect(host.played).toEqual([]);
+    expect(events.filter((event) => event.phase === "failed")).toHaveLength(0);
+    expect(events.at(-1)).toMatchObject({ phase: "finished" });
+    expect(host.played).toEqual([THREE_LINE.slice(61, 122), THREE_LINE.slice(122)]);
   });
 
   it("stays silent (and leaves timing to the caller) when the host cannot be heard", () => {
@@ -265,5 +277,98 @@ describe("speakCompanionLine", () => {
 
     expect(events.at(-1)?.phase).toBe("stopped");
     expect(() => stopCompanionSpeech()).not.toThrow();
+  });
+});
+
+describe("beginCompanionSpeechLine", () => {
+  it("keeps queueing later sentences when the caller feeds deltas (regression: only the first sentence was spoken)", async () => {
+    const host = new FakeHost();
+    setCompanionVoiceHost(host);
+    const events = collect();
+
+    const session = beginCompanionSpeechLine();
+    expect(session.mode).toBe("voice");
+
+    // 流式路径喂的是**增量**（每一拍新到的文本）——2026-09-19 之前增量被直接交给
+    // 按累积下标工作的切段器，第二拍起切出空串，第一句之后再也没声音。
+    session.feed("第一句。");
+    await flush();
+    expect(host.played).toEqual(["第一句。"]);
+
+    session.feed("第二句。");
+    session.feed("第三句。");
+    session.finish("");
+    await flush();
+
+    host.finishSegment();
+    await flush();
+    host.finishSegment();
+    await flush();
+    host.finishSegment();
+    await flush();
+
+    expect(host.synthesized).toEqual(["第一句。", "第二句。", "第三句。"]);
+    expect(events.at(-1)).toMatchObject({ phase: "finished", planId: session.planId, visibleChars: 12 });
+  });
+
+  it("forces the pending tail into a segment on finish so nothing is dropped", async () => {
+    const host = new FakeHost();
+    setCompanionVoiceHost(host);
+    const events = collect();
+
+    const session = beginCompanionSpeechLine();
+    session.feed("第一句。");
+    await flush();
+    host.finishSegment();
+    await flush();
+    session.finish("尾巴没有句号");
+    await flush();
+    host.finishSegment();
+    await flush();
+
+    expect(host.synthesized).toEqual(["第一句。", "尾巴没有句号"]);
+    expect(events.at(-1)).toMatchObject({ phase: "finished", planId: session.planId });
+  });
+
+  it("ignores empty feeds instead of corrupting the accumulation", async () => {
+    const host = new FakeHost();
+    setCompanionVoiceHost(host);
+    const events = collect();
+
+    const session = beginCompanionSpeechLine();
+    session.feed("");
+    session.feed("只有一句。");
+    session.finish("");
+    await flush();
+    host.finishSegment();
+    await flush();
+
+    expect(host.synthesized).toEqual(["只有一句。"]);
+    expect(events.at(-1)).toMatchObject({ phase: "finished" });
+  });
+
+  it("keeps speaking later sentences when one queued segment fails to synthesize", async () => {
+    // 排队路径同一条语义：中间一段合成反复失败 → 跳过它，第三句照常念，
+    // 整轮正常收尾（不再"第一句之后全队沉默"）。
+    const host = new FakeHost();
+    host.failFor.add("第二句。");
+    setCompanionVoiceHost(host);
+    const events = collect();
+
+    const session = beginCompanionSpeechLine();
+    session.feed("第一句。");
+    await flush();
+    session.feed("第二句。");
+    session.feed("第三句。");
+    session.finish("");
+    await flush();
+
+    host.finishSegment();
+    await flush();
+    host.finishSegment();
+    await flush();
+
+    expect(host.played).toEqual(["第一句。", "第三句。"]);
+    expect(events.at(-1)).toMatchObject({ phase: "finished", planId: session.planId });
   });
 });

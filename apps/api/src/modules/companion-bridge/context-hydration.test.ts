@@ -14,8 +14,9 @@ import type { MainPageContextInputV2 } from "@ailearn/shared";
 const uuid = () => crypto.randomUUID();
 
 function makeInput(): MainPageContextInputV2 {
+  const objectiveId = uuid();
   return {
-    routeRef: { kind: "card", cardId: uuid() },
+    routeRef: { kind: "card", cardId: uuid(), objectiveId },
     pageKind: "card",
     entityRefs: [{ kind: "card", cardId: uuid() }, { kind: "key_point", keyPointId: uuid() }],
     interactionState: "idle",

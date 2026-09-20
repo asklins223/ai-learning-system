@@ -29,6 +29,9 @@ importers:
       '@fastify/websocket':
         specifier: ^11.3.0
         version: 11.3.0
+      '@smithy/node-http-handler':
+        specifier: ^4.9.7
+        version: 4.11.3
       '@types/ws':
         specifier: ^8.18.1
         version: 8.18.1

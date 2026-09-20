@@ -15,7 +15,7 @@
  */
 
 import { sql } from "drizzle-orm";
-import { readJobPayloadString } from "@ailearn/shared";
+import { readCompanionThoughtJobPayload } from "@ailearn/shared";
 import { logger } from "../lib/logger.ts";
 import { assertJobLease, withJobTransaction } from "../lib/job-lease.ts";
 import { createEmbeddingProvider } from "../lib/ai-provider.ts";
@@ -362,8 +362,7 @@ interface MaterialRow extends Record<string, unknown> {
 }
 
 export async function runCompanionThought(job: JobPayload): Promise<void> {
-  const userId = readJobPayloadString(job.payload, "userId");
-  if (!userId) throw new Error("companion_thought payload 缺 userId");
+  const { userId } = readCompanionThoughtJobPayload(job.payload);
   await assertJobLease(job);
 
   // ── 阶段 1：素材收集（独立 RLS 事务） ────────────────────────────────

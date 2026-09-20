@@ -745,6 +745,7 @@ export function DesktopAccessGate({
   const [passwordVisible, setPasswordVisible] = useState(false);
   const [keepSignedIn, setKeepSignedIn] = useState(true);
   const [credentialPersistence, setCredentialPersistence] = useState<"safe_storage" | "memory">("memory");
+  const [authSurfaceHelp, setAuthSurfaceHelp] = useState<string | null>(null);
   const [roomRevealed, setRoomRevealed] = useState(false);
   const [scenePreference, setScenePreference] = useState<AuthScenePreference>("system");
   const [systemNow, setSystemNow] = useState(() => new Date());
@@ -794,6 +795,22 @@ export function DesktopAccessGate({
       if (interval !== undefined) window.clearInterval(interval);
     };
   }, [scenePreference]);
+
+  useEffect(() => {
+    if (view.phase !== "auth") return;
+    const api = desktopApi();
+    if (!api) return;
+    let cancelled = false;
+    void api.auth.getSurfaceManifest({ meta: createRequestMeta() }).then((response) => {
+      if (cancelled || !response.ok || response.data.testMode) return;
+      const targetId = `${view.mode}:static_help`;
+      const entry = response.data.manifest.surfaces.find((surface) => surface.surfaceId === targetId);
+      setAuthSurfaceHelp(entry?.textContent || null);
+    }).catch(() => {
+      if (!cancelled) setAuthSurfaceHelp(null);
+    });
+    return () => { cancelled = true; };
+  }, [view.phase, view.phase === "auth" ? view.mode : null]);
 
   const beginRoomReveal = useCallback(() => {
     // The gate owns a distinct window-side alcove, so entering the Room is a
@@ -1392,9 +1409,9 @@ export function DesktopAccessGate({
           <p className="desktop-access-gate__trust-note">
             <ShieldCheck size={16} aria-hidden="true" />
             <span>
-              {credentialPersistence === "safe_storage"
+              {authSurfaceHelp ?? (credentialPersistence === "safe_storage"
                 ? "登录凭据由系统钥匙串加密保存，密码本身不会写入磁盘。"
-                : "密码会安全提交；这台设备无法加密保存登录状态，关闭应用后需要重新登录。"}
+                : "密码会安全提交；这台设备无法加密保存登录状态，关闭应用后需要重新登录。")}
             </span>
           </p>
           <button className="desktop-access-gate__primary" type="submit" disabled={formBusy}>

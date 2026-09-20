@@ -85,12 +85,21 @@ export async function insertStreamEvent(
 }
 
 export interface CompanionTtsSegmentEvent {
+  version: 2;
   segmentId: string;
   ordinal: number;
-  text: string;
-  textSha256: string;
-  /** 15b 二期：段级情感（段内最后一个控制类标签，无则省略）——live2d 协同预留 */
-  emotion?: string;
+  displayText: string;
+  displayStart: number;
+  displayEnd: number;
+  synthesisText: string;
+  synthesisTextSha256: string;
+  cue: {
+    version: 1;
+    intent: "think" | "explain" | "encourage" | "celebrate" | "uncertain" | "warn" | "sleep";
+    emotion: "neutral" | "happy" | "curious" | "concerned" | "surprised";
+    intensity: number;
+    durationMs?: number;
+  };
 }
 
 /**
@@ -145,11 +154,15 @@ export async function emitCompanionTtsSegments(args: {
             ${args.conversationId}, ${startSeq + j}, ${args.workspaceId}, ${args.userId},
             ${args.runId}, ${args.generation}, ${args.accountEpoch}, 'voice.segment.ready',
             ${JSON.stringify({
+              version: segment.version,
               segmentId: segment.segmentId,
               ordinal: segment.ordinal,
-              text: segment.text,
-              textSha256: segment.textSha256,
-              ...(segment.emotion ? { emotion: segment.emotion } : {}),
+              displayText: segment.displayText,
+              displayStart: segment.displayStart,
+              displayEnd: segment.displayEnd,
+              synthesisText: segment.synthesisText,
+              synthesisTextSha256: segment.synthesisTextSha256,
+              cue: segment.cue,
             })}, ${args.expiresAt}
           )`), sql`, `)}
         `);

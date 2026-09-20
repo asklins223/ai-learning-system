@@ -397,21 +397,21 @@ async function executeReadTool(
     }
     case "companion_open_card": {
       const cardId = String(args.cardId);
-      const exists = await withWorkerWorkspaceTransaction(
+      const card = await withWorkerWorkspaceTransaction(
         { workspaceId: event.ctx.workspaceId, userId: event.read.userId },
         async (tx) => {
-          const rows = await tx.execute(sql`
-            SELECT card_id FROM learning_cards_v2
+          const rows = await tx.execute<{ card_id: string; objective_id: string }>(sql`
+            SELECT card_id, objective_id FROM learning_cards_v2
             WHERE card_id = ${cardId}
               AND workspace_id = ${event.ctx.workspaceId}
               AND lifecycle = 'active'
             LIMIT 1
           `);
-          return rows.length > 0;
+          return rows[0] ?? null;
         },
       );
-      if (!exists) throw new CompanionToolError("card not found in current workspace");
-      const route = { kind: "card", cardId };
+      if (!card) throw new CompanionToolError("card not found in current workspace");
+      const route = { kind: "card", cardId, objectiveId: card.objective_id };
       return { value: { route }, route, safeSummary: "已定位到学习卡片" };
     }
     case "companion_open_review": {
@@ -448,7 +448,7 @@ async function executeReadTool(
       return { value: { route }, route, safeSummary: "已聚焦知识图谱节点" };
     }
     case "companion_open_history": {
-      const route = { kind: "conversation_history", conversationId: event.read.conversationId };
+      const route = { kind: "conversation" };
       return { value: { route }, route, safeSummary: "已定位到对话历史" };
     }
     default:
@@ -1042,7 +1042,7 @@ export async function loadContinuation(
  * 所以每一步都能流式。由此产生的新问题是"已经发出去的可能是开场白"——这一步
  * 最终是工具调用，正文在下一轮。处理方式不是撤回（已提交的前缀不可撤回），
  * 而是**让开场白成为回复的一部分**：agent loop 把每一步的 content 按顺序拼成
- * 最终正文（见 joinVisibleSegments），流式前缀天然是它的前缀，硬约束
+ * 最终正文（见 joinVisibleSegmentsDeduped），流式前缀天然是它的前缀，硬约束
  * （`reconcileStreamedText`）不需要放宽。这也正是通用 agent 的行为——模型
  * 调用工具之前说的话本来就是展示给用户的。
  *
@@ -1260,8 +1260,43 @@ const VISIBLE_SEGMENT_SEPARATOR = "\n\n";
  * 同理**不对分段做 trim**：trim 掉的字符在流式侧是发出去过的，两侧必须共用同一段原文，
  * 净化统一在出口（validateCompanionOutput / 交付管线的 sanitize）做。
  */
-function joinVisibleSegments(segments: readonly string[]): string {
-  return segments.filter((segment) => segment.length > 0).join(VISIBLE_SEGMENT_SEPARATOR);
+/**
+ * 分段拼接（去重版，2026-09-19 E 内容质量；④-b 的拼接不变量全部继承）。
+ *
+ * ④-b 原始口径（现在由去重版继续保证）：
+ * - 判据是 `segment.length > 0` 而**不是**"trim 后非空"：分段符与分段内容是
+ *   **先发后判**的（跑完那一步才知道它有没有吐字），所以只要这一步吐出过字符，
+ *   它的分段符就已经在下发原文里了——这里必须同口径保留，否则"下发原文"与
+ *   "最终正文"在分段边界上错位，`writeTail` 的 `fullText.startsWith(delivered)`
+ *   会失败，整轮被判 `stream_full_text_diverged`。
+ * - 同理**不对分段做 trim**：trim 掉的字符在流式侧是发出去过的，两侧必须共用
+ *   同一段原文，净化统一在出口（validateCompanionOutput / 交付管线的 sanitize）做。
+ *
+ * 在此之上只做一件事：丢弃**从未流式下发过**的分段里，与前面某个保留分段
+ * trim 后完全重复的那一条（模型复读：工具步说完结论、终答步原样再说一遍）。
+ * 已下发过的分段一律保留——它已经在客户端草稿里，删掉等于与最终正文分叉。
+ * 前缀不变量仍成立：下发按步顺序进行，被丢的段从未出现在下发原文里；保留段
+ * 的相对顺序与分段符与交付时一致，`startsWith(delivered)` 不受影响。
+ */
+function joinVisibleSegmentsDeduped(
+  segments: readonly string[],
+  delivered: readonly boolean[],
+): { text: string; dropped: string[] } {
+  const kept: string[] = [];
+  const keptKeys = new Set<string>();
+  const dropped: string[] = [];
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index];
+    if (segment.length === 0) continue;
+    const key = segment.trim();
+    if (key.length >= 8 && keptKeys.has(key) && !delivered[index]) {
+      dropped.push(segment);
+      continue;
+    }
+    if (key.length >= 8) keptKeys.add(key);
+    kept.push(segment);
+  }
+  return { text: kept.join(VISIBLE_SEGMENT_SEPARATOR), dropped };
 }
 
 /**
@@ -1290,6 +1325,13 @@ export async function runCompanionAgentLoop(args: {
   ctx: CompanionDialogueHandlerContext;
   read: ReadContext;
   provider: AIProvider;
+  /**
+   * 思考档 provider（2026-09-19 退化回复闸）。交互链路的主 provider 关思考省首字
+   * 延迟（withThinkingDisabled），但网关/模型退化窗口里会出现"一词答案 + finish=stop"
+   * 的退化回复，且它会进历史被后续轮次模仿（一词回复自我复制）。给出思考档备用
+   * provider 后，退化答案会被原样重跑一次取更长者；不给则跳过该闸。
+   */
+  thinkingProvider?: AIProvider;
   baseMessages: ChatMessage[];
   expiresAt: string;
   continuationProposalId?: string;
@@ -1418,6 +1460,18 @@ export async function runCompanionAgentLoop(args: {
    * 天然是最终正文的前缀，硬约束（reconcileStreamedText）无需放宽。
    */
   const visibleSegments: string[] = [];
+  /** 与 visibleSegments 一一对应：该段是否已经流式下发过（E 去重的安全性判据）。 */
+  const visibleSegmentDelivered: boolean[] = [];
+  /** 退化回复闸每轮至多触发一次（2026-09-19 深夜，tokenrhythm 退化窗口实测）。 */
+  let degenerateRetried = false;
+  /** 当前用户提问的长度（退化闸的触发条件之一：寒暄短消息不触发）。 */
+  const currentUserPromptLen = (() => {
+    for (let i = args.baseMessages.length - 1; i >= 0; i -= 1) {
+      const message = args.baseMessages[i];
+      if (message.role === "user" && typeof message.content === "string") return message.content.length;
+    }
+    return 0;
+  })();
   while (stepCount < budget.maxSteps) {
     if (args.ctx.signal.aborted) throw new Error("companion agent aborted");
     if (Date.now() >= deadlineAt) {
@@ -1471,8 +1525,16 @@ export async function runCompanionAgentLoop(args: {
       ].filter(Boolean).join("\n\n"),
       messages,
       tools: finalAnswerOnly ? [] : toolDefinitions,
-      maxTokens: 700,
-      temperature: 0.9,
+      // maxTokens / temperature 分步（2026-09-19 内容质量 B+C；同日深夜修正预算）：
+      // qwen3.8-flash 是**思考型模型**（tokenrhythm enableThinking=true）——reasoning
+      // 也计入 completion 预算。700 的工具步预算会被思考整段吃光：流式路径只有
+      // reasoning_content 帧、零正文 delta（stream_empty → 全量降级缓冲），缓冲路径
+      // 正文被砍成一两个词（20:00-20:29 实测"Agent"/"我是"）。预算提到 2000/4000，
+      // 给思考留出空间；截断重试（finishReason=length 翻倍重试）作为兜底继续生效。
+      // - 工具步 0.4：这一步是**决策**（调不调工具、抽什么参数），要稳；
+      //   终答是表达，保持 0.9。
+      maxTokens: finalAnswerOnly ? 4_000 : 2_000,
+      temperature: finalAnswerOnly ? 0.9 : 0.4,
     };
     const stepId = await persistStep(event, stepCount, skill?.id ?? null, auditHash(stepRequest));
     /** 本步是否已经下发过文本（重试判据，每步重置）。 */
@@ -1498,7 +1560,7 @@ export async function runCompanionAgentLoop(args: {
       if (canStreamThisStep) {
         // 每一步都走真实流式：增量实时交给交付管线（净化 + 校验 + 落库 + SSE 下发）。
         // 分段符与最终正文的拼接口径必须一致（非首段 "\n\n"），否则已下发前缀
-        // 与最终正文会分叉——见 joinVisibleSegments。
+        // 与最终正文会分叉——见 joinVisibleSegmentsDeduped。
         const attemptStream = (): Promise<AgentTurnResult> =>
           runStreamingAgentStep({
             provider: args.provider,
@@ -1585,7 +1647,79 @@ export async function runCompanionAgentLoop(args: {
       );
       throw error;
     }
-    const calls = result.toolCalls ?? [];
+    // B 兜底（2026-09-19 内容质量）：这一步被 maxTokens 砍断、且**一个字都没下发
+    // 过**时，翻倍预算原样重试一次——半截话不该是用户拿到的最终答复。已下发的
+    // （流式成功，stepEmitted=true）无法撤回，只能留痕（下方 finishReason 日志）。
+    // 注意：persistStep 记录的 auditHash 是首次请求的；重试只改 maxTokens、不改
+    // prompt 内容，差异靠这条日志与 finishReason 留痕追溯。
+    if (result.finishReason === "length" && !stepEmitted && Date.now() < deadlineAt) {
+      const retryMaxTokens = Math.min(stepRequest.maxTokens * 2, 4_000);
+      logger.warn(
+        { runId: args.read.runId, stepCount, maxTokens: stepRequest.maxTokens, retryMaxTokens },
+        "companion agent step truncated by maxTokens; retrying once with doubled budget",
+      );
+      try {
+        result = await runWithAbortBudget(
+          (signal) => args.provider.executeAgentTurn!(
+            { ...stepRequest, maxTokens: retryMaxTokens },
+            signal,
+          ),
+          args.ctx.signal,
+          Math.min(resolveProviderCallTimeout("companion_agent"), Math.max(1, deadlineAt - Date.now())),
+        );
+      } catch (retryError) {
+        logger.warn(
+          { err: retryError, stepCount },
+          "companion agent truncation retry failed; keeping the truncated result",
+        );
+      }
+    }
+    let calls = result.toolCalls ?? [];
+    // 退化回复闸（2026-09-19 深夜，tokenrhythm 退化窗口实测）：正文短得不正常、
+    // 本轮一个字都没下发过、模型也没要调工具、而用户的提问是句完整的话——
+    // 用思考档 provider 原样重跑这一步一次，取更长者。保守触发（用户消息短于
+    // 8 字的寒暄不触发；每轮至多一次）；思考档重跑若带回工具调用则弃用
+    // （那是要走工具循环的信号，不是能直接落库的正文）。
+    if (
+      args.thinkingProvider
+      && typeof args.thinkingProvider.executeAgentTurn === "function"
+      && !degenerateRetried
+      && calls.length === 0
+      && !stepEmitted
+      && Date.now() < deadlineAt
+      && currentUserPromptLen >= 8
+      && typeof result.content === "string"
+      && result.content.trim().length > 0
+      && result.content.trim().length < 6
+    ) {
+      degenerateRetried = true;
+      logger.warn(
+        { runId: args.read.runId, stepCount, chars: result.content.trim().length },
+        "companion agent produced a degenerate short answer; retrying once with thinking enabled",
+      );
+      try {
+        const retryResult = await runWithAbortBudget(
+          (signal) => args.thinkingProvider!.executeAgentTurn!(stepRequest, signal),
+          args.ctx.signal,
+          Math.min(resolveProviderCallTimeout("companion_agent"), Math.max(1, deadlineAt - Date.now())),
+        );
+        const retryCalls = retryResult.toolCalls ?? [];
+        const retryText = typeof retryResult.content === "string" ? retryResult.content.trim() : "";
+        if (retryCalls.length === 0 && retryText.length > result.content.trim().length) {
+          logger.info(
+            { runId: args.read.runId, stepCount, chars: retryText.length },
+            "companion degenerate-answer retry produced a fuller answer",
+          );
+          result = retryResult;
+          calls = retryCalls;
+        }
+      } catch (retryError) {
+        logger.warn(
+          { err: retryError, stepCount },
+          "companion degenerate-answer retry failed; keeping the original answer",
+        );
+      }
+    }
     if (finalAnswerOnly && calls.length > 0) {
       // Tools were withheld on the final step. A provider that still emits tool
       // calls violates the request contract; fail closed instead of executing a
@@ -1598,8 +1732,25 @@ export async function runCompanionAgentLoop(args: {
       // 拼接口径必须与流式下发的分段符一致，否则已下发前缀与最终正文分叉。
       // 判据用 length（不是 trim）：只要这一步吐出过字符，它的分段符就已经在下发原文里。
       const stepText = typeof result.content === "string" ? result.content : "";
-      if (stepText.length > 0) visibleSegments.push(stepText);
-      const text = joinVisibleSegments(visibleSegments);
+      if (stepText.length > 0) {
+        visibleSegments.push(stepText);
+        // 这一步是否流式成功（stepEmitted 只在流式 emit 时置位；降级缓冲未 emit
+        // 则为 false）——E 去重据此决定该段能不能丢。
+        visibleSegmentDelivered.push(stepEmitted);
+      }
+      const deduped = joinVisibleSegmentsDeduped(visibleSegments, visibleSegmentDelivered);
+      if (deduped.dropped.length > 0) {
+        logger.warn(
+          {
+            runId: args.read.runId,
+            stepCount,
+            droppedCount: deduped.dropped.length,
+            droppedChars: deduped.dropped.reduce((sum, segment) => sum + segment.length, 0),
+          },
+          "companion agent dropped duplicated undelivered segment(s) from the visible reply",
+        );
+      }
+      const text = deduped.text;
       if (text.trim().length === 0) {
         await finishStep(event, stepId, "failed", undefined, "EMPTY_AGENT_RESPONSE");
         throw new Error("companion agent returned empty final response");
@@ -1613,7 +1764,9 @@ export async function runCompanionAgentLoop(args: {
           "companion agent final step was empty; answering with earlier step text only",
         );
       }
-      const duplicated = findDuplicateSegment(visibleSegments);
+      // E：有被丢弃的复读段时上面已经留痕；这个观测项只针对"想丢也丢不了"的
+      // 情况——复读段已经流式下发，只能保留（删了会与最终正文分叉）。
+      const duplicated = deduped.dropped.length === 0 ? findDuplicateSegment(visibleSegments) : null;
       if (duplicated !== null) {
         logger.warn(
           {
@@ -1649,9 +1802,10 @@ export async function runCompanionAgentLoop(args: {
     }
     // 带工具的一步：这一步的 content 是**开场白**（"我先看看你的笔记"），不是终答。
     // 它已经随流式下发（④-b），因此必须留在可见正文里——否则客户端累积的草稿
-    // 会与最终 assistant 消息对不上（见 joinVisibleSegments 的说明）。
+    // 会与最终 assistant 消息对不上（见 joinVisibleSegmentsDeduped 的说明）。
     if (typeof result.content === "string" && result.content.length > 0) {
       visibleSegments.push(result.content);
+      visibleSegmentDelivered.push(stepEmitted);
     }
     messages.push({
       role: "assistant",

@@ -25,7 +25,7 @@ import { understandingTopologyV3Routes } from "./modules/understanding-v3/routes
 import { isCardGenerationV2Enabled } from "./config/learning-companion-flags.ts";
 import { companionShellRoutes } from "./modules/companion-shell/index.ts";
 import { learningMetricRoutes } from "./modules/observability/routes.ts";
-import { companionConversationRoutes, companionConversationManagementRoutes, companionExportRoutes, assistantSessionRoutes } from "./modules/companion-conversation/index.ts";
+import { companionConversationRoutes, companionConversationManagementRoutes, companionExportRoutes, continuousHistoryRoutes } from "./modules/companion-conversation/index.ts";
 import { startCompanionNotifyListener, stopCompanionNotifyListener } from "./modules/companion-conversation/companion-notify.ts";
 import { learningRunRoutes } from "./modules/learning-runs/run-routes.ts";
 import { companionBridgeRoutes } from "./modules/companion-bridge/routes.ts";
@@ -342,7 +342,7 @@ async function main() {
   await app.register(companionShellRoutes);
   await app.register(learningMetricRoutes);
   await app.register(companionConversationRoutes);
-  await app.register(assistantSessionRoutes);
+  await app.register(continuousHistoryRoutes);
   await app.register(companionConversationManagementRoutes);
   await app.register(companionExportRoutes);
   // §11.6：启动清扫崩溃残留的临时探测音频（>1h hard cap；不阻塞启动）

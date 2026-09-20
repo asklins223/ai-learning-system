@@ -1,4 +1,6 @@
 import { gatewayErrorMessage } from "./desktop-client";
+import type { CompanionVoiceSpeakSegmentRequestV2 } from "@ailearn/shared/companion-voice-contracts";
+import type { CharacterCuePayloadV1 } from "@ailearn/shared/companion-conversation-contracts";
 import {
   COMPANION_SPEECH_FEED_INITIAL,
   splitForSpeech,
@@ -24,6 +26,8 @@ export interface CompanionVoiceHost {
   readonly audible: () => boolean;
   /** 合成一段文本并解码成可播放的 buffer；失败时抛错。 */
   readonly synthesize: (text: string) => Promise<AudioBuffer>;
+  /** Agent 正文通过服务端签发的片段引用合成；renderer 不提交正文。 */
+  readonly synthesizeSegment: (ref: CompanionVoiceSpeakSegmentRequestV2) => Promise<AudioBuffer>;
   /**
    * 播放到结束；期间按播放进度回调 0..1（调用方会自行节流）。播完 resolve，
    * 被 stop() 打断时也 resolve——打断由 generation 判定，不靠异常。
@@ -33,7 +37,7 @@ export interface CompanionVoiceHost {
   readonly stop: () => void;
 }
 
-export type CompanionSpeechPhase = "speaking" | "finished" | "stopped" | "failed";
+export type CompanionSpeechPhase = "speaking" | "finished" | "stopped" | "failed" | "text_only";
 
 export interface CompanionSpeechProgress {
   readonly planId: string;
@@ -46,6 +50,7 @@ export interface CompanionSpeechProgress {
    */
   readonly visibleChars: number;
   readonly failure?: string;
+  readonly cue?: CharacterCuePayloadV1;
 }
 
 export interface CompanionSpeechHandle {
@@ -68,6 +73,8 @@ const listeners = new Set<(progress: CompanionSpeechProgress) => void>();
 
 /** 播放进度的广播节流：逐帧广播会带着 React 一起 60Hz 重渲气泡。 */
 const PROGRESS_INTERVAL_MS = 80;
+export const COMPANION_SPEECH_FIRST_AUDIO_DEADLINE_MS = 1_600;
+export const COMPANION_SPEECH_GAP_DEADLINE_MS = 1_200;
 
 function emit(progress: CompanionSpeechProgress): void {
   for (const listener of listeners) listener(progress);
@@ -150,10 +157,15 @@ async function runSpeech(run: SpeechRun): Promise<void> {
       let buffer: AudioBuffer;
       try {
         buffer = await current;
-      } catch (error) {
-        // 预取失败就对这一段即时重发；本来就不是预取的失败则照常抛出。
-        if (current !== prefetched) throw error;
-        buffer = await synthesize(index);
+      } catch {
+        // 预取失败或即时失败都即时重发一次；再失败就**跳过这一段继续后面的**
+        // （2026-09-19 用户实测"只读第一句甚至前几个字"的残余：单段合成抖动/
+        // 限流曾把整轮语音直接判死）。文字显现靠阅读钟接管被跳过的段。
+        try {
+          buffer = await synthesize(index);
+        } catch {
+          continue;
+        }
       }
       if (run.runGeneration !== generation) return;
 
@@ -222,17 +234,54 @@ export interface CompanionSpeechSession {
   readonly planId: string;
   /** voice = 有音频在推；silent = 播不了，调用方自己推进文本。 */
   readonly mode: "voice" | "silent";
-  /** 累积文本（全量）推进：新出现的完整句进入合成队列。 */
+  /**
+   * 增量文本（这一拍**新到的部分**，2026-09-19 修正）：会话内部累积成全量后交给
+   * 切段器。切段器的 `pendingStart` 是累积文本里的绝对下标——直接把增量串交给它，
+   * 第二拍起 `slice(pendingStart)` 切出空串，第一句之后的句子永远排不进队列
+   * （用户实测症状：只念第一句）。
+   */
   feed(text: string): void;
-  /** 生成结束：把尾巴强制成段并收尾。 */
-  finish(text: string): void;
+  /** Worker 已签发的真实片段；显示区间直接对应干净正文。 */
+  feedSegment(segment: CompanionServerVoiceSegment): void;
+  /** 生成结束：把最后一段增量拼上、尾巴强制成段并收尾。 */
+  finish(text?: string): void;
   stop(): void;
 }
 
+export interface CompanionServerVoiceSegment {
+  readonly ref: CompanionVoiceSpeakSegmentRequestV2;
+  readonly displayText: string;
+  readonly displayStart: number;
+  readonly displayEnd: number;
+  readonly cue: CharacterCuePayloadV1;
+}
+
 interface CompanionSpeechQueue {
-  readonly segments: CompanionSpeechSegment[];
+  readonly segments: CompanionQueuedSpeechSegment[];
   finished: boolean;
   wake: (() => void) | null;
+}
+
+interface CompanionQueuedSpeechSegment {
+  readonly key: string;
+  readonly text: string;
+  readonly startIndex: number;
+  readonly endIndex: number;
+  readonly ref?: CompanionVoiceSpeakSegmentRequestV2;
+  readonly cue?: CharacterCuePayloadV1;
+}
+
+function withDeadline<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  // 用全局 setTimeout 而不是 window.setTimeout：这个模块会被 node 环境的
+  // vitest 直接加载（该测试文件没声明 jsdom），那里没有 `window`——同步抛出的
+  // ReferenceError 会把整段播放判死（实测：所有排队段一个都不播）。
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("VOICE_SEGMENT_DEADLINE")), timeoutMs);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
 }
 
 async function runQueuedSpeech(args: {
@@ -244,11 +293,44 @@ async function runQueuedSpeech(args: {
   const { queue } = args;
   let playedCount = 0;
   let previousEnd = 0;
-  let prefetched: { text: string; buffer: Promise<AudioBuffer> } | null = null;
-  const visibleAt = (segment: CompanionSpeechSegment, fraction: number): number => {
-    const span = Math.max(1, segment.endIndex - previousEnd);
+  let hasStartedAudio = false;
+  /**
+   * 预取队列（深度 2，2026-09-19 段间衔接优化）：当前段在播时，后面两段已经在
+   * 合成路上。深度 1 时段间仍会露出一个合成往返的空档（qwen/edge 都有网络
+   * 往返），实测听感就是"句与句之间卡一下"；深度 2 让下一段几乎总是就绪。
+   */
+  const prefetched: Array<{ key: string; buffer: Promise<AudioBuffer> }> = [];
+  const synthesize = (segment: CompanionQueuedSpeechSegment): Promise<AudioBuffer> => segment.ref
+    ? args.host.synthesizeSegment(segment.ref)
+    : args.host.synthesize(segment.text);
+  const synthesizeWithRetry = async (segment: CompanionQueuedSpeechSegment): Promise<AudioBuffer> => {
+    try {
+      return await synthesize(segment);
+    } catch {
+      return synthesize(segment);
+    }
+  };
+  const takePrefetched = (key: string): Promise<AudioBuffer> | null => {
+    const index = prefetched.findIndex((entry) => entry.key === key);
+    if (index < 0) return null;
+    const [entry] = prefetched.splice(index, 1);
+    return entry.buffer;
+  };
+  const prefetchUpcoming = (): void => {
+    for (const upcoming of queue.segments.slice(0, 2)) {
+      if (prefetched.length >= 2) break;
+      if (prefetched.some((entry) => entry.key === upcoming.key)) continue;
+      const promise = synthesizeWithRetry(upcoming);
+      // 预取失败会在用到它的那一轮被 await 到；先挂个空 handler 免得变成未处理拒绝。
+      promise.catch(() => undefined);
+      prefetched.push({ key: upcoming.key, buffer: promise });
+    }
+  };
+  const visibleAt = (segment: CompanionQueuedSpeechSegment, fraction: number): number => {
+    const start = Math.max(previousEnd, segment.startIndex);
+    const span = Math.max(1, segment.endIndex - start);
     const clamped = Math.min(1, Math.max(0, fraction));
-    return Math.min(segment.endIndex, previousEnd + Math.max(1, Math.floor(clamped * span)));
+    return Math.min(segment.endIndex, start + Math.max(1, Math.floor(clamped * span)));
   };
   try {
     for (;;) {
@@ -259,24 +341,35 @@ async function runQueuedSpeech(args: {
         await new Promise<void>((resolve) => { queue.wake = resolve; });
         continue;
       }
-      const wasPrefetched = prefetched !== null && prefetched.text === segment.text;
-      const current = wasPrefetched ? prefetched!.buffer : args.host.synthesize(segment.text);
-      prefetched = null;
-      // 当前段已经排上队了，紧接着把下一段也发出去：合成有网络往返，
-      // 串行等会在段间留空档（服务端按用户串行，提前发不增加并发压力）。
-      const upcoming = queue.segments[0];
-      if (upcoming) {
-        const promise = args.host.synthesize(upcoming.text);
-        promise.catch(() => undefined);
-        prefetched = { text: upcoming.text, buffer: promise };
-      }
+      const prefetchedBuffer = takePrefetched(segment.key);
+      const current = prefetchedBuffer ?? synthesizeWithRetry(segment);
+      prefetchUpcoming();
       let buffer: AudioBuffer;
       try {
-        buffer = await current;
+        buffer = await withDeadline(
+          current,
+          hasStartedAudio ? COMPANION_SPEECH_GAP_DEADLINE_MS : COMPANION_SPEECH_FIRST_AUDIO_DEADLINE_MS,
+        );
       } catch (error) {
-        // 预取失败对这一段即时重发；本来就不是预取的失败照常抛出。
-        if (!wasPrefetched) throw error;
-        buffer = await args.host.synthesize(segment.text);
+        if (args.runGeneration !== generation) return;
+        // 两类失败分两条路（方案 §4）：合成失败（"每段最多重试一次"已在
+        // synthesizeWithRetry 里做过）→ 跳过这一段继续后面的，别把整轮判死；
+        // 只有"合成迟迟不出结果"（首段 1.6s / 段间 1.2s 截止）才把本轮平滑降级为
+        // 纯文字——那之后迟到的音频整轮作废，不再突然恢复朗读。
+        const deadlineHit = error instanceof Error && error.message === "VOICE_SEGMENT_DEADLINE";
+        if (!deadlineHit) continue;
+        activePlanId = null;
+        generation += 1;
+        args.host.stop();
+        emit({
+          planId: args.planId,
+          phase: "text_only",
+          segmentIndex: playedCount,
+          segmentCount: playedCount + 1 + queue.segments.length,
+          visibleChars: previousEnd,
+          failure: "语音暂不可用，已继续显示文字",
+        });
+        return;
       }
       if (args.runGeneration !== generation) return;
 
@@ -286,7 +379,9 @@ async function runQueuedSpeech(args: {
         segmentIndex: playedCount,
         segmentCount: playedCount + 1 + queue.segments.length,
         visibleChars: visibleAt(segment, 0),
+        ...(segment.cue ? { cue: segment.cue } : {}),
       });
+      hasStartedAudio = true;
       let lastProgressAt = 0;
       await args.host.play(buffer, (fraction) => {
         if (args.runGeneration !== generation) return;
@@ -321,20 +416,22 @@ async function runQueuedSpeech(args: {
       phase: "failed",
       segmentIndex: -1,
       segmentCount: playedCount,
-      visibleChars: 0,
+      visibleChars: previousEnd,
       failure: gatewayErrorMessage(error),
     });
   }
 }
 
-/** 开始一句流式台词：先建会话，文本用 feed 推进。新的台词取代正在念的那句。 */
-export function beginCompanionSpeechLine(): CompanionSpeechSession {
+/** 开始一句流式台词。Agent 正文使用 strictSegments，只接受服务端签发的片段引用。 */
+export function beginCompanionSpeechLine(options: { readonly strictSegments?: boolean } = {}): CompanionSpeechSession {
   stopCompanionSpeech();
   const planId = `speech-${(sequence += 1)}`;
   const activeHost = host;
   const mode: "voice" | "silent" = activeHost && activeHost.audible() ? "voice" : "silent";
   const queue: CompanionSpeechQueue = { segments: [], finished: false, wake: null };
   let feedState: CompanionSpeechFeedState = COMPANION_SPEECH_FEED_INITIAL;
+  /** 调用方喂进来的累积文本（feed/finish 收增量，这里拼成切段器要的全量）。 */
+  let accumulated = "";
   let stopped = false;
 
   const push = (text: string, isFinal: boolean): void => {
@@ -342,7 +439,12 @@ export function beginCompanionSpeechLine(): CompanionSpeechSession {
     const split = splitForSpeechIncremental(text, feedState, isFinal);
     feedState = split.next;
     if (split.segments.length === 0) return;
-    queue.segments.push(...split.segments);
+    queue.segments.push(...split.segments.map((segment, index) => ({
+      key: `local:${segment.endIndex}:${index}`,
+      text: segment.text,
+      startIndex: Math.max(0, segment.endIndex - segment.text.length),
+      endIndex: segment.endIndex,
+    })));
     const wake = queue.wake;
     queue.wake = null;
     wake?.();
@@ -357,10 +459,37 @@ export function beginCompanionSpeechLine(): CompanionSpeechSession {
     planId,
     mode,
     feed(text: string): void {
-      push(text, false);
+      if (options.strictSegments) return;
+      if (text.length === 0) return;
+      accumulated += text;
+      push(accumulated, false);
     },
-    finish(text: string): void {
-      push(text, true);
+    feedSegment(segment: CompanionServerVoiceSegment): void {
+      if (stopped || !options.strictSegments) return;
+      if (queue.segments.some((item) => item.key === segment.ref.segmentId)) return;
+      queue.segments.push({
+        key: segment.ref.segmentId,
+        text: segment.displayText,
+        startIndex: segment.displayStart,
+        endIndex: segment.displayEnd,
+        ref: segment.ref,
+        cue: segment.cue,
+      });
+      queue.segments.sort((left, right) => left.startIndex - right.startIndex);
+      const wake = queue.wake;
+      queue.wake = null;
+      wake?.();
+    },
+    finish(text = ""): void {
+      if (options.strictSegments) {
+        queue.finished = true;
+        const wake = queue.wake;
+        queue.wake = null;
+        wake?.();
+        return;
+      }
+      accumulated += text;
+      push(accumulated, true);
       queue.finished = true;
       const wake = queue.wake;
       queue.wake = null;

@@ -14,7 +14,7 @@
  */
 
 import { z } from "zod";
-import { companionConversationV1Schema } from "./companion-conversation-contracts.ts";
+import { companionContentBlockV1Schema } from "./companion-conversation-contracts.ts";
 
 // ─── 记忆条目（§3.3 memory-routes.ts 的 MemoryItemV2）────────────────────
 
@@ -81,26 +81,58 @@ export type CompanionMemoryListV1 = z.infer<typeof companionMemoryListV1Schema>;
 
 // ─── 记忆星图（§2.6 memory-star-map.ts）──────────────────────────────────
 
-export const companionMemoryStarNodeV1Schema = z.strictObject({
+export const companionMemoryEntityTypeV2Schema = z.enum([
+  "note",
+  "source",
+  "card",
+  "key_point",
+  "learning_run",
+]);
+export type CompanionMemoryEntityTypeV2 = z.infer<typeof companionMemoryEntityTypeV2Schema>;
+
+export const companionMemoryEntityTargetV2Schema = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("note"), noteId: z.string().uuid() }),
+  z.strictObject({ kind: z.literal("source"), sourceId: z.string().uuid() }),
+  z.strictObject({ kind: z.literal("objective"), objectiveId: z.string().uuid() }),
+  z.strictObject({ kind: z.literal("understanding"), objectiveId: z.string().uuid() }),
+  z.strictObject({ kind: z.literal("learning_run"), runId: z.string().uuid() }),
+]);
+export type CompanionMemoryEntityTargetV2 = z.infer<typeof companionMemoryEntityTargetV2Schema>;
+
+const companionMemoryEntityLinkV2Schema = z.strictObject({
+  entityType: companionMemoryEntityTypeV2Schema,
+  entityId: z.string().uuid(),
+  /** 服务端解析后的可读名称；失效实体也必须返回稳定的说明，禁止显示裸 UUID。 */
+  label: z.string().min(1).max(240),
+  target: companionMemoryEntityTargetV2Schema.nullable(),
+  /** true = 关联的学习实体已删除；此时必须不可导航。 */
+  orphaned: z.boolean(),
+}).superRefine((link, context) => {
+  if (link.orphaned && link.target !== null) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["target"], message: "orphaned memory links cannot be navigable" });
+  }
+  if (!link.orphaned && link.target === null) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["target"], message: "live memory links require a navigation target" });
+  }
+});
+
+export const companionMemoryStarNodeV2Schema = z.strictObject({
   memoryId: z.string().uuid(),
-  kind: z.string().min(1).max(60),
+  kind: companionMemoryKindV1Schema,
   content: z.string().min(1).max(companionMemoryContentMaxLength),
   state: z.enum(["active", "pinned"]),
-  entityLinks: z.array(z.strictObject({
-    entityType: z.string().min(1).max(60),
-    entityId: z.string().min(1).max(120),
-    /** true = 关联的学习实体已被删除，星图上要画成断开的连线。 */
-    orphaned: z.boolean(),
-  })).max(200),
+  importance: z.number().min(0).max(1),
+  updatedAt: isoTimestampSchema,
+  entityLinks: z.array(companionMemoryEntityLinkV2Schema).max(200),
 });
-export type CompanionMemoryStarNodeV1 = z.infer<typeof companionMemoryStarNodeV1Schema>;
+export type CompanionMemoryStarNodeV2 = z.infer<typeof companionMemoryStarNodeV2Schema>;
 
-export const companionMemoryStarMapV1Schema = z.strictObject({
-  version: z.literal(1),
-  nodes: z.array(companionMemoryStarNodeV1Schema).max(500),
+export const companionMemoryStarMapV2Schema = z.strictObject({
+  version: z.literal(2),
+  nodes: z.array(companionMemoryStarNodeV2Schema).max(500),
   cursor: z.null(),
 });
-export type CompanionMemoryStarMapV1 = z.infer<typeof companionMemoryStarMapV1Schema>;
+export type CompanionMemoryStarMapV2 = z.infer<typeof companionMemoryStarMapV2Schema>;
 
 // ─── 桌宠日记（§15.3 daily-summary-routes.ts）───────────────────────────
 
@@ -276,18 +308,53 @@ export function companionPersonaPatchFromPreset(
   });
 }
 
-// ─── 对话记录（§6.3 GET /companion/conversations）───────────────────────
+// ─── 连续对话历史（产品层不暴露 conversation）──────────────────────────
 
-/**
- * 伴星中心只展示"我们聊过什么"的记录，不在这里续写对话——渲染层拿到的
- * 是会话摘要，没有消息正文，也没有发送通道。
- */
-export const companionConversationListV1Schema = z.strictObject({
+export const companionHistoryItemV1Schema = z.strictObject({
   version: z.literal(1),
-  items: z.array(companionConversationV1Schema).max(50),
+  messageId: z.string().uuid(),
+  role: z.enum(["user", "assistant", "system"]),
+  kind: z.enum(["text", "voice_transcript", "proactive", "action", "result", "error", "cancelled"]),
+  blocks: z.array(companionContentBlockV1Schema).min(1).max(32),
+  runId: z.string().uuid().nullable(),
+  createdAt: isoTimestampSchema,
+  editedAt: isoTimestampSchema.nullable(),
+});
+export type CompanionHistoryItemV1 = z.infer<typeof companionHistoryItemV1Schema>;
+
+export const companionHistoryPageV1Schema = z.strictObject({
+  version: z.literal(1),
+  items: z.array(companionHistoryItemV1Schema).max(100),
   nextCursor: z.string().max(2000).nullable(),
 });
-export type CompanionConversationListV1 = z.infer<typeof companionConversationListV1Schema>;
+export type CompanionHistoryPageV1 = z.infer<typeof companionHistoryPageV1Schema>;
+
+export const companionHistorySearchV1Schema = z.strictObject({
+  version: z.literal(1),
+  query: z.string().min(1).max(120),
+  items: z.array(companionHistoryItemV1Schema).max(50),
+});
+export type CompanionHistorySearchV1 = z.infer<typeof companionHistorySearchV1Schema>;
+
+export const companionHistoryClearResultV1Schema = z.strictObject({
+  version: z.literal(1),
+  deletedMessages: z.number().int().min(0),
+  deletedConversations: z.number().int().min(0),
+  inboxCreated: z.literal(true),
+});
+export type CompanionHistoryClearResultV1 = z.infer<typeof companionHistoryClearResultV1Schema>;
+
+export const companionHistoryQueryV1Schema = z.strictObject({
+  before: z.string().max(2000).optional(),
+  limit: z.number().int().min(1).max(100).optional(),
+});
+export type CompanionHistoryQueryV1 = z.infer<typeof companionHistoryQueryV1Schema>;
+
+export const companionHistorySearchQueryV1Schema = z.strictObject({
+  q: z.string().min(1).max(120),
+  limit: z.number().int().min(1).max(50).optional(),
+});
+export type CompanionHistorySearchQueryV1 = z.infer<typeof companionHistorySearchQueryV1Schema>;
 
 // ─── 记忆写操作请求 ─────────────────────────────────────────────────────
 
@@ -305,3 +372,88 @@ export const companionMemoryListQuerySchema = z.strictObject({
   includeArchived: z.boolean().optional(),
 });
 export type CompanionMemoryListQuery = z.infer<typeof companionMemoryListQuerySchema>;
+
+export const companionMemoryCreateInputV1Schema = z.strictObject({
+  kind: companionMemoryKindV1Schema,
+  content: z.string().min(1).max(companionMemoryContentMaxLength),
+  importance: z.number().min(0).max(1).optional(),
+  scope: companionMemoryScopeV1Schema.optional(),
+});
+export type CompanionMemoryCreateInputV1 = z.infer<typeof companionMemoryCreateInputV1Schema>;
+
+export const companionMemoryCorrectInputV1Schema = z.strictObject({
+  content: z.string().min(1).max(companionMemoryContentMaxLength),
+  reason: z.string().min(1).max(500).optional(),
+});
+export type CompanionMemoryCorrectInputV1 = z.infer<typeof companionMemoryCorrectInputV1Schema>;
+
+export const companionMemoryConflictListV1Schema = z.strictObject({
+  version: z.literal(1),
+  items: z.array(companionMemoryItemV1Schema).max(200),
+});
+export const companionMemoryConflictResolveResultV1Schema = z.strictObject({
+  version: z.literal(1),
+  ok: z.literal(true),
+});
+export const companionMemoryQueueResultV1Schema = z.strictObject({
+  version: z.literal(1),
+  queued: z.literal(true),
+});
+export const companionMemoryClearResultV1Schema = z.strictObject({
+  deletedCount: z.number().int().min(0),
+});
+
+// ─── 动态投递与数据管理（renderer-safe projection）──────────────────────
+
+export const companionActivityDeliveryV1Schema = z.strictObject({
+  version: z.literal(1),
+  deliveryId: z.string().uuid(),
+  inboxSequence: z.number().int().min(0),
+  state: z.enum(["queued", "delivered", "displayed", "acted", "dismissed", "snoozed", "expired", "suppressed"]),
+  kind: z.enum(["message", "proposal", "action_result", "system_event", "memory_candidate"]),
+  label: z.string().min(1).max(240),
+  target: z.discriminatedUnion("kind", [
+    z.strictObject({ kind: z.literal("dialogue"), messageId: z.string().uuid() }),
+    z.strictObject({ kind: z.literal("proposal"), proposalId: z.string().uuid() }),
+    z.strictObject({ kind: z.literal("memory"), memoryId: z.string().uuid() }),
+    z.strictObject({ kind: z.literal("none") }),
+  ]),
+  expired: z.boolean(),
+  createdAt: isoTimestampSchema,
+  expiresAt: isoTimestampSchema,
+});
+export type CompanionActivityDeliveryV1 = z.infer<typeof companionActivityDeliveryV1Schema>;
+
+export const companionActivityTimelineV1Schema = z.strictObject({
+  version: z.literal(1),
+  items: z.array(companionActivityDeliveryV1Schema).max(100),
+  nextCursor: z.number().int().min(0),
+  serverTime: isoTimestampSchema,
+});
+export type CompanionActivityTimelineV1 = z.infer<typeof companionActivityTimelineV1Schema>;
+
+export const companionActivityAckRequestV1Schema = z.strictObject({
+  deliveryId: z.string().uuid(),
+  inboxSequence: z.number().int().min(0),
+  transition: z.enum(["displayed", "acted", "dismissed"]),
+});
+export type CompanionActivityAckRequestV1 = z.infer<typeof companionActivityAckRequestV1Schema>;
+
+export const companionExportKindV1Schema = z.enum(["all", "memory", "audit"]);
+export type CompanionExportKindV1 = z.infer<typeof companionExportKindV1Schema>;
+
+export const companionExportResultV1Schema = z.strictObject({
+  version: z.literal(1),
+  saved: z.boolean(),
+  canceled: z.boolean(),
+  /** 只把用户已经选择的文件名回给 renderer，不暴露完整本机路径。 */
+  fileName: z.string().min(1).nullable(),
+  bytes: z.number().int().min(0),
+});
+export type CompanionExportResultV1 = z.infer<typeof companionExportResultV1Schema>;
+
+export const companionAuditDeleteResultV1Schema = z.strictObject({
+  deletedAudit: z.number().int().min(0),
+  deletedLedger: z.number().int().min(0),
+});
+export type CompanionAuditDeleteResultV1 = z.infer<typeof companionAuditDeleteResultV1Schema>;

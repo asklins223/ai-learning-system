@@ -15,8 +15,8 @@ const yaml = require("js-yaml");
  * 现在改为数据驱动的双向断言：
  *   1. 每个服务必须声明且只声明它实际读取的开关（多一个=死配置，少一个=运维
  *      无法在不改 compose 的情况下开启能力）；
- *   2. 表达式必须精确等于 `${NAME:-<期望默认值>}`，dev 默认开、prod 默认关
- *      （streaming voice 在两侧都保持关闭）。
+ *   2. 表达式必须精确等于 `${NAME:-<期望默认值>}`；伴星中心基础能力在 dev/prod
+ *      默认开启，外部模型/设备增强能力保持独立关闭。
  *
  * 读取方来源：`apps/api/src` 与 `workers/ai-worker/src` 中的 `process.env.<NAME>`
  * （不含测试）。新增开关时必须同时更新本表与两个 compose 文件。
@@ -27,26 +27,28 @@ const CAPABILITY_FLAGS = {
   api: {
     LEARNING_RUN_ENABLED: { dev: true, prod: false },
     CARD_GENERATION_V2_ENABLED: { dev: true, prod: false },
-    COMPANION_DIALOGUE_V1_ENABLED: { dev: true, prod: false },
+    COMPANION_DIALOGUE_V1_ENABLED: { dev: true, prod: true },
     COMPANION_VOICE_DIALOGUE_V1_ENABLED: { dev: true, prod: false },
     COMPANION_STREAMING_VOICE_V1_ENABLED: { dev: false, prod: false },
-    COMPANION_JOURNEY_V2: { dev: true, prod: false },
-    COMPANION_BRIDGE_V2: { dev: true, prod: false },
-    COMPANION_MEMORY_VECTOR_V1: { dev: true, prod: false },
-    COMPANION_MEMORY_STAR_MAP_V1: { dev: true, prod: false },
-    COMPANION_PET_PROFILE_V1: { dev: true, prod: false },
-    COMPANION_PROACTIVE_PERSONALIZED_V1: { dev: true, prod: false },
-    COMPANION_SUMMARIZER_V1: { dev: true, prod: false },
-    COMPANION_DAILY_SUMMARY_V1: { dev: true, prod: false },
+    COMPANION_JOURNEY_V2: { dev: true, prod: true },
+    COMPANION_BRIDGE_V2: { dev: true, prod: true },
+    COMPANION_MEMORY_VECTOR_V1: { dev: true, prod: true },
+    COMPANION_MEMORY_STAR_MAP_V1: { dev: true, prod: true },
+    COMPANION_PET_PROFILE_V1: { dev: true, prod: true },
+    COMPANION_PROACTIVE_PERSONALIZED_V1: { dev: true, prod: true },
+    COMPANION_SUMMARIZER_V1: { dev: true, prod: true },
+    COMPANION_DAILY_SUMMARY_V1: { dev: true, prod: true },
   },
   worker: {
     CARD_GENERATION_V2_LLM: { dev: true, prod: false },
-    COMPANION_DIALOGUE_V1_ENABLED: { dev: true, prod: false },
+    COMPANION_DIALOGUE_V1_ENABLED: { dev: true, prod: true },
     COMPANION_VOICE_DIALOGUE_V1_ENABLED: { dev: true, prod: false },
-    COMPANION_MEMORY_EXTRACTOR_V1: { dev: true, prod: false },
-    COMPANION_MEMORY_VECTOR_V1: { dev: true, prod: false },
-    COMPANION_SUMMARIZER_V1: { dev: true, prod: false },
-    COMPANION_DAILY_SUMMARY_V1: { dev: true, prod: false },
+    COMPANION_MEMORY_EXTRACTOR_V1: { dev: true, prod: true },
+    COMPANION_MEMORY_VECTOR_V1: { dev: true, prod: true },
+    COMPANION_SUMMARIZER_V1: { dev: true, prod: true },
+    COMPANION_DAILY_SUMMARY_V1: { dev: true, prod: true },
+    COMPANION_THOUGHTS_V1: { dev: true, prod: true },
+    COMPANION_THOUGHTS_LLM: { dev: false, prod: false },
   },
 };
 
@@ -108,5 +110,5 @@ const apiCount = Object.keys(CAPABILITY_FLAGS.api).length;
 const workerCount = Object.keys(CAPABILITY_FLAGS.worker).length;
 console.log(
   "companion capability config OK "
-  + `(dev=true/prod=false fail-closed; api ${apiCount} flags, worker ${workerCount} flags; no dead switches)`,
+  + `(base Companion Center enabled; api ${apiCount} flags, worker ${workerCount} flags; no dead switches)`,
 );

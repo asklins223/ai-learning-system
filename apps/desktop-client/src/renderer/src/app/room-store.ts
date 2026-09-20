@@ -89,6 +89,11 @@ export type NoteTargetRef = {
   readonly mode?: "read" | "edit";
 };
 export type ReviewTargetRef = { readonly scheduleId: string; readonly objectiveId: string };
+export type CompanionCenterTarget = {
+  readonly tab: "memory" | "dialogue" | "activity" | "diary" | "persona";
+  readonly focusMemoryId?: string;
+  readonly focusMessageId?: string;
+};
 
 /**
  * Where the bottom-left pill goes while a page is open. A page that lives under
@@ -123,6 +128,7 @@ type RoomStore = {
   recentNoteId: string | null;
   activeSourceId: string | null;
   activeObjectiveId: string | null;
+  companionCenterTarget: CompanionCenterTarget | null;
   settingsSection: string;
   /**
    * 一次性注意力目标（2026-09-19）：设置页里需要立刻被看到的那张卡。
@@ -225,6 +231,7 @@ type RoomStore = {
   setActiveNoteRef: (ref: NoteTargetRef | null) => void;
   setActiveSourceId: (sourceId: string | null) => void;
   setActiveObjectiveId: (objectiveId: string | null) => void;
+  setCompanionCenterTarget: (target: CompanionCenterTarget | null) => void;
   setSettingsSection: (section: string) => void;
   setSettingsAttention: (target: string | null) => void;
   setActiveReviewTarget: (target: ReviewTargetRef | null) => void;
@@ -285,6 +292,7 @@ export const useRoomStore = create<RoomStore>()(
       recentNoteId: null,
       activeSourceId: null,
       activeObjectiveId: null,
+      companionCenterTarget: null,
       settingsSection: "account",
       settingsAttention: null,
       activeReviewTarget: null,
@@ -344,6 +352,7 @@ export const useRoomStore = create<RoomStore>()(
         recentNoteId: null,
         activeSourceId: null,
         activeObjectiveId: null,
+        companionCenterTarget: null,
         settingsSection: "account",
         settingsAttention: null,
         activeReviewTarget: null,
@@ -393,6 +402,7 @@ export const useRoomStore = create<RoomStore>()(
             : null,
           activeSourceId: intent === "open-source" ? get().activeSourceId : null,
           activeObjectiveId: intent === "open-objective" ? get().activeObjectiveId : null,
+          companionCenterTarget: intent === "open-companion-center" ? get().companionCenterTarget : null,
           activeReviewTarget: intent === "review" ? get().activeReviewTarget : null,
           inputFocused: false,
           // 目标页自身不登记返回目标，所以「从星图跳进来」这一跳由调用方随
@@ -412,6 +422,7 @@ export const useRoomStore = create<RoomStore>()(
         recentNoteId: state.recentNoteId,
         activeSourceId: null,
         activeObjectiveId: null,
+        companionCenterTarget: null,
         activeReviewTarget: null,
         inputFocused: false,
       })),
@@ -457,6 +468,7 @@ export const useRoomStore = create<RoomStore>()(
       })),
       setActiveSourceId: (activeSourceId) => set({ activeSourceId }),
       setActiveObjectiveId: (activeObjectiveId) => set({ activeObjectiveId }),
+      setCompanionCenterTarget: (companionCenterTarget) => set({ companionCenterTarget }),
       setSettingsSection: (settingsSection) => set({ settingsSection }),
       setSettingsAttention: (settingsAttention) => set({ settingsAttention }),
       setActiveReviewTarget: (activeReviewTarget) => set({ activeReviewTarget }),

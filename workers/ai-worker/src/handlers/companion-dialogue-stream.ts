@@ -152,6 +152,11 @@ interface CompanionDeliveryArgs {
    * 注入后不碰数据库，用于验证节流/切片/补齐的拼接语义（不重不漏）。
    */
   writeVisible?: (text: string, appendFrom: number) => Promise<boolean>;
+  /**
+   * 可见 delta 已经通过 fence 并落库后的通知。语音分段在这里消费真实提交前缀，
+   * 从而保证每个 voice.segment.ready 永远排在对应 assistant.delta 之后。
+   */
+  onVisibleCommitted?: (committedText: string, fullVisibleText: string) => Promise<void>;
 }
 
 /**
@@ -266,7 +271,10 @@ export function createCompanionStreamDelivery(args: CompanionDeliveryArgs): Comp
     const ok = args.writeVisible
       ? await args.writeVisible(toWrite, delivered.length)
       : await writeDeltas(toWrite);
-    if (ok) delivered += toWrite;
+    if (ok) {
+      delivered += toWrite;
+      await args.onVisibleCommitted?.(toWrite, delivered);
+    }
     return ok;
   }
 

@@ -2,17 +2,14 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { requireSession } from "../identity/middleware.ts";
 import { parseBody } from "../../lib/validate.ts";
 import { safeSseWrite, safeWriteWithBackpressure } from "../../lib/safe-sse-write.ts";
-import { CompanionConversationError, createCompanionTurn, createCompanionConversation } from "./turn-service.ts";
+import { CompanionConversationError, createCompanionTurn } from "./turn-service.ts";
 import { createCompanionLearningRunContextGrantRequestV1Schema, createMenuProposalRequestV1Schema, createToolProposalRequestV1Schema, proposalDecisionRequestV1Schema } from "@ailearn/shared";
 import { cancelCompanionRun } from "./companion-cancel.ts";
 import { openCompanionEventStream, listCompanionAgentRoutes, listCompanionRunNodes } from "./companion-events.ts";
 import { openCompanionThought } from "./thought-service.ts";
 import {
   ensureCompanionInbox,
-  getCompanionConversationSnapshot,
-  listCompanionConversations,
   listCompanionMessages,
-  deleteCompanionConversation,
 } from "./companion-conversations-service.ts";
 import {
   createCompanionLearningRunContextGrant,
@@ -259,45 +256,6 @@ export async function companionConversationRoutes(app: FastifyInstance) {
     });
     return reply.send(context);
   });
-
-  // POST /companion/conversations — 03 §6.1 创建 dialogue（client 不能创建 inbox）。
-  app.post(
-    "/companion/conversations",
-    { preHandler: [requireSession, requireCompanionDialogue] },
-    async (req, reply) => {
-      const raw = (req.body ?? {}) as { version?: unknown; kind?: unknown; title?: unknown };
-      if (raw.version !== 1 || raw.kind !== "dialogue") {
-        return reply.code(400).send({
-          version: 1,
-          error: "INVALID_REQUEST",
-          message: "request must be { version: 1, kind: 'dialogue' }",
-          recoverable: false,
-          requestId: req.id,
-        });
-      }
-      const title = typeof raw.title === "string" ? raw.title : undefined;
-      if (!rateLimited(reply, req.id, `${req.session.workspaceId}:${req.session.userId}:create-conversation`, COMPANION_RATE_LIMITS.createConversationPerMinute.limit, COMPANION_RATE_LIMITS.createConversationPerMinute.windowMs)) return;
-      try {
-        const result = await createCompanionConversation({
-          workspaceId: req.session.workspaceId,
-          userId: req.session.userId,
-          title,
-        });
-        return reply.code(result.statusCode).send(result.body);
-      } catch (err) {
-        if (err instanceof CompanionConversationError) {
-          return reply.code(err.statusCode).send({
-            version: 1,
-            error: err.code,
-            message: err.statusCode >= 500 ? "服务器内部错误" : err.message,
-            recoverable: false,
-            requestId: req.id,
-          });
-        }
-        throw err;
-      }
-    },
-  );
 
   // POST /companion/conversations/:id/turns — 03 §6.5/§8.1 原子 turn 创建。
   // Idempotency-Key header 必填（UUID）；服务端只保存其 SHA-256。
@@ -611,70 +569,6 @@ export async function companionConversationManagementRoutes(app: FastifyInstance
     },
   );
 
-  // GET /companion/conversations — §6.3 签名 keyset 分页列表。
-  app.get<{ Querystring: { limit?: string; cursor?: string; kind?: string; status?: string } }>(
-    "/companion/conversations",
-    { preHandler: [requireSession, requireCompanionDialogue] },
-    async (req, reply) => {
-      if (!rateLimited(reply, req.id, `${req.session.workspaceId}:${req.session.userId}:read`, COMPANION_RATE_LIMITS.readQueriesPerMinute.limit, COMPANION_RATE_LIMITS.readQueriesPerMinute.windowMs)) return;
-      const kind = req.query?.kind === "inbox" ? "inbox" : "dialogue";
-      const status = req.query?.status === "archived" ? "archived" : "active";
-      try {
-        const limit = parsePaginationInt(req.query?.limit, 20);
-        const result = await listCompanionConversations({
-          workspaceId: req.session.workspaceId,
-          userId: req.session.userId,
-          limit,
-          cursor: req.query?.cursor ?? null,
-          kind,
-          status,
-        });
-        return reply.code(result.statusCode).send(result.body);
-      } catch (err) {
-        if (err instanceof CompanionConversationError) {
-          return reply.code(err.statusCode).send({
-            version: 1,
-            error: err.code,
-            message: err.statusCode >= 500 ? "服务器内部错误" : err.message,
-            recoverable: false,
-            requestId: req.id,
-          });
-        }
-        throw err;
-      }
-    },
-  );
-
-  // GET /companion/conversations/:id — §6.4 原子恢复快照（含 P5 proposal/action）。
-  app.get<{ Params: { id: string } }>(
-    "/companion/conversations/:id",
-    { preHandler: [requireSession, requireCompanionDialogue] },
-    async (req, reply) => {
-      if (!rateLimited(reply, req.id, `${req.session.workspaceId}:${req.session.userId}:read`, COMPANION_RATE_LIMITS.readQueriesPerMinute.limit, COMPANION_RATE_LIMITS.readQueriesPerMinute.windowMs)) return;
-      try {
-        const result = await getCompanionConversationSnapshot({
-          workspaceId: req.session.workspaceId,
-          userId: req.session.userId,
-          conversationId: req.params.id,
-        });
-        return reply.code(result.statusCode).header("cache-control", "no-store").send(result.body);
-      } catch (err) {
-        if (err instanceof CompanionConversationError) {
-          // 5xx 业务错误也脱敏（与 server.ts setErrorHandler 的 5xx 占位一致）
-          const is5xx = err.statusCode >= 500;
-          return reply.code(err.statusCode).send({
-            version: 1,
-            error: err.code,
-            message: is5xx ? "服务器内部错误" : err.message,
-            recoverable: !is5xx,
-            requestId: req.id,
-          });
-        }
-        throw err;
-      }
-    },
-  );
-
   // GET /companion/conversations/:id/messages — §6.4 历史消息（beforeSeq 分页）。
   app.get<{ Params: { id: string }; Querystring: { limit?: string; beforeSeq?: string } }>(
     "/companion/conversations/:id/messages",
@@ -707,33 +601,6 @@ export async function companionConversationManagementRoutes(app: FastifyInstance
     },
   );
 
-  // DELETE /companion/conversations/:id — §12 hard delete（active turn supersede fence）。
-  app.delete<{ Params: { id: string } }>(
-    "/companion/conversations/:id",
-    { preHandler: [requireSession, requireCompanionDialogue] },
-    async (req, reply) => {
-      if (!rateLimited(reply, req.id, `${req.session.workspaceId}:${req.session.userId}:mutate`, COMPANION_RATE_LIMITS.mutateConversationPerMinute.limit, COMPANION_RATE_LIMITS.mutateConversationPerMinute.windowMs)) return;
-      try {
-        const result = await deleteCompanionConversation({
-          workspaceId: req.session.workspaceId,
-          userId: req.session.userId,
-          conversationId: req.params.id,
-        });
-        return reply.code(result.statusCode).send();
-      } catch (err) {
-        if (err instanceof CompanionConversationError) {
-          return reply.code(err.statusCode).send({
-            version: 1,
-            error: err.code,
-            message: err.statusCode >= 500 ? "服务器内部错误" : err.message,
-            recoverable: false,
-            requestId: req.id,
-          });
-        }
-        throw err;
-      }
-    },
-  );
 }
 
 // ─── §12 Export（NDJSON） ─────────────────────────────────────────────────

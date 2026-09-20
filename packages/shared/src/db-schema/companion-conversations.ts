@@ -96,6 +96,8 @@ export const companionMessages = pgTable(
     // 额外能力，且避免每条 INSERT 写两棵 B-tree）。此处**不声明**该索引，防 generate 重建。
     workspaceUserConvSeqIdx: index("companion_messages_workspace_user_conv_seq_idx")
       .on(t.workspaceId, t.userId, t.conversationId, sql`seq DESC`),
+    continuousHistoryIdx: index("companion_messages_workspace_user_created_id_idx")
+      .on(t.workspaceId, t.userId, sql`${t.createdAt} DESC`, sql`${t.id} DESC`),
     // 2026-08-12（generate 对齐）：0093 定义单列 (action_ref) 部分索引
     actionRefIdx: index("companion_messages_action_ref_idx")
       .on(t.actionRef)

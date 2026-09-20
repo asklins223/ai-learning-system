@@ -1611,6 +1611,20 @@
       "when": 1789793389628,
       "tag": "0229_companion_message_cancelled_kind",
       "breakpoints": true
+    },
+    {
+      "idx": 230,
+      "version": "7",
+      "when": 1789793389629,
+      "tag": "0230_companion_continuous_history_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 231,
+      "version": "7",
+      "when": 1789793389630,
+      "tag": "0231_grant_companion_thoughts_exec",
+      "breakpoints": true
     }
   ]
 }

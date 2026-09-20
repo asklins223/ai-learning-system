@@ -6,7 +6,7 @@
  * （跨设备只允许一个未过期租约，CAS）。全部 withWorkspaceTransaction 内。
  */
 
-import { and, desc, eq, gt, sql } from "drizzle-orm";
+import { and, desc, eq, gt, lt, sql } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
 import { assistantDeliveries } from "@ailearn/shared/db-schema/assistant-deliveries";
 import { COMPANION_INBOX_NOTIFY_CHANNEL } from "./companion-notify.ts";
@@ -31,7 +31,7 @@ function toContract(row: typeof assistantDeliveries.$inferSelect): AssistantDeli
   return {
     version: 2,
     deliveryId: row.id,
-    assistantSessionId: row.assistantSessionId ?? "",
+    assistantSessionId: row.assistantSessionId,
     userId: row.userId,
     workspaceId: row.workspaceId,
     inboxSequence: row.inboxSequence,
@@ -234,4 +234,36 @@ export async function listInbox(
     .orderBy(assistantDeliveries.inboxSequence)
     .limit(Math.min(input.limit, 100));
   return rows.map(toContract);
+}
+
+/**
+ * 用户可见的历史时间线。与 SSE 的正序增量 inbox 分开：首屏从最新记录开始，
+ * 后续以最旧一条 sequence 作为 before 游标向过去翻页。
+ */
+export async function listDeliveryTimeline(
+  tx: ApiTransaction,
+  scope: DeliveryScope,
+  input: { beforeSequence?: number; limit: number; kind?: AssistantDeliveryKindV2 },
+): Promise<{ items: AssistantDeliveryV2[]; nextCursor: number }> {
+  const limit = Math.min(input.limit, 100);
+  const rows = await tx
+    .select()
+    .from(assistantDeliveries)
+    .where(and(
+      eq(assistantDeliveries.workspaceId, scope.workspaceId),
+      eq(assistantDeliveries.userId, scope.userId),
+      input.beforeSequence && input.beforeSequence > 0
+        ? lt(assistantDeliveries.inboxSequence, input.beforeSequence)
+        : undefined,
+      input.kind ? eq(assistantDeliveries.kind, input.kind) : undefined,
+    ))
+    .orderBy(desc(assistantDeliveries.inboxSequence))
+    .limit(limit + 1);
+  const page = rows.slice(0, limit).map(toContract);
+  return {
+    items: page,
+    nextCursor: rows.length > limit && page.length > 0
+      ? page[page.length - 1].inboxSequence
+      : 0,
+  };
 }

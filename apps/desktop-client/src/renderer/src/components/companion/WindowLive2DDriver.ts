@@ -41,6 +41,14 @@ interface Live2DInternalModel {
   originalHeight?: number;
   /** Union-able bounds of one drawable, in Cubism canvas units (y-up). */
   getDrawableBounds?: (index: number, out?: Live2DDrawableBounds) => Live2DDrawableBounds;
+  /**
+   * pixi-live2d-display 的 InternalModel 是 EventEmitter（2026-09-19 口型/表情修复）。
+   * `beforeModelUpdate` 在 motion + 眨眼 + 物理 + 姿态全部更新完之后、
+   * `coreModel.update()` 应用到绘制节点之前发出——只有挂在这里写参数，
+   * 我们的口型/表情值才能**每帧确定性地赢过** motion 曲线。
+   */
+  on?: (event: string, listener: () => void) => unknown;
+  off?: (event: string, listener: () => void) => unknown;
 }
 
 /** The character's real content box, as fractions of the model canvas. */
@@ -273,7 +281,19 @@ export class WindowLive2DDriver {
     this.destroy();
   };
 
-  private readonly handleTicker = (): void => {
+  /**
+   * 每帧参数写入（2026-09-19 口型/表情修复）。
+   *
+   * 之前挂在 `app.ticker` 上——但 pixi-live2d 的模型更新跑在 `Ticker.shared`
+   * （autoUpdate），两条独立 ticker 每帧互相赛跑；而模型自带的每条 motion
+   * （包括常驻循环的 Idle）都带**全部 128 条参数曲线**（ParamA、嘴、眼、眉、
+   * 腮红全在 motion 里）。motion 一旦后写，我们把语音振幅和情绪 FACS 写进去的
+   * 值就被整批抹掉——用户看到的就是"口型和表情没有应用上"。
+   *
+   * 现在挂在 `beforeModelUpdate` 上：motion/物理更新完 → 我们写 → 核心更新渲染。
+   * 顺序确定，不再有竞态。
+   */
+  private readonly handleModelUpdate = (): void => {
     if (this.disposed || this.paused || !this.model) return;
     const coreModel = this.model.internalModel?.coreModel;
     const setParameter = coreModel?.setParameterValueById;
@@ -385,9 +405,11 @@ export class WindowLive2DDriver {
       this.model = model;
       model.anchor.set(0.5, 0.5);
       app.stage.addChild(model);
+      // 参数写入挂进模型自己的更新周期（见 handleModelUpdate 的说明），
+      // 不再挂 app.ticker——那会和 pixi-live2d 的 motion 更新赛跑。
+      model.internalModel?.on?.("beforeModelUpdate", this.handleModelUpdate);
       this.measureContentBox();
       this.fitModel();
-      app.ticker?.add(this.handleTicker);
       // Never report ready until the backing canvas contains a real model
       // frame. This keeps the reserved seat stable until the actor is visible.
       this.renderCurrentFrame();
@@ -493,7 +515,7 @@ export class WindowLive2DDriver {
     this.resizeObserver = null;
     window.removeEventListener("resize", this.resizeToContainer);
     window.visualViewport?.removeEventListener("resize", this.resizeToContainer);
-    this.app?.ticker?.remove(this.handleTicker);
+    this.model?.internalModel?.off?.("beforeModelUpdate", this.handleModelUpdate);
     this.emotionController.reset();
     this.emotionMotionPlaying = false;
 
@@ -577,6 +599,8 @@ export class WindowLive2DDriver {
         width / 2 + (modelWidth * scale) / 2 - boxCenterX * scale,
         height * 0.02 - box.top * modelHeight * scale + (modelHeight * scale) / 2,
       );
+      // 半身取景把内容盒顶边放在容器顶边之下 2%（见上面的 position）。
+      this.publishInkTop(0.02);
       return;
     }
 
@@ -587,6 +611,22 @@ export class WindowLive2DDriver {
       width / 2 + (modelWidth * scale) / 2 - boxCenterX * scale,
       height * 0.98 - box.bottom * modelHeight * scale + (modelHeight * scale) / 2,
     );
+    // 内容盒顶边 = (容器顶到脚底的距离) − 内容盒高度；按 min(宽比, 高比) 适配时，模型比
+    // 容器瘦（宽比胜出）就会把头顶留在容器顶边之下——这段留白随缩放一起放大。
+    this.publishInkTop(Math.max(0, (height * 0.98 - boxHeight * scale) / height));
+  }
+
+  /**
+   * 把「角色**画出来的**顶边」按容器高度的分数写进容器（`--companion-model-ink-top`）。
+   *
+   * 气泡要悬在「她头顶之上 40px」，而容器顶边常常不是发际线：full 取景按
+   * `min(宽比, 高比)` 适配，模型比容器瘦时头顶之下留白；用户把伴星放大（或相机变焦）时
+   * 这段留白等比放大——只按容器顶定位的气泡就越飘越高，2026-09-20 用户截图："离的越来越
+   * 远了"。分数而不是像素：容器被外层 gsap 缩放时，分数不变、像素会变。
+   */
+  private publishInkTop(ratio: number): void {
+    const safe = Number.isFinite(ratio) ? Math.min(1, Math.max(0, ratio)) : 0;
+    this.container.style.setProperty("--companion-model-ink-top", safe.toFixed(4));
   }
 
   /**

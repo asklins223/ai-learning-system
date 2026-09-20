@@ -13,15 +13,25 @@ export interface MemoryStarMapNode {
   kind: string;
   content: string;
   state: "active" | "pinned";
+  importance: number;
+  updatedAt: string;
   entityLinks: {
-    entityType: string;
+    entityType: "card" | "key_point" | "note" | "source" | "learning_run";
     entityId: string;
+    label: string;
+    target:
+      | { kind: "note"; noteId: string }
+      | { kind: "source"; sourceId: string }
+      | { kind: "objective"; objectiveId: string }
+      | { kind: "understanding"; objectiveId: string }
+      | { kind: "learning_run"; runId: string }
+      | null;
     orphaned: boolean;
   }[];
 }
 
 export interface MemoryStarMapResult {
-  version: 1;
+  version: 2;
   nodes: MemoryStarMapNode[];
   cursor: null;
 }
@@ -33,13 +43,18 @@ export async function getMemoryStarMap(
   scope: { workspaceId: string; userId: string },
 ): Promise<MemoryStarMapResult> {
   const rows = await tx.execute<Record<string, unknown>>(sql`
-    SELECT m.id, m.kind, m.content, m.importance, m.pinned,
+    SELECT m.id, m.kind, m.content, m.importance, m.pinned, m.updated_at,
            COALESCE(
              jsonb_agg(
                jsonb_build_object(
                  'entityType', l.entity_type,
                  'entityId', l.entity_id,
-                 'orphaned', l.orphaned
+                 'label', COALESCE(resolved.label, '关联内容已不存在'),
+                 'target', CASE
+                   WHEN l.orphaned OR resolved.label IS NULL THEN NULL
+                   ELSE resolved.target
+                 END,
+                 'orphaned', l.orphaned OR resolved.label IS NULL
                )
              ) FILTER (WHERE l.id IS NOT NULL),
              '[]'::jsonb
@@ -49,6 +64,69 @@ export async function getMemoryStarMap(
       ON l.memory_id = m.id
      AND l.workspace_id = m.workspace_id
      AND l.user_id = m.user_id
+     AND l.entity_type IN ('card', 'key_point', 'note', 'source', 'learning_run')
+    LEFT JOIN LATERAL (
+      SELECT
+        CASE l.entity_type
+          WHEN 'note' THEN (
+            SELECT n.title FROM notes n
+            WHERE n.id = l.entity_id AND n.workspace_id = m.workspace_id AND n.deleted_at IS NULL
+            LIMIT 1
+          )
+          WHEN 'source' THEN (
+            SELECT s.title FROM sources s
+            WHERE s.id = l.entity_id AND s.workspace_id = m.workspace_id AND s.status <> 'archived'
+            LIMIT 1
+          )
+          WHEN 'card' THEN (
+            SELECT c.public_summary FROM learning_cards_v2 c
+            WHERE c.card_id = l.entity_id AND c.workspace_id = m.workspace_id AND c.lifecycle = 'active'
+            LIMIT 1
+          )
+          WHEN 'key_point' THEN (
+            SELECT COALESCE(r.concept_label, r.public_summary)
+            FROM learning_objective_revisions_v2 r
+            WHERE r.objective_id = l.entity_id AND r.workspace_id = m.workspace_id
+            ORDER BY r.revision DESC
+            LIMIT 1
+          )
+          WHEN 'learning_run' THEN (
+            SELECT CASE r.goal
+              WHEN 'stabilize' THEN '巩固学习'
+              WHEN 'clarify' THEN '澄清理解'
+              WHEN 'repair' THEN '修复理解'
+              WHEN 'transfer' THEN '迁移练习'
+              WHEN 'explore' THEN '探索学习'
+              ELSE '学习旅程'
+            END
+            FROM learning_runs r
+            WHERE r.id = l.entity_id AND r.workspace_id = m.workspace_id AND r.user_id = m.user_id
+            LIMIT 1
+          )
+        END AS label,
+        CASE l.entity_type
+          WHEN 'note' THEN CASE WHEN EXISTS (
+            SELECT 1 FROM notes n WHERE n.id = l.entity_id AND n.workspace_id = m.workspace_id AND n.deleted_at IS NULL
+          ) THEN jsonb_build_object('kind', 'note', 'noteId', l.entity_id) END
+          WHEN 'source' THEN CASE WHEN EXISTS (
+            SELECT 1 FROM sources s WHERE s.id = l.entity_id AND s.workspace_id = m.workspace_id AND s.status <> 'archived'
+          ) THEN jsonb_build_object('kind', 'source', 'sourceId', l.entity_id) END
+          WHEN 'card' THEN (
+            SELECT jsonb_build_object('kind', 'objective', 'objectiveId', c.objective_id)
+            FROM learning_cards_v2 c
+            WHERE c.card_id = l.entity_id AND c.workspace_id = m.workspace_id AND c.lifecycle = 'active'
+            LIMIT 1
+          )
+          WHEN 'key_point' THEN CASE WHEN EXISTS (
+            SELECT 1 FROM learning_objective_revisions_v2 r
+            WHERE r.objective_id = l.entity_id AND r.workspace_id = m.workspace_id
+          ) THEN jsonb_build_object('kind', 'understanding', 'objectiveId', l.entity_id) END
+          WHEN 'learning_run' THEN CASE WHEN EXISTS (
+            SELECT 1 FROM learning_runs r
+            WHERE r.id = l.entity_id AND r.workspace_id = m.workspace_id AND r.user_id = m.user_id
+          ) THEN jsonb_build_object('kind', 'learning_run', 'runId', l.entity_id) END
+        END AS target
+    ) resolved ON l.id IS NOT NULL
     WHERE m.workspace_id = ${scope.workspaceId}
       AND m.user_id = ${scope.userId}
       AND m.deleted_at IS NULL
@@ -64,10 +142,12 @@ export async function getMemoryStarMap(
     kind: String(row.kind),
     content: String(row.content),
     state: row.pinned ? "pinned" : "active",
+    importance: Number(row.importance),
+    updatedAt: new Date(String(row.updated_at)).toISOString(),
     entityLinks: Array.isArray(row.links)
-      ? (row.links as { entityType: string; entityId: string; orphaned: boolean }[])
+      ? (row.links as MemoryStarMapNode["entityLinks"])
       : [],
   }));
 
-  return { version: 1, nodes, cursor: null };
+  return { version: 2, nodes, cursor: null };
 }

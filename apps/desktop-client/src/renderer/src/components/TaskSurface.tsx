@@ -14,6 +14,7 @@ import {
   ObjectiveLibrarySurface,
 } from "./surfaces/WorkspaceLibrarySurface";
 import { CompanionCenterSurface } from "./surfaces/companion-center-surface";
+import { RenderErrorBoundary } from "./RenderErrorBoundary";
 import { NoteLibrarySurface } from "./surfaces/note-library-surface";
 import { NotebookSurface } from "./surfaces/notebook-surface";
 import { SearchSurface } from "./surfaces/search-surface";
@@ -345,20 +346,24 @@ export function TaskSurface() {
       tabIndex={-1}
     >
       <div className="surface-content task-surface__spatial-layer" key={renderedSurface}>
-        {renderedSurface === "study" ? <StudySurface /> : null}
-        {renderedSurface === "notebook" ? <NotebookSurface /> : null}
-        {renderedSurface === "card-generation" ? <CardGenerationSurface /> : null}
-        {renderedSurface === "review" ? <ReviewSurface /> : null}
-        {renderedSurface === "search" ? <SearchSurface /> : null}
-        {renderedSurface === "graph" ? <GraphSurface /> : null}
-        {renderedSurface === "validation" ? <ValidationSurface /> : null}
-        {renderedSurface === "source-library" ? <SourceLibrarySurface /> : null}
-        {renderedSurface === "source-detail" ? <SourceDetailSurface /> : null}
-        {renderedSurface === "note-library" ? <NoteLibrarySurface /> : null}
-        {renderedSurface === "objective-library" ? <ObjectiveLibrarySurface /> : null}
-        {renderedSurface === "objective-detail" ? <ObjectiveDetailSurface /> : null}
-        {renderedSurface === "companion-center" ? <CompanionCenterSurface /> : null}
-        {renderedSurface === "settings" ? <SettingsSurface /> : null}
+        {/* 页面级兜底：一张纸坏掉不该带走整个书房。`key` 已经跟着 surface 变化，
+            换页会重挂这一层，错误状态自然清掉，不需要额外的重置逻辑。 */}
+        <RenderErrorBoundary label="这个页面">
+          {renderedSurface === "study" ? <StudySurface /> : null}
+          {renderedSurface === "notebook" ? <NotebookSurface /> : null}
+          {renderedSurface === "card-generation" ? <CardGenerationSurface /> : null}
+          {renderedSurface === "review" ? <ReviewSurface /> : null}
+          {renderedSurface === "search" ? <SearchSurface /> : null}
+          {renderedSurface === "graph" ? <GraphSurface /> : null}
+          {renderedSurface === "validation" ? <ValidationSurface /> : null}
+          {renderedSurface === "source-library" ? <SourceLibrarySurface /> : null}
+          {renderedSurface === "source-detail" ? <SourceDetailSurface /> : null}
+          {renderedSurface === "note-library" ? <NoteLibrarySurface /> : null}
+          {renderedSurface === "objective-library" ? <ObjectiveLibrarySurface /> : null}
+          {renderedSurface === "objective-detail" ? <ObjectiveDetailSurface /> : null}
+          {renderedSurface === "companion-center" ? <CompanionCenterSurface /> : null}
+          {renderedSurface === "settings" ? <SettingsSurface /> : null}
+        </RenderErrorBoundary>
       </div>
     </section>
   );

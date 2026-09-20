@@ -214,24 +214,23 @@ services:
       AUTH_RATE_LIMIT_STORE: ${AUTH_RATE_LIMIT_STORE:-postgres}
       AUTH_RATE_LIMIT_WINDOW_MS: ${AUTH_RATE_LIMIT_WINDOW_MS:-900000}
       AUTH_RATE_LIMIT_MAX_ATTEMPTS: ${AUTH_RATE_LIMIT_MAX_ATTEMPTS:-5}
-      # Companion / LearningRun / Card Generation V2 capabilities are
-      # independently gated and fail-closed: every switch defaults to false and
-      # the deployment must opt in explicitly. Each service declares exactly the
-      # flags it reads; api/worker parity and dev/prod defaults are enforced by
+      # Companion Center base capabilities ship together; provider/device
+      # enhancements remain independently gated. Each service declares exactly the
+      # flags it reads; api/worker defaults are enforced by
       # .github/scripts/verify-companion-capability-config.mjs (make verify).
       LEARNING_RUN_ENABLED: ${LEARNING_RUN_ENABLED:-false}
       CARD_GENERATION_V2_ENABLED: ${CARD_GENERATION_V2_ENABLED:-false}
-      COMPANION_DIALOGUE_V1_ENABLED: ${COMPANION_DIALOGUE_V1_ENABLED:-false}
+      COMPANION_DIALOGUE_V1_ENABLED: ${COMPANION_DIALOGUE_V1_ENABLED:-true}
       COMPANION_VOICE_DIALOGUE_V1_ENABLED: ${COMPANION_VOICE_DIALOGUE_V1_ENABLED:-false}
       COMPANION_STREAMING_VOICE_V1_ENABLED: ${COMPANION_STREAMING_VOICE_V1_ENABLED:-false}
-      COMPANION_JOURNEY_V2: ${COMPANION_JOURNEY_V2:-false}
-      COMPANION_BRIDGE_V2: ${COMPANION_BRIDGE_V2:-false}
-      COMPANION_MEMORY_VECTOR_V1: ${COMPANION_MEMORY_VECTOR_V1:-false}
-      COMPANION_MEMORY_STAR_MAP_V1: ${COMPANION_MEMORY_STAR_MAP_V1:-false}
-      COMPANION_PET_PROFILE_V1: ${COMPANION_PET_PROFILE_V1:-false}
-      COMPANION_PROACTIVE_PERSONALIZED_V1: ${COMPANION_PROACTIVE_PERSONALIZED_V1:-false}
-      COMPANION_SUMMARIZER_V1: ${COMPANION_SUMMARIZER_V1:-false}
-      COMPANION_DAILY_SUMMARY_V1: ${COMPANION_DAILY_SUMMARY_V1:-false}
+      COMPANION_JOURNEY_V2: ${COMPANION_JOURNEY_V2:-true}
+      COMPANION_BRIDGE_V2: ${COMPANION_BRIDGE_V2:-true}
+      COMPANION_MEMORY_VECTOR_V1: ${COMPANION_MEMORY_VECTOR_V1:-true}
+      COMPANION_MEMORY_STAR_MAP_V1: ${COMPANION_MEMORY_STAR_MAP_V1:-true}
+      COMPANION_PET_PROFILE_V1: ${COMPANION_PET_PROFILE_V1:-true}
+      COMPANION_PROACTIVE_PERSONALIZED_V1: ${COMPANION_PROACTIVE_PERSONALIZED_V1:-true}
+      COMPANION_SUMMARIZER_V1: ${COMPANION_SUMMARIZER_V1:-true}
+      COMPANION_DAILY_SUMMARY_V1: ${COMPANION_DAILY_SUMMARY_V1:-true}
       AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS: ${AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS:-false}
       AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-true}
       # AI platform config — all provider/capability config in one JSON file.
@@ -320,10 +319,9 @@ services:
       # handler）在 7be4ffe 退役，worker 现在没有任何 HTTP 客户端回连 API（出站只到
       # LLM/源站）。留着会让"worker 会回调 API"成为误导性契约。
       # Keep worker-side execution authorization aligned with the API. The
-      # production stack remains fail-closed unless deployment env explicitly
-      # enables the approved companion capabilities. Only the flags the worker
+      # production stack enables the base Companion Center contract. Only the flags the worker
       # actually reads are declared here.
-      COMPANION_DIALOGUE_V1_ENABLED: ${COMPANION_DIALOGUE_V1_ENABLED:-false}
+      COMPANION_DIALOGUE_V1_ENABLED: ${COMPANION_DIALOGUE_V1_ENABLED:-true}
       COMPANION_VOICE_DIALOGUE_V1_ENABLED: ${COMPANION_VOICE_DIALOGUE_V1_ENABLED:-false}
       CARD_GENERATION_V2_LLM: ${CARD_GENERATION_V2_LLM:-false}
       # 2026-09-17：author/grounding 阶段内并发上限（此前硬串行）。
@@ -331,10 +329,12 @@ services:
       V2_STAGE_CONCURRENCY: ${V2_STAGE_CONCURRENCY:-12}
       # 2026-09-17：投机 pedagogy 开关（默认开）。
       V2_SPECULATIVE_PEDAGOGY: ${V2_SPECULATIVE_PEDAGOGY:-1}
-      COMPANION_MEMORY_EXTRACTOR_V1: ${COMPANION_MEMORY_EXTRACTOR_V1:-false}
-      COMPANION_MEMORY_VECTOR_V1: ${COMPANION_MEMORY_VECTOR_V1:-false}
-      COMPANION_SUMMARIZER_V1: ${COMPANION_SUMMARIZER_V1:-false}
-      COMPANION_DAILY_SUMMARY_V1: ${COMPANION_DAILY_SUMMARY_V1:-false}
+      COMPANION_MEMORY_EXTRACTOR_V1: ${COMPANION_MEMORY_EXTRACTOR_V1:-true}
+      COMPANION_MEMORY_VECTOR_V1: ${COMPANION_MEMORY_VECTOR_V1:-true}
+      COMPANION_SUMMARIZER_V1: ${COMPANION_SUMMARIZER_V1:-true}
+      COMPANION_DAILY_SUMMARY_V1: ${COMPANION_DAILY_SUMMARY_V1:-true}
+      COMPANION_THOUGHTS_V1: ${COMPANION_THOUGHTS_V1:-true}
+      COMPANION_THOUGHTS_LLM: ${COMPANION_THOUGHTS_LLM:-false}
       # Source image upload: MinIO/S3 storage for embedded images
       STORAGE_ENDPOINT: ${STORAGE_ENDPOINT:-http://minio:9000}
       S3_BUCKET: ${S3_BUCKET:-ailearn-workspaces}

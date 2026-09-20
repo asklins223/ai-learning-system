@@ -50,7 +50,7 @@ async function seed() {
 
 function makePage(cardId: string, keyPointId: string): MainPageContextInputV2 {
   return {
-    routeRef: { kind: "card", cardId },
+    routeRef: { kind: "card", cardId, objectiveId: keyPointId },
     pageKind: "card",
     entityRefs: [
       { kind: "card", cardId },

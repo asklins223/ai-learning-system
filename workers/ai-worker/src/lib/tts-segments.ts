@@ -79,6 +79,86 @@ export interface IncrementalTtsSplit {
   next: IncrementalTtsState;
 }
 
+/**
+ * 已提交可见正文上的稳定区间切分。与旧增量切句器不同，它不净化、压缩或重排文字，
+ * 因而 `displayText === fullText.slice(displayStart, displayEnd)` 始终成立，客户端可以
+ * 直接用绝对下标同步字幕，不再做易错的字符串前缀匹配。
+ */
+export interface CompanionDisplaySegmentState {
+  readonly cursor: number;
+  readonly sentCount: number;
+}
+
+export interface CompanionDisplaySegment {
+  readonly ordinal: number;
+  readonly displayText: string;
+  readonly displayStart: number;
+  readonly displayEnd: number;
+}
+
+export function splitCommittedDisplaySegments(
+  fullText: string,
+  state: CompanionDisplaySegmentState,
+  isFinal = false,
+  opts?: { readonly firstSegmentMinChars?: number; readonly maxSegmentChars?: number; readonly maxSegments?: number },
+): { readonly segments: CompanionDisplaySegment[]; readonly next: CompanionDisplaySegmentState } {
+  const maxSegmentChars = opts?.maxSegmentChars ?? TTS_MAX_SEGMENT_CHARS;
+  const maxSegments = opts?.maxSegments ?? TTS_MAX_SEGMENTS;
+  const firstSegmentMinChars = opts?.firstSegmentMinChars ?? TTS_FIRST_SEGMENT_MIN_CHARS;
+  let cursor = Math.min(Math.max(0, state.cursor), fullText.length);
+  let ordinal = state.sentCount;
+  const segments: CompanionDisplaySegment[] = [];
+
+  const push = (start: number, end: number): void => {
+    let displayStart = start;
+    let displayEnd = end;
+    while (displayStart < displayEnd && /\s/.test(fullText[displayStart] ?? "")) displayStart += 1;
+    while (displayEnd > displayStart && /\s/.test(fullText[displayEnd - 1] ?? "")) displayEnd -= 1;
+    cursor = end;
+    if (displayEnd <= displayStart || ordinal >= maxSegments) return;
+    ordinal += 1;
+    segments.push({
+      ordinal,
+      displayText: fullText.slice(displayStart, displayEnd),
+      displayStart,
+      displayEnd,
+    });
+  };
+
+  while (cursor < fullText.length && ordinal < maxSegments) {
+    const remaining = fullText.slice(cursor);
+    const hardEnd = Math.min(fullText.length, cursor + maxSegmentChars);
+    let boundary = -1;
+    const scanLimit = Math.min(remaining.length, maxSegmentChars);
+    for (let index = 0; index < scanLimit; index += 1) {
+      if (/[。！？；\n.!?;]/.test(remaining[index] ?? "")) {
+        boundary = cursor + index + 1;
+        break;
+      }
+    }
+
+    if (boundary > cursor) {
+      push(cursor, boundary);
+      continue;
+    }
+    if (remaining.length >= maxSegmentChars) {
+      push(cursor, hardEnd);
+      continue;
+    }
+    if (!isFinal && ordinal === 0 && remaining.trim().length >= firstSegmentMinChars) {
+      // 首段尽早发出，但保持这次已经提交的稳定前缀完整，避免把一个短句切成多个请求。
+      push(cursor, fullText.length);
+      continue;
+    }
+    if (isFinal) {
+      push(cursor, fullText.length);
+    }
+    break;
+  }
+
+  return { segments, next: { cursor, sentCount: ordinal } };
+}
+
 export function splitCompanionTtsSegmentsIncremental(
   text: string,
   state: IncrementalTtsState,

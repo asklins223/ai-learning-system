@@ -518,7 +518,6 @@ export const proposedLearningActionPayloadV1Schema = z.discriminatedUnion("kind"
   }).strict(),
   z.object({
     kind: z.literal("open_conversation_history"),
-    assistantSessionId: z.string().uuid().optional(),
   }).strict(),
   z.object({
     // revision = 目标记忆 updatedAt 的 epoch millis（单调 CAS 令牌；
@@ -668,6 +667,8 @@ export const companionLearningContextV1Schema = z.object({
     payloadSha256: z.string().regex(/^[a-f0-9]{64}$/),
     objectiveId: z.string().uuid(),
     originV2: createLearningRunV2RequestSchema.shape.originV2,
+    /** 服务端冻结的真实创建参数；确认时必须逐字段复用，不能在第二次读取时补造。 */
+    request: createLearningRunV2RequestSchema,
   }).nullable(),
 }).strict();
 
@@ -775,13 +776,41 @@ const companionStreamEventBaseShapeV1 = {
 
 // SSE 的 character.cue 必须与方案 13 §9.6 / 03 §4.4 的高层语义 cue 合同一致
 // （intent/emotion 为固定 enum，含 durationMs），不复用 presentation 名。
-const characterCuePayloadV1Schema = z.object({
+export const characterCuePayloadV1Schema = z.object({
   version: z.literal(1),
   intent: characterCueIntentV1Schema,
   emotion: characterCueEmotionV1Schema,
   intensity: z.number().min(0).max(1),
   durationMs: z.number().int().positive().optional(),
 }).strict();
+export type CharacterCuePayloadV1 = z.infer<typeof characterCuePayloadV1Schema>;
+
+/**
+ * 伴星回复的服务端语音片段合同。
+ *
+ * `display*` 永远对应已经提交给用户的干净正文；`synthesisText` 只供服务端按
+ * 严格引用重新读取并合成，可包含受控语气标签。桌面主进程会在跨 IPC 前删除
+ * `synthesisText`，渲染层只看到引用、正文区间、摘要和语义 cue。
+ */
+export const companionVoiceSegmentReadyPayloadV2Schema = z.strictObject({
+  version: z.literal(2),
+  segmentId: z.string().regex(/^[a-f0-9]{64}$/),
+  ordinal: z.number().int().min(1).max(200),
+  displayText: z.string().min(1).max(160),
+  displayStart: z.number().int().nonnegative(),
+  displayEnd: z.number().int().positive(),
+  synthesisText: z.string().min(1).max(200),
+  synthesisTextSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  cue: characterCuePayloadV1Schema,
+}).superRefine((value, context) => {
+  if (value.displayEnd <= value.displayStart) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["displayEnd"], message: "displayEnd must be greater than displayStart" });
+  }
+  if (value.displayEnd - value.displayStart !== value.displayText.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["displayText"], message: "display range must match displayText length" });
+  }
+});
+export type CompanionVoiceSegmentReadyPayloadV2 = z.infer<typeof companionVoiceSegmentReadyPayloadV2Schema>;
 
 const actionProposedProposalV1Schema = z.object({
   version: z.literal(1),
@@ -840,15 +869,11 @@ export const companionStreamEventV1Schema = z.discriminatedUnion("type", [
   z.object({ ...companionStreamEventBaseShapeV1, type: z.literal("action.expired"), payload: z.object({
     proposalId: z.string().uuid(),
   }).strict() }).strict(),
-  z.object({ ...companionStreamEventBaseShapeV1, type: z.literal("voice.segment.ready"), payload: z.object({
-    segmentId: z.string().regex(/^[a-f0-9]{64}$/),
-    // 2026-08-24：ordinal 上限 20 → 200——与 worker 切段上限 TTS_MAX_SEGMENTS
-    // 对齐；此前长回复第 21 段起被合同/客户端静默丢弃（文字显示、音频缺失）。
-    ordinal: z.number().int().min(1).max(200),
-    text: z.string().min(1).max(160), textSha256: z.string().regex(/^[a-f0-9]{64}$/),
-    // 15b 二期：段级情感（段内最后一个控制类标签，如 excited/laughing；无则省略）——live2d 协同预留
-    emotion: z.string().min(1).max(64).optional(),
-  }).strict() }).strict(),
+  z.object({
+    ...companionStreamEventBaseShapeV1,
+    type: z.literal("voice.segment.ready"),
+    payload: companionVoiceSegmentReadyPayloadV2Schema,
+  }).strict(),
   z.object({ ...companionStreamEventBaseShapeV1, type: z.literal("proactive.delivery"), payload: z.object({
     deliveryId: z.string().uuid(), messageId: z.string().uuid(), expiresAt: z.string().datetime(),
     contentPolicy: z.enum(["content", "content_hidden"]),
@@ -870,17 +895,6 @@ export type CompanionStreamEventV1 = z.infer<typeof companionStreamEventV1Schema
 // ─── P2/P3：TTS request + 错误码 type ────────────────────────────────────
 
 export type CompanionPublicErrorCodeV1 = z.infer<typeof companionPublicErrorCodeV1Schema>;
-
-export const companionTtsRequestV1Schema = z.object({
-  version: z.literal(1),
-  profileId: z.literal("companion-default-v1"),
-  conversationId: z.string().uuid(),
-  runId: z.string().uuid(),
-  generation: z.number().int().positive(),
-  // 2026-08-24：与 voice.segment.ready 的 ordinal 上限同步（20 → 200）。
-  ordinal: z.number().int().min(1).max(200),
-  segmentId: z.string().regex(/^[a-f0-9]{64}$/),
-}).strict();
 
 // ─── P6 §13 流式 TTS 请求（句子级，每稳定句一条流） ─────────────────────
 

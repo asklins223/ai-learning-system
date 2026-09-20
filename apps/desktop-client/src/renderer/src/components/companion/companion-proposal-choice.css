@@ -1,0 +1,175 @@
+.companion-choice-card {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  margin-top: 10px;
+  padding: 12px;
+  color: var(--companion-ink);
+  font-size: 11.5px;
+  line-height: 1.45;
+  border: 1.5px solid rgba(201, 164, 126, .66);
+  border-radius: 17px 20px 16px 18px;
+  background: linear-gradient(145deg, rgba(255, 253, 245, .98), rgba(255, 241, 207, .78));
+  box-shadow: 0 7px 18px rgba(91, 62, 39, .1);
+}
+
+.companion-choice-card[data-context="bubble"] {
+  margin-top: 0;
+}
+
+.companion-hud__composer > .companion-choice-card {
+  margin-top: 12px;
+}
+
+.companion-choice-card > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.companion-choice-card > header > span {
+  color: var(--companion-muted);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: .06em;
+}
+
+.companion-choice-card > header > small {
+  flex: none;
+  padding: 3px 7px;
+  color: #856040;
+  font-size: 10.5px;
+  font-weight: 700;
+  border-radius: 999px;
+  background: rgba(245, 181, 116, .25);
+}
+
+.companion-choice-card[data-status="accepted"] > header > small,
+.companion-choice-card[data-status="executing"] > header > small,
+.companion-choice-card[data-status="succeeded"] > header > small {
+  color: #356c50;
+  background: rgba(172, 216, 192, .42);
+}
+
+.companion-choice-card[data-status="failed"] > header > small {
+  color: #924838;
+  background: rgba(190, 100, 82, .14);
+}
+
+.companion-choice-card[data-status="rejected"] > header > small,
+.companion-choice-card[data-status="expired"] > header > small {
+  color: #73675c;
+  background: rgba(169, 156, 140, .18);
+}
+
+.companion-choice-card__title {
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.companion-choice-card dl {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+}
+
+.companion-choice-card dl > div {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 7px;
+}
+
+.companion-choice-card dt {
+  color: var(--companion-muted);
+  font-weight: 700;
+}
+
+.companion-choice-card dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.companion-choice-card__actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.companion-choice-card__actions button {
+  min-height: 36px;
+  padding: 7px 10px;
+  color: var(--companion-ink);
+  font: inherit;
+  font-weight: 700;
+  border: 1.5px solid rgba(201, 164, 126, .7);
+  border-radius: 12px 14px 11px 13px;
+  background: rgba(255, 255, 255, .76);
+  cursor: pointer;
+  transition: background-color 150ms ease-out, border-color 150ms ease-out, transform 150ms ease-out;
+}
+
+.companion-choice-card__actions .companion-choice-card__confirm {
+  border-color: rgba(143, 193, 166, .82);
+  background: rgba(205, 235, 217, .76);
+}
+
+.companion-choice-card__actions button:disabled {
+  cursor: wait;
+  opacity: .58;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .companion-choice-card__actions button:hover:not(:disabled) {
+    border-color: var(--companion-peach-strong);
+    background: #fff8e7;
+  }
+
+  .companion-choice-card__actions .companion-choice-card__confirm:hover:not(:disabled) {
+    border-color: var(--companion-mint-strong);
+    background: rgba(205, 235, 217, .95);
+  }
+}
+
+.companion-choice-card__error,
+.companion-choice-card--error {
+  color: #924838;
+}
+
+.companion-choice-card__error {
+  margin: 0;
+  font-size: 11px;
+}
+
+.companion-choice-card--loading {
+  display: flex;
+  align-items: center;
+  color: var(--companion-muted);
+}
+
+.companion-choice-card__spinner {
+  flex: none;
+  animation: companion-choice-spin 800ms linear infinite;
+}
+
+@keyframes companion-choice-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .companion-choice-card__actions button { transition: none; }
+  .companion-choice-card__spinner { animation-duration: 1.4s; }
+}
+
+.desktop-app[data-motion-mode="off"] .companion-choice-card__actions button,
+.companion-history[data-motion="off"] .companion-choice-card__actions button {
+  transition: none;
+}
+
+.desktop-app[data-motion-mode="off"] .companion-choice-card__spinner,
+.companion-history[data-motion="off"] .companion-choice-card__spinner {
+  animation: none;
+}

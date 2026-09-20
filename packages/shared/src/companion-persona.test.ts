@@ -9,7 +9,7 @@ import {
 
 test("current companion persona has the frozen canonical bytes and hash", () => {
   const bytes = Buffer.from(COMPANION_PERSONA_V4, "utf8");
-  assert.equal(bytes.length, 3225);
+  assert.equal(bytes.length, 3718);
   assert.equal(createHash("sha256").update(bytes).digest("hex"), COMPANION_PERSONA_V4_SHA256);
   assert.equal(COMPANION_PERSONA_V4_PROMPT_ID, "companion-persona-v4");
   assert.ok(COMPANION_PERSONA_V4.includes("有来有回"));

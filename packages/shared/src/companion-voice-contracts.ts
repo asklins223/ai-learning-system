@@ -30,6 +30,20 @@ export const companionVoiceSpeakResultV1Schema = z.strictObject({
 });
 export type CompanionVoiceSpeakResultV1 = z.infer<typeof companionVoiceSpeakResultV1Schema>;
 
+/**
+ * Agent 正文朗读只提交服务端签发的片段引用，正文、语气标签和 voice profile 都不由
+ * renderer 指定。API 会在当前工作区内重读事件并再次校验 run/generation fence。
+ */
+export const companionVoiceSpeakSegmentRequestV2Schema = z.strictObject({
+  version: z.literal(2),
+  conversationId: z.string().uuid(),
+  runId: z.string().uuid(),
+  generation: z.number().int().positive(),
+  ordinal: z.number().int().min(1).max(200),
+  segmentId: z.string().regex(/^[a-f0-9]{64}$/),
+});
+export type CompanionVoiceSpeakSegmentRequestV2 = z.infer<typeof companionVoiceSpeakSegmentRequestV2Schema>;
+
 // ─── 语音转文本（`companion.voice.transcribe`，2026-09-18 接线） ─────────────
 //
 // 渲染层已完成本地录音（getUserMedia + AudioWorklet → 16kHz 单声道 WAV），

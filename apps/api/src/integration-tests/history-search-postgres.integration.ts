@@ -82,8 +82,8 @@ async function seedIdentity() {
 
 async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
-  const { assistantSessionRoutes } = await import("../modules/companion-conversation/assistant-session-routes.ts");
-  await app.register(assistantSessionRoutes);
+  const { continuousHistoryRoutes } = await import("../modules/companion-conversation/continuous-history-routes.ts");
+  await app.register(continuousHistoryRoutes);
   return app;
 }
 

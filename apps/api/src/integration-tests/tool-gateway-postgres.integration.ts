@@ -123,7 +123,7 @@ async function confirmProposal(seeded: Seeded, proposalId: string, expectedPaylo
   }) as Promise<{
     status: string;
     resultRef: string | null;
-    route: { kind: string; keyPointId?: string; lens?: string; assistantSessionId?: string; restoreRun?: string } | null;
+    route: { kind: string; keyPointId?: string; lens?: string; restoreRun?: string } | null;
     safeSummary: string | null;
   }>;
 }
@@ -261,12 +261,10 @@ test("§18.1：restore_graph_viewport / open_conversation_history——导航同
     assert.equal(restoreResult.route?.kind, "star_map");
     assert.equal(restoreResult.route?.restoreRun, run.runId);
 
-    const assistantSessionId = randomUUID();
-    const history = await createToolProposal(seeded, { kind: "open_conversation_history", assistantSessionId });
+    const history = await createToolProposal(seeded, { kind: "open_conversation_history" });
     const historyResult = await confirmProposal(seeded, history.proposalId, history.payloadSha256);
     assert.equal(historyResult.status, "succeeded");
     assert.equal(historyResult.route?.kind, "conversation");
-    assert.equal(historyResult.route?.assistantSessionId, assistantSessionId);
   } finally {
     await seeded.cleanup();
   }

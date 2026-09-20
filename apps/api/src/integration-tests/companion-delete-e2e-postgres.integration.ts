@@ -1,7 +1,7 @@
 /**
  * §24.5 E15/E16 服务端等价集成测试。
  *
- * E15：删除对话（正文/消息物理清除 + 审计留痕）与删除记忆（soft delete，
+ * E15：清空连续历史（正文物理清除 + 新 inbox）与删除记忆（soft delete，
  * canonical 学习事实不受影响）。
  * E16：global off（账号级关闭桌宠）不取消 active LearningRun——Run 继续
  * 独立完成（§9.5：globalEnabled=false 不生成 proactive delivery，运行中的
@@ -45,8 +45,11 @@ const { withWorkspaceTransaction, closeDatabase } = await import("../db/client.t
 const { runLearningRunProcessingTick, closeStructuredSolutionSql } = await import(
   "../modules/learning-runs/run-processing-tick.ts"
 );
-const { deleteCompanionConversation, ensureCompanionInbox } = await import(
+const { ensureCompanionInbox } = await import(
   "../modules/companion-conversation/companion-conversations-service.ts"
+);
+const { clearContinuousHistory } = await import(
+  "../modules/companion-conversation/continuous-history-service.ts"
 );
 const { upsertMemory, listMemories, deleteMemory } = await import(
   "../modules/companion-conversation/memory-service.ts"
@@ -74,7 +77,7 @@ async function seedIdentity() {
   };
 }
 
-test("E15：删除对话与记忆——正文物理清除、审计留痕、学习事实不受影响", async () => {
+test("E15：清空连续历史与删除记忆——正文物理清除、新 inbox、学习事实不受影响", async () => {
   const seeded = await seedIdentity();
   try {
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
@@ -97,17 +100,23 @@ test("E15：删除对话与记忆——正文物理清除、审计留痕、学�
     const memoriesBefore = await withWorkspaceTransaction(scope, (tx) => listMemories(tx, scope, {}));
     assert.equal(memoriesBefore.length, 1);
 
-    // 删除会话 → 消息/会话物理清除。
-    const result = await withWorkspaceTransaction(scope, () =>
-      deleteCompanionConversation({ ...scope, conversationId }),
-    );
-    assert.ok(result.statusCode === 200 || result.statusCode === 204);
+    // 清空整条连续历史 → 旧消息/内部分段物理清除，并创建新的空 inbox。
+    const result = await clearContinuousHistory(scope);
+    assert.equal(result.activeReply, false);
+    if (!result.activeReply) assert.equal(result.value.inboxCreated, true);
     const msgRows = await scoped(scope, (tx) => tx`
       SELECT count(*)::int AS n FROM companion_messages WHERE conversation_id = ${conversationId}
     `);
     assert.equal(msgRows[0].n, 0, "消息正文物理清除");
-    const convRows = await scoped(scope, (tx) => tx`SELECT count(*)::int AS n FROM companion_conversations WHERE id = ${conversationId}`);
-    assert.equal(convRows[0].n, 0, "会话物理清除");
+    const convRows = await scoped(scope, (tx) => tx`
+      SELECT
+        count(*) FILTER (WHERE id = ${conversationId})::int AS old_count,
+        count(*) FILTER (WHERE kind = 'inbox' AND status = 'active')::int AS inbox_count
+      FROM companion_conversations
+      WHERE workspace_id = ${scope.workspaceId} AND user_id = ${scope.userId}
+    `);
+    assert.equal(convRows[0].old_count, 0, "旧内部分段物理清除");
+    assert.equal(convRows[0].inbox_count, 1, "创建唯一空 inbox");
 
     // 删除记忆 → 列表为空；审计 tombstone（deleted_at）保留。
     await withWorkspaceTransaction(scope, (tx) => deleteMemory(tx, scope, memoriesBefore[0].memoryItemId));

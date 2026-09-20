@@ -42,6 +42,7 @@ import {
   companionVoiceSpeakResultV1Schema,
   companionVoiceTranscribeResultV1Schema,
   type CompanionVoiceSpeakRequestV1,
+  type CompanionVoiceSpeakSegmentRequestV2,
 } from "./companion-voice-contracts.ts";
 // 伴星聊天发送链路（2026-09-18 接线）：建/复用 dialogue、发 turn、拉消息。
 import {
@@ -49,6 +50,9 @@ import {
   companionChatListMessagesResultV1Schema,
   companionChatSendTurnResultV1Schema,
 } from "./companion-chat-desktop-contracts.ts";
+import {
+  companionLearningContextV1Schema,
+} from "./companion-conversation-contracts.ts";
 // 站内图片字节通道：来源解析把网页图片写进对象存储后，正文引用指向
 // `/api/uploads/…`；渲染层够不到 API 源也不持有令牌，由 main 代取。
 import {
@@ -65,15 +69,31 @@ import {
 // 伴星中心（桌面页 20）：记忆、记忆星图、日记、人格档案与对话记录。
 // 读取之外只开放记忆裁决（确认/忽略/固定/归档），没有对话发送通道。
 import {
-  companionConversationListV1Schema,
   companionDailySummaryV1Schema,
+  companionActivityDeliveryV1Schema,
+  companionActivityTimelineV1Schema,
+  companionAuditDeleteResultV1Schema,
+  companionExportResultV1Schema,
+  companionHistoryClearResultV1Schema,
+  companionHistoryPageV1Schema,
+  companionHistorySearchV1Schema,
   companionMemoryItemV1Schema,
+  companionMemoryClearResultV1Schema,
+  companionMemoryConflictListV1Schema,
+  companionMemoryConflictResolveResultV1Schema,
   companionMemoryListV1Schema,
-  companionMemoryStarMapV1Schema,
+  companionMemoryQueueResultV1Schema,
+  companionMemoryStarMapV2Schema,
   companionPersonaMutationV1Schema,
   companionPersonaResetV1Schema,
   companionPersonaV1Schema,
   type CompanionMemoryListQuery,
+  type CompanionMemoryCreateInputV1,
+  type CompanionMemoryCorrectInputV1,
+  type CompanionActivityAckRequestV1,
+  type CompanionExportKindV1,
+  type CompanionHistoryQueryV1,
+  type CompanionHistorySearchQueryV1,
   type CompanionPersonaPatchV1,
 } from "./companion-memory-desktop-contracts.ts";
 // 账号级 presence（2026-09-16 裁决 3）：在线/勿扰/离线 + 三档强度 + 静默时段。
@@ -82,8 +102,19 @@ import {
   companionAccountStateV1Schema,
   companionOverviewSchema,
   companionAnswerModePreferenceV1Schema,
+  onboardingTransitionResponseSchema,
   type CompanionAccountPatch,
+  type OnboardingTransitionRequest,
 } from "./companion-shell-contracts.ts";
+import {
+  companionInvitationSchema,
+  companionJourneyBootstrapSchema,
+  companionJourneySchema,
+  type CompanionInvitationActionRequest,
+  type CompanionJourneyActionRequest,
+} from "./companion-journey-contracts.ts";
+import type { MainPageContextInputV2 } from "./companion-bridge-contracts.ts";
+import { authSurfaceManifestV1Schema } from "./auth-surface-manifest.ts";
 import { noteDetailV1Schema } from "./note-projection-contracts.ts";
 import { noteSaveReceiptV1Schema, noteSaveRequestV1Schema } from "./note-save-contracts.ts";
 import {
@@ -153,6 +184,7 @@ export const DESKTOP_IPC_CHANNELS = {
   navigationBack: "ailearn.v1.navigation.back",
   navigationRestore: "ailearn.v1.navigation.restore",
   authGetState: "ailearn.v1.auth.getState",
+  authGetSurfaceManifest: "ailearn.v1.auth.getSurfaceManifest",
   authLogin: "ailearn.v1.auth.login",
   authRegister: "ailearn.v1.auth.register",
   authLogout: "ailearn.v1.auth.logout",
@@ -194,8 +226,10 @@ export const DESKTOP_IPC_CHANNELS = {
   companionRoomGetProfile: "ailearn.v1.companion.room.getProfile",
   companionRoomPatchProfile: "ailearn.v1.companion.room.patchProfile",
   companionVoiceSpeak: "ailearn.v1.companion.voice.speak",
+  companionVoiceSpeakSegment: "ailearn.v1.companion.voice.speakSegment",
   companionAccountGetState: "ailearn.v1.companion.account.getState",
   companionAccountPatchState: "ailearn.v1.companion.account.patchState",
+  companionOnboardingTransition: "ailearn.v1.companion.onboarding.transition",
   companionMemoryList: "ailearn.v1.companion.memory.list",
   companionMemoryStarMap: "ailearn.v1.companion.memory.starMap",
   companionMemoryConfirm: "ailearn.v1.companion.memory.confirm",
@@ -204,11 +238,33 @@ export const DESKTOP_IPC_CHANNELS = {
   companionMemoryArchive: "ailearn.v1.companion.memory.archive",
   companionMemoryRestore: "ailearn.v1.companion.memory.restore",
   companionMemoryDelete: "ailearn.v1.companion.memory.delete",
+  companionMemoryCreate: "ailearn.v1.companion.memory.create",
+  companionMemoryCorrect: "ailearn.v1.companion.memory.correct",
+  companionMemoryDismiss: "ailearn.v1.companion.memory.dismiss",
+  companionMemoryConflicts: "ailearn.v1.companion.memory.conflicts",
+  companionMemoryResolveConflict: "ailearn.v1.companion.memory.resolveConflict",
+  companionMemoryRebuildEmbeddings: "ailearn.v1.companion.memory.rebuildEmbeddings",
+  companionMemoryClear: "ailearn.v1.companion.memory.clear",
+  companionMemorySummarizeRecent: "ailearn.v1.companion.memory.summarizeRecent",
   companionDailyGet: "ailearn.v1.companion.daily.get",
   companionPersonaGet: "ailearn.v1.companion.persona.get",
   companionPersonaPatch: "ailearn.v1.companion.persona.patch",
   companionPersonaReset: "ailearn.v1.companion.persona.reset",
-  companionConversationsList: "ailearn.v1.companion.conversations.list",
+  companionHistoryList: "ailearn.v1.companion.history.list",
+  companionHistorySearch: "ailearn.v1.companion.history.search",
+  companionHistoryClear: "ailearn.v1.companion.history.clear",
+  companionLearningContextGet: "ailearn.v1.companion.learningContext.get",
+  companionJourneyBootstrap: "ailearn.v1.companion.journey.bootstrap",
+  companionJourneyGet: "ailearn.v1.companion.journey.get",
+  companionInvitationAction: "ailearn.v1.companion.invitation.action",
+  companionJourneyAction: "ailearn.v1.companion.journey.action",
+  companionActivityTimeline: "ailearn.v1.companion.activity.timeline",
+  companionActivityPresent: "ailearn.v1.companion.activity.present",
+  companionActivityAck: "ailearn.v1.companion.activity.ack",
+  companionBridgeSetContext: "ailearn.v1.companion.bridge.setContext",
+  companionBridgeClearContext: "ailearn.v1.companion.bridge.clearContext",
+  companionDataExport: "ailearn.v1.companion.data.export",
+  companionAuditDelete: "ailearn.v1.companion.audit.delete",
   // 伴星聊天发送链路 + 语音转文本（2026-09-18 接线，companion-chat-desktop-contracts）。
   companionVoiceTranscribe: "ailearn.v1.companion.voice.transcribe",
   companionChatEnsureConversation: "ailearn.v1.companion.chat.ensureConversation",
@@ -450,6 +506,7 @@ export const desktopRouteKindValues = [
   "understanding.graph",
   "search.global",
   "settings.section",
+  "companion.center",
   "companion.drawer",
 ] as const;
 export const desktopRouteKindSchema = z.enum(desktopRouteKindValues);
@@ -477,6 +534,7 @@ export const desktopRouteKindM2Values = [
   "understanding.graph",
   "search.global",
   "settings.section",
+  "companion.center",
   "companion.drawer",
 ] as const;
 export const desktopRouteKindM2Schema = z.enum(desktopRouteKindM2Values);
@@ -514,6 +572,12 @@ const workspaceRouteSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("understanding.graph") }),
   z.strictObject({ kind: z.literal("search.global") }),
   z.strictObject({ kind: z.literal("settings.section"), section: nonEmptyStringSchema }),
+  z.strictObject({
+    kind: z.literal("companion.center"),
+    tab: z.enum(["memory", "dialogue", "activity", "diary", "persona"]).optional(),
+    focusMemoryId: uuidSchema.optional(),
+    focusMessageId: uuidSchema.optional(),
+  }),
   z.strictObject({ kind: z.literal("companion.drawer"), focus: nonEmptyStringSchema.optional() }),
 ]);
 
@@ -1255,10 +1319,26 @@ export const companionChatStreamEventV1Schema = z.strictObject({
 });
 export type CompanionChatStreamEventV1 = z.infer<typeof companionChatStreamEventV1Schema>;
 
+/** Renderer-safe bridge state. Broker-owned ids and hydrated entity data stay in main. */
+export const companionBridgeStateV1Schema = z.strictObject({
+  version: z.literal(1),
+  active: z.boolean(),
+  revision: z.string().min(1).nullable(),
+  expiresAt: isoTimestampSchema.nullable(),
+});
+export type CompanionBridgeStateV1 = z.infer<typeof companionBridgeStateV1Schema>;
+
+export const authSurfaceManifestResultV1Schema = z.strictObject({
+  manifest: authSurfaceManifestV1Schema,
+  testMode: z.boolean(),
+});
+export type AuthSurfaceManifestResultV1 = z.infer<typeof authSurfaceManifestResultV1Schema>;
+
 export const gatewayEventPayloadM2Schema = z.union([
   gatewayEventPayloadM1Schema,
   z.strictObject({ kind: z.literal("learning_run_changed"), runId: uuidSchema, revision: nonNegativeIntSchema }),
   z.strictObject({ kind: z.literal("card_generation_changed"), runId: uuidSchema, eventCursor: nonNegativeIntSchema, revision: nonNegativeIntSchema }),
+  z.strictObject({ kind: z.literal("companion_activity_changed"), inboxSequence: nonNegativeIntSchema }),
   z.strictObject({
     kind: z.literal("companion_chat_event"),
     conversationId: uuidSchema,
@@ -1271,6 +1351,7 @@ export const gatewayEventPayloadSchema = z.union([
   gatewayEventPayloadM1Schema,
   z.strictObject({ kind: z.literal("learning_run_changed"), runId: uuidSchema, revision: nonNegativeIntSchema }),
   z.strictObject({ kind: z.literal("card_generation_changed"), runId: uuidSchema, eventCursor: nonNegativeIntSchema, revision: nonNegativeIntSchema }),
+  z.strictObject({ kind: z.literal("companion_activity_changed"), inboxSequence: nonNegativeIntSchema }),
   z.strictObject({
     kind: z.literal("companion_chat_event"),
     conversationId: uuidSchema,
@@ -1290,7 +1371,7 @@ export const gatewayEventSchema = z
     workspaceEpoch: nonNegativeIntSchema,
     cursor: cursorSchema,
     eventRevision: nonNegativeIntSchema,
-    kind: z.enum(["connection_changed", "snapshot_invalidated", "learning_run_changed", "card_generation_changed", "companion_chat_event", "companion_delivery_changed", "domain_job_changed"]),
+    kind: z.enum(["connection_changed", "snapshot_invalidated", "learning_run_changed", "card_generation_changed", "companion_chat_event", "companion_activity_changed", "companion_delivery_changed", "domain_job_changed"]),
     schemaRevision: nonEmptyStringSchema,
     data: gatewayEventPayloadSchema,
   })
@@ -1437,6 +1518,7 @@ export interface AILearnDesktopApiM1 {
     restore(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<NavigationSnapshotV1>>;
   };
   readonly auth: {
+    getSurfaceManifest(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<AuthSurfaceManifestResultV1>>;
     getState(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<SessionContextV1>>;
     login(input: { meta: RequestMetaV1; email: string; password: string; remember: boolean }): Promise<GatewayResultV1<SessionContextV1>>;
     register(input: { meta: RequestMetaV1; email: string; password: string; inviteToken?: string; displayName?: string; remember: boolean }): Promise<GatewayResultV1<SessionContextV1>>;
@@ -1566,6 +1648,10 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
         meta: RequestMetaV1;
         request: CompanionVoiceSpeakRequestV1;
       }): Promise<GatewayResultV1<z.infer<typeof companionVoiceSpeakResultV1Schema>>>;
+      speakSegment(input: {
+        meta: RequestMetaV1;
+        request: CompanionVoiceSpeakSegmentRequestV2;
+      }): Promise<GatewayResultV1<z.infer<typeof companionVoiceSpeakResultV1Schema>>>;
       /**
        * 语音转文本（2026-09-18 接线）：渲染层本地录好 16kHz WAV，main 送到
        * `POST /voice/transcribe`（purpose=companion_dialogue）。本地 SenseVoice
@@ -1651,6 +1737,11 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
         meta: RequestMetaV1;
         request: CompanionAccountPatch;
       }): Promise<GatewayResultV1<z.infer<typeof companionAccountStateV1Schema>>>;
+      transitionOnboarding(input: {
+        meta: RequestMetaV1;
+        version: string;
+        request: OnboardingTransitionRequest;
+      }): Promise<GatewayResultV1<z.infer<typeof onboardingTransitionResponseSchema>>>;
     };
     /**
      * 伴星中心（桌面页 20）的共同记录。记忆星图与记忆列表是两套视图：
@@ -1659,7 +1750,7 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
      */
     readonly memory: {
       list(input: { meta: RequestMetaV1; query?: CompanionMemoryListQuery }): Promise<GatewayResultV1<z.infer<typeof companionMemoryListV1Schema>>>;
-      starMap(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof companionMemoryStarMapV1Schema>>>;
+      starMap(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof companionMemoryStarMapV2Schema>>>;
       confirm(input: { meta: RequestMetaV1; memoryId: Uuid }): Promise<GatewayResultV1<z.infer<typeof companionMemoryItemV1Schema>>>;
       pin(input: { meta: RequestMetaV1; memoryId: Uuid }): Promise<GatewayResultV1<z.infer<typeof companionMemoryItemV1Schema>>>;
       unpin(input: { meta: RequestMetaV1; memoryId: Uuid }): Promise<GatewayResultV1<z.infer<typeof companionMemoryItemV1Schema>>>;
@@ -1667,6 +1758,14 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
       restore(input: { meta: RequestMetaV1; memoryId: Uuid }): Promise<GatewayResultV1<z.infer<typeof companionMemoryItemV1Schema>>>;
       /** 候选记忆的「忽略」与已确认记忆的「删除」是同一个服务端动作。 */
       remove(input: { meta: RequestMetaV1; memoryId: Uuid }): Promise<GatewayResultV1<{ readonly memoryItemId: Uuid }>>;
+      create(input: { meta: RequestMetaV1; request: CompanionMemoryCreateInputV1 }): Promise<GatewayResultV1<z.infer<typeof companionMemoryItemV1Schema>>>;
+      correct(input: { meta: RequestMetaV1; memoryId: Uuid; request: CompanionMemoryCorrectInputV1 }): Promise<GatewayResultV1<z.infer<typeof companionMemoryItemV1Schema>>>;
+      dismiss(input: { meta: RequestMetaV1; memoryId: Uuid }): Promise<GatewayResultV1<z.infer<typeof companionMemoryItemV1Schema>>>;
+      conflicts(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof companionMemoryConflictListV1Schema>>>;
+      resolveConflict(input: { meta: RequestMetaV1; memoryId: Uuid; removeId: Uuid }): Promise<GatewayResultV1<z.infer<typeof companionMemoryConflictResolveResultV1Schema>>>;
+      rebuildEmbeddings(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof companionMemoryQueueResultV1Schema>>>;
+      clear(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof companionMemoryClearResultV1Schema>>>;
+      summarizeRecent(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof companionMemoryQueueResultV1Schema>>>;
     };
     readonly daily: {
       get(input: { meta: RequestMetaV1; date?: string }): Promise<GatewayResultV1<z.infer<typeof companionDailySummaryV1Schema>>>;
@@ -1685,9 +1784,34 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
       /** 恢复系统默认人格（POST /companion/pet-profile/reset）。 */
       reset(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof companionPersonaResetV1Schema>>>;
     };
-    /** 只读对话记录：会话摘要，没有消息正文，也没有发送通道。 */
-    readonly conversations: {
-      list(input: { meta: RequestMetaV1; limit?: number }): Promise<GatewayResultV1<z.infer<typeof companionConversationListV1Schema>>>;
+    /** 产品层唯一的连续历史；内部 conversation 分段不会跨过 IPC。 */
+    readonly history: {
+      list(input: { meta: RequestMetaV1; query?: CompanionHistoryQueryV1 }): Promise<GatewayResultV1<z.infer<typeof companionHistoryPageV1Schema>>>;
+      search(input: { meta: RequestMetaV1; query: CompanionHistorySearchQueryV1 }): Promise<GatewayResultV1<z.infer<typeof companionHistorySearchV1Schema>>>;
+      clear(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof companionHistoryClearResultV1Schema>>>;
+    };
+    /** 只读学习候选；不会创建 proposal 或启动学习运行。 */
+    readonly learningContext: {
+      get(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof companionLearningContextV1Schema>>>;
+    };
+    readonly journey: {
+      bootstrap(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof companionJourneyBootstrapSchema>>>;
+      get(input: { meta: RequestMetaV1; journeyId: Uuid }): Promise<GatewayResultV1<z.infer<typeof companionJourneySchema>>>;
+      actOnInvitation(input: { meta: RequestMetaV1; request: CompanionInvitationActionRequest }): Promise<GatewayResultV1<z.infer<typeof companionInvitationSchema>>>;
+      act(input: { meta: RequestMetaV1; journeyId: Uuid; request: CompanionJourneyActionRequest }): Promise<GatewayResultV1<z.infer<typeof companionJourneySchema>>>;
+    };
+    readonly activity: {
+      timeline(input: { meta: RequestMetaV1; before?: number }): Promise<GatewayResultV1<z.infer<typeof companionActivityTimelineV1Schema>>>;
+      present(input: { meta: RequestMetaV1; deliveryId: Uuid; inboxSequence: number }): Promise<GatewayResultV1<z.infer<typeof companionActivityDeliveryV1Schema>>>;
+      ack(input: { meta: RequestMetaV1; request: CompanionActivityAckRequestV1 }): Promise<GatewayResultV1<z.infer<typeof companionActivityDeliveryV1Schema>>>;
+    };
+    readonly bridge: {
+      setContext(input: { meta: RequestMetaV1; page: MainPageContextInputV2 }): Promise<GatewayResultV1<CompanionBridgeStateV1>>;
+      clearContext(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<CompanionBridgeStateV1>>;
+    };
+    readonly data: {
+      export(input: { meta: RequestMetaV1; kind: CompanionExportKindV1 }): Promise<GatewayResultV1<z.infer<typeof companionExportResultV1Schema>>>;
+      deleteAudit(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof companionAuditDeleteResultV1Schema>>>;
     };
     /** 任务 14：作答模态偏好（voice/silent/text/any，账号级跨设备）。 */
     readonly answerMode: {

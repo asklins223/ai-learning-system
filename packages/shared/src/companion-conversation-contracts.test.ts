@@ -288,7 +288,17 @@ test("SSE: union 中全部事件类型均可被接受（含 agent.skill/agent.to
     },
     "action.decision": { proposalId: UUID, decision: "confirm", status: "accepted" },
     "action.expired": { proposalId: UUID },
-    "voice.segment.ready": { segmentId: HASH, ordinal: 1, text: "你好", textSha256: HASH },
+    "voice.segment.ready": {
+      version: 2,
+      segmentId: HASH,
+      ordinal: 1,
+      displayText: "你好",
+      displayStart: 0,
+      displayEnd: 2,
+      synthesisText: "[excited]你好",
+      synthesisTextSha256: HASH,
+      cue: { version: 1, intent: "acknowledge", emotion: "happy", intensity: 0.6, durationMs: 4_000 },
+    },
     "proactive.delivery": { deliveryId: UUID, messageId: UUID, expiresAt: TIME, contentPolicy: "content" },
     "proactive.delivery.updated": { deliveryId: UUID, status: "shown", contentClaimed: true },
     "turn.cancelled": { reason: "user" },
@@ -428,10 +438,11 @@ test("learningRunStartCandidate：V2 字段必须完整", () => {
       // V2 字段
       objectiveId: "423e4567-e89b-12d3-a456-426614174000",
       originV2: { kind: "card" as const, cardId: "223e4567-e89b-12d3-a456-426614174000", objectiveId: "423e4567-e89b-12d3-a456-426614174000" },
+      request: { version: 2 as const, originV2: { kind: "card" as const, cardId: "223e4567-e89b-12d3-a456-426614174000", objectiveId: "423e4567-e89b-12d3-a456-426614174000" }, goal: "stabilize" as const, idempotencyKey: "pet-menu-v2:423e4567-e89b-12d3-a456-426614174000" },
     },
   };
   assert.equal(companionLearningContextV1Schema.safeParse(ctx).success, true);
-  const { objectiveId: _o, originV2: _v2, ...missingV2 } = ctx.learningRunStartCandidate!;
+  const { objectiveId: _o, originV2: _v2, request: _request, ...missingV2 } = ctx.learningRunStartCandidate!;
   assert.equal(companionLearningContextV1Schema.safeParse({
     ...ctx,
     learningRunStartCandidate: missingV2,
@@ -491,7 +502,6 @@ test("proposedLearningActionPayload：accepts §18 全部工具 kind", () => {
     { kind: "focus_graph_node", keyPointId, lens: "evidence" },
     { kind: "restore_graph_viewport", runId },
     { kind: "open_conversation_history" },
-    { kind: "open_conversation_history", assistantSessionId: "923e4567-e89b-12d3-a456-426614174000" },
     { kind: "confirm_or_reject_memory", memoryId, revision: 1720000000000, decision: "confirm" },
     { kind: "delete_assistant_memory", memoryId, revision: 1720000000000 },
   ];
@@ -549,6 +559,7 @@ test("learning context：LearningRun 候选字段可解析且旧字段被拒绝"
       payloadSha256: "c".repeat(64),
       objectiveId: UUID,
       originV2: { kind: "card", cardId: UUID2, objectiveId: UUID },
+      request: { version: 2, originV2: { kind: "card", cardId: UUID2, objectiveId: UUID }, goal: "stabilize", idempotencyKey: `pet-menu-v2:${UUID}` },
     },
   });
   assert.equal(ok.success, true);
@@ -607,7 +618,7 @@ test("grounded tutor：LearningRun context 和 grant 必须绑定同一页面类
   }).success, true);
 });
 
-test("proposalDecisionResponseV1Schema：route 接受 §18 V2 导航 kind（lens/restoreRun/assistantSessionId）", () => {
+test("proposalDecisionResponseV1Schema：route 接受 §18 V2 导航 kind（lens/restoreRun/连续历史）", () => {
   const base = {
     version: 1,
     proposalId: "b23e4567-e89b-12d3-a456-426614174000",
@@ -625,14 +636,21 @@ test("proposalDecisionResponseV1Schema：route 接受 §18 V2 导航 kind（lens
     proposalDecisionResponseV1Schema.safeParse({ ...base, route: { kind: "star_map", restoreRun: "423e4567-e89b-12d3-a456-426614174000" } }).success,
     true,
   );
-  // open_conversation_history：conversation + assistantSessionId
+  // open_conversation_history：产品层只有连续历史，不暴露内部 session id
   assert.equal(
-    proposalDecisionResponseV1Schema.safeParse({ ...base, route: { kind: "conversation", assistantSessionId: "923e4567-e89b-12d3-a456-426614174000" } }).success,
+    proposalDecisionResponseV1Schema.safeParse({ ...base, route: { kind: "conversation" } }).success,
     true,
   );
   // 旧导航 kind 仍接受
   assert.equal(proposalDecisionResponseV1Schema.safeParse({ ...base, route: { kind: "review" } }).success, true);
-  assert.equal(proposalDecisionResponseV1Schema.safeParse({ ...base, route: { kind: "card", cardId: "a23e4567-e89b-12d3-a456-426614174000" } }).success, true);
+  assert.equal(proposalDecisionResponseV1Schema.safeParse({
+    ...base,
+    route: {
+      kind: "card",
+      cardId: "a23e4567-e89b-12d3-a456-426614174000",
+      objectiveId: "b23e4567-e89b-12d3-a456-426614174000",
+    },
+  }).success, true);
   // V1 旧字段 conversationId 不再接受（V2 合同）
   assert.equal(
     proposalDecisionResponseV1Schema.safeParse({ ...base, route: { kind: "conversation", conversationId: "923e4567-e89b-12d3-a456-426614174000" } }).success,

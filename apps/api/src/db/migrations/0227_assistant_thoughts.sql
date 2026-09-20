@@ -102,7 +102,7 @@ BEGIN
         SELECT 1 FROM jobs j
         WHERE j.workspace_id = m.workspace_id
           AND j.type = 'companion_thought'
-          AND j.created_at > now() - interval '4 hours'
+          AND j.scheduled_at > now() - interval '4 hours'
       )
   LOOP
     -- 静默时段判定（跨午夜语义）在 worker handler 内用与 proactive-hook 相同的

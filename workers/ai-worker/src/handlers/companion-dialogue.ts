@@ -51,8 +51,11 @@ import {
 } from "@ailearn/shared";
 import { runCompanionAgentLoop } from "./companion-agent-runtime.ts";
 import { CompanionAgentBudgetExceededError } from "../lib/non-retryable-errors.ts";
-import { splitCompanionTtsSegmentsIncremental, companionSegmentId } from "../lib/tts-segments.ts";
-import { extractVoiceEmotion } from "@ailearn/shared/voice-expression-tags";
+import {
+  companionSegmentId,
+  splitCommittedDisplaySegments,
+  type CompanionDisplaySegmentState,
+} from "../lib/tts-segments.ts";
 import { applyDeterministicToneToSegments, resolveReplyToneEmotion } from "../lib/companion-tone.ts";
 import {
   assembleCompanionContext,
@@ -343,6 +346,15 @@ export async function runCompanionDialogue(
     // 等于审计/成本记录完全空转。只写元数据，不写内容。
     { userId: read.userId, operation: "companion_agent", jobId: ctx.id },
   );
+  // 思考档备用 provider（2026-09-19 退化回复闸）：主链路关思考时，网关/模型退化
+  // 窗口会把答案缩成一两个词且自我复制进历史。agent loop 检测到退化答案时用它
+  // 原样重跑一次取更长者（见 runCompanionAgentLoop 的退化回复闸）。
+  const thinkingProvider = createGovernedProvider(
+    createProvider(textRes.providerName, textRes.providerConfig),
+    govCtx,
+    ctx.workspaceId,
+    { userId: read.userId, operation: "companion_agent", jobId: ctx.id },
+  );
 
   // ── 22 方案：Context Orchestrator 检索长期记忆（非 grounded_tutor）──
   let memoryContext: ContextAssemblyResult = {
@@ -500,7 +512,64 @@ export async function runCompanionDialogue(
   // 交付管线实时下发（稳定前缀 + 增量校验 + 边生成边落库），不再等全文取回后
   // 再补写 delta。带工具的一步在调用工具前说的开场白会作为正文的一部分保留
   // （见 runCompanionAgentLoop 的 visibleSegments）。
-  const streamingDelivery = createCompanionStreamDelivery({ ctx, read, expiresAt, notifyCompanionEvent });
+  let voiceSegmentState: CompanionDisplaySegmentState = { cursor: 0, sentCount: 0 };
+  let voiceSegmentsEnabled = isCompanionVoiceDialogueEnabled();
+  const emitVisibleVoiceSegments = async (visibleText: string, isFinal: boolean): Promise<void> => {
+    if (!voiceSegmentsEnabled) return;
+    const split = splitCommittedDisplaySegments(visibleText, voiceSegmentState, isFinal);
+    voiceSegmentState = split.next;
+    if (split.segments.length === 0) return;
+    const emotion = resolveReplyToneEmotion(visibleText);
+    const cue = buildFinalCuePayload(visibleText);
+    const toned = applyDeterministicToneToSegments(
+      split.segments.map((segment) => ({
+        ordinal: segment.ordinal,
+        text: segment.displayText,
+        textSha256: sha256Utf8V1(segment.displayText),
+      })),
+      emotion,
+    );
+    try {
+      const written = await emitCompanionTtsSegments({
+        workspaceId: ctx.workspaceId,
+        userId: read.userId,
+        runId: read.runId,
+        generation: read.generation,
+        accountEpoch: read.accountEpoch,
+        conversationId: read.conversationId,
+        expiresAt,
+        notifyCompanionEvent,
+        segments: split.segments.map((segment, index) => {
+          const synthesis = toned[index];
+          const synthesisText = synthesis?.text ?? segment.displayText;
+          const synthesisTextSha256 = synthesis?.textSha256 ?? sha256Utf8V1(synthesisText);
+          return {
+            version: 2 as const,
+            segmentId: companionSegmentId(read.runId, read.generation, segment.ordinal, synthesisTextSha256),
+            ordinal: segment.ordinal,
+            displayText: segment.displayText,
+            displayStart: segment.displayStart,
+            displayEnd: segment.displayEnd,
+            synthesisText,
+            synthesisTextSha256,
+            cue,
+          };
+        }),
+      });
+      if (!written) voiceSegmentsEnabled = false;
+    } catch (error) {
+      // 语音是渐进增强；事件写入失败不能把已经安全提交的文字回复一起判失败。
+      voiceSegmentsEnabled = false;
+      logger.warn({ err: error, runId: read.runId }, "companion voice segment emission disabled for turn");
+    }
+  };
+  const streamingDelivery = createCompanionStreamDelivery({
+    ctx,
+    read,
+    expiresAt,
+    notifyCompanionEvent,
+    onVisibleCommitted: async (_committed, visibleText) => emitVisibleVoiceSegments(visibleText, false),
+  });
   let assistantText: string;
   let ttsRawText: string | null = null;
   let agentResult;
@@ -509,6 +578,7 @@ export async function runCompanionDialogue(
       ctx,
       read,
       provider,
+      thinkingProvider,
       baseMessages: messages,
       expiresAt,
       continuationProposalId,
@@ -554,6 +624,8 @@ export async function runCompanionDialogue(
         { runId: read.runId, reason: flushed.reason },
         "companion stream flush failed on a waiting-for-confirmation turn",
       );
+    } else {
+      await emitVisibleVoiceSegments(flushed.text, true);
     }
     return;
   }
@@ -650,39 +722,8 @@ export async function runCompanionDialogue(
     });
     throw new Error("companion streamed text diverged from validated text");
   }
-
-  // 15b（字幕般流式 TTS）：validate 后全量切段、在终态事务前逐个下发。
-  // 15b 二期：切段输入用 ttsRawText（含标签），assistantText 已剥离标签。
-  if (isCompanionVoiceDialogueEnabled()) {
-    const inc = splitCompanionTtsSegmentsIncremental(
-      ttsRawText ?? assistantText,
-      { rest: "", sentCount: 0, sentChars: 0 },
-      true,
-    );
-    // 2026-08-24：确定性语气层——全文判情绪，逐段注标签 + 净化幻觉标签。
-    // 注入会改变段文本，textSha256 重算后再派生 segmentId。
-    const toned = applyDeterministicToneToSegments(
-      inc.segments.map((seg) => ({ ordinal: seg.ordinal, text: seg.text, textSha256: seg.textSha256 })),
-      resolveReplyToneEmotion(ttsRawText ?? assistantText),
-    );
-    await emitCompanionTtsSegments({
-      workspaceId: ctx.workspaceId,
-      userId: read.userId,
-      runId: read.runId,
-      generation: read.generation,
-      accountEpoch: read.accountEpoch,
-      conversationId: read.conversationId,
-      expiresAt,
-      notifyCompanionEvent,
-      segments: toned.map((seg) => ({
-        segmentId: companionSegmentId(read.runId, read.generation, seg.ordinal, seg.textSha256),
-        ordinal: seg.ordinal,
-        text: seg.text,
-        textSha256: seg.textSha256,
-        emotion: extractVoiceEmotion(seg.text) ?? undefined,
-      })),
-    });
-  }
+  // 强制刷新最后一个未闭合句。已经在增量阶段发出的区间由 cursor 保证不会重复。
+  await emitVisibleVoiceSegments(assistantText, true);
 
   // ── 阶段 3c：终态事务（message + final + run succeeded） ──
   // 15b：TTS 段已在 delta 过程（流式）或 validate 后（非流式）逐个下发完毕，

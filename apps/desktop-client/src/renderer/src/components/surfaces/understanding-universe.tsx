@@ -95,6 +95,11 @@ export interface UnderstandingUniverseProps {
    * read each other's arrangements.
    */
   offsetStorageKey?: string;
+  typeLabels?: Partial<Record<GraphNode["type"], string>>;
+  stateLabels?: Record<string, string>;
+  summaryLabel?: string;
+  /** Disables decorative pulses/particles while preserving direct drag feedback. */
+  staticMotion?: boolean;
 }
 
 const NO_INSETS: UniverseInsets = { top: 0, bottom: 0, left: 0, right: 0 };
@@ -264,6 +269,11 @@ const DEFAULT_PALETTE: Palette = {
     reviewed: "#9fc28a",
     seen: "#79cedc",
     unseen: "#a89782",
+    active: "#79cedc",
+    pinned: "#ffe4a3",
+    candidate: "#a89782",
+    linked: "#8fc7a7",
+    orphaned: "#df7657",
   },
 };
 
@@ -324,6 +334,11 @@ function readPalette(element: HTMLElement): Palette {
       reviewed: cssValue(style, "--universe-state-reviewed", DEFAULT_PALETTE.states.reviewed),
       seen: cssValue(style, "--universe-state-seen", DEFAULT_PALETTE.states.seen),
       unseen: cssValue(style, "--universe-state-unseen", DEFAULT_PALETTE.states.unseen),
+      active: cssValue(style, "--universe-state-active", DEFAULT_PALETTE.states.active),
+      pinned: cssValue(style, "--universe-state-pinned", DEFAULT_PALETTE.states.pinned),
+      candidate: cssValue(style, "--universe-state-candidate", DEFAULT_PALETTE.states.candidate),
+      linked: cssValue(style, "--universe-state-linked", DEFAULT_PALETTE.states.linked),
+      orphaned: cssValue(style, "--universe-state-orphaned", DEFAULT_PALETTE.states.orphaned),
     },
   };
 }
@@ -341,7 +356,11 @@ function stateColor(node: GraphNode, palette: Palette) {
 
 function nodeRadius(node: GraphNode, zoom: number) {
   const scale = clamp(Math.pow(zoom, 0.72), 0.28, 1.45);
-  return BASE_RADIUS[node.type] * scale;
+  const importance = typeof node.metadata.importance === "number"
+    ? clamp(node.metadata.importance, 0, 1)
+    : 0.5;
+  const semanticScale = node.metadata.visualRole === "memory" ? 0.78 + importance * 0.56 : 0.86;
+  return BASE_RADIUS[node.type] * semanticScale * scale;
 }
 
 function screenPoint(point: Readonly<UniversePoint>, viewport: Viewport) {
@@ -765,7 +784,14 @@ function drawMainStar(
   context.quadraticCurveTo(core * 0.2, core * 0.2, 0, core * 1.7);
   context.quadraticCurveTo(-core * 0.2, core * 0.2, -core * 1.7, 0);
   context.quadraticCurveTo(-core * 0.2, -core * 0.2, 0, -core * 1.7);
-  context.fill();
+  if (node.state === "candidate") {
+    context.globalAlpha = 0.94;
+    context.lineWidth = 1.8;
+    context.strokeStyle = color;
+    context.stroke();
+  } else {
+    context.fill();
+  }
   context.fillStyle = "rgba(255,255,255,0.96)";
   context.beginPath();
   context.arc(0, 0, core * 0.34, 0, Math.PI * 2);
@@ -926,6 +952,7 @@ function drawEdge(
   context.strokeStyle = highlighted ? palette.edgeGlow : palette.edge;
   context.globalAlpha = highlighted ? 0.95 : dimmed ? 0.1 : quality === "overview" ? 0.7 : 0.78;
   context.lineWidth = highlighted ? 2 : quality === "detail" ? 1 : quality === "overview" ? 0.86 : 0.78;
+  if (edge.metadata?.orphaned === true) context.setLineDash([5, 7]);
   if (highlighted && quality !== "interaction") {
     context.shadowColor = palette.edgeGlow;
     context.shadowBlur = 9;
@@ -1039,6 +1066,10 @@ export const UnderstandingUniverse = forwardRef<
     title = "理解星图",
     insets,
     offsetStorageKey,
+    typeLabels,
+    stateLabels = STATE_LABEL,
+    summaryLabel = "知识节点",
+    staticMotion = false,
   },
   ref,
 ) {
@@ -2352,7 +2383,7 @@ export const UnderstandingUniverse = forwardRef<
   useEffect(() => {
     const query = window.matchMedia("(prefers-reduced-motion: reduce)");
     const updateMotion = () => {
-      reducedMotionRef.current = query.matches;
+      reducedMotionRef.current = staticMotion || query.matches;
       requestDraw();
     };
     const updateVisibility = () => {
@@ -2375,7 +2406,7 @@ export const UnderstandingUniverse = forwardRef<
       query.removeEventListener("change", updateMotion);
       document.removeEventListener("visibilitychange", updateVisibility);
     };
-  }, [requestDraw]);
+  }, [requestDraw, staticMotion]);
 
   // hoverId is deliberately absent: hovering must not invalidate the cached
   // scene layer. The hovered star is drawn dynamically in the frame loop, and
@@ -2424,8 +2455,8 @@ export const UnderstandingUniverse = forwardRef<
 
   const classNames = ["universe-canvas-root", className].filter(Boolean).join(" ");
   const selectedAnnouncement = selectedNode
-    ? `已选择${TYPE_LABEL[selectedNode.type]}：${selectedNode.label}，状态${STATE_LABEL[selectedNode.state ?? ""] ?? "未设置"}`
-    : "未选择知识节点";
+    ? `已选择${typeLabels?.[selectedNode.type] ?? TYPE_LABEL[selectedNode.type]}：${selectedNode.label}，状态${stateLabels[selectedNode.state ?? ""] ?? "未设置"}`
+    : `未选择${summaryLabel}`;
 
   return (
     <div
@@ -2458,8 +2489,8 @@ export const UnderstandingUniverse = forwardRef<
           <span className="universe-canvas-tooltip-copy">
             <strong>{hoveredNode.label}</strong>
             <span>
-              {TYPE_LABEL[hoveredNode.type]}
-              {hoveredNode.state ? ` · ${STATE_LABEL[hoveredNode.state] ?? hoveredNode.state}` : ""}
+              {typeLabels?.[hoveredNode.type] ?? TYPE_LABEL[hoveredNode.type]}
+              {hoveredNode.state ? ` · ${stateLabels[hoveredNode.state] ?? hoveredNode.state}` : ""}
             </span>
           </span>
         </div>
@@ -2511,7 +2542,7 @@ export const UnderstandingUniverse = forwardRef<
       </div>
 
       <p id={summaryId} className="universe-canvas-a11y-summary">
-        {`理解星图包含 ${positionedNodes.length} 个知识节点和 ${validEdges.length} 条真实关系。可使用页面上方的搜索框通过键盘查找并聚焦知识星体。`}
+        {`${title}包含 ${positionedNodes.length} 个${summaryLabel}和 ${validEdges.length} 条真实关系。可使用节点索引通过键盘查找并聚焦。`}
       </p>
       <p id={liveId} className="universe-canvas-a11y-live" aria-live="polite">
         {selectedAnnouncement}

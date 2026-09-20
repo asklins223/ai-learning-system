@@ -46,7 +46,7 @@ import {
 import { WindowLive2D, type WindowLive2DStatus } from "./WindowLive2D";
 import { CompanionBubble } from "./CompanionBubble";
 import { CompanionHud, type CompanionHudAction } from "./CompanionHud";
-import { CompanionChatProvider, useCompanionChat } from "../../app/companion-chat-session";
+import { useCompanionChat } from "../../app/companion-chat-session";
 import { HOME_FEATURE_ICONS } from "../home-v2/home-feature-icons";
 import { getHomeFeature, type HomeFeatureId } from "../home-v2/home-feature-registry";
 import { SurfaceDataState } from "../surfaces/surface-data";
@@ -92,18 +92,12 @@ const COMPANION_FIXED_POSE = Object.freeze({ x: 0, y: 0, rotation: 0, scaleX: 1 
 /**
  * 伴星的全部呈现：whisper 面板、历史手记、交互台、功能夹、Live2D 形象。
  *
- * 外层只做一件事——把对话状态（CompanionChatProvider）供给同时消费它的气泡坞与
- * 历史抽屉。里面那棵大树保持原来的写法与动画，不因为多了一层 Provider 而重新挂载。
+ * 对话状态由 App 外壳的 CompanionChatProvider 提供（见 App.tsx），这里不再自己
+ * 挂一层：同一条会话的消费方不止本组件——任务面上的伴星中心也要用它的
+ * `setMode("conversation")` 打开这套交互台。Provider 若只包住本组件，surface 作为
+ * 兄弟节点拿不到上下文，`useCompanionChat()` 会在渲染时抛错，整页黑屏。
  */
-export function CompanionRoot() {
-  return (
-    <CompanionChatProvider>
-      <CompanionPresenceView />
-    </CompanionChatProvider>
-  );
-}
-
-function CompanionPresenceView() {
+export function CompanionPresence() {
   const surface = useRoomStore((state) => state.surface);
   const motionPreference = useRoomStore((state) => state.motionMode);
   const reducedMotion = useRoomStore((state) => state.reducedMotion);
@@ -217,16 +211,22 @@ function CompanionPresenceView() {
   /** 当前气泡若源自念头（切片④），可点击让她主动开场。 */
   const [homeCueThoughtId, setHomeCueThoughtId] = useState<string | null>(null);
   const [externalModalOpen, setExternalModalOpen] = useState(false);
-  const { mode, setMode, assistantEmotion, liveReply, phase: chatPhase } = useCompanionChat();
+  const { mode, setMode, assistantCue, liveReply, phase: chatPhase } = useCompanionChat();
   const engaged = mode !== "closed";
-  /** 聊天回复的情绪（2026-09-18 情绪接表情）：20s 内驱动 Live2D 表情。 */
-  const [chatEmotion, setChatEmotion] = useState<{ emotion: string; at: number } | null>(null);
+  /**
+   * 聊天回复的语义 cue（2026-09-19 接 CharacterCuePayloadV1）：intensity 不再固定
+   * 0.5，生命周期也不再由这里的外层固定 20 秒计时器管理——Live2D 驱动里的情绪
+   * 控制器自带 hold/decay（`live2d-emotion.ts`），cue 到了就刷新目标，静默后自然
+   * 衰减回中性。历史消息不参与：`assistantCue` 只来自实时流。
+   */
+  const [chatEmotion, setChatEmotion] = useState<{ emotion: string; intensity: number; at: number } | null>(null);
   useEffect(() => {
-    if (!assistantEmotion) return;
-    setChatEmotion({ emotion: assistantEmotion, at: Date.now() });
-    const timer = window.setTimeout(() => setChatEmotion(null), 20_000);
-    return () => window.clearTimeout(timer);
-  }, [assistantEmotion]);
+    if (!assistantCue || assistantCue.emotion === "neutral") {
+      setChatEmotion(null);
+      return;
+    }
+    setChatEmotion({ emotion: assistantCue.emotion, intensity: assistantCue.intensity, at: Date.now() });
+  }, [assistantCue]);
   // 账号级 presence（2026-09-16 裁决 3）：跨设备同步，写入走 revision CAS。
   const [accountState, setAccountState] = useState<CompanionAccountStateV1 | null>(null);
   const [accountFailure, setAccountFailure] = useState<string | null>(null);
@@ -430,6 +430,10 @@ function CompanionPresenceView() {
         force3D: true,
       });
     }
+    // 气泡的「模型顶位移」**不在这里**量：这条投影只在首页跑（`!homeMode` 直接 return），
+    // 任务页上留给 HUD 的会是一个按首页几何算出来的旧值，把气泡连轨道一起顶出窗口
+    // （2026-09-20 用户截图）。它现在由 `CompanionHud` 的实测 effect 负责——那里能同时看到
+    // 角色自己报的墨迹顶边（`--companion-model-ink-top`）与角色盒，且每一页都在跑。
     root.dataset.worldAnchor = `${worldAnchorRef.current.x},${worldAnchorRef.current.y}`;
     root.dataset.cameraScale = String(cameraScale);
     root.dataset.projectionState = "tracking";
@@ -1227,7 +1231,7 @@ function CompanionPresenceView() {
     : touchKind === "body"
       ? { emotion: "curious", intensity: 0.65 }
       : chatEmotion
-        ? { emotion: chatEmotion.emotion, intensity: 0.5 }
+        ? { emotion: chatEmotion.emotion, intensity: chatEmotion.intensity, at: chatEmotion.at }
         : companionMoment === "lamp" || companionMoment === "confirm"
         ? { emotion: "happy", intensity: 0.85 }
         : engaged
@@ -1273,13 +1277,34 @@ function CompanionPresenceView() {
   // Live2D 不可用 / 注册表 hidden）发布到 `.desktop-app` 上，hud-surface.css
   // 的「动态伴星座位」段据此收窄或恢复各页版心（右侧 245px / 左侧 365px /
   // wide 版心 245px / 星图 seat-gutter 340px）——伴星在场时不压正文，缺席后
-  // 版心恢复无伴星几何，不再固定占位。
+  // 版心恢复无伴星几何，不再固定占位。用户放大伴星时，座位预算也同步增加；
+  // 否则 125% 以上的角色会越过固定 245px/365px 边界压住任务卡片。
   useEffect(() => {
     const app = document.querySelector<HTMLElement>(".desktop-app");
     if (!app) return undefined;
+    const reserveExtra = Math.round(Math.max(0, companionScale - 1) * 240);
+    const compactReserveExtra = Math.round(reserveExtra * 0.45);
     app.classList.toggle("companion-absent", presenceHidden || companionUnavailable);
-    return () => app.classList.remove("companion-absent");
-  }, [companionUnavailable, presenceHidden]);
+    app.style.setProperty("--companion-seat-right", `${245 + reserveExtra}px`);
+    app.style.setProperty("--companion-seat-left", `${365 + reserveExtra}px`);
+    app.style.setProperty("--companion-seat-left-collapsed", `${335 + reserveExtra}px`);
+    app.style.setProperty("--companion-seat-right-compact", `${124 + compactReserveExtra}px`);
+    app.style.setProperty("--companion-seat-left-compact", `${194 + compactReserveExtra}px`);
+    app.style.setProperty("--companion-seat-left-collapsed-compact", `${178 + compactReserveExtra}px`);
+    app.style.setProperty("--companion-universe-seat-gutter", `${340 + reserveExtra}px`);
+    app.style.setProperty("--companion-universe-seat-gutter-compact", `${250 + compactReserveExtra}px`);
+    return () => {
+      app.classList.remove("companion-absent");
+      app.style.removeProperty("--companion-seat-right");
+      app.style.removeProperty("--companion-seat-left");
+      app.style.removeProperty("--companion-seat-left-collapsed");
+      app.style.removeProperty("--companion-seat-right-compact");
+      app.style.removeProperty("--companion-seat-left-compact");
+      app.style.removeProperty("--companion-seat-left-collapsed-compact");
+      app.style.removeProperty("--companion-universe-seat-gutter");
+      app.style.removeProperty("--companion-universe-seat-gutter-compact");
+    };
+  }, [companionScale, companionUnavailable, presenceHidden]);
 
   // 分层 Escape：历史先返回更多，其余交互返回关闭态。
   useEffect(() => {

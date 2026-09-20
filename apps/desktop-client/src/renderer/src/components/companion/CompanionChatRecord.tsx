@@ -3,7 +3,9 @@ import { CalendarDays, ChevronLeft, ChevronRight } from "lucide-react";
 import type { CompanionMessageV1 } from "@ailearn/shared/companion-conversation-contracts";
 import type { CompanionChatSession } from "../../app/companion-chat-session";
 import { companionMessageText } from "../../app/companion-chat-session";
-import { companionRunTraceExpired, type CompanionRunTrace } from "../../app/companion-agent-nodes";
+import type { CompanionRunTrace } from "../../app/companion-agent-nodes";
+import { CompanionProposalChoice } from "./CompanionProposalChoice";
+import { CompanionRunTraceView } from "./CompanionRunTraceView";
 import "./companion-chat-record.css";
 
 /**
@@ -77,31 +79,6 @@ export function highlightText(text: string, keyword: string): ReactNode {
   return parts;
 }
 
-function CompanionRunTracePanel({ trace }: { readonly trace: CompanionRunTrace }) {
-  const expired = companionRunTraceExpired(trace);
-  return (
-    <details className="companion-record__trace">
-      <summary>过程 {trace.summary.stepCount} 步 · 调用 {trace.summary.toolCallCount} 次工具</summary>
-      {expired ? (
-        <p className="companion-record__trace-expired">过程记录已过期（只保留近期会话）</p>
-      ) : (
-        <ol style={{ "--trace-count": Math.max(0, trace.nodes.length - 1) } as React.CSSProperties}>
-          {trace.nodes.map((node, index) => (
-            <li
-              key={node.key}
-              data-state={node.state}
-              style={{ "--trace-delay": Math.min(5, Math.max(0, trace.nodes.length - 1 - index)) } as React.CSSProperties}
-            >
-              <span>{node.label}</span>
-              {node.summary ? <small>{node.summary}</small> : null}
-            </li>
-          ))}
-        </ol>
-      )}
-    </details>
-  );
-}
-
 /** 单条消息（时间线 / 某日视图共用）。 */
 export function CompanionChatRecordArticle({
   message,
@@ -113,30 +90,36 @@ export function CompanionChatRecordArticle({
   const trace = message.role === "assistant"
     ? chat.runTraces.find((item) => item.summary.assistantMessageId === message.id) ?? null
     : null;
+  const traceProposalIds = new Set(trace?.nodes.flatMap((node) => node.proposalId ? [node.proposalId] : []) ?? []);
   return (
     <article data-message-id={message.id} data-role={message.role} data-kind={message.kind} data-cancelled={message.kind === "cancelled" || undefined}>
       <header><span>{message.role === "user" ? "你" : "Mao"}{message.kind === "voice_transcript" ? " · 语音" : ""}</span><time>{messageTime(message.createdAt)}</time></header>
       <p>{companionMessageText(message)}</p>
       {message.kind === "cancelled" ? <p className="companion-record__stopped">你在这里停下了{stopSummary(trace)}</p> : null}
       {message.kind === "error" ? <p className="companion-record__stopped">这一轮没能说完{stopSummary(trace)}</p> : null}
-      {trace && shouldShowRunTrace(trace) ? <CompanionRunTracePanel trace={trace} /> : null}
+      {trace && shouldShowRunTrace(trace) ? (
+        <CompanionRunTraceView
+          trace={trace}
+          proposalStates={chat.proposalStates}
+          onDecideProposal={(proposalId, decision) => { void chat.decideProposal(proposalId, decision); }}
+        />
+      ) : null}
       {message.role === "assistant"
-        ? message.blocks.filter((block) => block.type === "action_ref").map((block) => block.type === "action_ref"
-          ? <CompanionProposalInline key={block.proposalId} state={chat.proposalStates[block.proposalId]} />
+        ? message.blocks.filter((block) => block.type === "action_ref" && !traceProposalIds.has(block.proposalId)).map((block) => block.type === "action_ref"
+          ? (
+              <div className="companion-history__legacy-proposal" key={block.proposalId}>
+                <small>这项选择来自较早的过程记录，原执行节点已不可用。</small>
+                <CompanionProposalChoice
+                  proposalId={block.proposalId}
+                  state={chat.proposalStates[block.proposalId]}
+                  context="history"
+                  onDecide={(decision) => { void chat.decideProposal(block.proposalId, decision); }}
+                />
+              </div>
+            )
           : null)
         : null}
     </article>
-  );
-}
-
-function CompanionProposalInline({ state }: { readonly state: CompanionChatSession["proposalStates"][string] | undefined }) {
-  if (!state || state.phase !== "ready" || !state.proposal) return null;
-  const { proposal } = state;
-  return (
-    <span className="companion-record__proposal" data-status={proposal.status}>
-      提案：{proposal.title}
-      {proposal.status === "pending" ? "（待处理）" : proposal.status === "succeeded" || proposal.status === "accepted" || proposal.status === "executing" ? "（已执行）" : proposal.status === "rejected" ? "（已婉拒）" : proposal.status === "failed" ? "（执行失败）" : "（已过期）"}
-    </span>
   );
 }
 
@@ -178,7 +161,7 @@ export function MonthCalendar({
   ];
 
   return (
-    <div className="companion-record__calendar" role="dialog" aria-label="选择日期">
+    <div id="companion-record-calendar" className="companion-record__calendar" role="group" aria-label="选择日期">
       <div className="companion-record__calendar-head">
         <button type="button" onClick={() => shift(-1)} aria-label="上个月"><ChevronLeft size={14} /></button>
         <strong>{year}年{month + 1}月</strong>

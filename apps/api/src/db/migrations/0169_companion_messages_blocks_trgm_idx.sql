@@ -1,7 +1,7 @@
 -- 0169: companion_messages.blocks 的 pg_trgm GIN 索引。
 --
 -- 背景（PERF-WN / 审计第二轮 #12）：GET /companion/history/search
--- （assistant-session-routes.ts）对 companion_messages 用
+-- （continuous-history-routes.ts）对 companion_messages 用
 -- `blocks::text ILIKE '%keyword%'`。前置通配符无法命中 B-tree，RLS 已把
 -- 范围收窄到单 user/workspace，但无 GIN 索引时每次请求仍是该用户全部消息
 -- 的全表扫描（LIMIT 只约束返回体积，不约束扫描工作量）。

@@ -13,6 +13,11 @@ import {
   setCompanionVoiceHost,
   stopCompanionSpeech,
 } from "../../app/companion-voice-playback";
+import {
+  companionMouthTarget,
+  smoothCompanionMouthLevel,
+} from "../../app/companion-mouth-meter";
+import type { CompanionVoiceSpeakSegmentRequestV2 } from "@ailearn/shared/companion-voice-contracts";
 
 type HomeV2SoundKind = "page" | "footstep" | "magic";
 
@@ -243,6 +248,8 @@ export function HomeV2AudioController() {
   const [unlocked, setUnlocked] = useState(false);
   const graphRef = useRef<HomeV2AudioGraph | null>(null);
   const voiceRef = useRef<VoicePlayback | null>(null);
+  const mouthLevelRef = useRef(0);
+  const mouthReleaseFrameRef = useRef(0);
   const voiceRequestGenerationRef = useRef(0);
   const lastVoiceRef = useRef<{ text: string; at: number }>({ text: "", at: 0 });
   const voiceFailureAtRef = useRef(0);
@@ -254,11 +261,15 @@ export function HomeV2AudioController() {
   workspaceEpochRef.current = invalidation.workspaceEpoch;
   const audibleRef = useRef(false);
 
-  const stopVoicePlayback = useCallback(() => {
+  const stopVoicePlayback = useCallback((immediate = true) => {
     const playback = voiceRef.current;
     voiceRef.current = null;
+    window.cancelAnimationFrame(mouthReleaseFrameRef.current);
     if (!playback) {
-      setHomeV2VoiceLevel(0);
+      if (immediate) {
+        mouthLevelRef.current = 0;
+        setHomeV2VoiceLevel(0);
+      }
       return;
     }
     cancelAnimationFrame(playback.frame);
@@ -269,7 +280,24 @@ export function HomeV2AudioController() {
     }
     playback.source.disconnect();
     playback.analyser.disconnect();
-    setHomeV2VoiceLevel(0);
+    if (immediate) {
+      mouthLevelRef.current = 0;
+      setHomeV2VoiceLevel(0);
+    } else {
+      let previousAt = performance.now();
+      const release = (at: number) => {
+        const next = smoothCompanionMouthLevel(mouthLevelRef.current, 0, at - previousAt);
+        previousAt = at;
+        mouthLevelRef.current = next;
+        setHomeV2VoiceLevel(next);
+        if (next > 0.01) mouthReleaseFrameRef.current = window.requestAnimationFrame(release);
+        else {
+          mouthLevelRef.current = 0;
+          setHomeV2VoiceLevel(0);
+        }
+      };
+      mouthReleaseFrameRef.current = window.requestAnimationFrame(release);
+    }
     // 等待这次播放的人必须拿到结果，否则它会一直以为自己还在播。
     playback.settle();
   }, []);
@@ -281,47 +309,50 @@ export function HomeV2AudioController() {
    * AudioContext 和同一条振幅通道。喊停永远由 stopVoicePlayback 统一处理，
    * 所以 cue 与对话台词天然互斥——谁抢到谁播，被抢的那个立刻拿到 resolve。
    */
-  const playVoiceBuffer = useCallback((
+  const playVoiceBuffer = useCallback(async (
     buffer: AudioBuffer,
     onProgress: (fraction: number) => void,
-  ): Promise<void> => new Promise<void>((resolve) => {
+  ): Promise<void> => {
     const graph = graphRef.current;
     if (!graph || !userInitiatedAudibleRef.current) {
-      resolve();
       return;
     }
+    await graph.context.resume();
+    if (graphRef.current !== graph || !userInitiatedAudibleRef.current) return;
     stopVoicePlayback();
-    const source = graph.context.createBufferSource();
-    const analyser = graph.context.createAnalyser();
-    const tuning = HOME_V2_AUDIO_TUNING.voice;
-    analyser.fftSize = tuning.analyserFftSize;
-    analyser.smoothingTimeConstant = tuning.analyserSmoothing;
-    source.buffer = buffer;
-    source.connect(analyser).connect(graph.context.destination);
-    const samples = new Float32Array(analyser.fftSize);
-    const startedAt = graph.context.currentTime;
-    const playback: VoicePlayback = { source, analyser, samples, frame: 0, settle: () => resolve() };
-    const meter = () => {
-      if (voiceRef.current !== playback) return;
-      analyser.getFloatTimeDomainData(samples);
-      let peak = 0;
-      for (let index = 0; index < samples.length; index += 1) {
-        const value = Math.abs(samples[index]);
-        if (value > peak) peak = value;
-      }
-      setHomeV2VoiceLevel(peak);
-      const elapsed = graph.context.currentTime - startedAt;
-      onProgress(buffer.duration > 0 ? Math.min(1, elapsed / buffer.duration) : 1);
+    return new Promise<void>((resolve) => {
+      const source = graph.context.createBufferSource();
+      const analyser = graph.context.createAnalyser();
+      const tuning = HOME_V2_AUDIO_TUNING.voice;
+      analyser.fftSize = tuning.analyserFftSize;
+      analyser.smoothingTimeConstant = tuning.analyserSmoothing;
+      source.buffer = buffer;
+      source.connect(analyser).connect(graph.context.destination);
+      const samples = new Float32Array(analyser.fftSize);
+      const startedAt = graph.context.currentTime;
+      let previousMeterAt = performance.now();
+      const playback: VoicePlayback = { source, analyser, samples, frame: 0, settle: () => resolve() };
+      const meter = (at: number) => {
+        if (voiceRef.current !== playback) return;
+        analyser.getFloatTimeDomainData(samples);
+        const target = companionMouthTarget(samples);
+        const level = smoothCompanionMouthLevel(mouthLevelRef.current, target, at - previousMeterAt);
+        previousMeterAt = at;
+        mouthLevelRef.current = level;
+        setHomeV2VoiceLevel(level);
+        const elapsed = graph.context.currentTime - startedAt;
+        onProgress(buffer.duration > 0 ? Math.min(1, elapsed / buffer.duration) : 1);
+        playback.frame = requestAnimationFrame(meter);
+      };
       playback.frame = requestAnimationFrame(meter);
-    };
-    playback.frame = requestAnimationFrame(meter);
-    source.onended = () => {
-      if (voiceRef.current !== playback) return;
-      stopVoicePlayback();
-    };
-    voiceRef.current = playback;
-    source.start();
-  }), [stopVoicePlayback]);
+      source.onended = () => {
+        if (voiceRef.current !== playback) return;
+        stopVoicePlayback(false);
+      };
+      voiceRef.current = playback;
+      source.start();
+    });
+  }, [stopVoicePlayback]);
 
   useEffect(() => {
     const unlock = (event: Event) => {
@@ -382,43 +413,57 @@ export function HomeV2AudioController() {
     return decodeBase64Audio(graph.context, unwrapGatewayResult(response).audioBase64);
   }, []);
 
+  const synthesizeVoiceSegment = useCallback(async (request: CompanionVoiceSpeakSegmentRequestV2): Promise<AudioBuffer> => {
+    const speakApi = window.ailearn?.companion?.voice?.speakSegment;
+    const graph = graphRef.current;
+    if (!speakApi || !graph) throw new Error("语音通道还没准备好");
+    const response = await speakApi.call(window.ailearn.companion.voice, {
+      meta: createRequestMeta(workspaceEpochRef.current ?? undefined),
+      request,
+    });
+    return decodeBase64Audio(graph.context, unwrapGatewayResult(response).audioBase64);
+  }, []);
+
   // 把音频出口交给伴星台词播放服务：它只管排队与计时，解码、播放、振幅仍在这里，
   // 全应用因此只有一个 AudioContext 和一条嘴型通道。
   useEffect(() => {
     setCompanionVoiceHost({
       audible: () => userInitiatedAudibleRef.current,
       synthesize: synthesizeVoice,
+      synthesizeSegment: synthesizeVoiceSegment,
       play: playVoiceBuffer,
       stop: stopVoicePlayback,
     });
     return () => setCompanionVoiceHost(null);
-  }, [playVoiceBuffer, stopVoicePlayback, synthesizeVoice]);
+  }, [playVoiceBuffer, stopVoicePlayback, synthesizeVoice, synthesizeVoiceSegment]);
 
   useEffect(() => {
     const graph = graphRef.current;
     if (!graph) return;
-    if (!audible) {
+    const now = graph.context.currentTime;
+    graph.ambientGain.gain.cancelScheduledValues(now);
+    if (!audible) graph.ambientGain.gain.setValueAtTime(0, now);
+    if (!userInitiatedAudible) {
       voiceRequestGenerationRef.current += 1;
       stopVoicePlayback();
-      const now = graph.context.currentTime;
-      graph.ambientGain.gain.cancelScheduledValues(now);
-      graph.ambientGain.gain.setValueAtTime(0, now);
       void graph.context.suspend().catch(() => undefined);
       return;
     }
     void graph.context.resume()
       .then(() => {
-        if (graphRef.current !== graph || !audibleRef.current) return;
-        const now = graph.context.currentTime;
-        graph.ambientGain.gain.cancelScheduledValues(now);
-        graph.ambientGain.gain.setValueAtTime(0, now);
-        graph.ambientGain.gain.linearRampToValueAtTime(
-          HOME_V2_AUDIO_TUNING.ambient.gain,
-          now + HOME_V2_AUDIO_TUNING.ambient.fadeSeconds,
-        );
+        if (graphRef.current !== graph) return;
+        const resumedAt = graph.context.currentTime;
+        graph.ambientGain.gain.cancelScheduledValues(resumedAt);
+        graph.ambientGain.gain.setValueAtTime(0, resumedAt);
+        if (audibleRef.current) {
+          graph.ambientGain.gain.linearRampToValueAtTime(
+            HOME_V2_AUDIO_TUNING.ambient.gain,
+            resumedAt + HOME_V2_AUDIO_TUNING.ambient.fadeSeconds,
+          );
+        }
       })
       .catch(() => undefined);
-  }, [audible, stopVoicePlayback]);
+  }, [audible, stopVoicePlayback, userInitiatedAudible]);
 
   useEffect(() => {
     const play = (event: Event) => {

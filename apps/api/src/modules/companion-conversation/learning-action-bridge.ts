@@ -12,7 +12,7 @@
  */
 
 import { sql } from "drizzle-orm";
-import { companionGroundedTutorGrantV1Schema, companionLearningRunContextV1Schema, companionProposalSnapshotV1Schema, proposedLearningActionPayloadV1Schema, } from "@ailearn/shared";
+import { companionGroundedTutorGrantV1Schema, companionLearningContextV1Schema, companionLearningRunContextV1Schema, companionProposalSnapshotV1Schema, createLearningRunV2RequestSchema, proposedLearningActionPayloadV1Schema, } from "@ailearn/shared";
 import { sha256Utf8V1, canonicalJsonV1 } from "@ailearn/shared/content-hash";
 import type { CompanionLearningContextV1, LearningRunOriginV2 } from "@ailearn/shared";
 import { withWorkspaceTransaction, type ApiTransaction } from "../../db/client.ts";
@@ -205,6 +205,8 @@ async function resolveCompanionLearningContextInTransaction(
       request: payloadV2.request,
     } : null;
     if (v2Payload && isLearningRunOriginV2(v2Payload.request.originV2)) {
+      const request = createLearningRunV2RequestSchema.parse(v2Payload.request);
+      const proposalPayload = { kind: "start_learning_run_v2" as const, request };
       learningRunStartCandidate = {
       candidateId: "learning_run_start",
       title: sanitizeText(claimText, 80)
@@ -214,9 +216,10 @@ async function resolveCompanionLearningContextInTransaction(
       impactSummary: actionableObjective.personal.review?.status === "due"
         ? "完成复习运行，恢复记忆曲线"
         : "创建一次学习运行，完成后按真实结果安排复习",
-      payloadSha256: sha256Utf8V1(canonicalJsonV1(v2Payload)),
+      payloadSha256: sha256Utf8V1(canonicalJsonV1(proposalPayload)),
       objectiveId: actionableObjective.objectiveId,
-      originV2: v2Payload.request.originV2,
+      originV2: request.originV2,
+      request,
       };
     }
   }
@@ -339,15 +342,9 @@ export async function createCompanionMenuProposal(args: {
         if (!start || !start.objectiveId || !start.originV2) {
           throw new CompanionConversationError("NO_CANDIDATE", 409, "learning candidate disappeared");
         }
-        const idempotencyKey = `pet-menu-v2:${start.objectiveId}`;
         payload = {
           kind: "start_learning_run_v2",
-          request: {
-            originV2: start.originV2,
-            goal: "stabilize",
-            idempotencyKey,
-            requestedTimeBudgetSeconds: 180,
-          },
+          request: start.request,
         };
       }
       const payloadHash = sha256(canonicalJson(payload));
@@ -357,6 +354,7 @@ export async function createCompanionMenuProposal(args: {
         );
       }
 
+      companionLearningContextV1Schema.parse(context);
       return createCompanionProposalInTransaction(tx, {
         workspaceId: args.workspaceId,
         userId: args.userId,
@@ -504,8 +502,8 @@ async function createCompanionProposalInTransaction(
         if (!conv[0]) {
           throw new CompanionConversationError("NOT_FOUND", 404, "conversation not found");
         }
-        if (conv[0].kind !== "dialogue" || conv[0].status !== "active") {
-          throw new CompanionConversationError("FORBIDDEN", 403, "conversation is not an active dialogue");
+        if ((conv[0].kind !== "dialogue" && conv[0].kind !== "inbox") || conv[0].status !== "active") {
+          throw new CompanionConversationError("FORBIDDEN", 403, "conversation is not an active companion segment");
         }
         // §8.5：先原子回收过期 pending（TTL 5min → expired + action.expired 事件
         // + 挂起 run/工具调用终结）。必须在 active run 校验**之前**执行：Agent run
@@ -537,31 +535,28 @@ async function createCompanionProposalInTransaction(
           );
         }
       } else {
-        // §6.1/§6.7：与 createCompanionConversation 同限额——用户新建 dialogue
-        // 对话上限 200，不能绕过 API 检查直接 INSERT。
-        const dialogueCount = await tx.execute<{ n: string }>(sql`
-          SELECT count(*)::int AS n FROM companion_conversations
-          WHERE workspace_id = ${args.workspaceId}
-            AND user_id = ${args.userId}
-            AND kind = 'dialogue'
-            AND status = 'active'
-        `);
-        if (Number(dialogueCount[0]?.n ?? 0) >= 200) {
-          throw new CompanionConversationError(
-            "CONVERSATION_LIMIT_REACHED", 409, "max 200 user-created dialogue conversations",
-          );
-        }
-        const created = await tx.execute<{ id: string }>(sql`
+        // 产品层只有一条连续历史。没有传内部段时，原子确保唯一 inbox，
+        // 不再暗中创建用户可见的 dialogue/session。
+        await tx.execute(sql`
           INSERT INTO companion_conversations
             (id, workspace_id, user_id, kind, title, title_source, status)
-          VALUES (${randomUUID()}, ${args.workspaceId}, ${args.userId}, 'dialogue',
-                  ${args.title.slice(0, 80)}, 'auto', 'active')
-          RETURNING id
+          VALUES (${randomUUID()}, ${args.workspaceId}, ${args.userId}, 'inbox',
+                  '伴星消息', 'system', 'active')
+          ON CONFLICT DO NOTHING
         `);
-        if (!created[0]) {
-          throw new CompanionConversationError("INTERNAL_ERROR", 500, "conversation create failed");
+        const inbox = await tx.execute<{ id: string }>(sql`
+          SELECT id FROM companion_conversations
+          WHERE workspace_id = ${args.workspaceId}
+            AND user_id = ${args.userId}
+            AND kind = 'inbox'
+            AND status = 'active'
+          LIMIT 1
+          FOR UPDATE
+        `);
+        if (!inbox[0]) {
+          throw new CompanionConversationError("INTERNAL_ERROR", 500, "inbox ensure failed");
         }
-        conversationId = created[0].id;
+        conversationId = inbox[0].id;
       }
 
       // clientMessageId is the second idempotency fence for an explicit
@@ -1009,7 +1004,12 @@ export async function decideCompanionProposal(args: {
       const kind = proposalPayload.kind;
       if (NAVIGATION_KINDS.has(kind)) {
         // 纯导航：同步完成（200 succeeded）
-        const route = navigationRouteFor(kind, proposalPayload);
+        const route = await resolveNavigationRouteFor(
+          tx,
+          args.workspaceId,
+          kind,
+          proposalPayload,
+        );
         await tx.execute(sql`
           UPDATE companion_action_proposals
           SET status = 'succeeded', decision = 'confirm', decided_at = now(),
@@ -1527,7 +1527,16 @@ function navigationRouteFor(kind: string, payload: Record<string, unknown>): {
     case "open_review":
       return { route: { kind: "review" }, safeSummary: "打开复习页" };
     case "open_card":
-      return { route: { kind: "card", cardId: payload.cardId }, safeSummary: "打开卡片" };
+      return typeof payload.cardId === "string" && typeof payload.objectiveId === "string"
+        ? {
+            route: {
+              kind: "card",
+              cardId: payload.cardId,
+              objectiveId: payload.objectiveId,
+            },
+            safeSummary: "打开卡片",
+          }
+        : null;
     case "open_star_map":
       return { route: { kind: "star_map", keyPointId: payload.keyPointId ?? undefined }, safeSummary: "打开星图" };
     case "focus_graph_node":
@@ -1539,12 +1548,36 @@ function navigationRouteFor(kind: string, payload: Record<string, unknown>): {
       return { route: { kind: "star_map", restoreRun: payload.runId }, safeSummary: "恢复星图视口" };
     case "open_conversation_history":
       return {
-        route: { kind: "conversation", assistantSessionId: payload.assistantSessionId ?? undefined },
+        route: { kind: "conversation" },
         safeSummary: "打开对话历史",
       };
     default:
       return null;
   }
+}
+
+async function resolveNavigationRouteFor(
+  tx: ApiTransaction,
+  workspaceId: string,
+  kind: string,
+  payload: Record<string, unknown>,
+): Promise<ReturnType<typeof navigationRouteFor>> {
+  if (kind !== "open_card") return navigationRouteFor(kind, payload);
+  if (typeof payload.cardId !== "string") {
+    throw new CompanionConversationError("INVALID_REQUEST", 400, "cardId is required");
+  }
+  const rows = await tx.execute<{ objective_id: string }>(sql`
+    SELECT objective_id
+    FROM learning_cards_v2
+    WHERE workspace_id = ${workspaceId}
+      AND id = ${payload.cardId}
+    LIMIT 1
+  `);
+  const objectiveId = rows[0]?.objective_id;
+  if (!objectiveId) {
+    throw new CompanionConversationError("NOT_FOUND", 404, "card target no longer exists");
+  }
+  return navigationRouteFor(kind, { ...payload, objectiveId });
 }
 
 async function appendDecisionEvent(

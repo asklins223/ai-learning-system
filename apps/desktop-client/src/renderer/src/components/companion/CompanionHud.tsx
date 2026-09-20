@@ -2,11 +2,13 @@ import {
   Fragment,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
+  type UIEvent as ReactUIEvent,
 } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -37,14 +39,12 @@ import {
   companionMessageText,
   useCompanionChat,
   type CompanionNavChip,
-  type CompanionProposalUiState,
 } from "../../app/companion-chat-session";
 import {
   beginCompanionSpeechLine,
-  isCompanionVoiceAudible,
-  speakCompanionLine,
   stopCompanionSpeech,
   subscribeCompanionSpeech,
+  type CompanionServerVoiceSegment,
   type CompanionSpeechSession,
 } from "../../app/companion-voice-playback";
 import {
@@ -53,7 +53,7 @@ import {
   type CompanionRevealDriver,
 } from "../../app/companion-reveal-driver";
 import { subscribeHomeV2VoiceLevel } from "../../app/companion-voice-level";
-import { companionRunTraceExpired, type CompanionRunTrace } from "../../app/companion-agent-nodes";
+import type { CompanionRunTrace } from "../../app/companion-agent-nodes";
 import {
   CompanionAgentRail,
   type CompanionAgentRailProgress,
@@ -67,11 +67,16 @@ import {
   quietHoursWithBoundary,
 } from "./companion-account-presence";
 import {
-  COMPANION_BUBBLE_MIN_HEIGHT_PX,
+  companionBubbleHoldMs,
+  companionBubbleLineHeights,
   companionBubbleMaxHeightPx,
   companionBubbleText,
 } from "./companion-bubble-reveal";
-import { companionBubbleClearance } from "./companion-bubble-clearance";
+import {
+  createCompanionBubbleFollow,
+  type CompanionBubbleFollow,
+} from "./companion-bubble-follow";
+import { COMPANION_BUBBLE_FRAME_INSET, companionBubbleClearance } from "./companion-bubble-clearance";
 import { useCompanionVoiceInput, type CompanionVoiceInput } from "./use-companion-voice-input";
 import { DIRECTORY_RAIL_MODE_EVENT, DIRECTORY_RAIL_STATE_EVENT } from "../DirectoryRail";
 import type { Rect } from "./companion-home-placement";
@@ -85,6 +90,8 @@ import {
   shouldShowRunTrace,
   stopSummary,
 } from "./CompanionChatRecord";
+import { CompanionProposalChoice } from "./CompanionProposalChoice";
+import { CompanionRunTraceView } from "./CompanionRunTraceView";
 import "./companion-chat-record.css";
 import "./companion-hud.css";
 
@@ -129,13 +136,20 @@ export interface CompanionHudProps {
   readonly onAgentToolExecuting?: () => void;
 }
 
-type MoreView = "menu" | "actions" | "settings";
+type MoreView = "menu" | "actions";
 
 type CompanionVoiceSegmentReadyDetail = Readonly<{
+  version: 2;
+  conversationId: string;
   runId: string;
+  generation: number;
   segmentId: string;
   ordinal: number;
-  text: string;
+  displayText: string;
+  displayStart: number;
+  displayEnd: number;
+  synthesisTextSha256: string;
+  cue: CompanionServerVoiceSegment["cue"];
 }>;
 type BubbleStage = "visible" | "leaving";
 
@@ -149,14 +163,8 @@ interface ActiveCompanionSpeech {
   stop(): void;
 }
 
-const BUBBLE_HOLD_MS = 1_100;
 const BUBBLE_EXIT_MS = 140;
-const CARD_ONLY_LINE = "我把这件事整理成了一条可执行建议，已经收进历史会话里。";
-/**
- * 只念最终结果（方案 §3.1）。太短的回复不出声——"好的""收到"用语音念出来比静默更吵，
- * 而且没有信息量。它与 worker 侧"取消时是否留档"的长度门槛是同一个量级（那边 12 字）。
- */
-const COMPANION_MIN_SPEAK_CHARS = 8;
+const CARD_ONLY_LINE = "我把这件事整理成了一条可执行建议，已经收进对话记录里。";
 /** 出声结束后呼吸环从当前振幅回落到静息的时长（方案 §4）。 */
 const COMPANION_BREATH_RETURN_MS = 300;
 /** 停止后的就地说明在气泡里停留多久；之后由用户的下一次发送或这里收掉。 */
@@ -206,10 +214,21 @@ export function CompanionHud({
   const chat = useCompanionChat();
   const [input, setInput] = useState("");
   const [moreView, setMoreView] = useState<MoreView>("menu");
+  /**
+   * 密集设置的宿主（方案 §3）：不再是贴着伴星弹出的面板——那一面把大小/权限/安静时段
+   * 全挤在一起，展开时盖住任务主内容。它们迁到**窗口右缘**的边缘面板（portal 到 body，
+   * `position: fixed` 不受场景锚点的 transform 包裹块影响）；输入、简单菜单和选择卡
+   * 继续贴在伴星身边。
+   */
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  /** 回合结束后只发布一次的稳定摘要（方案 §3 无障碍）：流式文本不再是持续 live region。 */
+  const [turnSummary, setTurnSummary] = useState("");
+  const [proposalNotice, setProposalNotice] = useState("");
   const [revealedChars, setRevealedChars] = useState(0);
   const [bubbleStage, setBubbleStage] = useState<BubbleStage>("visible");
   const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
   const micRef = useRef<HTMLButtonElement>(null);
+  const moreControlRef = useRef<HTMLButtonElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   /**
    * 显现驱动器（2026-09-19 字幕式朗读）：文本**到了多少**与**该露多少**是两件事，
@@ -236,13 +255,14 @@ export function CompanionHud({
    * 同时满足两边。
    */
   const speechSessionRef = useRef<CompanionSpeechSession | null>(null);
-  /** 已经喂给语音会话的字符数（防止同一段文本被重复排进队列）。 */
-  const spokenCharsRef = useRef(0);
-  const latestDraftTextRef = useRef("");
-  const voiceFallbackTimerRef = useRef(0);
   const pendingVoiceSegmentsRef = useRef<CompanionVoiceSegmentReadyDetail[]>([]);
   const seenVoiceSegmentIdsRef = useRef(new Set<string>());
   const [voiceSegmentRevision, setVoiceSegmentRevision] = useState(0);
+  /**
+   * 气泡元素的镜像 ref：停留计时的暂停判定（悬停/聚焦）在 effect 闭包里即时读它，
+   * 不把 bubbleEl 挂进那批 effect 的依赖。
+   */
+  const bubbleElRef = useRef<HTMLDivElement | null>(null);
   /**
    * 本轮关心的播放计划 id。播放进度是模块级广播，换轮时旧计划的 `stopped` 也会到——
    * 不过滤的话它会把新的一轮误判成"音频停了"，文字就会抢在声音前面。
@@ -255,6 +275,20 @@ export function CompanionHud({
   const presenceRef = useRef<HTMLSpanElement>(null);
   /** 气泡元素（用回调 ref：它是条件渲染的，状态里存元素比存 ref 更好依赖）。 */
   const [bubbleEl, setBubbleEl] = useState<HTMLDivElement | null>(null);
+  bubbleElRef.current = bubbleEl;
+  /** 气泡**正文**的滚动容器：长回复在它里面自己滚，跟随（见下面的 effect）也挂在它身上。 */
+  const bubbleBodyRef = useRef<HTMLParagraphElement | null>(null);
+  /**
+   * 跟随的状态机（判据与规则都在 `companion-bubble-follow.ts`，有单测）：长回复装满后
+   * 新字要钉在视野里，但用户自己往上读时要让位，他回到底部或换一轮再跟着走。
+   */
+  const followRef = useRef<CompanionBubbleFollow | null>(null);
+  if (followRef.current === null) followRef.current = createCompanionBubbleFollow();
+  const bubbleFollow = followRef.current;
+  /** 此刻有正在等待用户选择的提案时为 true：气泡停留计时暂停（方案 §3）。 */
+  const pendingProposalIdRef = useRef<string | null>(null);
+  /** 本轮语音此刻是否正在出声：出声时气泡停留计时暂停（方案 §3）。 */
+  const speakingRef = useRef(false);
   /** HUD 根：两笔实测值写在它身上；气泡不在时也要能写，所以不能从气泡反查父节点。 */
   const hudRef = useRef<HTMLDivElement>(null);
   /**
@@ -295,8 +329,14 @@ export function CompanionHud({
   useEffect(() => {
     const onVoiceSegment = (event: Event) => {
       const detail = (event as CustomEvent<Partial<CompanionVoiceSegmentReadyDetail>>).detail;
-      if (!detail || typeof detail.runId !== "string" || typeof detail.segmentId !== "string"
-        || typeof detail.ordinal !== "number" || typeof detail.text !== "string" || !detail.text) return;
+      // V2 合同逐字段校验（主进程已做 shared schema 校验，这里只挡明显残帧）：
+      // displayStart/displayEnd 是干净正文里的字符区间，任一缺失就整个丢弃——
+      // 渲染层绝不猜"这段对应正文的哪里"。
+      if (!detail || detail.version !== 2 || typeof detail.runId !== "string"
+        || typeof detail.segmentId !== "string" || typeof detail.ordinal !== "number"
+        || typeof detail.displayText !== "string" || detail.displayText.length === 0
+        || typeof detail.displayStart !== "number" || typeof detail.displayEnd !== "number"
+        || typeof detail.conversationId !== "string" || typeof detail.generation !== "number") return;
       if (seenVoiceSegmentIdsRef.current.has(detail.segmentId)) return;
       seenVoiceSegmentIdsRef.current.add(detail.segmentId);
       pendingVoiceSegmentsRef.current.push(detail as CompanionVoiceSegmentReadyDetail);
@@ -305,7 +345,6 @@ export function CompanionHud({
     window.addEventListener("ailearn:companion-voice-segment-ready", onVoiceSegment);
     return () => {
       window.removeEventListener("ailearn:companion-voice-segment-ready", onVoiceSegment);
-      window.clearTimeout(voiceFallbackTimerRef.current);
     };
   }, []);
 
@@ -354,7 +393,6 @@ export function CompanionHud({
     const draft = chat.draft;
     const reveal = ensureRevealDriver();
     if (!draft) return;
-    latestDraftTextRef.current = draft.text;
     if (draftRunIdRef.current !== draft.runId) {
       draftRunIdRef.current = draft.runId;
       // 换轮：上一轮没念完的立刻停掉，否则两轮的语音会叠在一起。先摘掉计划 id，
@@ -362,8 +400,6 @@ export function CompanionHud({
       activeSpeechPlanRef.current = null;
       speechSessionRef.current?.stop();
       speechSessionRef.current = null;
-      spokenCharsRef.current = 0;
-      window.clearTimeout(voiceFallbackTimerRef.current);
       pendingVoiceSegmentsRef.current = pendingVoiceSegmentsRef.current.filter((segment) => segment.runId === draft.runId);
       seenVoiceSegmentIdsRef.current.clear();
       for (const segment of pendingVoiceSegmentsRef.current) seenVoiceSegmentIdsRef.current.add(segment.segmentId);
@@ -375,41 +411,43 @@ export function CompanionHud({
       reveal.noteSession("unavailable");
       return;
     }
-    // 太短的回复不值得开口（与终态路径同一个门槛）。起步门槛用当前草稿长度估：
-    // 短回复本来就到不了这里，长回复只会更早开始念。
-    if (speechSessionRef.current === null && draft.text.length >= COMPANION_MIN_SPEAK_CHARS) {
-      speechSessionRef.current = beginCompanionSpeechLine();
+    // 正文朗读只走服务端签发的片段引用（strictSegments）：渲染层不再本地切段、
+    // 不再做字符串前缀匹配——语气标签剥离后的真实字符区间只有服务端知道，本地
+    // 匹配就是猜（2026-09-19 之前的 180ms 文字回退由此整个删除）。服务端片段迟迟
+    // 不到时，播放层的首段 1.6s / 段间 1.2s 截止会把本轮平滑降级为纯文字。
+    // 不设长度门槛（2026-09-20 用户实测"短内容不发音"）：要不要发声由 worker 的
+    // 分段器决定——它对任何剩余文本在 final 时都会成段，「哈哈」这类短回复照样
+    // 有段可念；整轮没有段时由播放层直接收尾，显现交回阅读钟。
+    if (speechSessionRef.current === null) {
+      speechSessionRef.current = beginCompanionSpeechLine({ strictSegments: true });
       activeSpeechPlanRef.current = speechSessionRef.current.planId;
     }
     const session = speechSessionRef.current;
     reveal.noteSession(session ? session.mode : "unavailable");
     if (!session) return;
+    // 只喂本轮的段；feedSegment 内部按 segmentId 幂等，SSE 重连重放不会念两遍。
     const remainingSegments: CompanionVoiceSegmentReadyDetail[] = [];
     for (const segment of pendingVoiceSegmentsRef.current.sort((a, b) => a.ordinal - b.ordinal)) {
-      if (segment.runId !== draft.runId) continue;
-      const pending = draft.text.slice(spokenCharsRef.current);
-      if (pending.startsWith(segment.text)) {
-        session.feed(segment.text);
-        spokenCharsRef.current += segment.text.length;
+      if (segment.runId !== draft.runId) {
+        remainingSegments.push(segment);
         continue;
       }
-      // SSE 重连可能重放已经由 fallback 入队的段，segmentId 去重之外再以当前
-      // 已消费前缀兜一层，保证绝不会把同一句念两遍。
-      if (draft.text.slice(0, spokenCharsRef.current).includes(segment.text)) continue;
-      remainingSegments.push(segment);
+      session.feedSegment({
+        ref: {
+          version: 2,
+          conversationId: segment.conversationId,
+          runId: segment.runId,
+          generation: segment.generation,
+          ordinal: segment.ordinal,
+          segmentId: segment.segmentId,
+        },
+        displayText: segment.displayText,
+        displayStart: segment.displayStart,
+        displayEnd: segment.displayEnd,
+        cue: segment.cue,
+      });
     }
     pendingVoiceSegmentsRef.current = remainingSegments;
-    window.clearTimeout(voiceFallbackTimerRef.current);
-    voiceFallbackTimerRef.current = window.setTimeout(() => {
-      const currentSession = speechSessionRef.current;
-      const currentText = latestDraftTextRef.current;
-      if (!currentSession || draftRunIdRef.current !== draft.runId) return;
-      const pending = currentText.slice(spokenCharsRef.current);
-      if (!pending) return;
-      currentSession.feed(pending);
-      spokenCharsRef.current = currentText.length;
-    }, 180);
-    return () => window.clearTimeout(voiceFallbackTimerRef.current);
   }, [chat.draft, ensureRevealDriver, voiceEnabled, voiceSegmentRevision]);
 
   useEffect(() => {
@@ -427,6 +465,8 @@ export function CompanionHud({
         reveal.noteArrived(partial.length);
         reveal.noteSession("unavailable");
         setBubbleStage("visible");
+        // 稳定摘要只发这一次（方案 §3 无障碍）：流式期间不逐字播报。
+        setTurnSummary(chat.failure ? `${partial.trim()} ${chat.failure}` : partial.trim());
         return;
       }
       // 这一轮再也没有终态回复了（失败/被丢弃）：正在念的也要停掉，
@@ -434,9 +474,6 @@ export function CompanionHud({
       activeSpeechPlanRef.current = null;
       speechSessionRef.current?.stop();
       speechSessionRef.current = null;
-      spokenCharsRef.current = 0;
-      latestDraftTextRef.current = "";
-      window.clearTimeout(voiceFallbackTimerRef.current);
       pendingVoiceSegmentsRef.current = [];
       seenVoiceSegmentIdsRef.current.clear();
       reveal.reset();
@@ -446,49 +483,76 @@ export function CompanionHud({
     }
     const text = companionHudReplyText(reply);
     const total = text.trim().length;
-    // 朗读收尾（2026-09-19 ⑥）：本轮若已经在草稿阶段开了口，这里只补剩下的尾巴，
-    // 不再另起一段语音——否则同一句话会被念两遍。没开过口的（整段到达、未走流式）
-    // 仍然走 `speakCompanionLine` 单次调用。太短不念（走阅读钟）。
-    window.clearTimeout(voiceFallbackTimerRef.current);
-    const session = speechSessionRef.current;
+    // 朗读收尾：正文只能通过服务端签发的片段引用播放（strictSegments），自由文本
+    // TTS 的终态兜底链路已删除。流式阶段开过口的会话在这里收尾；没开过口的
+    // （整段到达、未走流式草稿）在这里补开一个——服务端片段通常在 assistant.final
+    // 前后到达，此刻把缓冲里的段喂进去还来得及播。
+    let session = speechSessionRef.current;
     speechSessionRef.current = null;
+    if (!session && voiceEnabled) {
+      session = beginCompanionSpeechLine({ strictSegments: true });
+    }
     let handle: ActiveCompanionSpeech | null = null;
     if (session) {
       if (!voiceEnabled) {
         // 语音被关掉：会话收干净，别挂在后台继续合成。
         activeSpeechPlanRef.current = null;
         session.stop();
-      } else if (session.mode === "voice" || !isCompanionVoiceAudible()) {
-        session.finish(text.slice(spokenCharsRef.current));
-        handle = { planId: session.planId, mode: session.mode, stop: () => session.stop() };
       } else {
-        // 会话建在"那一刻不可出声"上（宿主没解锁 / 当时静音），现在能出声了：换一次性台词，
-        // 否则这一轮整轮没有声音（症状②："气泡回来了却不发音"）。反过来（现在不能出声）
-        // 保持 silent 交给阅读钟，不假装在出声。
-        activeSpeechPlanRef.current = null;
-        session.stop();
-        handle = speakCompanionLine(text);
+        // 把缓冲里还没喂的服务端段补进会话（走流式时已喂过，segmentId 幂等），
+        // 然后封队：迟到的片段不再入队（"本轮不再次突然恢复朗读"）。
+        for (const segment of pendingVoiceSegmentsRef.current.sort((a, b) => a.ordinal - b.ordinal)) {
+          const runId = draftRunIdRef.current;
+          if (runId !== null && segment.runId !== runId) continue;
+          session.feedSegment({
+            ref: {
+              version: 2,
+              conversationId: segment.conversationId,
+              runId: segment.runId,
+              generation: segment.generation,
+              ordinal: segment.ordinal,
+              segmentId: segment.segmentId,
+            },
+            displayText: segment.displayText,
+            displayStart: segment.displayStart,
+            displayEnd: segment.displayEnd,
+            cue: segment.cue,
+          });
+        }
+        pendingVoiceSegmentsRef.current = [];
+        session.finish();
+        handle = { planId: session.planId, mode: session.mode, stop: () => session.stop() };
       }
-    }
-    spokenCharsRef.current = 0;
-    if (!handle && voiceEnabled && total >= COMPANION_MIN_SPEAK_CHARS) {
-      handle = speakCompanionLine(text);
     }
     activeSpeechPlanRef.current = handle?.planId ?? null;
     let stopped = false;
     let holdTimer = 0;
     let exitTimer = 0;
-
-    const dismiss = () => {
-      if (stopped) return;
-      holdTimer = window.setTimeout(() => {
-        if (stopped) return;
-        setBubbleStage("leaving");
-        exitTimer = window.setTimeout(() => {
-          if (!stopped) chat.dismissLiveReply();
-        }, BUBBLE_EXIT_MS);
-      }, BUBBLE_HOLD_MS);
+    /**
+     * 停留时长自适应（方案 §3）：按文字长度 2.4–6s，而不是旧的固定 1.1s；悬停、
+     * 键盘聚焦、待选卡片在旁、正在朗读都会暂停计时——所以用小步 tick 而不是一次
+     * setTimeout，每步即时检查暂停条件。
+     */
+    const HOLD_TICK_MS = 120;
+    let remainingHoldMs = companionBubbleHoldMs(total);
+    const holdPaused = (): boolean => {
+      const bubble = bubbleElRef.current;
+      if (bubble && (bubble.matches(":hover") || bubble.contains(document.activeElement))) return true;
+      if (pendingProposalIdRef.current !== null) return true;
+      if (speakingRef.current) return true;
+      return false;
     };
+    holdTimer = window.setInterval(() => {
+      if (stopped) return;
+      if (!holdPaused()) remainingHoldMs -= HOLD_TICK_MS;
+      if (remainingHoldMs > 0) return;
+      window.clearInterval(holdTimer);
+      holdTimer = 0;
+      setBubbleStage("leaving");
+      exitTimer = window.setTimeout(() => {
+        if (!stopped) chat.dismissLiveReply();
+      }, BUBBLE_EXIT_MS);
+    }, HOLD_TICK_MS);
 
     // 这一轮到此不会再长了：把到货量交给驱动器，但**不**补满显现。
     // 露多少字由音频进度（或它没动静时的阅读钟）决定，收尾只由 onComplete 触发——
@@ -497,13 +561,36 @@ export function CompanionHud({
     reveal.noteArrived(total);
     reveal.noteSession(handle ? handle.mode : "unavailable");
     reveal.noteTurnFinal();
-    const offComplete = reveal.onComplete(() => dismiss());
+    // 稳定摘要（方案 §3 无障碍）：回合终态只发布一次全文，读屏不再跟着逐字流
+    // 反复朗读碎片。setState 同值时 React 直接跳过，天然去重。
+    setTurnSummary(total > 0 ? text : (chat.failure ?? "这一轮没有返回内容。"));
+    const offComplete = reveal.onComplete(() => {
+      // onComplete 时刻可能已经有一段"暂停"在进行：计时从现在才开始走。
+      if (stopped) return;
+      if (holdTimer === 0) return;
+      window.clearInterval(holdTimer);
+      holdTimer = 0;
+      exitTimer = window.setTimeout(() => {
+        if (stopped) return;
+        setBubbleStage("leaving");
+        exitTimer = window.setTimeout(() => {
+          if (!stopped) chat.dismissLiveReply();
+        }, BUBBLE_EXIT_MS);
+      }, Math.max(0, remainingHoldMs));
+    });
     setBubbleStage("visible");
-    if (total <= 0) dismiss();
+    if (total <= 0) {
+      window.clearInterval(holdTimer);
+      holdTimer = 0;
+      setBubbleStage("leaving");
+      exitTimer = window.setTimeout(() => {
+        if (!stopped) chat.dismissLiveReply();
+      }, BUBBLE_EXIT_MS);
+    }
 
     return () => {
       stopped = true;
-      window.clearTimeout(holdTimer);
+      window.clearInterval(holdTimer);
       window.clearTimeout(exitTimer);
       offComplete();
       handle?.stop();
@@ -518,11 +605,17 @@ export function CompanionHud({
    * `stopped` 广播会把新的一轮误判成"音频停了"。
    */
   useEffect(() => subscribeCompanionSpeech((progress) => {
+    // 先记"本轮是否正在出声"：停留计时要在朗读期间暂停（方案 §3）。
+    speakingRef.current = progress.phase === "speaking" && progress.planId === activeSpeechPlanRef.current;
     const driver = revealDriverRef.current;
     if (!driver || progress.planId !== activeSpeechPlanRef.current) return;
     if (progress.phase === "speaking") driver.noteAudioProgress(progress.visibleChars);
-    else if (progress.phase === "finished") driver.noteAudioFinished();
-    else driver.noteAudioStopped();
+    else if (progress.phase === "finished" && progress.visibleChars > 0) driver.noteAudioFinished();
+    else if (progress.phase === "finished") {
+      // 整轮一个字都没念过（服务端语音关着 / 没有任何片段）：不能按"音频播完"
+      // 处理——那会瞬间推满全文。交回阅读钟，让文字仍按阅读节奏露出。
+      driver.noteAudioStopped();
+    } else driver.noteAudioStopped();
   }), []);
 
   /**
@@ -582,27 +675,62 @@ export function CompanionHud({
   useEffect(() => {
     if (!chat.stopNotice) return;
     setFrozenText(lastOutputRef.current);
+    // 稳定摘要（方案 §3 无障碍）：停止也是回合终态，发一次"已停止"收尾。
+    setTurnSummary(lastOutputRef.current.trim().length > 0
+      ? `${lastOutputRef.current.trim()}（已停止）`
+      : "已停止这一轮。");
     // 停止说明是"就地提示"，不是常驻状态；下一次发送也会把它清掉。
     const timer = window.setTimeout(() => chat.dismissStopNotice(), STOP_NOTICE_HOLD_MS);
     return () => window.clearTimeout(timer);
   }, [chat.dismissStopNotice, chat.stopNotice]);
 
   /**
-   * 气泡的两笔实测值，都写进 HUD 根元素的 CSS 变量：
+   * 气泡的三笔实测值，都写进 HUD 根元素的 CSS 变量：
    *
    * - `--companion-bubble-h`：轨道贴在气泡**上方**，得先知道气泡多高才算得出轨道位置。
-   * - `--companion-bubble-max-h`：气泡向上能长多高 = "气泡底边到视口顶的距离" − 头顶轨道与
-   *   留白的预算（`--companion-bubble-top-reserve`）。`calc(100% - …)` 算不出来：气泡里的
-   *   `100%` 是 HUD 的高度，跟"到视口顶还有多远"没有固定关系。不钳住的话，320 字的回复
-   *   （气泡容量上限）能撑到 ~470px，把气泡和头顶轨道一起顶出窗口——实测 `bubbleH≥300`
-   *   时轨道 `top=-29`（1440×810）。
+   * - `--companion-bubble-max-h` / `--companion-bubble-min-h`：气泡能从多矮长到多高。上限 =
+   *   "气泡底边到视口顶的距离" − 头顶轨道与留白的预算（`--companion-bubble-top-reserve`）。
+   *   `calc(100% - …)` 算不出来：气泡里的 `100%` 是 HUD 的高度，跟"到视口顶还有多远"没有
+   *   固定关系。不钳住的话，320 字的回复（气泡容量上限）能撑到 ~470px，把气泡和头顶轨道
+   *   一起顶出窗口——实测 `bubbleH≥300` 时轨道 `top=-29`（1440×810）。
    *
-   * 气泡底边是钉死的（`bottom: calc(100% + 12px)`），不随自身高度变，所以这两笔测量不会
-   * 互相触发成环；也不改气泡自身的定位契约（它的几何是被闸门固化过的）。
+   * 两个高度都**对齐到整行**（`companionBubbleLineHeights`，2026-09-20）：正文装满后气泡内
+   * 部滚动、跟随把最新一行钉在底部，容器高度不是行高的整数倍时最上面那行永远被切半截
+   * （用户反馈："自动就给我滚动下去了，上一行只能看到半截"）。正文以外的占用（内边距、
+   * 边框、生成期的胶囊留白、失败说明行）和行高都按元素实测，窗口断点与胶囊在场与否都跟手。
+   *
+   * 气泡底边是钉死的（`bottom: calc(100% + var(--companion-bubble-gap-y))`），不随自身高度
+   * 变，所以这几笔测量不会互相触发成环；也不改气泡自身的定位契约（它的几何是被闸门固化过的）。
    */
   useEffect(() => {
     const host = hudRef.current;
     if (!host) return;
+    // HUD 与锚点盒同框（`inset: 0`）：`host.parentElement` 就是角色盒。
+    const anchor = host.parentElement;
+    const character = anchor?.querySelector<HTMLElement>(".window-live2d") ?? null;
+    let raf = 0;
+    let following = false;
+    /**
+     * 气泡的 `max-height` 是**绝对测量**（"底边到视口顶还剩多少"），所以角色盒一动就得重量。
+     * 判据照抄让位那段（`companion-bubble-clearance`）：看它此刻还有没有动画在跑，它停我们
+     * 就停；`MOTION_FOLLOW_CEILING_MS` 只是"动画因为别的原因一直不停"时的兜底。
+     */
+    const followMotion = () => {
+      if (following) return;
+      following = true;
+      const startedAt = Date.now();
+      const step = () => {
+        apply();
+        const moving = anchor?.getAnimations({ subtree: true })
+          .some((animation) => animation.playState === "running") ?? false;
+        if (!moving || Date.now() - startedAt > MOTION_FOLLOW_CEILING_MS) {
+          following = false;
+          return;
+        }
+        raf = window.requestAnimationFrame(step);
+      };
+      raf = window.requestAnimationFrame(step);
+    };
     const apply = () => {
       // 气泡不在时**归零**，不能留着上一次的值：轨道的 `bottom` 里含
       // `var(--companion-bubble-h)`，留旧值会让轨道停在上一次气泡占过的高度上——气泡早
@@ -613,26 +741,91 @@ export function CompanionHud({
       const reserve = Number.parseFloat(
         getComputedStyle(host).getPropertyValue("--companion-bubble-top-reserve"),
       );
-      const maxHeight = companionBubbleMaxHeightPx(
-        // 没有气泡要放时，按"气泡底边贴在她头顶上方 12px"这个契约位置来算预算。
-        bubbleEl ? bubbleEl.getBoundingClientRect().bottom : host.getBoundingClientRect().top - 12,
+      // 已经下移了多少（上一拍的产物）：上限要按**下移前**的底边算，否则"往下让"会把上限
+      // 一起放大，气泡又长上去，两个数互相追着跑。
+      const appliedPush = cssPixels(host, "--companion-bubble-push-down", 0);
+      const available = companionBubbleMaxHeightPx(
+        // 没有气泡要放时，按"气泡底边贴在她头顶上方"这个契约位置来算预算。
+        (bubbleEl ? bubbleEl.getBoundingClientRect().bottom : host.getBoundingClientRect().top - 12) - appliedPush,
         Number.isFinite(reserve) ? reserve : 0,
       );
-      host.style.setProperty("--companion-bubble-max-h", `${maxHeight}px`);
-      // 气泡被压到下限 = 这面窗口的头顶放不下「气泡下限 + 展开态轨道」（预算 148px 里给
+      const body = bubbleBodyRef.current;
+      const heights = companionBubbleLineHeights({
+        available,
+        // 正文以外的垂直占用 = 气泡高 − 正文可视高（含内边距、边框、胶囊留白、说明行）。
+        chrome: bubbleEl && body ? bubbleEl.offsetHeight - body.clientHeight : Number.NaN,
+        lineHeight: body ? Number.parseFloat(getComputedStyle(body).lineHeight) : Number.NaN,
+      });
+      host.style.setProperty("--companion-bubble-max-h", `${heights.maxHeight}px`);
+      host.style.setProperty("--companion-bubble-min-h", `${heights.minHeight}px`);
+      // 气泡只放得下一行 = 这面窗口的头顶放不下「气泡下限 + 展开态轨道」（预算 148px 里给
       // 轨道留了 ~121px）。此时让轨道先收成摘要行：它越出窗口比少三行过程更糟，而摘要行
-      // 本来就带步数与工具次数。判据就取"钳位有没有落到下限"，不另立常量、不引入环
+      // 本来就带步数与工具次数。判据就取"上限有没有落到下限"，不另立常量、不引入环
       // （气泡上限只由它自己的底边决定，跟轨道高矮无关）。
-      setRailTight(maxHeight === COMPANION_BUBBLE_MIN_HEIGHT_PX);
+      setRailTight(heights.maxHeight === heights.minHeight);
+      // 模型顶位移（2026-09-20）：气泡间隙 = 基础值 + 这个位移，落点始终是「她**画出来的**
+      // 头顶」之上 40px。必须用角色自己报的墨迹顶边（`--companion-model-ink-top` 是驱动
+      // `fitModel()` 写下的容器高度分数），不能用角色盒/外壳的顶边——模型比盒瘦时头顶之下
+      // 有留白，按盒顶定位的气泡会随缩放越飘越高（用户截图："离的越来越远了"）。
+      // 量在这里而不是首页的相机投影里：任务页不跑那条投影，留下的旧值会把气泡顶出窗口。
+      // 分数乘容器的**实际**高度，外层 gsap 缩放因此天然跟手。
+      const anchorRect = anchor ? anchor.getBoundingClientRect() : null;
+      let inkTop: number | null = null;
+      if (character && anchorRect) {
+        const characterRect = character.getBoundingClientRect();
+        const inkRatio = Number.parseFloat(
+          getComputedStyle(character).getPropertyValue("--companion-model-ink-top"),
+        );
+        inkTop = characterRect.top + characterRect.height * (Number.isFinite(inkRatio) ? inkRatio : 0);
+        host.style.setProperty(
+          "--companion-model-top-shift",
+          `${Math.round(anchorRect.top - inkTop)}px`,
+        );
+      }
+      // 她站得很高时（拖到窗口上方 / 放大到头顶贴顶），"头顶之上 40px"放不下气泡与轨道：
+      // 与其让它们被窗口切掉、整块看不见，不如连气泡带轨道**整体下移**刚好够用的距离
+      // （2026-09-20 用户反馈："消息气泡和步骤展示都看不到了"）。下移量按**实际栈高**算，
+      // 只在真的越界时非零——气泡与轨道一起挪，两者间距不变。
+      //
+      // 代价说清楚：她正好站在窗口顶时，下移会盖住她的**帽檐/头顶**一截。这是有意的取舍
+      // ——看不见信息比盖住她的帽子更糟，而那种几何下气泡上限只剩一行（她头顶之上本来就
+      // 放不下更多），所以盖住的幅度有界，不会盖到脸。
+      const rail = host.querySelector<HTMLElement>(".companion-hud__rail");
+      const railHeight = rail ? rail.offsetHeight : 0;
+      const railGapY = cssPixels(host, "--companion-rail-gap-y", 20);
+      const stackHeight = bubbleHeight + (railHeight > 0 ? railGapY + railHeight : 0);
+      const unpushedBottom = bubbleEl ? bubbleEl.getBoundingClientRect().bottom - appliedPush : 0;
+      const pushDown = bubbleHeight > 0
+        ? Math.max(0, Math.round(COMPANION_BUBBLE_FRAME_INSET + stackHeight - unpushedBottom))
+        : 0;
+      host.style.setProperty("--companion-bubble-push-down", `${pushDown}px`);
     };
     apply();
-    const observer = new ResizeObserver(apply);
+    const observer = new ResizeObserver(followMotion);
     if (bubbleEl) observer.observe(bubbleEl);
+    // 角色尺寸变化（用户缩放 / 相机变焦）要重算；**墨迹顶边**是驱动写在容器 style 上的，
+    // 换景别（full ↔ bust）只改渲染不改盒尺寸，所以两种都得盯。
+    if (character) observer.observe(character);
+    const inkObserver = new MutationObserver(followMotion);
+    if (character) inkObserver.observe(character, { attributes: true, attributeFilter: ["style"] });
+    // 角色盒**整体平移**不改变任何尺寸：换页的座位迁移（CSS 过渡）与拖动（gsap 写 x/y）都
+    // 只动位置。位置变了，"气泡底边到视口顶还剩多少"就变了——量晚一点，上限就会让气泡长到
+    // 窗口外（2026-09-20 用户截图：气泡和步骤展示整块不见）。所以这两种位移也各接一条线：
+    // 过渡有 transitionrun，拖动是 gsap 每帧写锚点 style（上面的 inkObserver 是另一个元素，
+    // 这里再挂一个盯锚点）。
+    const motionObserver = new MutationObserver(followMotion);
+    if (anchor) motionObserver.observe(anchor, { attributes: true, attributeFilter: ["style"] });
+    anchor?.addEventListener("transitionrun", followMotion);
     // 窗口尺寸变了，"气泡底边到视口顶"也就变了；场景投影变化会让气泡重挂载、effect 重跑。
-    window.addEventListener("resize", apply);
+    window.addEventListener("resize", followMotion);
     return () => {
+      window.cancelAnimationFrame(raf);
+      following = false;
       observer.disconnect();
-      window.removeEventListener("resize", apply);
+      inkObserver.disconnect();
+      motionObserver.disconnect();
+      anchor?.removeEventListener("transitionrun", followMotion);
+      window.removeEventListener("resize", followMotion);
     };
   });
 
@@ -683,11 +876,16 @@ export function CompanionHud({
       }
       // 通道未让位时的框按 CSS 里那条链反推，不读它自己的 rect：气泡与轨道都带入场动画，
       // `getBoundingClientRect` 会把 transform 之后的盒子读进来，量出来的是斜的。
+      //
+      // 气泡底边取**布局值**（`offsetTop + offsetHeight`，相对 HUD 顶边）而不是 `gap-y` 那个
+      // 变量：间隙现在是 `calc(40px + var(--companion-model-top-shift))`，`getComputedStyle`
+      // 读回来的是未解析的 calc 文本，`parseFloat` 只拿得到 40——等于把让位算在另一个位置上
+      // （2026-09-20 修）。布局值不受入场动画的 transform 影响，也不必知道那条链里有哪些项。
       const bubbleHeight = bubbleEl?.offsetHeight ?? 0;
       const stepRailHeight = stepRail?.offsetHeight ?? 0;
-      const gapY = cssPixels(host, "--companion-bubble-gap-y", 12);
       const railGapY = cssPixels(host, "--companion-rail-gap-y", 20);
-      const bottom = hudRect.top - (bubbleHeight > 0 ? gapY : railGapY);
+      const bubbleBottomInset = bubbleEl ? bubbleEl.offsetTop + bubbleEl.offsetHeight : 0;
+      const bottom = bubbleHeight > 0 ? hudRect.top + bubbleBottomInset : hudRect.top - railGapY;
       const height = bubbleHeight > 0
         ? bubbleHeight + (stepRailHeight > 0 ? railGapY + stepRailHeight : 0)
         : stepRailHeight;
@@ -824,6 +1022,65 @@ export function CompanionHud({
   const outputTone = slot?.tone ?? "reply";
   const stopping = chat.cancelling;
 
+  /** 把最新一行钉回视野（用户已经自己往上读过时，状态机给的答案是"什么都不做"）。 */
+  const pinBubbleToLatest = useCallback(() => {
+    const el = bubbleBodyRef.current;
+    if (!el) return;
+    const next = bubbleFollow.pinnedScrollTop({
+      scrollTop: el.scrollTop,
+      scrollHeight: el.scrollHeight,
+      clientHeight: el.clientHeight,
+    });
+    if (next === null) return;
+    el.scrollTop = next;
+  }, [bubbleFollow]);
+
+  /**
+   * 正文元素的回调 ref：新气泡（= 新一轮）挂载即把跟随复位到"贴底"。上一轮用户自己
+   * 往上读到的位置不该跟到下一轮——那时正文已经换了一段话。
+   */
+  const setBubbleBodyEl = useCallback((el: HTMLParagraphElement | null) => {
+    bubbleBodyRef.current = el;
+    if (el) bubbleFollow.reset();
+  }, [bubbleFollow]);
+
+  /**
+   * 用户动了滚动条就把"跟随"交回给他：只要他不是停在底部，后面推进的新字就不再抢他的
+   * 位置。他自己滚回底部，跟随自动恢复（规则见 `companion-bubble-follow.ts`）。
+   */
+  const handleBubbleScroll = useCallback((event: ReactUIEvent<HTMLParagraphElement>) => {
+    const el = event.currentTarget;
+    bubbleFollow.noteScroll({
+      scrollTop: el.scrollTop,
+      scrollHeight: el.scrollHeight,
+      clientHeight: el.clientHeight,
+    });
+  }, [bubbleFollow]);
+
+  /**
+   * 跟随最新一行（2026-09-20 用户截图：长消息在气泡里不跟最新位置，像卡住）。
+   *
+   * 显现钟每 60ms 推一个字，气泡装满之后新字从底部冒出来；不跟底，用户看到的永远是
+   * 开头那几行，最新的字长在视野之外。这里用 layout effect 而不是 passive：贴底要赶在
+   * 这一帧画出来之前完成，否则每推进一行都会先闪一下"字被切在底边"。
+   */
+  useLayoutEffect(() => {
+    pinBubbleToLatest();
+  }, [outputText, pinBubbleToLatest]);
+
+  /**
+   * 容器尺寸变化同样要回底：窗口缩放会重算 `--companion-bubble-max-h`、失败说明行会占走
+   * 正文的高度——容器变矮时，"底部"已经不是屏幕上那一行。ResizeObserver 在挂载时自带
+   * 一次回调，所以首屏那一贴也由它兜住（此时 layout effect 可能还没拿到最终高度）。
+   */
+  useLayoutEffect(() => {
+    const el = bubbleBodyRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(pinBubbleToLatest);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [bubbleEl, pinBubbleToLatest]);
+
   /**
    * 「被抛出去」（方案 §5 第 5 项）：按下发送后气泡做一次上抛再回位，给"我把话交出去了"
    * 一个身体动作。用一个 180ms 的短标记驱动，不留在常驻状态里。
@@ -913,6 +1170,41 @@ export function CompanionHud({
     voice.toggle();
   };
 
+  // 优先展示刚落地回复里的选择；气泡文字消失后，尚未决定的真实 proposal 仍留在伴星旁。
+  // 这样用户不需要在一秒多的回复停留时间里抢着点，也不会为了作决定被迫打开历史。
+  const proposalEntries = Object.entries(chat.proposalStates);
+  const liveProposalId = [...(chat.liveReply?.proposalIds ?? [])].reverse().find((proposalId) => {
+    const state = chat.proposalStates[proposalId];
+    return !state || state.phase !== "ready" || state.proposal.status === "pending";
+  });
+  const pendingProposalId = liveProposalId ?? [...proposalEntries].reverse().find(([, state]) => (
+    state.phase === "loading" || (state.phase === "ready" && state.proposal.status === "pending")
+  ))?.[0] ?? null;
+  pendingProposalIdRef.current = pendingProposalId;
+  const pendingProposalState = pendingProposalId ? chat.proposalStates[pendingProposalId] : undefined;
+
+  /**
+   * 选择卡的无障碍播报（方案 §3）：出现与状态变化各发一句**简短**提示，靠
+   * `lastProposalNoticeRef` 去重——`proposalStates` 每次快照刷新都是新对象，
+   * 不去重的话读屏会反复念同一句。
+   */
+  const lastProposalNoticeRef = useRef("");
+  useEffect(() => {
+    const state = pendingProposalId ? chat.proposalStates[pendingProposalId] : undefined;
+    let next = "";
+    if (pendingProposalId && (!state || state.phase !== "ready" || state.proposal.status === "pending")) {
+      next = "Mao 有一项动作在等你确认；可以稍后决定，也可以直接继续聊。";
+    } else if (state?.phase === "ready" && state.proposal.status !== "pending") {
+      next = state.proposal.status === "accepted" ? "动作建议已确认。"
+        : state.proposal.status === "rejected" ? "动作建议已拒绝。"
+          : state.proposal.status === "expired" ? "动作建议已过期。"
+            : "动作建议已处理。";
+    }
+    if (!next || next === lastProposalNoticeRef.current) return;
+    lastProposalNoticeRef.current = next;
+    setProposalNotice(next);
+  }, [pendingProposalId, chat.proposalStates]);
+
   return (
     <div ref={hudRef} className="companion-hud" data-mode={chat.mode} data-motion={motionMode}>
       {railVisible ? (
@@ -927,14 +1219,26 @@ export function CompanionHud({
           data-tone={outputTone}
           data-slot={slot?.tone ?? "reply"}
           data-breath={breath}
-          role="status"
-          aria-live="polite"
         >
           <span className="companion-hud__presence-dot" ref={presenceRef} aria-hidden="true" />
-          <p>{outputText}</p>
+          {/* 长回复的正文在它自己里面滚，新字钉在视野里（见上面的跟随 effect）。 */}
+          <p ref={setBubbleBodyEl} onScroll={handleBubbleScroll}>{outputText}</p>
+          {/* 视觉流式文本**不是**持续 live region（方案 §3 无障碍）：逐字更新会让读屏
+              反复朗读碎片；回合终态的稳定摘要在下方 `companion-hud__sr-status` 发布。 */}
           {/* 被打断的原因就在这里说清楚——以前它只出现在输入面板里，
               用户收起面板就既看不见原因、也不知道那半句还在不在（症状①-D）。 */}
           {interruptedNote ? <p className="companion-hud__output-note" role="status">{interruptedNote}</p> : null}
+          {/* 流式阶段给「显示全文」（方案 §3）：立即完成文字呈现——只推显现驱动器，
+              不碰正在播放的语音（音频进度只是显现的下限）。 */}
+          {chat.draft ? (
+            <button
+              type="button"
+              className="companion-hud__output-reveal"
+              onClick={() => revealDriverRef.current?.finish()}
+            >
+              显示全文
+            </button>
+          ) : null}
           {/* 停止（方案 §6）：生成中用户视线在气泡上，不该强迫他把鼠标移到旁边的按钮列。 */}
           {chat.phase === "sending" ? (
             <button
@@ -945,14 +1249,25 @@ export function CompanionHud({
               title="停止这一轮"
               aria-label="停止这一轮"
             >
-              {stopping ? <Loader2 className="companion-hud__spin" size={13} aria-hidden="true" /> : <Square size={11} aria-hidden="true" />}
+              {stopping ? <Loader2 className="companion-hud__spin" size={13} aria-hidden="true" /> : <Square size={11} fill="currentColor" aria-hidden="true" />}
               <span>{stopping ? "正在停止…" : "停止"}</span>
             </button>
           ) : null}
         </div>
       ) : null}
 
-      <nav className="companion-hud__controls" aria-label="Mao 身边的交互">
+      {pendingProposalId && chat.mode === "closed" ? (
+        <aside className="companion-hud__panel companion-hud__proposal-dock" aria-label="Mao 正在等你的选择">
+          <CompanionProposalChoice
+            proposalId={pendingProposalId}
+            state={pendingProposalState}
+            context="bubble"
+            onDecide={(decision) => { void chat.decideProposal(pendingProposalId, decision); }}
+          />
+        </aside>
+      ) : null}
+
+      {chat.mode !== "history" ? <nav className="companion-hud__controls" aria-label="Mao 身边的交互">
         {voiceEnabled ? (
           <button
             ref={micRef}
@@ -963,8 +1278,14 @@ export function CompanionHud({
             onPointerDown={playButtonBounce}
             onClick={toggleVoice}
             disabled={voice.phase === "transcribing" || chat.phase === "sending"}
-            title={voice.supported ? "语音输入" : "当前设备没有可用的麦克风"}
-            aria-label={voice.phase === "listening" ? "结束语音输入并发送" : "语音输入"}
+            title={voice.supported
+              ? (chat.phase === "sending" ? "正在回复中——停止当前回复后可说话" : "语音输入")
+              : "当前设备没有可用的麦克风"}
+            aria-label={voice.phase === "listening"
+              ? "结束语音输入并发送"
+              : voice.supported
+                ? (chat.phase === "sending" ? "正在回复中——停止当前回复后可说话" : "语音输入")
+                : "当前设备没有可用的麦克风"}
           >
             {voice.phase === "transcribing" ? <Loader2 className="companion-hud__spin" size={19} aria-hidden="true" /> : <Mic size={19} aria-hidden="true" />}
           </button>
@@ -980,8 +1301,9 @@ export function CompanionHud({
           <Keyboard size={19} aria-hidden="true" />
         </button>
         <button
+          ref={moreControlRef}
           type="button"
-          data-active={chat.mode === "actions" || chat.mode === "history" || undefined}
+          data-active={chat.mode === "actions" || undefined}
           onPointerDown={playButtonBounce}
           onClick={() => chat.setMode(chat.mode === "actions" ? "closed" : "actions")}
           title="更多功能"
@@ -989,7 +1311,7 @@ export function CompanionHud({
         >
           <MoreHorizontal size={20} aria-hidden="true" />
         </button>
-      </nav>
+      </nav> : null}
 
       {chat.mode === "conversation" ? (
         <section className="companion-hud__panel companion-hud__composer" aria-label="给 Mao 的消息气泡">
@@ -1004,7 +1326,10 @@ export function CompanionHud({
               <button type="button" onClick={chat.dismissFeedSelection} aria-label="移除引用"><X size={14} /></button>
             </blockquote>
           ) : null}
-          <form onSubmit={(event) => { event.preventDefault(); void sendText(); }}>
+          <form
+            data-sending={chat.phase === "sending" || undefined}
+            onSubmit={(event) => { event.preventDefault(); void sendText(); }}
+          >
             <textarea
               ref={composerRef}
               autoFocus
@@ -1023,27 +1348,45 @@ export function CompanionHud({
               // 正在跑的那一轮），把输入框锁死只会让用户以为"她没停我不能说话"。
               disabled={phase === "transcribing"}
             />
-            {/* 生成中，发送按钮**原位**变「停止」——位置不变，避免鼠标追着按钮跑（方案 §6）。 */}
+            {/*
+              方案 §2：生成期间「停止」常驻原位（不再把发送按钮整个换掉——位置不跳，
+              鼠标不用追）；输入框非空时旁边同时出现「发送并接替」。按钮与键盘 Enter
+              走同一条 `sendText → chat.send`，服务端 supersedesGeneration 接替旧轮，
+              从此不会再有"Enter 能发、按钮不能发"的两套真话。
+            */}
             {chat.phase === "sending" ? (
               <button
                 type="button"
                 className="companion-hud__composer-stop"
                 disabled={stopping}
                 onClick={stopTurn}
-                aria-label="停止这一轮"
+                title="停止当前回复"
+                aria-label="停止当前回复"
               >
                 {stopping
                   ? <Loader2 className="companion-hud__spin" size={17} aria-hidden="true" />
-                  : <Square size={15} aria-hidden="true" />}
+                  : <Square size={15} fill="currentColor" aria-hidden="true" />}
               </button>
-            ) : (
-              <button type="submit" disabled={!input.trim() || phase === "transcribing"} aria-label="发送"><Send size={17} /></button>
-            )}
+            ) : null}
+            <button
+              type="submit"
+              disabled={!input.trim() || phase === "transcribing"}
+              title={chat.phase === "sending" ? "发送并接替当前回复" : "发送"}
+              aria-label={chat.phase === "sending" ? "发送并接替当前回复" : "发送"}
+            ><Send size={17} /></button>
           </form>
           {/* 只在"当前状态就是出错"时显示。会话层里 failure 只有伴随 phase='error'
               才代表本轮失败；抽屉读成功会把 phase 推回 ready 而 failure 留着，
               那属于上一轮的陈旧报错，不该永远挂在这张气泡上。 */}
           {chat.failure && chat.phase === "error" ? <p className="companion-hud__note companion-hud__note--error" role="status">{chat.failure}</p> : null}
+          {pendingProposalId ? (
+            <CompanionProposalChoice
+              proposalId={pendingProposalId}
+              state={pendingProposalState}
+              context="bubble"
+              onDecide={(decision) => { void chat.decideProposal(pendingProposalId, decision); }}
+            />
+          ) : null}
         </section>
       ) : null}
 
@@ -1051,7 +1394,7 @@ export function CompanionHud({
         <section className="companion-hud__panel companion-hud__more" aria-label="伴星更多功能">
           <header>
             {moreView !== "menu" ? <button type="button" onClick={() => setMoreView("menu")} aria-label="返回更多功能"><ChevronLeft size={17} /></button> : <span />}
-            <strong>{moreView === "menu" ? "更多" : moreView === "actions" ? "当前页快捷操作" : "伴星快捷设置"}</strong>
+            <strong>{moreView === "menu" ? "更多" : "当前页快捷操作"}</strong>
             <button type="button" onClick={() => chat.setMode("closed")} aria-label="关闭更多功能"><X size={16} /></button>
           </header>
           {moreView === "menu" ? (
@@ -1062,13 +1405,21 @@ export function CompanionHud({
                 </button>
               ) : null}
               <button type="button" onClick={() => chat.setMode("history")}>
-                <History size={18} /><span><strong>历史会话</strong><small>从右侧抽屉回看完整对话和提案</small></span>
+                <History size={18} /><span><strong>对话记录</strong><small>从右侧抽屉回看连续对话和动作建议</small></span>
               </button>
-              <button type="button" onClick={() => setMoreView("settings")}>
-                <Settings2 size={18} /><span><strong>伴星快捷设置</strong><small>大小、安静陪伴与账号偏好</small></span>
+              <button
+                type="button"
+                onClick={() => {
+                  // 边缘面板接管密集设置：贴身「更多」菜单同时收起，不出现两层面板。
+                  setMoreView("menu");
+                  chat.setMode("closed");
+                  setSettingsOpen(true);
+                }}
+              >
+                <Settings2 size={18} /><span><strong>伴星设置</strong><small>大小、声音、行为与账号偏好（在窗口右缘展开）</small></span>
               </button>
             </div>
-          ) : moreView === "actions" ? (
+          ) : (
             <div className="companion-hud__action-list">
               {actions.map((action) => {
                 const Icon = action.icon;
@@ -1079,22 +1430,99 @@ export function CompanionHud({
                 );
               })}
             </div>
-          ) : (
-            <CompanionQuickSettings settings={settings} />
           )}
         </section>
       ) : null}
+
+      {/*
+        密集设置 → 窗口右缘的边缘面板（方案 §3）。portal 到 body：伴星的场景锚点
+        带 transform/will-change，HUD 内任何 fixed 定位都会被它劫持成局部坐标。
+        非模态（不锁 Tab）、Esc / 点击外部关闭、关闭后焦点归还「更多功能」按钮。
+      */}
+      {settingsOpen ? createPortal(
+        <CompanionEdgeSettings
+          settings={settings}
+          onClose={() => {
+            setSettingsOpen(false);
+            window.requestAnimationFrame(() => moreControlRef.current?.focus({ preventScroll: true }));
+          }}
+        />,
+        document.body,
+      ) : null}
+
+      {/* 回合稳定摘要 + 选择卡状态的无障碍提示（方案 §3）：不挂在流式文本上。 */}
+      <div className="companion-hud__sr-status" role="status">{turnSummary}</div>
+      <div className="companion-hud__sr-status" role="status">{proposalNotice}</div>
 
       <CompanionHistoryDrawer
         open={chat.mode === "history"}
         motionMode={motionMode}
         voice={voice}
         voiceEnabled={voiceEnabled}
-        onBack={() => chat.setMode("actions")}
-        onClose={() => chat.setMode("closed")}
+        onBack={() => {
+          chat.setMode("actions");
+          window.requestAnimationFrame(() => moreControlRef.current?.focus({ preventScroll: true }));
+        }}
+        onClose={() => {
+          chat.setMode("closed");
+          window.requestAnimationFrame(() => moreControlRef.current?.focus({ preventScroll: true }));
+        }}
       />
 
     </div>
+  );
+}
+
+/**
+ * 窗口右缘的边缘设置面板（方案 §3）。
+ *
+ * 与贴身面板的分工：输入框、简单菜单、选择卡留在伴星身边；密集设置（大小/声音/
+ * 行为/账号）搬到这里——有标题、分组、独立滚动、关闭按钮、Esc 与点击外部关闭，
+ * 关闭后焦点归还调用方。宽度钳在 `min(340px, 34vw)`、高度钳在视口内：紧凑窗口下
+ * 它最多吃掉右缘一条窄列，任务主内容不被盖住。
+ *
+ * 非模态：不锁 Tab、不设焦点陷阱——它是一个可以边看页面边调的旁路面板。
+ */
+function CompanionEdgeSettings({ settings, onClose }: {
+  readonly settings: CompanionHudSettings;
+  readonly onClose: () => void;
+}) {
+  const panelRef = useRef<HTMLElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    closeRef.current?.focus({ preventScroll: true });
+  }, []);
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !event.defaultPrevented) {
+        event.preventDefault();
+        event.stopPropagation();
+        onClose();
+      }
+    };
+    // capture：面板外的交互先于页面自身 handler 收到这次 pointerdown，避免
+    // 「点外部打开另一个浮层」时两层同时对同一次点击反应。
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (panelRef.current && target instanceof Node && !panelRef.current.contains(target)) onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("pointerdown", onPointerDown, true);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("pointerdown", onPointerDown, true);
+    };
+  }, [onClose]);
+  return (
+    <aside ref={panelRef} className="companion-hud__edge-panel" role="dialog" aria-label="伴星设置">
+      <header>
+        <strong>伴星设置</strong>
+        <button ref={closeRef} type="button" onClick={onClose} aria-label="关闭伴星设置"><X size={16} /></button>
+      </header>
+      <div className="companion-hud__edge-body">
+        <CompanionQuickSettings settings={settings} />
+      </div>
+    </aside>
   );
 }
 
@@ -1104,6 +1532,12 @@ function CompanionQuickSettings({ settings }: { readonly settings: CompanionHudS
   const fillPercent = Math.min(100, Math.max(0, Math.round(((settings.scale - settings.scaleMin) / scaleSpan) * 100)));
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const quiet = account?.quietHours ?? null;
+  const permissionLevel = account?.agentSettings?.permissionLevel ?? "guided";
+  const permissionDescription = permissionLevel === "read_only"
+    ? "只读取和查询，不执行任何改动。"
+    : permissionLevel === "guided"
+      ? "每次产生改动前都会先向你确认。"
+      : "跳转、设置与填充可自动执行；不可恢复的操作仍会确认。";
   const accountMeta = settings.accountFailure
     ? "读取失败"
     : !account
@@ -1172,12 +1606,12 @@ function CompanionQuickSettings({ settings }: { readonly settings: CompanionHudS
             </div>
             <div className="companion-hud__setting-row">
               <span className="companion-hud__setting-label">助理权限</span>
-              <div className="companion-hud__choice" aria-label="助理权限档位">
+              <div className="companion-hud__choice" aria-label="助理权限档位" aria-describedby="companion-permission-description">
                 {COMPANION_AGENT_PERMISSION_OPTIONS.map(([value, label]) => (
                   <button
                     key={value}
                     type="button"
-                    aria-pressed={(account.agentSettings?.permissionLevel ?? "guided") === value}
+                    aria-pressed={permissionLevel === value}
                     disabled={settings.accountSaving}
                     title={value === "read_only"
                       ? "只允许查询，不做任何改动"
@@ -1191,6 +1625,7 @@ function CompanionQuickSettings({ settings }: { readonly settings: CompanionHudS
                 ))}
               </div>
             </div>
+            <p id="companion-permission-description" className="companion-hud__permission-note">{permissionDescription}</p>
             <div className="companion-hud__setting-row">
               <span className="companion-hud__setting-label">静默时段</span>
               <button
@@ -1256,6 +1691,9 @@ function CompanionHistoryDrawer({
   const [exiting, setExiting] = useState(false);
   const [navNote, setNavNote] = useState<string | null>(null);
   const [input, setInput] = useState("");
+  const drawerRef = useRef<HTMLElement>(null);
+  const backButtonRef = useRef<HTMLButtonElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const micRef = useRef<HTMLButtonElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -1294,7 +1732,7 @@ function CompanionHistoryDrawer({
       const all = await chat.fetchAllMessages();
       // null = 会话/分页基线还没就绪：不缓存空结果，落「可重试」态而不是无限转圈。
       if (all) setAllMessages(all);
-      else setAllError("会话还没有就绪，请稍后重试。");
+      else setAllError("对话记录还没有就绪，请稍后重试。");
     } catch (error) {
       setAllError(gatewayErrorMessage(error));
     } finally {
@@ -1417,7 +1855,7 @@ function CompanionHistoryDrawer({
         </p>
       )
       : allMessages == null
-        ? <p className="companion-history__system">会话还没有就绪。</p>
+        ? <p className="companion-history__system">对话记录还没有就绪。</p>
         : null;
 
   useEffect(() => {
@@ -1428,8 +1866,25 @@ function CompanionHistoryDrawer({
     }
     if (!mounted) return;
     setExiting(true);
-    const timer = window.setTimeout(() => { setMounted(false); setExiting(false); }, 280);
+    const timer = window.setTimeout(() => { setMounted(false); setExiting(false); }, 220);
     return () => window.clearTimeout(timer);
+  }, [mounted, open]);
+
+  useEffect(() => {
+    if (!open || !mounted) return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      (recordOpen ? searchInputRef.current : backButtonRef.current)?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [mounted, open, recordOpen]);
+
+  useEffect(() => {
+    if (!open || !mounted) return undefined;
+    const app = document.querySelector<HTMLElement>(".desktop-app");
+    if (!app) return undefined;
+    const previouslyInert = app.inert;
+    app.inert = true;
+    return () => { app.inert = previouslyInert; };
   }, [mounted, open]);
 
   useEffect(() => voice.subscribeLevel((level) => {
@@ -1475,23 +1930,68 @@ function CompanionHistoryDrawer({
 
   if (!mounted) return null;
   return createPortal(
-    <aside
-      className="companion-history"
-      data-stage={exiting ? "exiting" : "visible"}
-      data-motion={motionMode}
-      data-view={recordOpen ? "record" : "chat"}
-      aria-label="历史会话抽屉"
-      aria-hidden={exiting || undefined}
-    >
+    <>
+      <button
+        type="button"
+        className="companion-history__scrim"
+        data-stage={exiting ? "exiting" : "visible"}
+        data-motion={motionMode}
+        tabIndex={-1}
+        aria-label="关闭对话记录"
+        onClick={onClose}
+      />
+      <aside
+        ref={drawerRef}
+        className="companion-history companion-chat"
+        data-stage={exiting ? "exiting" : "visible"}
+        data-motion={motionMode}
+        data-view={recordOpen ? "record" : "chat"}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="companion-history-title"
+        aria-hidden={exiting || undefined}
+        onKeyDown={(event) => {
+          if (event.key === "Escape" && !event.defaultPrevented) {
+            event.preventDefault();
+            event.stopPropagation();
+            if (calendarOpen) {
+              setCalendarOpen(false);
+            } else if (recordOpen) {
+              setRecordOpen(false);
+              setSearchInput("");
+              setDateFilter(null);
+            } else {
+              onBack();
+            }
+            return;
+          }
+          if (event.key !== "Tab") return;
+          const focusable = Array.from(drawerRef.current?.querySelectorAll<HTMLElement>(
+            'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex="-1"])',
+          ) ?? []).filter((element) => element.offsetParent !== null);
+          if (focusable.length === 0) return;
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+          if (!first || !last) return;
+          if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+          }
+        }}
+      >
       <header>
         <button
+          ref={backButtonRef}
           type="button"
           onClick={recordOpen ? () => { setRecordOpen(false); setSearchInput(""); setDateFilter(null); } : onBack}
           aria-label={recordOpen ? "返回对话" : "返回更多功能"}
         ><ChevronLeft size={17} /></button>
         <div>
-          <strong>{recordOpen ? "聊天记录" : "历史会话"}</strong>
-          <span>{recordOpen ? "搜索、按日期浏览全部对话" : "真实会话、语音转写和动作提案"}</span>
+          <strong id="companion-history-title">{recordOpen ? "查找记录" : "连续对话"}</strong>
+          <span>{recordOpen ? "搜索或按日期定位对话" : "消息、语音转写与动作建议都在这里"}</span>
         </div>
         <div className="companion-history__header-actions">
           {!recordOpen ? (
@@ -1499,7 +1999,7 @@ function CompanionHistoryDrawer({
               <History size={16} />
             </button>
           ) : null}
-          <button type="button" onClick={onClose} aria-label="关闭历史会话"><X size={17} /></button>
+          <button type="button" onClick={onClose} aria-label="关闭对话记录"><X size={17} /></button>
         </div>
       </header>
       {/* 记录视图专属工具行：搜索 + 自绘月历筛选 */}
@@ -1508,6 +2008,7 @@ function CompanionHistoryDrawer({
           <div className="companion-record__search">
             <Search size={13} aria-hidden="true" />
             <input
+              ref={searchInputRef}
               value={searchInput}
               onChange={(event) => {
                 setSearchInput(event.currentTarget.value);
@@ -1523,6 +2024,9 @@ function CompanionHistoryDrawer({
               type="button"
               className="companion-record__date-btn"
               data-active={dateFilter != null || calendarOpen || undefined}
+              aria-haspopup="true"
+              aria-expanded={calendarOpen}
+              aria-controls="companion-record-calendar"
               onClick={() => { setCalendarOpen((value) => !value); void ensureAllMessages(); }}
             >
               <CalendarDays size={14} aria-hidden="true" />
@@ -1542,7 +2046,7 @@ function CompanionHistoryDrawer({
         {/* ── 对话视图：日期分组时间线 ── */}
         {!recordOpen ? (
           <>
-            {chat.phase === "loading" ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />正在读取会话…</p> : null}
+            {chat.phase === "loading" ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />正在读取对话…</p> : null}
             {chat.historyLoadingOlder ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />加载更早的消息…</p> : null}
             {!chat.historyHasMore && chat.messages.length > 0 ? <p className="companion-history__system">没有更早的消息了</p> : null}
             {chat.messages.map((message, index) => {
@@ -1571,7 +2075,13 @@ function CompanionHistoryDrawer({
                   <header><span>Mao</span><time>正在说…</time></header>
                   <p>{smoothedDraftText}</p>
                   {trace && shouldShowRunTrace(trace)
-                    ? <CompanionRunTracePanel trace={trace} />
+                    ? (
+                        <CompanionRunTraceView
+                          trace={trace}
+                          proposalStates={chat.proposalStates}
+                          onDecideProposal={(proposalId, decision) => { void chat.decideProposal(proposalId, decision); }}
+                        />
+                      )
                     : null}
                 </article>
               );
@@ -1581,7 +2091,7 @@ function CompanionHistoryDrawer({
         ) : (
           /* ── 聊天记录视图：只负责「找」。选中搜索命中或日期后回到上面的对话时间线定位 ── */
           <>
-            {chat.phase === "loading" ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />正在读取会话…</p> : null}
+            {chat.phase === "loading" ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />正在读取对话…</p> : null}
             {(() => {
               const keyword = searchInput.trim();
               if (!keyword) {
@@ -1666,7 +2176,8 @@ function CompanionHistoryDrawer({
       ) : null}
       {chat.navChips.length > 0 && !recordOpen ? <div className="companion-history__nav">{chat.navChips.map((chip) => <div key={chip.id}><span>{chip.summary}</span>{chip.route ? <button type="button" onClick={() => void openRoute(chip)}>前往</button> : <small>桌面端暂不支持这个跳转</small>}<button type="button" onClick={() => chat.dismissNavChip(chip.id)} aria-label="知道了"><X size={12} /></button></div>)}</div> : null}
       {!recordOpen && (navNote || chat.failure) ? <p className="companion-history__error" role="status">{navNote ?? chat.failure}</p> : null}
-    </aside>,
+      </aside>
+    </>,
     document.body,
   );
 }
@@ -1736,46 +2247,5 @@ function useSmoothedDraftText(draft: { runId: string; text: string } | null): st
  * 状态点复用轨道那套 `data-state`，文案是 `safeLabel` 原文。
  *
  * 「没有任何节点」与「节点被 TTL 清掉」必须分开说：前者是这轮本来就只有一步（不显示），
- * 后者要显式告诉用户"只保留近期会话"，**不显示空白、不伪造占位**。
+ * 后者要显式告诉用户"只保留近期对话过程"，**不显示空白、不伪造占位**。
  */
-function CompanionRunTracePanel({ trace }: { readonly trace: CompanionRunTrace }) {
-  const expired = companionRunTraceExpired(trace);
-  return (
-    <details className="companion-history__trace">
-      <summary>过程 {trace.summary.stepCount} 步 · 调用 {trace.summary.toolCallCount} 次工具</summary>
-      {expired ? (
-        <p className="companion-history__trace-expired">过程记录已过期（只保留近期会话）</p>
-      ) : (
-        <ol style={{ "--trace-count": Math.max(0, trace.nodes.length - 1) } as CSSProperties}>
-          {trace.nodes.map((node, index) => (
-            <li
-              key={node.key}
-              data-state={node.state}
-              // 抽屉打开时**最后一个节点先出现**，其余以 40ms 逐个补上（最多 6 个 stagger），
-              // 避免一整屏内容同时砸下来（方案 §5 第 6 项）。
-              style={{ "--trace-delay": Math.min(5, Math.max(0, trace.nodes.length - 1 - index)) } as CSSProperties}
-            >
-              <span>{node.label}</span>
-              {node.summary ? <small>{node.summary}</small> : null}
-            </li>
-          ))}
-        </ol>
-      )}
-    </details>
-  );
-}
-
-function CompanionProposalCard({ state, onDecide }: { readonly state: CompanionProposalUiState | undefined; readonly onDecide: (decision: "confirm" | "reject") => void }) {
-  if (!state) return null;
-  if (state.phase === "loading") return <div className="companion-proposal"><Loader2 className="companion-hud__spin" size={12} />正在核对提案…</div>;
-  if (state.phase === "error") return <div className="companion-proposal companion-proposal--error">提案状态拿不到：{state.message}</div>;
-  const { proposal, deciding, error } = state;
-  const pending = proposal.status === "pending";
-  return (
-    <div className="companion-proposal" data-status={proposal.status}>
-      <strong>{proposal.title}</strong><span>目标：{proposal.targetSummary}</span><span>影响：{proposal.impactSummary}</span>
-      {pending ? <div><button type="button" disabled={Boolean(deciding)} onClick={() => onDecide("confirm")}>执行</button><button type="button" disabled={Boolean(deciding)} onClick={() => onDecide("reject")}>先不了</button></div> : <small>{proposal.status === "rejected" ? "你选择了先不执行" : proposal.status === "expired" ? "提案已过期" : proposal.status === "failed" ? "执行失败" : "已执行"}</small>}
-      {error ? <em>{error}</em> : null}
-    </div>
-  );
-}

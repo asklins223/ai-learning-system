@@ -21,11 +21,13 @@ import { Readable } from "node:stream";
 import { requireSession } from "../identity/middleware.ts";
 import { CompanionConversationError } from "../companion-conversation/turn-service.ts";
 import { assertSafeTtsInput, DEFAULT_VOICE_PROFILE } from "./voice-tts-policy.ts";
-import { edgeTtsSynthesize, edgeTtsSynthesizeStream, EdgeTtsError } from "./voice-providers/edge-tts.ts";
+import { edgeTtsSynthesizeStream, EdgeTtsError } from "./voice-providers/edge-tts.ts";
 import { stripVoiceExpressionTags } from "@ailearn/shared/voice-expression-tags";
 import { qwenTtsSynthesizeStreamForUser, QwenTtsError } from "./voice-providers/qwen-tts.ts";
 import { loadTtsEngineConfig } from "./voice-providers/tts-config.ts";
-import { companionTtsRequestV1Schema, companionTtsStreamRequestV1Schema } from "@ailearn/shared";
+import { synthesizeTtsBytes } from "./voice-providers/tts-engine.ts";
+import { companionTtsStreamRequestV1Schema } from "@ailearn/shared";
+import { companionVoiceSpeakSegmentRequestV2Schema } from "@ailearn/shared/companion-voice-contracts";
 import { siliconFlowTranscribe, SiliconFlowAsrError } from "./voice-providers/siliconflow-asr.ts";
 import {
   COMPANION_RATE_LIMITS,
@@ -172,40 +174,42 @@ export async function voiceRoutes(app: FastifyInstance) {
       if (engine === "qwen") {
         const cfg = loadTtsEngineConfig().qwen;
         if (!cfg.workspaceId) {
-          return reply.code(502).send({
-            error: "TTS_FAILED", code: "TTS_FAILED",
-            message: "qwen TTS 未配置业务空间 ID（config tts.qwen.workspaceId）", recoverable: true,
-          });
+          // 未配置业务空间 ID：不再直接 502，降级 edge（qwen 缺配置不该让语音消失）。
+          req.log.warn("qwen tts workspaceId missing; falling back to edge-tts");
+        } else {
+          try {
+            const result = await qwenTtsSynthesizeStreamForUser(
+              `${req.session.workspaceId}:${req.session.userId}`,
+              parsed.data.text,
+              {
+                workspaceId: cfg.workspaceId,
+                apiKey: process.env.DASHSCOPE_API_KEY ?? "",
+                model: cfg.model,
+                // qwen 音色固定走 config（前端 voice 是 edge 音色，不混用）。
+                voice: cfg.voice,
+                format: cfg.format,
+                sampleRate: cfg.sampleRate,
+                // 15b 二期：指令控制（高质量声音描述，config tts.qwen.instruction）
+                instruction: cfg.instruction,
+              },
+            );
+            reply.hijack();
+            reply.raw.writeHead(200, {
+              "Content-Type": result.contentType,
+              "Cache-Control": "no-store",
+              "Transfer-Encoding": "chunked",
+            });
+            const nodeStream = Readable.fromWeb(result.stream as unknown as import("node:stream/web").ReadableStream);
+            nodeStream.on("error", () => reply.raw.destroy());
+            nodeStream.pipe(reply.raw);
+            req.raw.on("close", () => nodeStream.destroy()); // 打断 → 关闭上游 WS
+            return;
+          } catch (err) {
+            // 响应头尚未发出：qwen 任务失败（WS 抖动/限流）降级 edge 重合成，
+            // 客户端拿到的仍是一段完整音频（2026-09-19 语音链路兜底）。
+            req.log.warn({ err }, "qwen tts stream failed before headers; falling back to edge-tts");
+          }
         }
-        // 按用户排队（workspaceId:userId）：同一用户的段落严格串行（含音频阶段，
-        // 保住 ordinal 播放时序与连接复用），不同用户并行、受全局名额约束。
-        // 见 qwen-tts.ts 的「按用户串行 + 全局有界并发」。
-        const result = await qwenTtsSynthesizeStreamForUser(
-          `${req.session.workspaceId}:${req.session.userId}`,
-          parsed.data.text,
-          {
-            workspaceId: cfg.workspaceId,
-            apiKey: process.env.DASHSCOPE_API_KEY ?? "",
-            model: cfg.model,
-            // qwen 音色固定走 config（前端 voice 是 edge 音色，不混用）。
-            voice: cfg.voice,
-            format: cfg.format,
-            sampleRate: cfg.sampleRate,
-            // 15b 二期：指令控制（高质量声音描述，config tts.qwen.instruction）
-            instruction: cfg.instruction,
-          },
-        );
-        reply.hijack();
-        reply.raw.writeHead(200, {
-          "Content-Type": result.contentType,
-          "Cache-Control": "no-store",
-          "Transfer-Encoding": "chunked",
-        });
-        const nodeStream = Readable.fromWeb(result.stream as unknown as import("node:stream/web").ReadableStream);
-        nodeStream.on("error", () => reply.raw.destroy());
-        nodeStream.pipe(reply.raw);
-        req.raw.on("close", () => nodeStream.destroy()); // 打断 → 关闭上游 WS
-        return;
       }
       // 2026-08-13（引擎兼容）：情感/富语言标签是 qwen-audio 专属能力——
       // edge-tts 会把 `[excited]` 等标签当普通文字朗读，合成前必须剥离。
@@ -248,7 +252,7 @@ export async function voiceRoutes(app: FastifyInstance) {
     const raw = (req.body ?? {}) as Record<string, unknown>;
     if (typeof raw === "object" && raw !== null && "conversationId" in raw) {
       if (rejectDisabledCompanionVoice(reply, "COMPANION_VOICE_DIALOGUE_V1_ENABLED")) return;
-      const parsed = companionTtsRequestV1Schema.safeParse(raw);
+      const parsed = companionVoiceSpeakSegmentRequestV2Schema.safeParse(raw);
       if (!parsed.success) {
         return reply.code(400).send({
           error: "INVALID_REQUEST", code: "INVALID_REQUEST",
@@ -267,11 +271,18 @@ export async function voiceRoutes(app: FastifyInstance) {
           ordinal: parsed.data.ordinal,
           segmentId: parsed.data.segmentId,
         },
-        synthesize: (text, voice) =>
-          // 2026-08-24（AI 设计审查三轮）：情感/富语言标签是 qwen-audio 专属能力
-          // ——与上方流式分支（:206）对齐，edge-tts 合成前必须剥离；否则确定性
-          // 语气层注入的 [excited] 等控制标签会被当普通文字朗读出来。
-          edgeTtsSynthesize(stripVoiceExpressionTags(text), voice, { baseUrl: process.env.EDGE_TTS_BASE_URL }),
+        synthesize: async (text, voice) => {
+          // 2026-09-19 语音链路改造：ref 分段同样走「qwen WS 优先 + edge 兜底」。
+          // 语气/富语言标签是 qwen-audio 专属能力：qwen 原样传入（确定性语气层
+          // 注入的 [excited] 等控制标签由它理解），edge 合成前在引擎内剥离。
+          const r = await synthesizeTtsBytes({
+            text,
+            edgeVoice: voice,
+            queueKey: `${session.workspaceId}:${session.userId}`,
+            onQwenFallback: (error) => req.log.warn({ err: error, ordinal: parsed.data.ordinal }, "qwen tts failed; falling back to edge-tts"),
+          });
+          return { audio: r.audio };
+        },
       });
       if (result.statusCode !== 200) {
         return reply.code(result.statusCode).send(result.error);
@@ -290,11 +301,17 @@ export async function voiceRoutes(app: FastifyInstance) {
     // 隐藏提示/非法 voice profile；DEFAULT_VOICE_PROFILE 通过 allowlist）。
     assertSafeTtsInput(body.text, DEFAULT_VOICE_PROFILE);
     try {
-      const result = await edgeTtsSynthesize(body.text, body.voice ?? "zh-CN-XiaoxiaoNeural", {
-        baseUrl: process.env.EDGE_TTS_BASE_URL,
+      // 2026-09-19 语音链路改造：普通朗读也走「qwen WS 优先 + edge 兜底」——
+      // 此前硬编码 edge 容器 HTTP（实测每段 2.3–2.5s），桌面伴星的语音完全
+      // 够不着 qwen WebSocket 引擎。
+      const result = await synthesizeTtsBytes({
+        text: body.text,
+        edgeVoice: body.voice ?? "zh-CN-XiaoxiaoNeural",
+        queueKey: `${req.session!.workspaceId}:${req.session!.userId}`,
+        onQwenFallback: (error) => req.log.warn({ err: error }, "qwen tts failed; falling back to edge-tts"),
       });
       return reply
-        .type("audio/mpeg")
+        .type(result.contentType)
         .header("Cache-Control", "no-store")
         .send(Buffer.from(result.audio));
     } catch (err) {

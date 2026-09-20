@@ -17,6 +17,7 @@ import {
   uuidSchema,
   AVATAR_MAX_BYTES,
   authProfileResultV1Schema,
+  authSurfaceManifestResultV1Schema,
   avatarObjectKeySchema,
   avatarUploadResultV1Schema,
   inviteCreatedV1Schema,
@@ -82,12 +83,19 @@ import { reviewDeferRequestV2Schema, reviewDeferResultV2Schema, reviewQueueV2Sch
 import { todayActivityV1Schema } from "@ailearn/shared/activity-surface-contracts";
 import { roomProjectionV1Schema, type RoomProjectionV1 } from "@ailearn/shared/room-projection-contracts";
 import {
+  companionAccountGlobalOffEventV1Schema,
   companionAccountStateV1Schema,
   companionAnswerModePreferenceV1Schema,
   companionOverviewSchema,
+  onboardingTransitionResponseSchema,
+  runtimeFenceResponseSchema,
   type CompanionAccountPatch,
+  type CompanionAccountGlobalOffEventV1,
   type CompanionAccountStateV1,
   type CompanionOverview,
+  type OnboardingTransitionRequest,
+  type OnboardingTransitionResponse,
+  type RuntimeFenceResponse,
 } from "@ailearn/shared/companion-shell-contracts";
 import {
   companionHomeProjectionV1Schema,
@@ -103,6 +111,7 @@ import {
   companionVoiceSpeakResultV1Schema,
   companionVoiceTranscribeResultV1Schema,
   type CompanionVoiceSpeakRequestV1,
+  type CompanionVoiceSpeakSegmentRequestV2,
   type CompanionVoiceSpeakResultV1,
   type CompanionVoiceTranscribeRequestV1,
   type CompanionVoiceTranscribeResultV1,
@@ -138,8 +147,11 @@ import {
 } from "@ailearn/shared/companion-chat-desktop-contracts";
 import {
   companionGroundedTutorGrantV1Schema,
+  companionLearningContextV1Schema,
   companionLearningRunContextV1Schema,
+  companionStreamEventV1Schema,
   type CompanionGroundedTutorGrantV1,
+  type CompanionLearningContextV1,
   type CompanionLearningRunContextV1,
   type CreateCompanionLearningRunContextGrantRequestV1,
 } from "@ailearn/shared/companion-conversation-contracts";
@@ -157,25 +169,64 @@ import {
   type NoteImageUploadResultV1,
 } from "@ailearn/shared/note-image-upload-contracts";
 import {
-  companionConversationListV1Schema,
+  assistantDeliveryV2Schema,
+  assistantContextSnapshotV2Schema,
+  mainPageContextInputV2Schema,
+  type AssistantContextSnapshotV2,
+  type AssistantDeliveryV2,
+  type MainPageContextInputV2,
+} from "@ailearn/shared/companion-bridge-contracts";
+import {
   companionDailySummaryV1Schema,
+  companionActivityDeliveryV1Schema,
+  companionActivityTimelineV1Schema,
+  companionAuditDeleteResultV1Schema,
+  companionHistoryClearResultV1Schema,
+  companionHistoryPageV1Schema,
+  companionHistorySearchV1Schema,
   companionMemoryItemV1Schema,
+  companionMemoryClearResultV1Schema,
+  companionMemoryConflictListV1Schema,
+  companionMemoryConflictResolveResultV1Schema,
   companionMemoryListV1Schema,
-  companionMemoryStarMapV1Schema,
+  companionMemoryQueueResultV1Schema,
+  companionMemoryStarMapV2Schema,
   companionPersonaMutationV1Schema,
   companionPersonaResetV1Schema,
   companionPersonaV1Schema,
-  type CompanionConversationListV1,
   type CompanionDailySummaryV1,
+  type CompanionActivityDeliveryV1,
+  type CompanionActivityTimelineV1,
+  type CompanionActivityAckRequestV1,
+  type CompanionAuditDeleteResultV1,
+  type CompanionHistoryClearResultV1,
+  type CompanionHistoryPageV1,
+  type CompanionHistoryQueryV1,
+  type CompanionHistorySearchQueryV1,
+  type CompanionHistorySearchV1,
   type CompanionMemoryItemV1,
+  type CompanionMemoryCreateInputV1,
+  type CompanionMemoryCorrectInputV1,
   type CompanionMemoryListQuery,
   type CompanionMemoryListV1,
-  type CompanionMemoryStarMapV1,
+  type CompanionMemoryStarMapV2,
   type CompanionPersonaMutationV1,
   type CompanionPersonaPatchV1,
   type CompanionPersonaResetV1,
   type CompanionPersonaV1,
 } from "@ailearn/shared/companion-memory-desktop-contracts";
+import { companionConversationV1Schema } from "@ailearn/shared/companion-conversation-contracts";
+import {
+  companionInvitationSchema,
+  companionJourneyBootstrapSchema,
+  companionJourneySchema,
+  type CompanionInvitationActionRequest,
+  type CompanionInvitationV2,
+  type CompanionJourneyActionRequest,
+  type CompanionJourneyBootstrap,
+  type CompanionJourneyV2,
+} from "@ailearn/shared/companion-journey-contracts";
+
 import { noteDetailV1Schema, type NoteDetailV1 } from "@ailearn/shared/note-projection-contracts";
 import { noteSaveReceiptV1Schema, type NoteSaveReceiptV1 } from "@ailearn/shared/note-save-contracts";
 import {
@@ -236,6 +287,46 @@ import {
 } from "@ailearn/shared/card-generation-desktop-contracts";
 import { projectLearningDashboardToRoomProjection } from "./room-projection";
 import { computeClientReviewHashV2 } from "@ailearn/shared/card-generation-v2-hashing";
+
+// 仅供 main 进程确保内部对话分段使用。产品界面与 renderer 合同不暴露
+// conversation 列表或标识，连续历史统一走 /companion/history。
+const companionActivityTimelineWireSchema = z.strictObject({
+  items: z.array(assistantDeliveryV2Schema.extend({ expired: z.boolean() })).max(100),
+  nextCursor: z.number().int().min(0),
+  serverTime: z.string().datetime({ offset: true }),
+});
+
+function projectCompanionDelivery(delivery: AssistantDeliveryV2 & { expired?: boolean }): CompanionActivityDeliveryV1 {
+  const payload = delivery.payloadRef;
+  const label = payload.kind === "system_event"
+    ? payload.text ?? "伴星状态已更新"
+    : payload.kind === "memory_item"
+      ? payload.contentPreview ?? "有一条记忆候选等待查看"
+      : payload.kind === "proposal"
+        ? "有一项操作等待你确认"
+        : payload.kind === "action_result"
+          ? "伴星操作已有结果"
+          : "收到一条伴星消息";
+  const target: CompanionActivityDeliveryV1["target"] = payload.kind === "message"
+    ? { kind: "dialogue", messageId: payload.messageId }
+    : payload.kind === "proposal" || payload.kind === "action_result"
+      ? { kind: "proposal", proposalId: payload.proposalId }
+      : payload.kind === "memory_item"
+        ? { kind: "memory", memoryId: payload.memoryItemId }
+        : { kind: "none" };
+  return companionActivityDeliveryV1Schema.parse({
+    version: 1,
+    deliveryId: delivery.deliveryId,
+    inboxSequence: delivery.inboxSequence,
+    state: delivery.state,
+    kind: delivery.kind,
+    label,
+    target,
+    expired: delivery.expired ?? new Date(delivery.expiresAt).getTime() <= Date.now(),
+    createdAt: delivery.createdAt,
+    expiresAt: delivery.expiresAt,
+  });
+}
 
 const DEFAULT_API_ORIGIN = "http://127.0.0.1:4000";
 
@@ -449,18 +540,49 @@ export function parseCompanionSseFrame(block: string): CompanionChatStreamEventV
     return null;
   }
   if (typeof raw !== "object" || raw === null) return null;
-  const envelope = raw as Record<string, unknown>;
-  const payload = envelope.payload;
-  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return null;
+  const envelope = companionStreamEventV1Schema.safeParse(raw);
+  if (!envelope.success) return null;
+  const payload = envelope.data.type === "voice.segment.ready"
+    ? (({ synthesisText: _privateSynthesisText, ...rendererSafe }) => rendererSafe)(envelope.data.payload)
+    : envelope.data.payload;
   if (JSON.stringify(payload).length > COMPANION_CHAT_EVENT_MAX_PAYLOAD_BYTES) return null;
   const parsed = companionChatStreamEventV1Schema.safeParse({
-    seq: envelope.seq,
-    runId: envelope.runId ?? null,
-    generation: envelope.generation,
-    eventType: envelope.type,
+    seq: envelope.data.seq,
+    runId: envelope.data.runId,
+    generation: envelope.data.generation,
+    eventType: envelope.data.type,
     payload,
   });
   return parsed.success ? parsed.data : null;
+}
+
+export function parseCompanionAccountSseFrame(block: string): CompanionAccountGlobalOffEventV1 | null {
+  const dataLines: string[] = [];
+  for (const line of block.split(/\r?\n/)) {
+    if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+  }
+  if (dataLines.length === 0) return null;
+  try {
+    const parsed = companionAccountGlobalOffEventV1Schema.safeParse(JSON.parse(dataLines.join("\n")));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Durable inbox frames are validated in main before becoming renderer invalidations. */
+export function parseCompanionInboxSseFrame(block: string): AssistantDeliveryV2 | null {
+  const dataLines: string[] = [];
+  for (const line of block.split(/\r?\n/)) {
+    if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+  }
+  if (dataLines.length === 0) return null;
+  try {
+    const parsed = assistantDeliveryV2Schema.safeParse(JSON.parse(dataLines.join("\n")));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
 }
 
 function waitForStreamRetry(milliseconds: number): Promise<void> {
@@ -489,6 +611,11 @@ export class DesktopGateway {
   private readonly activeRequests = new Map<string, AbortController>();
   private readonly commandIdempotency = new Map<string, string>();
   private readonly deviceSessionId = randomUUID();
+  private readonly companionAccountSessionId = randomUUID();
+  private readonly companionDeliveryLeases = new Map<string, { readonly inboxSequence: number; readonly leaseToken: string }>();
+  private companionBridgeContext: { readonly page: MainPageContextInputV2; snapshot: AssistantContextSnapshotV2 } | null = null;
+  private companionBridgeRenewTimer: ReturnType<typeof setInterval> | null = null;
+  private companionBridgeGeneration = 0;
   private readonly credentials: SessionCredentialStore | null;
   /** How the current credential is held; reported to the renderer as truth. */
   private credentialPersistence: "memory" | "safe_storage" = "memory";
@@ -660,6 +787,7 @@ export class DesktopGateway {
 
   async login(email: string, password: string, requestId?: string, remember?: boolean): Promise<SessionContextV1> {
     await this.ensureConnected(requestId);
+    await this.clearCompanionBridgeContext(requestId).catch(() => undefined);
     const persist = remember ?? this.credentialPersistence === "safe_storage";
     const result = await this.request("/auth/login", {
       method: "POST",
@@ -668,6 +796,7 @@ export class DesktopGateway {
     const parsed = rawAuthResponseSchema.safeParse(result.body);
     if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
     this.commandIdempotency.clear();
+    this.clearCompanionRuntimeState();
     this.token = parsed.data.token;
     this.workspaceEpoch = 1;
     this.roomProjectionCache = null;
@@ -677,6 +806,7 @@ export class DesktopGateway {
 
   async register(email: string, password: string, inviteToken?: string, displayName?: string, requestId?: string, remember?: boolean): Promise<SessionContextV1> {
     await this.ensureConnected(requestId);
+    await this.clearCompanionBridgeContext(requestId).catch(() => undefined);
     const persist = remember ?? this.credentialPersistence === "safe_storage";
     const body: { email: string; password: string; inviteToken?: string; displayName?: string } = { email, password };
     if (inviteToken) body.inviteToken = inviteToken;
@@ -685,6 +815,7 @@ export class DesktopGateway {
     const parsed = rawAuthResponseSchema.safeParse(result.body);
     if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
     this.commandIdempotency.clear();
+    this.clearCompanionRuntimeState();
     this.token = parsed.data.token;
     this.workspaceEpoch = 1;
     this.roomProjectionCache = null;
@@ -710,12 +841,28 @@ export class DesktopGateway {
     return this.loadSession(requestId);
   }
 
+  async getAuthSurfaceManifest(requestId?: string) {
+    await this.ensureConnected(requestId);
+    const result = await this.request(
+      "/public/auth-surface-manifest",
+      { method: "GET" },
+      false,
+      true,
+      requestId,
+    );
+    const parsed = authSurfaceManifestResultV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
   async logout(requestId?: string): Promise<{ loggedOut: true; serverRevoked: boolean }> {
+    await this.clearCompanionBridgeContext(requestId).catch(() => undefined);
     const token = this.token;
     this.token = null;
     this.currentSession = null;
     this.roomProjectionCache = null;
     this.commandIdempotency.clear();
+    this.clearCompanionRuntimeState();
     this.tokenIsRestored = false;
     this.credentialPersistence = "memory";
     // Local sign-out is authoritative: the stored credential goes even when the
@@ -760,6 +907,7 @@ export class DesktopGateway {
 
   async changePassword(currentPassword: string, newPassword: string, requestId?: string): Promise<{ changed: true; sessionsRevoked: true }> {
     await this.ensureConnected(requestId);
+    await this.clearCompanionBridgeContext(requestId).catch(() => undefined);
     await this.request("/auth/change-password", {
       method: "POST",
       body: JSON.stringify({ currentPassword, newPassword }),
@@ -768,6 +916,7 @@ export class DesktopGateway {
     this.currentSession = null;
     this.roomProjectionCache = null;
     this.commandIdempotency.clear();
+    this.clearCompanionRuntimeState();
     this.tokenIsRestored = false;
     this.credentialPersistence = "memory";
     await this.credentials?.clear().catch(() => undefined);
@@ -1118,6 +1267,7 @@ export class DesktopGateway {
 
   async switchWorkspace(workspaceId: string, requestId?: string): Promise<SessionContextV1> {
     await this.ensureConnected(requestId);
+    await this.clearCompanionBridgeContext(requestId).catch(() => undefined);
     const result = await this.request("/auth/switch-workspace", {
       method: "POST",
       body: JSON.stringify({ workspaceId }),
@@ -1125,6 +1275,7 @@ export class DesktopGateway {
     const parsed = rawAuthResponseSchema.safeParse(result.body);
     if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
     this.commandIdempotency.clear();
+    this.clearCompanionRuntimeState();
     this.token = parsed.data.token;
     this.workspaceEpoch += 1;
     this.roomProjectionCache = null;
@@ -1190,10 +1341,12 @@ export class DesktopGateway {
   }
 
   clearCredential(): void {
+    void this.clearCompanionBridgeContext().catch(() => undefined);
     this.token = null;
     this.currentSession = null;
     this.roomProjectionCache = null;
     this.commandIdempotency.clear();
+    this.clearCompanionRuntimeState();
   }
 
   async getReviewQueue(cursor?: string, limit = 50, requestId?: string): Promise<z.infer<typeof reviewQueueV2Schema>> {
@@ -1598,6 +1751,270 @@ export class DesktopGateway {
     return parsed.data;
   }
 
+  /**
+   * 账号级 onboarding CAS 状态机。渲染层只能提交严格动作与公开版本号，
+   * display permit、runId、revision 和跨设备冲突都由服务端裁决。
+   */
+  async transitionCompanionOnboarding(
+    version: string,
+    request: OnboardingTransitionRequest,
+    requestId?: string,
+  ): Promise<OnboardingTransitionResponse> {
+    await this.ensureConnected(requestId);
+    const result = await this.request(
+      `/me/companion/onboarding/${encodeURIComponent(version)}/transition`,
+      { method: "POST", body: JSON.stringify(request) },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = onboardingTransitionResponseSchema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  async renewCompanionRuntimeFence(
+    surfaceEpoch: number,
+    ttlSeconds = 120,
+    requestId?: string,
+  ): Promise<RuntimeFenceResponse> {
+    await this.ensureConnected(requestId);
+    const result = await this.request(
+      "/me/companion/runtime-fences",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          deviceSessionId: this.deviceSessionId,
+          surfaceEpoch,
+          ttlSeconds,
+        }),
+      },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = runtimeFenceResponseSchema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  /** Main-only account epoch stream. Raw SSE and device identity never cross preload. */
+  async watchCompanionAccountEvents(
+    afterEpoch: number,
+    onEvent: (event: CompanionAccountGlobalOffEventV1) => void | Promise<void>,
+    onError?: (error: unknown) => void,
+  ): Promise<() => void> {
+    await this.ensureConnected();
+    const controller = new AbortController();
+    let closed = false;
+    let cursor = Number.isSafeInteger(afterEpoch) && afterEpoch >= 0 ? afterEpoch : 0;
+    const stop = (): void => {
+      closed = true;
+      controller.abort();
+    };
+    const run = async (): Promise<void> => {
+      while (!closed) {
+        try {
+          const configuration = this.configuration;
+          if (!configuration) throw new DesktopGatewayFailure("configuration_error", "user_action");
+          const headers = new Headers({ Accept: "text/event-stream" });
+          if (this.token) headers.set("Authorization", `Bearer ${this.token}`);
+          const userId = this.currentSession?.status === "authenticated" ? this.currentSession.user.userId : null;
+          if (cursor > 0 && userId) headers.set("Last-Event-ID", `${userId}:${cursor}`);
+          const url = new URL("/me/companion/events", `${configuration.config.apiOrigin}/`);
+          url.searchParams.set("after", String(cursor));
+          const response = await fetch(url, { method: "GET", headers, signal: controller.signal, redirect: "manual" });
+          if (response.status >= 300 && response.status < 400) throw new DesktopGatewayFailure("api_untrusted", "user_action");
+          if (!response.ok) throw this.mapResponseError(response.status, response.headers);
+          const reader = response.body?.getReader();
+          if (!reader) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+          const decoder = new TextDecoder();
+          let buffer = "";
+          while (!closed) {
+            const chunk = await reader.read();
+            if (chunk.done) break;
+            buffer += decoder.decode(chunk.value, { stream: true });
+            const blocks = buffer.split(/\r?\n\r?\n/);
+            buffer = blocks.pop() ?? "";
+            for (const block of blocks) {
+              const event = parseCompanionAccountSseFrame(block);
+              if (!event || event.epoch <= cursor) continue;
+              cursor = event.epoch;
+              await onEvent(event);
+            }
+          }
+          if (!closed) await waitForStreamRetry(1000);
+        } catch (error) {
+          if (closed || (error instanceof Error && error.name === "AbortError")) return;
+          onError?.(error);
+          if (error instanceof DesktopGatewayFailure && ["api_untrusted", "auth_required", "reauth_required", "forbidden", "not_found", "unsupported_contract"].includes(error.code)) return;
+          await waitForStreamRetry(1000);
+        }
+      }
+    };
+    void run();
+    return stop;
+  }
+
+  /**
+   * Main-owned durable proactive inbox stream. The renderer receives only a
+   * sequence invalidation and re-reads the strict timeline projection.
+   */
+  async watchCompanionInboxEvents(
+    afterSequence: number,
+    onDelivery: (delivery: AssistantDeliveryV2) => void | Promise<void>,
+    onError?: (error: unknown) => void,
+  ): Promise<() => void> {
+    await this.ensureConnected();
+    const controller = new AbortController();
+    let closed = false;
+    let cursor = Number.isSafeInteger(afterSequence) && afterSequence >= 0 ? afterSequence : 0;
+    const stop = (): void => {
+      closed = true;
+      controller.abort();
+    };
+    const run = async (): Promise<void> => {
+      while (!closed) {
+        try {
+          const configuration = this.configuration;
+          if (!configuration) throw new DesktopGatewayFailure("configuration_error", "user_action");
+          const headers = new Headers({ Accept: "text/event-stream" });
+          if (this.token) headers.set("Authorization", `Bearer ${this.token}`);
+          if (cursor > 0) headers.set("Last-Event-ID", String(cursor));
+          const url = new URL("/companion/deliveries/inbox/stream", `${configuration.config.apiOrigin}/`);
+          url.searchParams.set("after", String(cursor));
+          const response = await fetch(url, { method: "GET", headers, signal: controller.signal, redirect: "manual" });
+          if (response.status >= 300 && response.status < 400) throw new DesktopGatewayFailure("api_untrusted", "user_action");
+          if (!response.ok) throw this.mapResponseError(response.status, response.headers);
+          const reader = response.body?.getReader();
+          if (!reader) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+          const decoder = new TextDecoder();
+          let buffer = "";
+          while (!closed) {
+            const chunk = await reader.read();
+            if (chunk.done) break;
+            buffer += decoder.decode(chunk.value, { stream: true });
+            const blocks = buffer.split(/\r?\n\r?\n/);
+            buffer = blocks.pop() ?? "";
+            for (const block of blocks) {
+              const delivery = parseCompanionInboxSseFrame(block);
+              if (!delivery || delivery.inboxSequence <= cursor) continue;
+              cursor = delivery.inboxSequence;
+              await onDelivery(delivery);
+            }
+          }
+          if (!closed) await waitForStreamRetry(1000);
+        } catch (error) {
+          if (closed || (error instanceof Error && error.name === "AbortError")) return;
+          onError?.(error);
+          if (error instanceof DesktopGatewayFailure && ["api_untrusted", "auth_required", "reauth_required", "forbidden", "not_found", "unsupported_contract"].includes(error.code)) return;
+          await waitForStreamRetry(1000);
+        }
+      }
+    };
+    void run();
+    return stop;
+  }
+
+  private clearCompanionBridgeLocalState(): void {
+    this.companionBridgeGeneration += 1;
+    if (this.companionBridgeRenewTimer) clearInterval(this.companionBridgeRenewTimer);
+    this.companionBridgeRenewTimer = null;
+    this.companionBridgeContext = null;
+  }
+
+  private companionBridgeState(active: boolean, snapshot?: AssistantContextSnapshotV2) {
+    return {
+      version: 1 as const,
+      active,
+      revision: snapshot?.revision ?? null,
+      expiresAt: snapshot?.expiresAt ?? null,
+    };
+  }
+
+  private async renewCompanionBridgeContext(generation: number): Promise<void> {
+    const current = this.companionBridgeContext;
+    if (!current || generation !== this.companionBridgeGeneration) return;
+    const result = await this.request(
+      `/companion/bridge/contexts/${current.snapshot.contextId}/renew`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          contextId: current.snapshot.contextId,
+          pageInstanceId: current.snapshot.pageInstanceId,
+          expectedRevision: current.snapshot.revision,
+        }),
+      },
+      true,
+      true,
+    );
+    const parsed = assistantContextSnapshotV2Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    if (generation !== this.companionBridgeGeneration || !this.companionBridgeContext) return;
+    this.companionBridgeContext.snapshot = parsed.data;
+  }
+
+  async setCompanionBridgeContext(
+    pageInput: MainPageContextInputV2,
+    requestId?: string,
+  ) {
+    await this.ensureConnected(requestId);
+    const page = mainPageContextInputV2Schema.parse(pageInput);
+    const current = this.companionBridgeContext;
+    if (current && isDeepStrictEqual(current.page, page)) {
+      return this.companionBridgeState(true, current.snapshot);
+    }
+    await this.clearCompanionBridgeContext(requestId).catch(() => this.clearCompanionBridgeLocalState());
+    const generation = this.companionBridgeGeneration;
+    const contextId = randomUUID();
+    const pageInstanceId = randomUUID();
+    const result = await this.request(
+      "/companion/bridge/contexts",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          contextId,
+          deviceSessionId: this.deviceSessionId,
+          pageInstanceId,
+          accountSessionId: this.companionAccountSessionId,
+          page,
+        }),
+      },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = assistantContextSnapshotV2Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    if (generation !== this.companionBridgeGeneration) return this.companionBridgeState(false);
+    this.companionBridgeContext = { page, snapshot: parsed.data };
+    this.companionBridgeRenewTimer = setInterval(() => {
+      void this.renewCompanionBridgeContext(generation).catch(() => this.clearCompanionBridgeLocalState());
+    }, 10_000);
+    return this.companionBridgeState(true, parsed.data);
+  }
+
+  async clearCompanionBridgeContext(requestId?: string) {
+    const current = this.companionBridgeContext;
+    this.clearCompanionBridgeLocalState();
+    if (!current || !this.token) return this.companionBridgeState(false);
+    await this.request(
+      `/companion/bridge/contexts/${current.snapshot.contextId}`,
+      {
+        method: "DELETE",
+        body: JSON.stringify({
+          contextId: current.snapshot.contextId,
+          pageInstanceId: current.snapshot.pageInstanceId,
+          expectedRevision: current.snapshot.revision,
+        }),
+      },
+      true,
+      true,
+      requestId,
+    );
+    return this.companionBridgeState(false);
+  }
+
   // ─── 伴星聊天发送链路 + 语音转文本（2026-09-18 接线） ────────────────────
   //
   // 服务端契约（routes.ts / companion-voice-service.ts）早已就绪，桌面端此前
@@ -1605,45 +2022,27 @@ export class DesktopGateway {
   // 录音 → 本地 SenseVoice（WASM）转写，本地引擎不可用才落到云通道；文本
   // 或语音转写作为 turn 提交；回复靠 messages 轮询取回（SSE 是后续正规化路径）。
 
-  /**
-   * ensureConversation：复用最近一条 active dialogue，没有才新建。
-   * GET /companion/conversations?kind=dialogue&status=active&limit=1 → POST 兜底。
-   */
+  /** 连续对话只复用唯一 inbox；内部 conversation id 不进入产品层。 */
   async ensureCompanionConversation(
     _request: CompanionChatEnsureRequestV1,
     requestId?: string,
   ): Promise<CompanionChatEnsureResultV1> {
     await this.ensureConnected(requestId);
-    const listResult = await this.request(
-      "/companion/conversations?kind=dialogue&status=active&limit=1",
-      { method: "GET" },
+    const ensureResult = await this.request(
+      "/companion/inbox/ensure",
+      { method: "POST", body: "{}" },
       true,
       true,
       requestId,
     );
-    const parsedList = companionConversationListV1Schema.safeParse(listResult.body);
-    if (!parsedList.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
-    const existing = parsedList.data.items[0];
-    if (existing) {
-      const parsed = companionChatEnsureResultV1Schema.safeParse({
-        version: 1,
-        conversation: existing,
-        created: false,
-      });
-      if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
-      return parsed.data;
+    const conversation = companionConversationV1Schema.safeParse(ensureResult.body);
+    if (!conversation.success || conversation.data.kind !== "inbox") {
+      throw new DesktopGatewayFailure("unsupported_contract", "user_action");
     }
-    const createResult = await this.request(
-      "/companion/conversations",
-      { method: "POST", body: JSON.stringify({ version: 1, kind: "dialogue" }) },
-      true,
-      true,
-      requestId,
-    );
     const parsed = companionChatEnsureResultV1Schema.safeParse({
       version: 1,
-      conversation: createResult.body,
-      created: true,
+      conversation: conversation.data,
+      created: ensureResult.status === 201,
     });
     if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
     return parsed.data;
@@ -1704,6 +2103,21 @@ export class DesktopGateway {
       requestId,
     );
     const parsed = companionLearningRunContextV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  /** Read-only menu context used by the Companion Center activity feed. */
+  async getCompanionLearningContext(requestId?: string): Promise<CompanionLearningContextV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request(
+      "/companion/learning-context",
+      { method: "GET" },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionLearningContextV1Schema.safeParse(result.body);
     if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
     return parsed.data;
   }
@@ -1954,7 +2368,7 @@ export class DesktopGateway {
     return parsed.data;
   }
 
-  async getCompanionMemoryStarMap(requestId?: string): Promise<CompanionMemoryStarMapV1> {
+  async getCompanionMemoryStarMap(requestId?: string): Promise<CompanionMemoryStarMapV2> {
     await this.ensureConnected(requestId);
     const result = await this.request(
       "/companion/memory/star-map",
@@ -1963,7 +2377,7 @@ export class DesktopGateway {
       true,
       requestId,
     );
-    const parsed = companionMemoryStarMapV1Schema.safeParse(result.body);
+    const parsed = companionMemoryStarMapV2Schema.safeParse(result.body);
     if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
     return parsed.data;
   }
@@ -2002,6 +2416,108 @@ export class DesktopGateway {
     const id = this.safeUuid(memoryId);
     await this.request(`/companion/memory/${id}`, { method: "DELETE" }, true, true, requestId);
     return { memoryItemId: id };
+  }
+
+  async createCompanionMemory(request: CompanionMemoryCreateInputV1, requestId?: string): Promise<CompanionMemoryItemV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request(
+      "/companion/memory",
+      { method: "POST", body: JSON.stringify({ ...request, userStated: true, candidate: false, sourceType: "user_stated" }) },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionMemoryItemV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  async correctCompanionMemory(memoryId: string, request: CompanionMemoryCorrectInputV1, requestId?: string): Promise<CompanionMemoryItemV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request(
+      `/companion/memory/${this.safeUuid(memoryId)}/correct`,
+      { method: "POST", body: JSON.stringify(request) },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionMemoryItemV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  async dismissCompanionMemory(memoryId: string, requestId?: string): Promise<CompanionMemoryItemV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request(
+      `/companion/memory/${this.safeUuid(memoryId)}/dismiss`,
+      { method: "POST", body: JSON.stringify({}) },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionMemoryItemV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  async listCompanionMemoryConflicts(requestId?: string) {
+    await this.ensureConnected(requestId);
+    const result = await this.request("/companion/memory/conflicts", { method: "GET" }, true, true, requestId);
+    const parsed = companionMemoryConflictListV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  async resolveCompanionMemoryConflict(memoryId: string, removeId: string, requestId?: string) {
+    await this.ensureConnected(requestId);
+    const result = await this.request(
+      `/companion/memory/${this.safeUuid(memoryId)}/resolve-conflict`,
+      { method: "POST", body: JSON.stringify({ removeId: this.safeUuid(removeId) }) },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionMemoryConflictResolveResultV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  async rebuildCompanionMemoryEmbeddings(requestId?: string) {
+    await this.ensureConnected(requestId);
+    const result = await this.request(
+      "/companion/memory/rebuild-embeddings",
+      { method: "POST", body: JSON.stringify({}) },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionMemoryQueueResultV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  async clearCompanionMemories(requestId?: string) {
+    await this.ensureConnected(requestId);
+    const result = await this.request("/companion/memory", { method: "DELETE" }, true, true, requestId);
+    const parsed = companionMemoryClearResultV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  async summarizeRecentCompanionHistory(requestId?: string) {
+    // Renderer 不接触内部 conversation id；main 只在提交 summarizer job 时解析
+    // 当前内部分段，然后只回传「已排队」的稳定结果。
+    const current = await this.ensureCompanionConversation({ version: 1 }, requestId);
+    const result = await this.request(
+      `/companion/conversations/${this.safeUuid(current.conversation.id)}/summarize`,
+      { method: "POST", body: JSON.stringify({}) },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionMemoryQueueResultV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
   }
 
   private async mutateCompanionMemory(
@@ -2090,24 +2606,281 @@ export class DesktopGateway {
     return parsed.data;
   }
 
-  /** 对话记录只读列表；渲染层拿不到消息正文，也没有发送通道。 */
-  async listCompanionConversations(
-    limit?: number,
+  async listCompanionHistory(
+    query: CompanionHistoryQueryV1 = {},
     requestId?: string,
-  ): Promise<CompanionConversationListV1> {
+  ): Promise<CompanionHistoryPageV1> {
     await this.ensureConnected(requestId);
-    const params = new URLSearchParams({ kind: "dialogue", status: "active" });
-    if (limit !== undefined) params.set("limit", String(limit));
+    const params = new URLSearchParams();
+    if (query.before) params.set("before", query.before);
+    if (query.limit !== undefined) params.set("limit", String(query.limit));
+    const suffix = params.toString();
     const result = await this.request(
-      `/companion/conversations?${params.toString()}`,
+      `/companion/history${suffix ? `?${suffix}` : ""}`,
       { method: "GET" },
       true,
       true,
       requestId,
     );
-    const parsed = companionConversationListV1Schema.safeParse(result.body);
+    const parsed = companionHistoryPageV1Schema.safeParse(result.body);
     if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
     return parsed.data;
+  }
+
+  async searchCompanionHistory(
+    query: CompanionHistorySearchQueryV1,
+    requestId?: string,
+  ): Promise<CompanionHistorySearchV1> {
+    await this.ensureConnected(requestId);
+    const params = new URLSearchParams({ q: query.q });
+    if (query.limit !== undefined) params.set("limit", String(query.limit));
+    const result = await this.request(
+      `/companion/history/search?${params.toString()}`,
+      { method: "GET" },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionHistorySearchV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  async clearCompanionHistory(requestId?: string): Promise<CompanionHistoryClearResultV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request(
+      "/companion/history",
+      { method: "DELETE" },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionHistoryClearResultV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  async getCompanionJourneyBootstrap(requestId?: string): Promise<CompanionJourneyBootstrap> {
+    await this.ensureConnected(requestId);
+    const result = await this.request("/companion/journey/bootstrap", { method: "GET" }, true, true, requestId);
+    const parsed = companionJourneyBootstrapSchema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  async actOnCompanionInvitation(
+    request: CompanionInvitationActionRequest,
+    requestId?: string,
+  ): Promise<CompanionInvitationV2> {
+    await this.ensureConnected(requestId);
+    const result = await this.request(
+      "/companion/invitation/actions",
+      { method: "POST", body: JSON.stringify(request) },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionInvitationSchema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  async getCompanionJourney(
+    journeyId: string,
+    requestId?: string,
+  ): Promise<CompanionJourneyV2> {
+    await this.ensureConnected(requestId);
+    const result = await this.request(
+      `/companion/journeys/${this.safeUuid(journeyId)}`,
+      { method: "GET" },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionJourneySchema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  async actOnCompanionJourney(
+    journeyId: string,
+    request: CompanionJourneyActionRequest,
+    requestId?: string,
+  ): Promise<CompanionJourneyV2> {
+    await this.ensureConnected(requestId);
+    const result = await this.request(
+      `/companion/journeys/${this.safeUuid(journeyId)}/actions`,
+      { method: "POST", body: JSON.stringify(request) },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionJourneySchema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  async listCompanionActivityTimeline(
+    before?: number,
+    requestId?: string,
+  ): Promise<CompanionActivityTimelineV1> {
+    await this.ensureConnected(requestId);
+    const cursor = before && before > 0 ? `&before=${Math.trunc(before)}` : "";
+    const result = await this.request(
+      `/companion/deliveries/timeline?limit=50${cursor}`,
+      { method: "GET" },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionActivityTimelineWireSchema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return companionActivityTimelineV1Schema.parse({
+      version: 1,
+      items: parsed.data.items.map(projectCompanionDelivery),
+      nextCursor: parsed.data.nextCursor,
+      serverTime: parsed.data.serverTime,
+    });
+  }
+
+  clearCompanionRuntimeState(): void {
+    this.companionDeliveryLeases.clear();
+    this.clearCompanionBridgeLocalState();
+  }
+
+  private async claimCompanionDeliveryLease(
+    deliveryId: string,
+    inboxSequence: number,
+    requestId?: string,
+  ): Promise<void> {
+    const lease = { inboxSequence, leaseToken: randomUUID() };
+    const claim = await this.request(
+      `/companion/deliveries/${deliveryId}/lease`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          version: 2,
+          deviceSessionId: this.deviceSessionId,
+          leaseToken: lease.leaseToken,
+          idempotencyKey: randomUUID(),
+        }),
+      },
+      true,
+      true,
+      requestId,
+    );
+    const claimed = assistantDeliveryV2Schema.safeParse(claim.body);
+    if (!claimed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    this.companionDeliveryLeases.set(deliveryId, lease);
+  }
+
+  /**
+   * 展示前由 main 领取跨设备租约；renderer 只拿安全投影，不接触 device session
+   * 或 lease token。重复领取由本进程缓存幂等收敛。
+   */
+  async presentCompanionDelivery(
+    deliveryId: string,
+    inboxSequence: number,
+    requestId?: string,
+  ): Promise<CompanionActivityDeliveryV1> {
+    await this.ensureConnected(requestId);
+    const id = this.safeUuid(deliveryId);
+    const lease = this.companionDeliveryLeases.get(id);
+    if (!lease || lease.inboxSequence !== inboxSequence) {
+      await this.claimCompanionDeliveryLease(id, inboxSequence, requestId);
+    }
+    const shown = await this.ackCompanionDelivery({ deliveryId: id, inboxSequence, transition: "displayed" }, requestId);
+    return shown;
+  }
+
+  async ackCompanionDelivery(
+    input: CompanionActivityAckRequestV1,
+    requestId?: string,
+  ): Promise<CompanionActivityDeliveryV1> {
+    await this.ensureConnected(requestId);
+    const id = this.safeUuid(input.deliveryId);
+    const lease = this.companionDeliveryLeases.get(id);
+    if (!lease || lease.inboxSequence !== input.inboxSequence) {
+      throw new DesktopGatewayFailure("conflict", "resync_first");
+    }
+    const sendAck = (leaseToken: string) => this.request(
+      `/companion/deliveries/${id}/ack`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          version: 2,
+          deliveryId: id,
+          inboxSequence: input.inboxSequence,
+          deviceSessionId: this.deviceSessionId,
+          leaseToken,
+          transition: input.transition,
+          idempotencyKey: randomUUID(),
+        }),
+      },
+      true,
+      true,
+      requestId,
+    );
+    let result;
+    try {
+      result = await sendAck(lease.leaseToken);
+    } catch (error) {
+      if (!(error instanceof DesktopGatewayFailure) || error.code !== "conflict") throw error;
+      this.companionDeliveryLeases.delete(id);
+      await this.claimCompanionDeliveryLease(id, input.inboxSequence, requestId);
+      const renewed = this.companionDeliveryLeases.get(id);
+      if (!renewed) throw new DesktopGatewayFailure("conflict", "resync_first");
+      result = await sendAck(renewed.leaseToken);
+    }
+    const parsed = assistantDeliveryV2Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    if (input.transition === "acted" || input.transition === "dismissed") {
+      this.companionDeliveryLeases.delete(id);
+    }
+    return projectCompanionDelivery(parsed.data);
+  }
+
+  async deleteCompanionAudit(requestId?: string): Promise<CompanionAuditDeleteResultV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request("/me/companion/audit", { method: "DELETE" }, true, true, requestId);
+    const parsed = companionAuditDeleteResultV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  async openCompanionExport(
+    kind: "all" | "memory" | "audit",
+    requestId?: string,
+  ): Promise<Response> {
+    await this.ensureConnected(requestId);
+    const configuration = this.configuration;
+    if (!configuration) throw new DesktopGatewayFailure("configuration_error", "user_action");
+    const path = kind === "all" ? "/companion/export"
+      : kind === "memory" ? "/companion/memory/export"
+        : "/me/companion/audit/export";
+    const headers = new Headers({ Accept: kind === "all" ? "application/x-ndjson" : "application/json" });
+    if (this.token) headers.set("Authorization", `Bearer ${this.token}`);
+    let response: Response;
+    try {
+      response = await fetch(new URL(path, `${configuration.config.apiOrigin}/`), {
+        method: "GET",
+        headers,
+        redirect: "manual",
+      });
+    } catch {
+      this.connection = { version: 1, kind: "api_unavailable" };
+      throw new DesktopGatewayFailure("api_unavailable", "safe_retry");
+    }
+    if (response.status >= 300 && response.status < 400) {
+      throw new DesktopGatewayFailure("api_untrusted", "user_action");
+    }
+    if (!response.ok) throw this.mapResponseError(response.status, response.headers);
+    const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+    const expected = kind === "all" ? "application/x-ndjson" : "application/json";
+    if (!contentType.startsWith(expected) || !response.body) {
+      throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    }
+    return response;
   }
 
   async speakCompanionVoice(
@@ -2122,6 +2895,27 @@ export class DesktopGateway {
         method: "POST",
         body: JSON.stringify({ text: request.text, voice: COMPANION_VOICE_SPEAK_VOICE }),
       },
+      requestId,
+    );
+    const parsed = companionVoiceSpeakResultV1Schema.safeParse({
+      version: 1,
+      mimeType: "audio/mpeg",
+      audioBase64: Buffer.from(result.bytes).toString("base64"),
+      byteLength: result.bytes.byteLength,
+      voice: COMPANION_VOICE_SPEAK_VOICE,
+    });
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  async speakCompanionVoiceSegment(
+    request: CompanionVoiceSpeakSegmentRequestV2,
+    requestId?: string,
+  ): Promise<CompanionVoiceSpeakResultV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.requestAudioBytes(
+      "/voice/tts",
+      { method: "POST", body: JSON.stringify(request) },
       requestId,
     );
     const parsed = companionVoiceSpeakResultV1Schema.safeParse({
