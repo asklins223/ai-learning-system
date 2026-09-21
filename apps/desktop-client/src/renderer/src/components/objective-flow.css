@@ -299,17 +299,17 @@
 .hud-surface .v3-goal-list__end,
 .hud-surface .v3-objective-sheet__header,
 .hud-surface .v3-objective-tags span,
-.hud-surface .v3-next-action span,
-.hud-surface .v3-next-action p,
 .hud-surface .v3-action-error,
 .hud-surface .v3-section-heading > span {
   font-size: 11px;
 }
 .hud-surface .v3-goal-focus blockquote,
-.hud-surface .v3-goal-search input,
-.hud-surface .v3-next-action button {
+.hud-surface .v3-goal-search input {
   font-size: 12px;
 }
+/* P15 之后详情页主行动块自己就是那个按钮，字号写在 approved-surfaces.css:247-258
+ * 的唯一一处（label 11 / 动词 15 衬线 / 说明 12）。这里不再插手，也不再需要地板——
+ * 上一版靠 `.v3-next-action span` 兜底，正因为原文在两个紧凑档里把它打到 4px/5px。 */
 /* 第二批：实机追问出来的——第一批只覆盖了 approved-surfaces.css:181-254，
  * 学习账本三列与整条证据栏还在 8px（13 段）与 10px（5 段）。 */
 .hud-surface .v3-learning-ledger dt,
@@ -389,6 +389,12 @@
   .hud-surface .meta { font-size: 9px; }
   .hud-surface .run-confirmation p { font-size: 10px; line-height: 1.6; }
   .hud-surface .task-title p { font-size: 9px; }
+}
+/* 焦点卡那颗 CTA 的动词被 approved-surfaces.css:542 在这一档打到 9px。它是列表页
+ * 唯一真的会开始作答的按钮，和详情页主行动块是同一个东西，所以跟着一起抬到 12px。
+ * 这一档按**高度**生效，只量默认窗口看不见它——B8 的实机因此改成跑三档。 */
+@media (max-width: 900px), (max-height: 520px) {
+  .hud-surface .v3-goal-focus__action span:not(small) { font-size: 12px; }
 }
 
 /* P10：22 种 chip 同权重的真根因是 `approved-surfaces.css:246` 写的

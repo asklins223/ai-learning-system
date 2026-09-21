@@ -584,20 +584,33 @@ export function ObjectiveDetailSurface() {
               </div>
             </div>
 
-            <section className="v3-next-action" aria-labelledby="objective-next-action-title">
-              <div>
-                <span id="objective-next-action-title">现在最值得做</span>
-                <strong>{primaryActionLabel(objective.primaryAction)}</strong>
+            {/* P15：这块黄纸本身就是那颗按钮。此前标题的 <strong> 和右边那颗按钮印
+                的是同一个词（实机 sameWord=true），而按钮只有 77×28——427×78 的一整块
+                视觉重心里，唯一该被点的东西占 5% 的面积。现在按列表行那套语法：
+                纸块可点，右边只放箭头。名字只取动词，两句解释走 describedby，
+                否则读屏会念一整段纸。 */}
+            <button
+              type="button"
+              className="v3-next-action"
+              disabled={starting || !isActionable(objective.primaryAction)}
+              onClick={() => void startAction()}
+              aria-labelledby="objective-next-action-verb"
+              aria-describedby="objective-next-action-state objective-next-action-why"
+            >
+              <span className="v3-next-action__text">
+                <span className="v3-next-action__label">现在最值得做</span>
+                <strong id="objective-next-action-verb" className="v3-next-action__verb">
+                  {starting ? "正在准备" : primaryActionLabel(objective.primaryAction)}
+                </strong>
                 {/* 状态词先解释自己，再谈下一步：只留一个灰色按钮时，用户读到的是
                     "产品坏了"，不是"我上次看了答案"（2026-09-20 实走复盘 #9）。 */}
-                <p>{objectiveStateHint(detailState)}</p>
-                <p>{primaryActionDescription(objective.primaryAction)}</p>
-              </div>
-              <button type="button" disabled={starting || !isActionable(objective.primaryAction)} onClick={() => void startAction()}>
-                {starting ? <LoaderCircle size={17} aria-hidden="true" /> : objective.primaryAction.kind === "refresh" ? <RefreshCw size={17} aria-hidden="true" /> : <ArrowRight size={17} aria-hidden="true" />}
-                {starting ? "正在准备" : primaryActionLabel(objective.primaryAction)}
-              </button>
-            </section>
+                <span id="objective-next-action-state" className="v3-next-action__why">{objectiveStateHint(detailState)}</span>
+                <span id="objective-next-action-why" className="v3-next-action__why">{primaryActionDescription(objective.primaryAction)}</span>
+              </span>
+              <span className="v3-next-action__go" aria-hidden="true">
+                {starting ? <LoaderCircle size={17} /> : objective.primaryAction.kind === "refresh" ? <RefreshCw size={17} /> : <ArrowRight size={17} />}
+              </span>
+            </button>
             {actionFailure ? <p className="v3-action-error" role="alert"><AlertTriangle size={14} aria-hidden="true" />{actionFailure}</p> : null}
 
             <section className="v3-learning-ledger" aria-labelledby="learning-ledger-title">
@@ -653,7 +666,11 @@ export function ObjectiveDetailSurface() {
                   <span className="v3-origin-row__index">{String(index + 1).padStart(2, "0")}</span>
                   <div>
                     <div><strong>{formatOriginKind(origin.kind)}</strong><span>{formatSupportGrade(origin.supportGrade)}</span></div>
-                    <p>{formatOriginIntegrity(origin.integrity)} · {origin.evidenceSnapshotIds.length} 条原文证据</p>
+                    {/* 「0 条原文证据」在这一栏里出现过三次：栏头总数、这一行、
+                        下一行的「没有留当时引用的原文」。同一件负面事实说三遍，
+                        就是 P17 那栏看起来很满其实很空的来源。总数留在栏头，这一行
+                        只在**真有**证据时报数。 */}
+                    <p>{formatOriginIntegrity(origin.integrity)}{origin.evidenceSnapshotIds.length ? ` · ${origin.evidenceSnapshotIds.length} 条原文证据` : ""}</p>
                     <small>{origin.kind === "imported" ? `导入批次 ${origin.importBatchRef}` : origin.sourceSnapshotId ? "留了当时引用的原文" : "没有留当时引用的原文"}</small>
                   </div>
                 </article>

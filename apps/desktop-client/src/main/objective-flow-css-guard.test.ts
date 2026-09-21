@@ -132,3 +132,27 @@ describe("列表行的事实句不许长成 chip（P10）", () => {
     expect(facts).toMatch(/<Fragment key=\{chip\}/);
   });
 });
+
+describe("详情页主行动块（P15）", () => {
+  const css = stripComments(read("src/renderer/src/components/approved-surfaces.css"));
+
+  it("两个紧凑档都不许再给这块降字号", () => {
+    // 实机就是在这里量到动词 9px：那条档按**高度**生效，而 B4 的地板清单是按
+    // :181-254 那段无条件规则挑的，紧凑档没照着列——于是 strong 整个漏在外面。
+    // 现在整块自己就是按钮，字号只写在无条件那一处。
+    const mediaBodies = [...css.matchAll(/@media[^{]*\{([\s\S]*?\n\})/g)].map((match) => match[1]);
+    expect(mediaBodies.length, "@media 块解析不出来").toBeGreaterThan(1);
+    const shrinkers = mediaBodies
+      .flatMap((body) => body.split("\n"))
+      .filter((line) => /\.v3-next-action/.test(line) && /font-size/.test(line));
+    expect(shrinkers, `紧凑档还在降主行动块的字号：\n${shrinkers.join("\n")}`).toEqual([]);
+  });
+
+  it("无条件那一处给动词与说明各自定了字号", () => {
+    const verb = css.match(/\.v3-next-action__verb\s*\{([^}]*)\}/);
+    expect(verb, "动词没有规则接手").not.toBeNull();
+    expect(Number(/([0-9.]+)px/.exec(verb?.[1] ?? "")?.[1]), "动词字号读不出来").toBeGreaterThanOrEqual(14);
+    const why = css.match(/\.v3-next-action__why\s*\{([^}]*)\}/);
+    expect(Number(/font-size:\s*([0-9.]+)px/.exec(why?.[1] ?? "")?.[1])).toBeGreaterThanOrEqual(12);
+  });
+});
