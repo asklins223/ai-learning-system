@@ -49,6 +49,7 @@ import {
   useRoomStore,
 } from "../../app/room-store";
 import { createRequestMeta, gatewayErrorMessage, unwrapGatewayResult } from "../../app/desktop-client";
+import { signOutCurrentAccount } from "../../app/account-signout";
 import { SETTINGS_ATTENTION_AI_CONSENT } from "../../app/companion-consent-gate";
 import { publishGateInvalidation } from "../../app/gate-invalidation";
 import {
@@ -365,6 +366,8 @@ export function SettingsSurface() {
   const [profileFailure, setProfileFailure] = useState<string | null>(null);
   const [avatarSrc, setAvatarSrc] = useState<string | null>(null);
   const [passwordForm, setPasswordForm] = useState({ current: "", next: "", confirm: "" });
+  /** 退出登录后这台设备就交还给登录页了；这一位只用来让按下去的那一下有回音。 */
+  const [signingOut, setSigningOut] = useState(false);
   const [invites, setInvites] = useState<InviteListResultV1 | null>(null);
   const [members, setMembers] = useState<MemberListResultV1 | null>(null);
   const [invitesRead, setInvitesRead] = useState(false);
@@ -780,6 +783,19 @@ export function SettingsSurface() {
     } finally {
       setProfileBusy(null);
     }
+  };
+
+  /**
+   * 退出登录。动作本体在 `app/account-signout.ts`，与顶栏账户小框共用一份：
+   * 两处对「退出了没有」的说法必须一致，三种结局的话也由它一次写好。
+   *
+   * 这里不接 `setNotice`：门禁随即把整页换成登录页，页面自己的提示活不过那一行
+   * （设置页以前就是这么把「已切换到…」弄丢的）。
+   */
+  const signOutOfAccount = async () => {
+    if (signingOut) return;
+    setSigningOut(true);
+    await signOutCurrentAccount();
   };
 
   /** Owner：生成邀请。结果里的 token 只显示这一次。 */
@@ -1351,6 +1367,30 @@ export function SettingsSurface() {
                 <KeyRound size={13} aria-hidden="true" />
                 {profileBusy === "password" ? "修改中…" : "修改密码"}
               </button>
+            </div>
+          </details>
+          <details className="settings-disclosure">
+            <summary>
+              <span>
+                <b>退出登录</b>
+                <small>换一个人用这台设备，或者到别的设备上继续。</small>
+              </span>
+            </summary>
+            <div className="settings-rows">
+              <SettingRow
+                title={`退出 ${session?.user?.email ?? "这个账号"}`}
+                detail="清掉这台设备上的登录状态，并请学习服务撤销这次登录。学习记录不会因为退出而减少，其他设备上的登录也不受影响。"
+              >
+                <button
+                  type="button"
+                  className="button danger"
+                  disabled={signingOut}
+                  onClick={() => void signOutOfAccount()}
+                >
+                  <LogOut size={13} aria-hidden="true" />
+                  {signingOut ? "正在退出…" : "退出登录"}
+                </button>
+              </SettingRow>
             </div>
           </details>
         </section>

@@ -54,6 +54,10 @@ import {
   unwrapGatewayResult,
 } from "../app/desktop-client";
 import {
+  clearAccountSignOutNotice,
+  peekAccountSignOutNotice,
+} from "../app/account-signout";
+import {
   subscribeGateInvalidation,
   type GateInvalidationCode,
 } from "../app/gate-invalidation";
@@ -914,6 +918,19 @@ export function DesktopAccessGate({
           spaceIdentityBoundaryRef.current = identityBoundary;
           useRoomStore.getState().setSpaceIdentity(identity);
         }
+        // 账号身份与空间身份同一时机、同一来源发布：顶栏那个小框要回答「我是谁」，
+        // 而它不该为这句话自己发请求——设置页已经有一份档案，两处各读各的就会打架。
+        const account = {
+          email: next.session.user.email,
+          displayName: next.session.user.displayName ?? null,
+        };
+        const published = useRoomStore.getState().accountIdentity;
+        if (published?.email !== account.email || published?.displayName !== account.displayName) {
+          useRoomStore.getState().setAccountIdentity(account);
+        }
+        // 会话重新成立，上一次退出留下的那句话就用完了。不清的话它会在下一次
+        // 完全不同的场合（比如会话到期）再冒出来。
+        clearAccountSignOutNotice();
       }
       setView(next);
     };
@@ -1058,7 +1075,7 @@ export function DesktopAccessGate({
             waitTimer = window.setTimeout(() => requestBootstrap(), 700);
             return;
           case "authenticate":
-            apply({ phase: "auth", mode: "login" });
+            apply({ phase: "auth", mode: "login", serviceNotice: peekAccountSignOutNotice() ?? undefined });
             return;
           case "reauthenticate":
             apply({ phase: "reauth", session: sessionDecision.session });
@@ -1113,7 +1130,7 @@ export function DesktopAccessGate({
         const failureDecision = decideBootstrapGatewayFailure(error);
         switch (failureDecision.kind) {
           case "authenticate":
-            apply({ phase: "auth", mode: "login" });
+            apply({ phase: "auth", mode: "login", serviceNotice: peekAccountSignOutNotice() ?? undefined });
             return;
           case "reauthenticate":
             apply({ phase: "reauth", session: lastTrustedSessionRef.current });
@@ -1203,6 +1220,9 @@ export function DesktopAccessGate({
     }
     const registering = view.mode === "register";
     const pendingInvite = inviteToken.trim();
+    // 开始下一次登录，上一次退出留下的结论就翻篇了：它描述的是刚离开的那个账号，
+    // 继续挂在表单下面会把两件事混成一件。
+    clearAccountSignOutNotice();
     setFormBusy(true);
     setFormFailure(null);
     try {

@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useRoomStore } from "../../app/room-store";
 import { SETTINGS_ATTENTION_AI_CONSENT } from "../../app/companion-consent-gate";
 import { SETTINGS_ATTENTION_MS, SettingsSurface } from "./settings-surface";
+import { subscribeGateInvalidation } from "../../app/gate-invalidation";
+import { clearAccountSignOutNotice, peekAccountSignOutNotice } from "../../app/account-signout";
 
 /**
  * The settings centre's regressions all had the same shape: a value the reader
@@ -117,6 +119,10 @@ function installApi(options: {
       getState: vi.fn(async () => ok(session(role))),
       joinWorkspace: vi.fn(async () => ok(session(role))),
       getProfile: vi.fn(async () => ok({ version: 1 as const, displayName: "读者", avatarUrl: null })),
+      logout: vi.fn(async (input: unknown): Promise<GatewayResultV1<{ loggedOut: true; serverRevoked: boolean }>> => {
+        calls.push({ method: "logout", input });
+        return ok({ loggedOut: true as const, serverRevoked: true });
+      }),
     },
     companion: {
       answerMode: {
@@ -644,5 +650,75 @@ describe("workspace export", () => {
 
     await screen.findByRole("alert");
     expect(screen.queryByText(/已导出到/)).toBeNull();
+  });
+});
+
+/**
+ * 退出登录（2026-09-21）：设置页里也要有一条走得出的退出路。此前客户端只有
+ * 「改密码」会间接把人踢回登录页，换账号因此没有正当入口。
+ *
+ * 这块故意藏在 `<details>` 里：折叠时那枚按钮不该被 role 查询命中——一条断言
+ * 同时钉住「要两步才算数」和「别把退出摆在随手可按的地方」。
+ */
+describe("设置页的退出登录", () => {
+  afterEach(() => {
+    clearAccountSignOutNotice();
+  });
+
+  async function renderAccountSection() {
+    const installed = installApi();
+    render(<SettingsSurface />);
+    await screen.findByText("理解空间", { selector: ".space-identity h3" });
+    return installed;
+  }
+
+  function openSignOutDisclosure() {
+    fireEvent.click(screen.getByText("换一个人用这台设备，或者到别的设备上继续。").closest("summary") as Element);
+  }
+
+  it("退出这块默认是折着的：先展开说清楚的那一步，才轮到按钮", async () => {
+    await renderAccountSection();
+
+    const disclosure = screen
+      .getByText("换一个人用这台设备，或者到别的设备上继续。")
+      .closest("details") as HTMLDetailsElement;
+    // 注意：jsdom 里折叠的 <details> 仍然把子节点留在 DOM 里，role 查询照样命中，
+    // 所以「藏起来了」只能钉 `open` 这一个事实，不能钉查询查不到。
+    expect(disclosure.open).toBe(false);
+
+    fireEvent.click(disclosure.querySelector("summary") as Element);
+    await screen.findByRole("button", { name: "退出登录" });
+    expect(disclosure.open).toBe(true);
+  });
+
+  it("退的是屏幕上写明的这个账号", async () => {
+    await renderAccountSection();
+    openSignOutDisclosure();
+
+    expect(screen.getByText("退出 reader@example.com")).toBeTruthy();
+  });
+
+  it("按下去真的调用了退出，并把房间交还给登录页", async () => {
+    const { api } = await renderAccountSection();
+    const invalidations: string[] = [];
+    const stop = subscribeGateInvalidation((code) => { invalidations.push(code); });
+    openSignOutDisclosure();
+
+    fireEvent.click(screen.getByRole("button", { name: "退出登录" }));
+
+    await waitFor(() => expect(api.auth.logout).toHaveBeenCalledOnce());
+    expect(invalidations).toContain("auth_required");
+    stop();
+  });
+
+  it("与顶栏小框共用同一份结论：撤销没送达时那句话留给登录页", async () => {
+    const { api } = await renderAccountSection();
+    api.auth.logout.mockResolvedValueOnce(ok({ loggedOut: true as const, serverRevoked: false as const }));
+    openSignOutDisclosure();
+
+    fireEvent.click(screen.getByRole("button", { name: "退出登录" }));
+    await waitFor(() => expect(api.auth.logout).toHaveBeenCalledOnce());
+
+    expect(peekAccountSignOutNotice()).toContain("没能通知学习服务撤销");
   });
 });

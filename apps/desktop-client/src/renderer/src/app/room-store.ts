@@ -100,6 +100,24 @@ export type SpaceIdentity = {
   readonly role: "owner" | "member";
   readonly isPersonal: boolean;
 };
+/**
+ * 这台设备上是**谁**登录了。顶栏的账户小框、设置页的账户块都读这一个值，
+ * 与 `spaceIdentity` 同一个时机由门禁发布，所以小框不自己发请求，也就不会出现
+ * 「小框说一个账号、胶囊说另一个账号」的两套真相。
+ */
+export type AccountIdentity = {
+  readonly email: string;
+  readonly displayName: string | null;
+};
+/**
+ * 头像字节。它只能靠主进程的字节通道取回，而那是**点开小框时**才发生的请求，
+ * 所以这里连邮箱一起存：按钮只有在字节属于当前账号时才用它，换过账号之后宁可
+ * 落回首字母印章，也不会把上一个账号的脸留在屏幕上。
+ */
+export type AccountAvatar = {
+  readonly email: string;
+  readonly src: string;
+};
 export type CompanionCenterTarget = {
   readonly tab: "memory" | "dialogue" | "activity" | "diary" | "persona" | "data";
   readonly focusMemoryId?: string;
@@ -166,6 +184,9 @@ type RoomStore = {
    * 屏幕上没有任何一处说明「我在哪个空间、我能不能改」。
    */
   spaceIdentity: SpaceIdentity | null;
+  /** 当前登录的账号；门禁还没读到会话时为 null，此时按钮不冒充知道是谁。 */
+  accountIdentity: AccountIdentity | null;
+  accountAvatar: AccountAvatar | null;
   ambientRequested: boolean;
   masterMuted: boolean;
   onboardingSeen: boolean;
@@ -269,6 +290,8 @@ type RoomStore = {
   setHudPage: (page: HudPageId, spaceEntry?: "first" | "returning") => void;
   /** 发布/清空顶栏空间胶囊的身份；由门禁在每次读到已验证会话时调用。 */
   setSpaceIdentity: (identity: SpaceIdentity | null) => void;
+  setAccountIdentity: (identity: AccountIdentity | null) => void;
+  setAccountAvatar: (avatar: AccountAvatar | null) => void;
   toggleAmbient: () => void;
   toggleMasterMuted: () => void;
   /** 显式设置总静音，供设置页的受控开关使用（不再靠双重否定反推）。 */
@@ -328,6 +351,8 @@ export const useRoomStore = create<RoomStore>()(
       hudPage: "home",
       hudSpaceEntry: null,
       spaceIdentity: null,
+      accountIdentity: null,
+      accountAvatar: null,
       ambientRequested: false,
       masterMuted: false,
       onboardingSeen: false,
@@ -509,6 +534,8 @@ export const useRoomStore = create<RoomStore>()(
         hudSpaceEntry: hudPage === "space" ? hudSpaceEntry ?? null : null,
       }),
       setSpaceIdentity: (spaceIdentity) => set({ spaceIdentity }),
+      setAccountIdentity: (accountIdentity) => set({ accountIdentity }),
+      setAccountAvatar: (accountAvatar) => set({ accountAvatar }),
       toggleAmbient: () =>
         set((state) => ({
           ambientRequested: !state.ambientRequested,
