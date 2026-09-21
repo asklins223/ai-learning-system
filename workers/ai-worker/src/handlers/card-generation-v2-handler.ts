@@ -411,6 +411,13 @@ export async function releaseInflightV2OutboxLeases(): Promise<number> {
  * - 租约核对是**只读**的。管道事务里的 `fenceV2OutboxLease` 会 UPDATE 同一行 outbox
  *   并持锁到提交，这里若加 `FOR UPDATE` 就会排在它后面阻塞分钟级，短事务就白短路了。
  * - 失败**不抛**。读数写不进去的代价是"那一格不动"，不是"这批卡丢了"。
+ *
+ * 第三道是 2026-09-21 实机量出来的补丁：这个函数**必须**用 `isolated: true` 开独立事务。
+ * 默认的 `withWorkerWorkspaceTransaction` 会加入当前作用域里那条事务，而调用点就在
+ * `processCardGenerationPlan` 自己的事务里（handler `:1205` 开的那个），于是读数跟着
+ * 管道一起提交 —— 对外仍然要等整批 LLM 跑完才可见。真跑实测：124.3 秒的生成里
+ * HTTP 只采到 `[0, 8]`，读数行的 `updated_at` 与大事务开始时间逐微秒相同。
+ * 判据见 `card-generation-v2-live-progress-postgres.integration.ts`「tick 不加入调用方的事务」。
  */
 export async function writeCardGenerationLiveProgress(
   job: PendingOutboxJob,
@@ -439,6 +446,7 @@ export async function writeCardGenerationLiveProgress(
         `);
         return true;
       },
+      { isolated: true },
     );
   } catch (error) {
     logger.warn({ runId: job.runId, err: sanitizeOperationalError(error) },

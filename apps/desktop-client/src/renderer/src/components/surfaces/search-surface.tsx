@@ -147,7 +147,7 @@ function previewParagraphs(preview: SearchPreview, query: string): string[] {
 /** The gap note only appears when the server really reports a missing link. */
 function previewGap(preview: SearchPreview): string | null {
   if (preview.kind === "objective") {
-    if (preview.detail.sources.missingOrigin) return "这条目标还没有来源血缘，结论暂时无法回溯到材料。";
+    if (preview.detail.sources.missingOrigin) return "这条目标还没有出处，结论暂时追不回材料。";
     if (preview.detail.content.freshness === "source_outdated") return "这条目标的来源已经过期，需要重新核对。";
     if (preview.detail.content.freshness === "legacy_unreviewed") return "这条目标还未按当前来源核验过，结论可能已经漂移。";
     if (preview.detail.personal.initialValidation?.status === "deferred") return "初次验证被推迟，证据仍待补齐。";

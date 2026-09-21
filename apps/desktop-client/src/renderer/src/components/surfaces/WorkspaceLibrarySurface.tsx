@@ -383,7 +383,7 @@ export function ObjectiveLibrarySurface() {
           <section className="v3-goal-ledger" aria-labelledby="goal-ledger-title">
             <header className="v3-goal-ledger__header">
               <div>
-                <h3 id="goal-ledger-title">目标口袋</h3>
+                <h3 id="goal-ledger-title">全部理解目标</h3>
                 <p>已载入 {page?.items.length ?? 0} / {page?.total ?? 0} 条{page?.snapshotAt ? ` · 更新于 ${formatObjectiveDateTime(page.snapshotAt)}` : ""}</p>
               </div>
               <label className="v3-goal-search">
@@ -592,17 +592,17 @@ export function ObjectiveDetailSurface() {
             </section>
 
             <footer className="v3-objective-revision">
-              <span>目标修订 {objective.surfaceRevision}</span>
-              <span>生命周期版本 {objective.lifecycleEpoch}</span>
-              <span>{content.presentation.cardRevision ? `学习卡修订 ${content.presentation.cardRevision}` : "尚无公开学习卡"}</span>
-              <span>{content.presentation.publicationRevision ? `发布修订 ${content.presentation.publicationRevision}` : "尚未发布"}</span>
+              <span>目标第 {objective.surfaceRevision} 版</span>
+              <span>状态变更 {objective.lifecycleEpoch} 次</span>
+              <span>{content.presentation.cardRevision ? `学习卡第 ${content.presentation.cardRevision} 版` : "尚无公开学习卡"}</span>
+              <span>{content.presentation.publicationRevision ? `发布第 ${content.presentation.publicationRevision} 版` : "尚未发布"}</span>
               <span>创建于 {formatObjectiveDateTime(objective.createdAt)}</span>
             </footer>
           </article>
 
-          <aside className="v3-lineage-ledger" aria-label="证据与来源血缘">
+          <aside className="v3-lineage-ledger" aria-label="证据与出处">
             <header>
-              <div><Layers3 size={16} aria-hidden="true" /><h3>证据口袋</h3></div>
+              <div><Layers3 size={16} aria-hidden="true" /><h3>证据清单</h3></div>
               <span>{objective.sources.origins.length} 条来源 · {evidenceSnapshotCount} 条原文证据</span>
             </header>
             {objective.sources.primaryNote ? (
@@ -612,7 +612,7 @@ export function ObjectiveDetailSurface() {
                 <ChevronRight size={16} aria-hidden="true" />
               </button>
             ) : <div className="v3-primary-note v3-primary-note--missing"><AlertTriangle size={17} aria-hidden="true" /><span><small>主笔记</small><strong>尚未关联主笔记</strong></span></div>}
-            {objective.sources.missingOrigin ? <p className="v3-lineage-warning"><AlertTriangle size={14} aria-hidden="true" />部分来源血缘缺失，验证前建议先补齐。</p> : null}
+            {objective.sources.missingOrigin ? <p className="v3-lineage-warning"><AlertTriangle size={14} aria-hidden="true" />部分来源还没对上，验证前建议先补齐。</p> : null}
             <div className="v3-origin-list">
               {objective.sources.origins.length ? objective.sources.origins.map((origin, index) => (
                 <article key={origin.originId} className="v3-origin-row">
@@ -623,7 +623,7 @@ export function ObjectiveDetailSurface() {
                     <small>{origin.kind === "imported" ? `导入批次 ${origin.importBatchRef}` : origin.sourceSnapshotId ? "留了当时引用的原文" : "没有留当时引用的原文"}</small>
                   </div>
                 </article>
-              )) : <div className="v3-origin-empty"><FolderOpen size={19} aria-hidden="true" /><strong>尚无公开来源血缘</strong><span>这里不会用示例证据填充空白。</span></div>}
+              )) : <div className="v3-origin-empty"><FolderOpen size={19} aria-hidden="true" /><strong>还没有可公开的出处</strong><span>这里不会用示例证据填充空白。</span></div>}
             </div>
             <footer className="v3-lineage-boundary">
               <strong>这里会展示什么</strong>

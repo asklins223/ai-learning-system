@@ -212,6 +212,40 @@ test("到终态之后读数退役：候选表才是真相，读数不得反超",
 });
 
 /**
+ * 第五条不变量（2026-09-21 实机量出来的补丁）：读数**不得加入调用方的事务**。
+ *
+ * 前四条都是在"没有外层事务"的情况下调用写入函数，所以它们全绿也证明不了活路径——
+ * 管道里的 tick 恰恰是在 `processCardGenerationPlan` 那条分钟级事务里调的，而
+ * `withWorkerWorkspaceTransaction` 默认会加入当前作用域里那条事务。真跑证据：
+ * 124.3 秒的生成里 HTTP 只采到 `[0, 8]`，读数行的 `updated_at` 与大事务开始时间
+ * 逐微秒相同（`/tmp/ladder3.log`）。
+ *
+ * 这里用"外层事务故意回滚"精确复现那个条件：读数若跟着外层回滚消失，就说明它加入了
+ * 外层事务（改前红）；只有自己提交才留得下。
+ */
+test("tick 不加入调用方的事务：外层回滚，读数仍在", async () => {
+  const { writeCardGenerationLiveProgress } = await import("../handlers/card-generation-v2-handler.ts");
+  const { withWorkerWorkspaceTransaction } = await import("../db.ts");
+  const job = await claimPlanJob();
+
+  await assert.rejects(
+    withWorkerWorkspaceTransaction({ workspaceId: WORKSPACE_ID, userId: null }, async () => {
+      const written = await writeCardGenerationLiveProgress(job, {
+        plannedCards: 8, authored: 2, gatePassed: 0, gateFailed: 0,
+      });
+      assert.equal(written, true);
+      throw new Error("rollback-on-purpose");
+    }),
+    /rollback-on-purpose/,
+  );
+
+  const stored = await readProgressRow();
+  assert.equal(stored?.progress.authored, 2,
+    "读数被外层事务的回滚带走了 → tick 加入了管道事务，界面上仍要等整批跑完才看得到");
+  assert.equal(stored?.lease_token, job.leaseToken);
+});
+
+/**
  * 最后一条要钉的是**tick 点落在活路径上**：前四条只证明"有人调用写入函数时它是对的"，
  * 而调用点在 `mapWithConcurrency` 的循环体里——如果那个位置其实在死支上，前四条照样全绿。
  * 所以这里用**确定性 provider**（不出网、不花钱）把整条真管道跑一遍，再要求读数表里

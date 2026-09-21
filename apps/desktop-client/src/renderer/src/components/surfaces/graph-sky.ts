@@ -48,7 +48,7 @@ export const EDGE_KIND_LABEL = {
   relates_to: "语义关联",
   supersedes: "替代版本",
   supported_by: "证据支撑",
-  sourced_from: "来源血缘",
+  sourced_from: "来源材料",
   contains_note: "收录笔记",
 } as const satisfies Record<UnderstandingEdgeProjectionV3["kind"], string>;
 

@@ -2009,16 +2009,26 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
             </div>
             <div className={`learning-run-hint${hints.length > 0 ? " learning-run-hint--shown" : ""}`} role={hints.length > 0 ? "status" : undefined}>
               <Lightbulb size={15} aria-hidden="true" />
-              {hints.length > 0 ? (
-                <ol className="learning-run-hint__levels">
-                  {hints.map((entry) => (
-                    <li key={entry.level}><span>{entry.text}</span></li>
-                  ))}
-                </ol>
-              ) : (
-                <span>卡住时可以先要一条提示，或换一种作答方式。</span>
-              )}
-              {hints.some((entry) => entry.downgraded) ? <small>看过提示之后，这张卡本轮只计练习分，不再计正式理解分。</small> : null}
+              {/*
+                提示正文必须包在一个元素里（2026-09-21 实机截图）：
+                `.learning-run-hint` 是 `auto minmax(0,1fr)` 两列网格，图标占第一列。
+                先前提示层与「只计练习分」那句是**并列的两个网格项**，于是那句被自动
+                放进第二行第一列，而 `auto` 列按它的 max-content 撑满整块面板，
+                把提示层挤成十几像素宽的一条竖排字。包一层之后网格永远只有两个子项，
+                第三行内容再怎么加也挤不到正文列。
+              */}
+              <div className="learning-run-hint__body">
+                {hints.length > 0 ? (
+                  <ol className="learning-run-hint__levels">
+                    {hints.map((entry) => (
+                      <li key={entry.level}><span>{entry.text}</span></li>
+                    ))}
+                  </ol>
+                ) : (
+                  <span>卡住时可以先要一条提示，或换一种作答方式。</span>
+                )}
+                {hints.some((entry) => entry.downgraded) ? <small>看过提示之后，这张卡本轮只计练习分，不再计正式理解分。</small> : null}
+              </div>
             </div>
           </aside>
           <section className="learning-run-stage">

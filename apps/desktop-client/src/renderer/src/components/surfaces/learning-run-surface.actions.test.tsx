@@ -226,6 +226,26 @@ describe("LearningRunSurface · 动作区", () => {
     expect(state.actions.filter((action) => action.kind === "request_hint")).toHaveLength(2);
   });
 
+  it("提示正文只占一列：正文与「只计练习分」都装进同一个容器", async () => {
+    const { state } = renderRun();
+    const label = (text: RegExp) => screen.getAllByRole("button").find((button) => text.test(button.textContent ?? ""));
+
+    fireEvent.click((await waitFor(() => label(/^给我一点提示/)))!);
+    await waitFor(() => expect(state.actions[0]).toEqual({ kind: "request_hint", level: 1 }));
+
+    // 面板是 `auto minmax(0,1fr)` 两列网格（图标占第一列），所以直接子项必须**恰好**
+    // 两个：多出来的那个会被自动排到第二行第一列，而 `auto` 列按它的 max-content
+    // 撑满整块面板，正文列被压到十几像素——实机上就是一条竖排单字（2026-09-21 截图）。
+    const panel = document.querySelector(".learning-run-hint")!;
+    expect(panel.children).toHaveLength(2);
+
+    const body = panel.querySelector(".learning-run-hint__body")!;
+    expect(body).toBeTruthy();
+    expect(body.querySelector(".learning-run-hint__levels")).toBeTruthy();
+    // 降级说明也在正文容器里，不是面板的第三个直接子项。
+    expect(body.querySelector("small")?.textContent).toContain("只计练习分");
+  });
+
   it("专注时间逐秒推进，服务端读数只会抬高它、绝不把钟拨回去", async () => {
     const { state } = renderRun();
     const clockText = () => document.querySelector(".learning-run-clock b")?.textContent ?? "";

@@ -113,14 +113,29 @@ export async function setWorkerTransactionContext(
   return workerScope.applyContext(transaction, context);
 }
 
+export interface WorkerWorkspaceTransactionOptions {
+  /**
+   * 强制开一条**独立**事务，即使当前已经处在 worker 事务作用域里（默认会加入它）。
+   *
+   * 存在的理由（2026-09-21 实测）：V2 生成管道整条跑在一个分钟级事务里，实时进度
+   * 读数若跟着它提交，就要等整批 LLM 跑完才对外可见——那正是复盘 #2「进度不逐格走」
+   * 的成因（124 秒里 HTTP 只采到 0 和 8 两个值）。凡是"必须让**另一个连接**立刻
+   * 看见"的写入都要走这个开关。
+   */
+  isolated?: boolean;
+}
+
 export async function withWorkerWorkspaceTransaction<T>(
   context: WorkerWorkspaceTransactionContext,
   operation: (transaction: WorkerTransaction) => Promise<T>,
+  options: WorkerWorkspaceTransactionOptions = {},
 ): Promise<T> {
   const normalized = normalizeWorkerWorkspaceTransactionContext(context);
-  const active = workerScope.requireActive(normalized);
-  if (active) {
-    return operation(active.transaction);
+  if (!options.isolated) {
+    const active = workerScope.requireActive(normalized);
+    if (active) {
+      return operation(active.transaction);
+    }
   }
 
   return db.transaction(async (transaction) => {

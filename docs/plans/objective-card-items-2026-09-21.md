@@ -650,3 +650,90 @@ reaped by the next worker startup"，但下一个 worker 启动时租约**还没
 那 25 分钟内没有任何 run 行被改写（查过），仍在进行中的 run 还是 1 条（就是 §22 提到的
 那挂 8-19 僵尸 `9b536df1`，它的 job 早就是 `failed`，reaper 也救不动它）。
 用例已改成上面那条**本地谓词断言**，不再调全局 reaper——测试不该扫别人的表。
+
+## 25. A2 的读数其实没实时：tick 加入了管道大事务（已修 + 已钉）
+
+§21 说 A2 做完"读数在整批提交之前就能被 API 读到"，§22 说"tick 落在活路径上"已由第 5 条
+用例钉住。**这两句都过强了**，16:45 那次真跑把它证伪了。
+
+### 真跑现场（夹具笔记「进度阶梯实测夹具：记忆与学习的七个概念」）
+
+run `c1fbba41`：19 次真 LLM 调用（qwen3.8-flash 全 success）、管道 **124.3 秒**、8 张候选
+（4 过门禁，含 2 张 `single_choice` 练习件）、终态 `review_ready`。HTTP 轮询只看到两个值：
+
+```
+    0.0s planning        planned=0 authored=0
+  124.3s review_ready    planned=8 authored=8
+authored 采样序列: [0, 8]
+```
+
+### 根因：`withWorkerWorkspaceTransaction` 会加入当前作用域那条事务
+
+- `writeCardGenerationLiveProgress` 调 `withWorkerWorkspaceTransaction`，而
+  `workers/ai-worker/src/db.ts` 的语义是"**已经在一个 worker 事务作用域里就直接加入它**"
+  （`const active = workerScope.requireActive(normalized); if (active) return operation(active.transaction)`）。
+- 两个 tick 调用点（handler `:1517` 规划后、`:1545` 每张卡写完）就在
+  `processCardGenerationPlan` 自己那条分钟级事务里（`:1205` 开的 scope），context 同为
+  `{ workspaceId, userId: null }` → AsyncLocalStorage 必然命中 → **读数写进了大事务**。
+- 于是"独立短事务"只存在于设计文字里：§21 的实测（拿 d375f218 手造租约与读数）和第 1 条
+  用例都是**在作用域之外**调用写入函数，那才会走到真正独立的分支；第 5 条只断言
+  "最终读数 == 候选张数"，不校验"提交前可见"，所以照样全绿。
+
+三条互相印证的证据：
+
+| 证据 | 读数 |
+|---|---|
+| 读数行 `updated_at` | `08:45:24.170456+00` —— 与候选行、事件、`run.updated_at` **逐微秒相同**（都是大事务的 `now()`） |
+| outbox `processed_at` | `08:47:28.103708` —— 真实结束时间，比读数晚 124 秒 |
+| `ladder3.log` | 124.3 秒里 `authored` 只取到 `[0, 8]` |
+
+### 改法（本次）
+
+1. `db.ts` 的 `withWorkerWorkspaceTransaction` 增第三个参数 `{ isolated?: true }`：给了它就
+   **强制** `db.transaction(...)` 开新连接，不加入 ambient scope（RLS 上下文照旧在事务内设置）。
+2. `writeCardGenerationLiveProgress` 传 `{ isolated: true }`。
+3. 新用例「**tick 不加入调用方的事务：外层回滚，读数仍在**」精确复现活路径条件——在
+   `withWorkerWorkspaceTransaction` 里调写入函数然后故意回滚，读数必须留得下。
+   改前红（`expected 2` / 实际没有行），改后绿；这条比"轮询等中间值"确定性得多。
+
+回归：worker 集成 7/7（原 6 条 + 新增 1 条）、worker 单测 700/700、`workers/ai-worker`
+typecheck 干净。
+
+### 真跑阶梯：修完当场复测，成立
+
+同一篇夹具内容（3085 字节的「记忆与学习的七个概念」）新建 run `aabb1ff1`，修复后的 worker
+（tsx 已重载）跑真 LLM：
+
+```
+   19.5s planning   planned=8 authored=0
+   39.9s planning   planned=8 authored=1
+   41.0s planning   planned=8 authored=2
+   42.0s planning   planned=8 authored=3
+   43.0s planning   planned=8 authored=5
+   44.0s planning   planned=8 authored=6
+   48.1s planning   planned=8 authored=8
+  103.2s review_ready planned=8 authored=8 passed=7 failed=1
+authored 采样序列: [0 ×39, 1, 2, 3, 5, 6, 6, 6, 6, 8, 8 …]
+不同取值: [0, 1, 2, 3, 5, 6, 8] → 中间值 5 个
+```
+
+§18 的判据（"`authored` 从 0 单调涨到 N，且中间值至少出现 2 次"）**满足**；对比修复前那次
+`[0, 8]`（两个值、124 秒）。第二条独立证据：读数行 `updated_at = 09:14:35.282` 而 outbox
+`processed_at = 09:15:30.371` —— 相差 55 秒，读数确实是**管道中途**提交的；修复前这两个
+时间戳逐微秒相同。
+
+顺带复现了 v25 的产出（这批 8 张候选里 4 张 `single_choice` + 1 张 `true_false`）。
+夹具笔记与读数行测完即删（读数表无 FK，需单独删）。
+
+### 仍未做
+
+- §18 的 A1（逐候选提交，让"张数"之外还能报"第几步"）仍按 §21 的判定挂着：前置是重放
+  语义 + 候选幂等，独立成批。现在读数这一半已经真了，界面上"第几步"仍只在 planning 分支
+  有文案（`run.status` 那一列还是跟着大事务走）。
+
+### 顺带记一条别人的红（未修，只报）
+
+`apps/desktop-client/src/renderer/src/components/CardGenerationSurface.tsx` 之外，
+`docs` 里那份 note-to-card 文档提到的 `apps/api` typecheck 两处仍在（`note-service-extra.test.ts`
+要 `cleanTitleCandidate` / `deriveNoteTitle`，而 `modules/note/service.ts` 在途改动已不导出）。
+

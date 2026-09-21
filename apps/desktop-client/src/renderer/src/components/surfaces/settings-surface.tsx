@@ -575,7 +575,7 @@ export function SettingsSurface() {
       invoke("open-settings");
       setSettingsSection(section);
       setHudPage("settings", "returning");
-      setNotice(`已切换到「${workspace.name}」，这一页读取的是新空间的能力投影。`);
+      setNotice(`已切换到「${workspace.name}」，这一页读的是新空间的最新状态。`);
       await load();
     } catch (error) {
       setFailureNotice(gatewayErrorMessage(error));

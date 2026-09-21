@@ -4792,8 +4792,18 @@
   transform: rotate(-0.35deg);
 }
 
+/* 提示正文的容器：图标之外的**所有**内容都装在这里，网格因此恒定两个子项。
+   2026-09-21 实机截图：此前提示层与「只计练习分」那句各是一个网格项，后者被自动
+   放进第二行第一列，`auto` 列按它的 max-content 撑满面板 → 提示被挤成竖排单字。 */
+.hud-surface .learning-run-hint__body {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
 /* 两级提示同框按序展示（复盘 #11：第二级不再另起一个按钮）。 */
 .hud-surface .learning-run-hint__levels {
+  min-width: 0;
   margin: 0;
   padding-left: 16px;
   display: grid;

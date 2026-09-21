@@ -182,7 +182,7 @@ export const HUD_PAGES: Readonly<Record<HudPageId, HudPageDefinition>> = {
     id: "goal-detail",
     number: "11",
     title: "理解目标详情",
-    subtitle: "围绕一个主张查看证据、血缘、版本和验证入口",
+    subtitle: "围绕一个主张查看证据、出处、版本和验证入口",
     plate: "workshop",
     companion: {
       mode: "ambient", seat: "left", framing: "bust", interaction: "on-demand", proactive: "silent", draggable: false,
