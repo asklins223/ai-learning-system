@@ -429,3 +429,20 @@
 
 **此刻仓库里唯一不自洽的地方（不是本批次改的）**
 `apps/api/src/modules/note/document-state.ts` 是并行 agent 的**未跟踪新文件**（`git status` = `??`），`npx tsc` 在它上报 3 组错（`Uint8Array` 不能赋给 `Buffer`、`PgColumn + number`）。api 测试不受影响（1403 pass / 0 fail），但 `apps/api` 的 typecheck 现在因它不干净——我只改了 `card-generation-v2/generation-run-service.ts` 和它的测试，报错文件列表里只有这一个。
+
+## 7.1 #6 的线上实证（补 §3.5 里挂着的最后一跳）
+
+真卡 `5c8ae1f4`（run 406b213c 那批）→ 文本作答 → 走真 `assessment_critic`：
+`learning_assessments.source=assessment_critic / status=completed`，api 日志
+`critic verdicts=3 … write-back done`，`rubric_results` 三条反馈**全部非空且各自指出一处缺失**：
+
+- `recall → missing | 未提及语言模型生成语义token这一步骤`
+- `recall → missing | 未提及流匹配模块还原声学细节这一步骤`
+- `recall → missing | 未提及声码器输出波形这一步骤`
+
+答案是我故意写偏的（只讲基础声学模型/继续预训练/对齐器），三条判 missing 是对的，
+所以这不是"总能拿到一句泛泛反馈"，而是**判分内容与作答内容对得上**。
+（另记一次自己的错：脚本轮询 120 秒就报了 `pending`，实际判分在那之后立刻完成——
+读结果要用库里的终态，别信一次轮询窗口。）
+
+至此 18 条里最后一处"只有单测、没在线上验过"补齐。
