@@ -87,12 +87,17 @@ describe(`Migration ${TAG} — 候选目标/版本唯一索引`, () => {
     assert.match(normalized, /^CREATE UNIQUE INDEX/i, "除了 drop 旧索引，这个迁移只应当新建一条索引");
   });
 
-  it("journal 登记了它，且排在既有尾部之后（不重编号别人的条目）", () => {
+  it("journal 登记了它，且 idx 与数组位置一致（被重编号/挪位就会红）", () => {
     const entries = readJournal();
     const position = entries.findIndex((entry) => entry.tag === TAG);
     assert.ok(position >= 0, "没登记进 journal 的迁移永远不会被应用");
-    assert.equal(position, entries.length - 1, "新条目应当追加在尾部");
-    assert.equal(entries[position].idx, entries.length - 1);
+    // 不要求它是最后一条——别人也会往后追加。要求的是清单自身自洽：
+    // 位置 = idx = when 单调，三者任一对不上都意味着有人重编号或插队。
+    assert.equal(entries[position].idx, position, "idx 与数组位置不一致 → 有人重编号了");
+    if (position > 0) {
+      assert.ok(entries[position].when > entries[position - 1].when,
+        "when 不比前一条大 → 应用顺序会与本迁移的预期相反");
+    }
   });
 
   it("drizzle schema 声明了同名索引（代码与库不许各说各话）", () => {
