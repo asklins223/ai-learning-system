@@ -1335,3 +1335,26 @@ gauge    存在、未被 hidden 遮住，aria-valuenow=49
 下次动这块先做这个决定，不再"等下一次"。
 
 夹具笔记 `a75da5d4` 已进回收站（软删可恢复），它留下的 6 张候选未激活。
+
+## 36. 结算事件能不能活着走出 api：能
+
+§34 说"事件暂时只落库"，那还差一步没查：它出不出得来（这个仓库的事件出口有一张
+`BLOCKED_EVENT_PAYLOAD_KEYS`，`answer`/`front`/`objectiveDraft` 这类键会被递归删掉，
+未知键也可能被过滤，不验就不知道）。
+
+做法：给一条真实 run 手工插一条缺额事件（载荷故意带上 `misses[]` 与 `deliveredForm: null`
+这种最容易在过滤里丢的形状），走 `GET /v2/card-generation-runs/:runId/events` 读回来：
+
+```json
+{"eventSeq": 29, "eventType": "card_generation.practice_quota_short",
+ "payload": {"misses": [{"requiredForm": "matching", "deliveredForm": null,
+               "objectiveLocalId": "obj-atom-2"}], "metCount": 1, "requiredCount": 3}}
+```
+
+原样出来了：事件类型没被白名单挡掉，嵌套数组里的字段一个没少，`null` 也没被抹成缺键。
+SSE 走的是同一个查询（`getGenerationRunEventsV2`），所以两条路都通。
+**验证完那条假事件已删掉**（库里现在 `practice_quota_short` 计数 0——两批真跑都没有缺额，
+本来就不该有）。
+
+到这里，配额这一头从"planner 点名 → 作者交付 → 结算 → 事件 → api 出口"整条都能读到了，
+只是界面上还没有任何地方显示它（§26 里留的那个产品决定）。
