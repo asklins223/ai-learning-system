@@ -613,6 +613,8 @@ window.ailearn.learningRun.getResult({ meta, runId: '46fc6801-…' })
 
 **还纠出一处 harness 污染**：`page.setViewportSize()` 在 `connectOverCDP` 的页面上是**真改窗口**，`Emulation.clearDeviceMetricsOverride` 清不掉、`reload` 也还原不回来。所以第一个脚本跑完，后面所有脚本的"默认档"量的其实是上一个脚本留下的尺寸——v-b8p15 有一版 `default` 与 `short-1200x450` 数字完全相同就是这个原因。改成 `captureViewport()` / `restoreViewport(original)`（跑前记原尺寸、跑完显式设回去），并把实例基准设成 1280×800，三档全部重跑一遍才算数。
 
+**由此得出一条硬约束**：这套三档量法**只能对着自己另起的实例跑**（`npx electron-vite dev -w --remoteDebuggingPort 9232 -- --user-data-dir=/tmp/objflow-udd2`，脚本用 `OBJFLOW_CDP` 指过去）。连到用户那个 9222 上跑，等于每量一档就把用户的窗口真尺寸改一次，而且不会自己还原。
+
 测试：`WorkspaceLibrarySurface.next-action.test.tsx` 4 例 + `WorkspaceLibrarySurface.lineage.test.tsx` 2 例，**每条都做过变异检验**（动词再印一遍 → 1 红；拿掉 `onClick` → 1 红；拿掉 labelledby/describedby → 1 红；`disabled={starting}` → 1 红；行内重新报 0 条 → 1 红；把条数整条删掉 → 1 红）。CSS 侧另加 2 条静态守卫（紧凑档不得再降这块的字号；动词/说明的无条件字号 ≥14/≥12），也各自红过。
 
 **P15 原文方案里没做的一半**：把腾出来的右栏空间还给「这题会怎么问」的预告（§9.2）。那需要先定产品口径，不在本批。
