@@ -210,3 +210,74 @@ test("到终态之后读数退役：候选表才是真相，读数不得反超",
   // review_ready 却没有候选行 = 这条 run 是测试造出来的终态；重点是"读数不再参与"。
   assert.equal((await readRunView())?.progress?.authored, 0);
 });
+
+/**
+ * 最后一条要钉的是**tick 点落在活路径上**：前四条只证明"有人调用写入函数时它是对的"，
+ * 而调用点在 `mapWithConcurrency` 的循环体里——如果那个位置其实在死支上，前四条照样全绿。
+ * 所以这里用**确定性 provider**（不出网、不花钱）把整条真管道跑一遍，再要求读数表里
+ * 留下的正是最后一次 tick 的数字。
+ */
+test("真跑一遍确定性管道：作者循环里的 tick 确实落了盘", async () => {
+  // 前四条用例把那条手搓 run 停在 authoring/review_ready 上，而 in-flight 守卫是按
+  // 笔记判的——不收尾就再也建不了新 run（这正是 §21 里 A1 会撞上的同一道守卫）。
+  await admin`UPDATE card_generation_runs_v2 SET status = 'cancelled' WHERE id = ${runId}`;
+  const { createGenerationRunV2 } = await import(
+    "../../../../apps/api/src/modules/card-generation-v2/generation-run-service.ts"
+  );
+  const created = await createGenerationRunV2(
+    { workspaceId: WORKSPACE_ID, userId: USER_ID },
+    VERSION_ID,
+    {
+      version: 2,
+      noteVersionId: VERSION_ID,
+      sourceScope: { kind: "whole_note" },
+      learningGoal: "understand",
+      detailThreshold: "balanced",
+      quantity: { kind: "adaptive" },
+      clientRequestId: `live-progress-pipeline-${randomUUID()}`,
+    },
+    `live-progress-pipeline-${randomUUID()}`,
+  );
+  const pipelineRunId = created.runId;
+
+  // 只从 pending 认领：dev 容器里的 worker 也在轮询同一张库，被它抢走时这条断言
+  // 会明确喊出来（而不是把"谁的租约"当成测试前提）。
+  const leaseToken = randomUUID();
+  const claimed = await admin`
+    UPDATE card_generation_run_outbox_v2
+    SET status = 'processing', started_at = now(), lease_expires_at = now() + interval '30 minutes',
+        lease_token = ${leaseToken}
+    WHERE run_id = ${pipelineRunId} AND job_type = 'card_generation_plan' AND status = 'pending'
+    RETURNING id, workspace_id, run_id, job_type, payload
+  `;
+  assert.equal(claimed.length, 1, "dev 容器的 worker 抢走了这条 job（重跑即可）");
+  const row = claimed[0] as { id: string; workspace_id: string; run_id: string; job_type: string; payload: Record<string, unknown> };
+
+  const { processV2OutboxJob } = await import("../handlers/card-generation-v2-handler.ts");
+  await processV2OutboxJob({
+    id: row.id, workspaceId: row.workspace_id, runId: row.run_id,
+    jobType: row.job_type, payload: row.payload as Record<string, unknown>, leaseToken,
+  });
+
+  const [jobState] = await admin`
+    SELECT status, last_error FROM card_generation_run_outbox_v2 WHERE id = ${row.id}
+  ` as unknown as Array<{ status: string; last_error: string | null }>;
+  assert.equal(jobState.status, "completed",
+    `管道没跑完：job=${jobState.status} last_error=${jobState.last_error}`);
+
+  const committed = await admin`
+    SELECT COUNT(DISTINCT candidate_id)::int AS n FROM card_generation_candidates_v2
+    WHERE run_id = ${pipelineRunId}
+  `;
+  const authoredCards = (committed[0] as { n: number }).n;
+  const stored = await admin`
+    SELECT lease_token, progress FROM card_generation_run_progress_v2 WHERE run_id = ${pipelineRunId}
+  `;
+  const live = stored[0] as { lease_token: string; progress: Record<string, number> } | undefined;
+  assert.ok(live, "整条管道跑完，读数表里一行都没有 → tick 点不在活路径上");
+  assert.equal(live.lease_token, leaseToken);
+  // 循环里那张卡一张卡地 tick 过：最后一次必须等于**真正写进候选表的张数**。
+  assert.ok(authoredCards >= 1, `确定性管道没写出任何候选（${authoredCards}），这条断言就无从判断`);
+  assert.equal(live.progress.authored, authoredCards);
+  assert.equal(live.progress.plannedCards >= authoredCards, true);
+});

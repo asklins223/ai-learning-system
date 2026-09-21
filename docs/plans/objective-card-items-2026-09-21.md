@@ -521,3 +521,44 @@ route: "/v2/card-generation-runs"  err: { category: "database", name: "Error" }
 一开始也起不来，我改成自己落 run 行绕开了它——**但没有替别人把 0248 应用到共享开发库**，
 那是他们的在途决定。谁先跑 `db:migrate`（或应用 0248），这条 500 就消失；
 在那之前任何"真跑一次看阶梯"都做不了。
+
+## 22. 真跑阶梯：一次被并发保存杀掉，改成用确定性管道把它钉死
+
+0248 由 note 侧应用之后（`notes.share_scope` 已存在），`POST /v2/card-generation-runs`
+恢复到 202（我第一版探针按 `st==200` 判断，直接把脚本吓退了——202 才是受理码）。
+挑了一篇新笔记（自造夹具，1162 字）建 run `f5ca6d61`：
+
+```
+07:51:50 V2 outbox job processing / V2 pipeline route classified
+07:51:55 WARN V2 card generation outbox poll failed  (relation_error：交错/区块那对关系被判矛盾)
+07:53:54 [tsx] change in ./src/handlers/companion-dialogue-content.ts Restarting...
+07:53:59 [tsx] Process didn't exit in 5s. Force killing...
+```
+
+**整条管道在作者阶段被并发保存 force kill**，outbox 停在 `processing`、租约挂到 08:23:50，
+run 停在 `planning`——这正是记忆里那条"崩一次赔 30 分钟 + 重投要再花一遍钱"。
+我没有手动回队再跑一次：那等于为同一个测量再付一次全量 LLM，而且在这个会话里
+companion 侧平均每 2-4 分钟存一次盘，第二次大概率同样被杀。
+
+改成把**真正还没证明的那件事**钉成确定性测试（0 次 AI 调用）：前四条用例只证明
+"调用写入函数时行为正确"，而调用点在 `mapWithConcurrency` 的循环体里——**位置在不在活路径上**
+是它们测不到的。新增第 5 条用例用确定性 provider 把整条真管道跑完，然后断言
+读数表里留下的最后一次 tick **等于候选表真正写出的张数**（`authored === COUNT(DISTINCT candidate_id)`，
+且 ≥1）。这条断言对两种退化都会红：把循环里的 tick 删掉 → 读数停在 0；两处都删 → 没有行。
+
+### 顺带修的一处别人的红（在本文档范围内）
+
+`workers/ai-worker/src/integration-tests/card-generation-v2-postgres.integration.ts`
+**自迁移 0237 起就在 before 钩子里红**：种子还在往 `workspaces` 写 `ai_consent_version`
+（42703）。已改成只写 `(id, owner_id, name)`。修完之后它红在更深的一处：
+`pollV2Outbox(5)` 返回 0——**dev 容器里的 worker 在轮询同一个库，会把 pending job 抢走**。
+这是共享开发库上的结构性竞争，不是那条测试自己的错，我没有改它的认领方式（它测的就是
+poll 路径）。我新加的那个文件因此用 `UPDATE … WHERE status='pending' RETURNING` 守卫式认领，
+抢不过时明确喊"dev 容器的 worker 抢走了这条 job（重跑即可）"，而不是把租约归属当前提。
+
+### 还没做
+
+§18 的第 1 条判据（真 LLM 跑一次、HTTP 采到 ≥2 个中间值）仍未测。它现在唯一缺的是
+**一个没有并发保存的窗口**：机制本身已经被第 5 条用例钉住，剩下的只是"真 LLM 的时间尺度上
+每一格都会被采到"。下次跑之前先确认 worker 进程能安静几分钟，再考虑手动回队。
+夹具笔记已删除（`notes` 级联清掉了它的 run/outbox/候选），读数表当前 0 行。

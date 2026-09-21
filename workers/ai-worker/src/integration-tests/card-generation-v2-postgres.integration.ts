@@ -47,8 +47,10 @@ before(async () => {
     await tx`INSERT INTO users (id, email, password_hash)
       VALUES (${USER_ID}, ${`v2-it-${USER_ID}@example.invalid`}, 'unused')
       ON CONFLICT (id) DO NOTHING`;
-    await tx`INSERT INTO workspaces (id, owner_id, name, ai_consent_version, ai_consent_at, ai_consent_by)
-      VALUES (${WORKSPACE_ID}, ${USER_ID}, 'V2 IT', 'v1', now(), ${USER_ID})
+    // 同意三列自 0237 起在 `user_ai_settings`，不在 `workspaces` 上；这里还按旧列插入，
+    // 会让整条纵切在 before 钩子里就报 42703（自 0237 起一直如此）。
+    await tx`INSERT INTO workspaces (id, owner_id, name)
+      VALUES (${WORKSPACE_ID}, ${USER_ID}, 'V2 IT')
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role)
       VALUES (${WORKSPACE_ID}, ${USER_ID}, 'owner') ON CONFLICT DO NOTHING`;
