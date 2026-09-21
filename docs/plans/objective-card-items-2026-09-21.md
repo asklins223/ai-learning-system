@@ -1711,3 +1711,24 @@ worker 侧传 `candidate.objective.practiceItem` 的 `options.length`，api 侧
 **还没有真实证据的两件事**（不写成已完）：v27 之后模型到底会不会写够 3 个选项——需要一次
 真跑；而库里能跑长文的笔记此刻全被 `review_ready` / `needs_attention` 批次占着
 （`POST /v2/card-generation-runs` 实测回 `note_generation_in_flight`）。
+
+## 48. 本树此刻的 arbiter 事实（给 A1 真正落地那一刻准备）
+
+三个会话在两份不同的树上各说各的，所以这里只记可复跑的事实（`bash scripts/check-a1-landed.sh`）：
+
+- 迁移 `0253_candidate_objective_revision_unique.sql` 建的是**五列**唯一索引：
+  `(workspace_id, run_id, plan_version, plan_objective_local_id, revision)`；
+- dev 库里 `pg_indexes` 实际存在的也就是这一条（另一条唯一索引是 `candidate_revision_id`）；
+- 此刻 `card-generation-v2-handler.ts` 里**没有**任何按目标的 `ON CONFLICT` —— A1 的逐候选提交
+  还没进这条线（`git log -S` 与 `grep -c` 双判据）。
+
+于是留下一条硬约束，谁落 A1 谁必须满足其一，否则每张卡提交一次就失败一次：
+
+1. 冲突目标写成五列，与库里的 arbiter **逐列一致**（`ON CONFLICT` 的 arbiter 不要求是索引名前缀，
+   但列集合必须与某个唯一索引完全匹配，多一列少一列都不行）；或
+2. 先加一条与代码列集合一致的四列唯一索引（走 `02xx` 迁移 + 进 `meta/_journal.json`，
+   并且注意 §38 的教训：四列的键**不含 `plan_version`**，replan 用同一批 `obj-atom-N` 目标号
+   出新计划时会被它误伤，所以要连同 replan 那条路一起想清楚）。
+
+顺带：本次审计里"库里 8 道 `single_choice` 有 3 道只有 2 个选项"与"宽度规则只翻 1 张卡"
+两数已记 §47；结算侧的宽度下限已生效并有真实数据走过缺额分支。
