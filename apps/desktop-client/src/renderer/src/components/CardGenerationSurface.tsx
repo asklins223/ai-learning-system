@@ -806,14 +806,19 @@ export function CardGenerationSurface() {
                     {cardGenerationStatusLabel(run.status)}
                   </strong>
                   <span className="card-generation-progress__meta">
-                    {progressView.inFlight
-                      ? "这一步的中间计数要等这一批写完才读得到"
-                      : `已完成 ${progressDone} 步 · 待进行 ${progressTodo} 步`}
-                    {progressView.detail ? ` · ${progressView.detail}` : ""} · 最后更新 {formatRelative(run.updatedAt)}
+                    {[
+                      // 在途时不报步数（`run.status` 还在那个大事务里），但张数是实时
+                      // 读数（0249），所以 `detail` 照旧显示——以前这里整块换成一句
+                      // "中间计数要等这一批写完"，那句现在已经是假话了。
+                      ...(progressView.inFlight
+                        ? []
+                        : [`已完成 ${progressDone} 步 · 待进行 ${progressTodo} 步`]),
+                      ...(progressView.detail ? [progressView.detail] : []),
+                      `最后更新 ${formatRelative(run.updatedAt)}`,
+                    ].join(" · ")}
                   </span>
                 </div>
                 <div
-                  hidden={progressView.inFlight}
                   className="card-generation-progress__gauge"
                   role="progressbar"
                   aria-label="整体进度"

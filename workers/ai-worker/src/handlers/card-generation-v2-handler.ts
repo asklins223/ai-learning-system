@@ -104,6 +104,7 @@ import type {
   CardHintPairV2,
   GenerationSemanticSpecV2,
   GenerationInputSnapshotV2,
+  CardGenerationLiveProgressV2,
 } from "@ailearn/shared/card-generation-v2-contracts";
 
 // ─── Outbox claim ────────────────────────────────────────────────────────
@@ -343,6 +344,55 @@ async function fenceV2OutboxLease(tx: WorkerTransaction, job: PendingOutboxJob):
   `);
   if (rows.length === 0) {
     throw new Error("V2 outbox lease lost before transaction commit");
+  }
+}
+
+/**
+ * 写一次生成过程的**实时进度读数**（迁移 0249，实走复盘 #2）。
+ *
+ * 为什么要有这个东西：主管道跑在一个分钟级事务里（`processCardGenerationPlan` 起
+ * 那个 `withWorkerWorkspaceTransaction`），期间候选行与 `run.status` 对外都不可见，
+ * 所以 `progress.authored` 在整段生成里恒为 0——那一格进度不是"跳过了几个值"，是
+ * 压根读不到。这里只把**读数**提前落盘，产物仍然原子提交（逐候选提交是 §21 的 A1，
+ * 它的前置是重放语义 + 候选幂等，另一批）。
+ *
+ * 两道刻意设计：
+ * - 租约核对是**只读**的。管道事务里的 `fenceV2OutboxLease` 会 UPDATE 同一行 outbox
+ *   并持锁到提交，这里若加 `FOR UPDATE` 就会排在它后面阻塞分钟级，短事务就白短路了。
+ * - 失败**不抛**。读数写不进去的代价是"那一格不动"，不是"这批卡丢了"。
+ */
+export async function writeCardGenerationLiveProgress(
+  job: PendingOutboxJob,
+  progress: CardGenerationLiveProgressV2,
+): Promise<boolean> {
+  try {
+    return await withWorkerWorkspaceTransaction(
+      { workspaceId: job.workspaceId, userId: null },
+      async (tx) => {
+        const alive = await tx.execute(sql`
+          SELECT 1 FROM public.card_generation_run_outbox_v2
+          WHERE id = ${job.id} AND status = 'processing' AND lease_token = ${job.leaseToken}
+            AND lease_expires_at > now()
+          LIMIT 1
+        `);
+        if (alive.length === 0) return false;
+        await tx.execute(sql`
+          INSERT INTO public.card_generation_run_progress_v2
+            (run_id, workspace_id, lease_token, progress, updated_at)
+          VALUES (${job.runId}, ${job.workspaceId}, ${job.leaseToken},
+                  ${JSON.stringify(progress)}::jsonb, now())
+          ON CONFLICT (run_id) DO UPDATE
+          SET lease_token = EXCLUDED.lease_token,
+              progress = EXCLUDED.progress,
+              updated_at = now()
+        `);
+        return true;
+      },
+    );
+  } catch (error) {
+    logger.warn({ runId: job.runId, err: sanitizeOperationalError(error) },
+      "[v2-pipeline] live progress write skipped");
+    return false;
   }
 }
 
@@ -1412,6 +1462,10 @@ const existingObjRows = (await tx.execute(sql`
     };
     /** 提示与候选并行收集：候选对象参与审计哈希，提示不参与（迁移 0234）。 */
     const authoredHints = new Map<string, CardHintPairV2>();
+    // 0249：计划已冻结、作者还没开工 → 先把分母写出去，界面这一刻起就有"共 N 张"。
+    await writeCardGenerationLiveProgress(job, {
+      plannedCards: planObjectives.length, authored: 0, gatePassed: 0, gateFailed: 0,
+    });
     const candidatePipelines = await mapWithConcurrency(
       planObjectives,
       V2_STAGE_CONCURRENCY,
@@ -1435,6 +1489,11 @@ const existingObjRows = (await tx.execute(sql`
         }
         authoredByIndex[index] = candidate;
         authoredCount += 1;
+        // 0249：每写完一张 tick 一格。这一行在 mapWithConcurrency 的循环体里，
+        // 所以 N 张卡就有 N 次毫秒级短事务——而候选仍然要等整批提交才可见。
+        await writeCardGenerationLiveProgress(job, {
+          plannedCards: planObjectives.length, authored: authoredCount, gatePassed: 0, gateFailed: 0,
+        });
         if (V2_SPECULATIVE_PEDAGOGY && authoredCount === planObjectives.length && !speculativePedagogy) {
           speculativePedagogy = startSpeculativePedagogy(
             authoredByIndex.filter((c): c is LearningCardCandidateRevisionV2 => c !== undefined),

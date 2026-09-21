@@ -436,7 +436,7 @@ export async function getGenerationRunV2(ctx: RunContext, runId: string) {
     // 进度只在单 run 读取时聚合：这是生成工作台与笔记页订阅后重读的那一条，
     // 列表接口（active runs）不带，避免每次房间刷新都多打一遍候选表。
     const progress = await readGenerationProgressV2(
-      tx, ctx.workspaceId, runId, rows[0].currentPlanVersion,
+      tx, ctx.workspaceId, runId, rows[0].currentPlanVersion, rows[0].status,
     );
     return serializeRunPublic(rows[0], tx, progress);
   });

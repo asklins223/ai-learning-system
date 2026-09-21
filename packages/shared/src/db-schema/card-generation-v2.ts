@@ -610,6 +610,30 @@ export const cardGenerationRunOutboxV2 = pgTable(
   }),
 );
 
+/**
+ * 0249：生成过程的实时进度读数（只读投影，不是产物）。
+ * 为什么没有指向 runs 的外键、为什么带 `leaseToken`、为什么到终态不清理——
+ * 三处的理由都写在迁移 0249 的表头注释里（一句话版本：外键的 KEY SHARE 会排在
+ * 管道事务那把分钟级 `FOR UPDATE` 后面，读数就永远刷不进来）。
+ */
+export const cardGenerationRunProgressV2 = pgTable(
+  "card_generation_run_progress_v2",
+  {
+    runId: uuid("run_id").primaryKey(),
+    workspaceId: uuid("workspace_id").notNull(),
+    leaseToken: uuid("lease_token").notNull(),
+    progress: jsonb("progress").notNull().default(sql`'{}'::jsonb`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    progressShapeCheck: check(
+      "card_generation_run_progress_v2_progress_chk",
+      sql`jsonb_typeof(${t.progress}) = 'object'`,
+    ),
+    workspaceIdx: index("card_generation_run_progress_v2_workspace_idx").on(t.workspaceId),
+  }),
+);
+
 // ─── 0138 补表（§18 审查修复） ─────────────────────────────────────────────
 // 依据 docs/evidence/learning-companion/20-learning-card-v2-implementation-review.md；
 // 与迁移 0138_card_generation_v2_review_fixes.sql 保持一致。

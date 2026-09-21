@@ -91,7 +91,15 @@ export function cardGenerationProgressView(
   let fraction = 0;
   let detail: string | null = null;
   if (status === "planning") {
-    detail = "正在规划这一批要出哪些目标";
+    // 0249 起，planning 阶段里也能报出数：候选行要等整批提交才可见，但 worker 每写完
+    // 一张就用一个毫秒级短事务把计数写进进度读数（`run.status` 那一列仍在大事务里）。
+    // 所以"共 8 张、已写 3 张"是真的，而"第几步"仍然不是。
+    if (planned > 0) {
+      fraction = Math.min(authored / planned, 0.95);
+      detail = `已写出 ${authored} / ${planned} 张候选`;
+    } else {
+      detail = "正在规划这一批要出哪些目标";
+    }
   } else if (status === "authoring") {
     fraction = planned > 0 ? Math.min(authored / planned, 0.95) : 0;
     detail = planned > 0 ? `已写出 ${authored} / ${planned} 张候选` : `已写出 ${authored} 张候选`;
@@ -103,11 +111,11 @@ export function cardGenerationProgressView(
 
   const percent = Math.min(100, Math.round(((stage + fraction) / cardGenerationStageCount) * 100));
   /**
-   * 在途时不给"第 N 步"和百分比：整条生成管道跑在一个事务里，`run.status` 与候选行
-   * 都到提交那一刻才对外可见（2026-09-21 两次真跑实测都是 planning → 终态一步跨完，
-   * 且 `authored` 在中途恒为 0）。所以任何进行中的刻度都只会从约 12% 直接跳到 100%。
-   * 与其亮一个不会动的进度，不如说清楚"写完一批一次给齐"。
-   * 真要做到逐张可见，得把落库挪出那个事务并换掉防双付的锁——不是改文案能解决的。
+   * 在途时不给"第 N 步"：整条生成管道跑在一个事务里，`run.status` 到提交那一刻才对外
+   * 可见（2026-09-21 两次真跑实测都是 planning → 终态一步跨完）。0249 把**候选计数**
+   * 挪出了那个事务（进度读数表），所以"已写 3 / 8 张"现在是真的、会一格格走；
+   * 但"第几步"仍要等状态真的提交——提前报等于把同一屏上的两个读数对不上。
+   * 真要做到逐张出卡（连阶段一起活），前置是 §21 的 A1：重放语义 + 候选幂等。
    */
   const inFlight = status === "planning" || status === "authoring" || status === "checking";
   const eyebrow = inFlight

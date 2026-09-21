@@ -166,7 +166,7 @@ describe("CardGenerationSurface · 生成工作台", () => {
    * 整体百分之多少"，而不是只把裸状态码摆出来让用户自己换算。四段轨道是同一
    * 件事的另一半张脸 —— 所以"填满几段"和百分比必须是同一个数。
    */
-  it("生成中页只说「写完一批一次给齐」，不亮读不到的步数与百分比", async () => {
+  it("生成中页不亮读不到的步数，但候选计数照旧写出来", async () => {
     stubGateway("checking");
     useRoomStore.setState({ activeCardGenerationRunId: RUN_ID });
     const { container } = render(<CardGenerationSurface />);
@@ -175,8 +175,14 @@ describe("CardGenerationSurface · 生成工作台", () => {
     const progress = container.querySelector(".card-generation-progress");
     expect(progress?.textContent).toContain("写完一批一次给齐");
     expect(progress?.textContent).toContain("正在做质量检查");
-    expect(progress?.textContent).toContain("中间计数要等这一批写完");
-    expect(progress?.textContent).toContain("这一步的中间计数");
+    // 0249 之后计数是实时读数，所以那句"中间计数要等这一批写完"已经不成立；
+    // 步数依旧不报（`run.status` 还在管道的大事务里）。
+    expect(progress?.textContent).not.toContain("中间计数");
+    // 步数只在 meta 这一行，不与四段轨道的"已完成/待进行"圆点混淆。
+    const meta = container.querySelector(".card-generation-progress__meta");
+    expect(meta?.textContent).not.toContain("待进行");
+    expect(meta?.textContent).not.toContain("已完成");
+    expect(progress?.textContent).toContain("正在核对质量门与证据绑定");
     expect(progress?.textContent).toContain("最后更新");
     // checking 落在第三段：前两段已完成、第三段进行中、第四段待进行。
     const steps = [...container.querySelectorAll(".card-generation-progress__step")];
@@ -208,7 +214,7 @@ describe("CardGenerationSurface · 生成工作台", () => {
     await waitFor(() => expect(container.querySelector(".card-generation-progress")).not.toBeNull());
     const progress = container.querySelector(".card-generation-progress");
     expect(progress?.textContent).toContain("已过质量门 2 / 8");
-    expect(progress?.textContent).toContain("中间计数要等这一批写完");
+    expect(progress?.textContent).not.toContain("中间计数");
     const bar = container.querySelector('[role="progressbar"]');
     // 无计数时 checking 恒为 50；有过 2/8 道质量门才往上走一格。
     expect(Number(bar?.getAttribute("aria-valuenow"))).toBeGreaterThan(50);

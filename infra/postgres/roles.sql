@@ -529,6 +529,9 @@ BEGIN
     'candidate_evidence_binding_plans_v2',
     'evidence_eligibility_states_v2',
     'card_generation_run_outbox_v2',
+    -- 0249：worker 写实时进度读数（毫秒级短事务），API 只读。这张表对 runs 没有
+    -- 外键，正是为了让这个写入不排在管道事务那把分钟级 FOR UPDATE 后面。
+    'card_generation_run_progress_v2',
     'learning_target_snapshots_v2'
   ]
   LOOP
@@ -1045,6 +1048,8 @@ BEGIN
       ('candidate_evidence_binding_plans_v2', true, true, true, true),
       ('evidence_eligibility_states_v2', true, true, true, true),
       ('card_generation_run_outbox_v2', true, true, true, true),
+      -- 0249：与上面的授权清单同一条（worker 写实时进度读数）。
+      ('card_generation_run_progress_v2', true, true, true, true),
       ('learning_target_snapshots_v2', true, true, true, true),
       ('card_content_capability_state', true, true, true, false),
       ('card_generation_semantic_specs_v2', true, true, false, false),

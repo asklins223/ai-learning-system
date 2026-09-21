@@ -416,3 +416,108 @@ B（提交 66a0049f）已经让界面不再撒谎。A 做完后，把 B 里那�
 `apps/api` typecheck 现在报两处，都在 note 链路上，不是本批改动：
 `src/__tests__/note-service-extra.test.ts(11,12)` 想要 `cleanTitleCandidate` / `deriveNoteTitle`，
 而 `modules/note/service.ts`（工作区里被在途批次 4.x 改动）已经不导出它们。
+
+## 21. 方案 A 拆成 A1/A2：A1 经调研判定为"现在做会引入永久锁死"，只做 A2
+
+§18 写的 A（fence token 取代整管道行锁）先做了一轮消费方调研（4 个问题，逐条 file:line），
+结果推翻了它自己的前提。两条致命发现：
+
+1. **重放会变成静默空转**：入口守卫是 `handlers/card-generation-v2-handler.ts:1140`
+   `if (run.status !== "planning") return;`。今天 `authoring` 只在那个大事务里写（`:1464`），
+   回滚后仍是 `planning`，所以 reaper 重投的 job 真的会重跑。一旦逐候选提交，
+   `authoring` 已经落库 → 重投的 job 直接 return → 事务收尾把 job 标成 `completed`
+   （`:357`）→ **run 永远停在 `authoring`**。而 `generation-run-service.ts:177-194` 的
+   in-flight 守卫只看 `status + error_code`，`authoring` 既不在豁免里也不在终态里 →
+   这篇笔记之后每次生成都吃 `409 note_generation_in_flight`，还白占一个
+   `MAX_INFLIGHT_RUNS` 槽。reaper 也救不了：它只在 `attempts+1>=6` 时把 run 打成
+   `needs_attention`（`:501-511`），而那 5 次重投每次都空转 completed，attempts 根本不涨。
+2. **候选写入不是幂等的**：`insertAuthoredCandidatesBatched`（`:3156-3193`）是普通多行
+   INSERT，主键 `randomUUID()`，**没有 ON CONFLICT、没有先删后插**。今天的防重复完全来自
+   "行锁 + status==planning"这一对。逐候选提交等于把重复候选直接放出来。
+
+另外两条会让界面变得难看但可接受：`getGenerationRunCandidatesV2`（`generation-run-service.ts:521-543`）
+对 run 状态**零守卫**，逐候选提交后审核页会列出半批；激活的"未决即丢弃"清扫
+（`activation-service.ts:462-472`）会漏掉提交时还不存在的候选。
+
+**结论**：A1 的真实前置是"重放语义 + 候选幂等"（按 `plan_objective_local_id` +
+`card_content_epoch` 建唯一索引、入口守卫改成可续跑的状态机、半提交批次要能被 §7 那类
+豁免识别）。这是独立一批的活，不该塞在"让进度真的走起来"里顺手做。**A1 继续挂着，不改判据。**
+
+### A2（本批做的）：只把读数改成真的，一行锁都不动
+
+用户 #2 抱怨的是"进度不是一格格走的"，不是"卡没一张张冒出来"。所以把**读数**做真，
+把**产物**保持原子提交：
+
+- 新表 `card_generation_run_progress_v2(run_id, workspace_id, lease_token, progress jsonb, updated_at)`，
+  **故意不加 FK**：FK 会对 `card_generation_runs_v2` 取 KEY SHARE，而大事务正持着那一行的
+  `FOR UPDATE`（`:1119-1127`）——加了 FK，进度写入会一直阻塞到整批 LLM 跑完，等于白做。
+- 写进度前先在最简事务里做一次**只读**租约核对（`status='processing' AND lease_token=$token
+  AND lease_expires_at>now()`）。只读是刻意的：大事务里的 `fenceV2OutboxLease`（`:336-347`）
+  会 UPDATE 同一行并持锁到提交，若这里用 `FOR UPDATE` 就会排在它后面阻塞分钟级。
+  核对不过就静默跳过——过期租约的旧 worker 写不进读数。
+-  tick 点就在 `:1437 authoredCount += 1` 旁边：作者循环是 `mapWithConcurrency(planObjectives,
+  V2_STAGE_CONCURRENCY, …)`，每张卡写完各触发一次 ≤1ms 的独立事务，N 张就有 N 格。
+- 读取端 `readGenerationProgressV2`（api `helpers.ts:125-162`）：run 处于
+  `planning/authoring/checking` 且读数行合法时用读数，其余情况仍回候选表数（终态真相不变）。
+  `CardGenerationProgressV1` 的形状一个字段都不改，桌面合同不动。
+- 进度写失败**绝不影响管道**：整段包成 best-effort（记 warn 后继续），读数只是读数。
+- A2 做完**并不能**把 B 的 `inFlight` 分支去掉——这条是我先写错、做完才发现的：
+  `run.status` 的那一列仍然写在大事务里，所以在途期间对外永远是 `planning`，
+  "第 N 步"提前报会和详情页对不上。**留下的就是步数**，被换源的只有候选计数。
+  真正改的是 `detail`：`planning` 分支现在也会说"已写出 3 / 8 张候选"。
+
+### 验收（A2 版判据，替代 §18 第 1 条）
+1. 把某个 run 的 status 置 `authoring` 并用 worker 的写入函数塞读数 → HTTP 轮询必须看到
+   `progress.authored` 从 0 走到中间值（不再恒 0）。
+2. 用**别人的** lease_token 调用同一个写入函数 → 读数行必须 0 影响、内容不变。
+这两条都能用确定性路径验，不烧 AI；真跑留到本批最后测一次阶梯。
+
+### A2 的实测（全部确定性路径，0 次 AI 调用）
+
+新增 `workers/ai-worker/src/integration-tests/card-generation-v2-live-progress-postgres.integration.ts`
+（真 Postgres，写入方以 `ailearn_worker`（NOBYPASSRLS）跑，RLS 与授权清单都被真走一遍）：
+
+| 用例 | 断言 | 改前是否红（人为退化验证） |
+|---|---|---|
+| 读数在提交前就可见 | 候选表 0 行时视图报 `authored=3 / planned=8` | 把 `LIVE_PROGRESS_STATUSES` 清空 → **红**（同时带红第 3 条） |
+| fence：租约被抢走 | 旧 job 再写 → 返回 false，行内容仍是 4 | 把 `if (alive.length === 0) return false` 改成永不返回 → **红** |
+| 租约一死读数退役 | 过期租约 → 视图回到候选表的真 0 | 同上（清空换源） |
+| 到终态读数不参与 | `review_ready` 时报候选表的 0 | — |
+
+界面口径 `cardGenerationProgressView` 补 1 条用例（planning 内 1/4/8 三步 detail 与
+percent 严格递增，且步数仍不报）；同样做过人为退化验证（去掉 planning 分支 → 该条红）。
+生成中那一屏（`CardGenerationSurface.tsx`）随读数换源一起改了两处：
+去掉"这一步的中间计数要等这一批写完才读得到"（0249 之后它是假话）与进度条上的
+`hidden={inFlight}`（条现在会走）。这一改先补了测试（`CardGenerationSurface.review.test.tsx`
+新增"生成中这一屏：张数是实时的"，改前红），并就地改掉两条钉着旧文案的断言
+（`CardGenerationSurface.test.tsx` 里的 `中间计数`）。
+
+计数：worker 集成 4/4、worker 相关单测 67/67、api card-generation-v2 全部 237/237、
+桌面全量 1094/1094（其中本批三张文件 10+16+13）；shared 与桌面 typecheck 干净。
+
+跑真接口那一段（`GET /v2/card-generation-runs/:id`，不是测试进程）：
+
+```
+lease alive   : ('authoring', {'plannedCards': 12, 'authored': 11, 'gatePassed': 5, 'gateFailed': 3})
+lease expired : ('authoring', {'plannedCards': 8,  'authored': 8,  'gatePassed': 5, 'gateFailed': 3})
+```
+
+（拿 `d375f218` 这条已有 run 临时造的租约与读数：活租约时读数**盖过**已提交的 8 张，
+租约过期后自动退回候选表的真相。测完已复原：run 回 `review_ready`、outbox 回
+`completed`、读数表清空。）
+
+### 唯一没测到的那条：真跑阶梯——被别人的在途迁移挡住了（如实报，不替他改）
+
+`POST /v2/card-generation-runs` 现在在跑着的 dev API 上直接 **500**：
+
+```
+route: "/v2/card-generation-runs"  err: { category: "database", name: "Error" }
+```
+
+原因不在本批：工作区里 `notes` 的 drizzle schema 已经带 `share_scope`，而
+`apps/api/src/db/migrations/0248_note_share_scope.sql` 还是**未跟踪文件、也没应用**
+（`information_schema` 查 `notes.share_scope` = 0 列）。`generation-run-service.ts:160`
+是全列 SELECT `notes`，于是创建生成运行直接炸。同一原因让我这条批的集成测试
+一开始也起不来，我改成自己落 run 行绕开了它——**但没有替别人把 0248 应用到共享开发库**，
+那是他们的在途决定。谁先跑 `db:migrate`（或应用 0248），这条 500 就消失；
+在那之前任何"真跑一次看阶梯"都做不了。

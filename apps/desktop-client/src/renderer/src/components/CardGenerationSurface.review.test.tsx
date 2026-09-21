@@ -27,7 +27,7 @@ type CandidateState = {
   publishState: string;
 };
 
-function stubGateway(initial: readonly CandidateState[], runOverride: { status?: string; recovery?: unknown } = {}) {
+function stubGateway(initial: readonly CandidateState[], runOverride: { status?: string; recovery?: unknown; progress?: Record<string, number> | null } = {}) {
   const state = {
     candidates: initial.map((candidate) => ({ ...candidate })),
     reviewCalls: [] as unknown[],
@@ -56,6 +56,8 @@ function stubGateway(initial: readonly CandidateState[], runOverride: { status?:
     recovery: ["needs_attention", "failed", "stale"].includes(state.status)
       ? runOverride.recovery ?? null
       : null,
+    // 生成中的候选计数自 0249 起来自服务端的实时读数，stub 要能把它带进来。
+    progress: runOverride.progress ?? null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   });
@@ -280,6 +282,29 @@ describe("CardGenerationSurface · 候选审核", () => {
     const practiceRow = [...document.querySelectorAll("dt")]
       .find((dt) => dt.textContent === "随卡练习")?.nextElementSibling?.textContent ?? "";
     expect(practiceRow).toBe("判断题 · 对不对二选一");
+  });
+
+  it("生成中这一屏：张数是实时的，进度条不再整块藏起来", async () => {
+    stubGateway(
+      [{ candidateId: "cand-1", statement: "第一张", reviewDecision: "undecided", publishState: "unpublished" }],
+      {
+        status: "planning",
+        progress: { plannedCards: 8, authored: 3, gatePassed: 0, gateFailed: 0 },
+      },
+    );
+    useRoomStore.setState({ activeCardGenerationRunId: RUN_ID });
+    render(<CardGenerationSurface />);
+
+    await waitFor(() => {
+      expect(document.querySelector(".card-generation-progress__meta")?.textContent).toBeTruthy();
+    });
+    const meta = document.querySelector(".card-generation-progress__meta");
+    expect(meta?.textContent).toContain("已写出 3 / 8 张候选");
+    // 0249 之前这句是真的（计数要到整批提交才读得到），现在留着就是一句谎。
+    expect(meta?.textContent).not.toContain("要等这一批写完");
+    expect(document.querySelector(".card-generation-progress__gauge")?.hasAttribute("hidden")).toBe(false);
+    // 步数依旧不报：run.status 还在那个大事务里。
+    expect(meta?.textContent).not.toContain("待进行");
   });
 
   it("没配练习件的卡直说没有，不假装有一道题", async () => {

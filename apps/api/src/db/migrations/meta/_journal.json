@@ -1716,6 +1716,13 @@
       "tag": "0245_objective_practice_items",
       "breakpoints": true,
       "when": 1789793389643
+    },
+    {
+      "idx": 245,
+      "version": "7",
+      "tag": "0249_card_generation_live_progress",
+      "breakpoints": true,
+      "when": 1789800000003
     }
   ]
 }

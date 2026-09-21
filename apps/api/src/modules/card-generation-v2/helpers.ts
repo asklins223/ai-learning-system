@@ -13,7 +13,7 @@ import {
 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
 import { noteBlocks, notes } from "@ailearn/shared/db-schema/note";
-import { cardGenerationRunStatusV2Schema, isCandidateReviewReadyV2 } from "@ailearn/shared/card-generation-v2-contracts";
+import { cardGenerationRunStatusV2Schema, cardGenerationLiveProgressV2Schema, isCandidateReviewReadyV2 } from "@ailearn/shared/card-generation-v2-contracts";
 import { projectCardGenerationRecoveryV1 } from "./desktop-projection.ts";
 import type { CardGenerationProgressV1 } from "@ailearn/shared/card-generation-desktop-contracts";
 // 2026-08-24（AI 设计审查 §4.4 第二批）：ServiceError 继承 shared 纯逻辑层的
@@ -116,17 +116,29 @@ export async function checkSourceOutdated(
   return hashCanonicalV2("card-generation-v2/source-content", { blockContents }) !== runSourceContentHash;
 }
 /**
+ * 哪些状态下"候选表还数不出真相"，因而要信实时读数（0249）。
+ * 正是管道还在跑的这三态；到了终态，候选已经提交，读数自然退役（它也不会再被更新）。
+ */
+const LIVE_PROGRESS_STATUSES = new Set(["planning", "authoring", "checking"]);
+
+/**
  * 一次生成的逐候选进度聚合（2026-09-20 实走复盘 #2）。
  *
  * `run.status` 到 `authoring` 就停住不动，候选是一张张写出来的，所以进度必须回到
  * 候选表上数。取每个 candidate 的**最新修订**再分组——一次生成里同一候选会被改写
  * 多次（rewrite 路径），按行数会虚高。
+ *
+ * 但候选表本身也救不了"正在生成的那几分钟"：整条管道跑在一个事务里，候选行要到
+ * 提交才可见，所以 `authoring` 期间的读数**恒为 0**（两次真跑实测）。0249 起 worker
+ * 每写完一张就用一个毫秒级短事务把读数写到 `card_generation_run_progress_v2`，
+ * 未到终态时优先信它——见下面的 `LIVE_PROGRESS_STATUSES`。
  */
 export async function readGenerationProgressV2(
   tx: ApiTransaction,
   workspaceId: string,
   runId: string,
   currentPlanVersion: number,
+  runStatus: string,
 ): Promise<CardGenerationProgressV1> {
   const progress: CardGenerationProgressV1 = {
     plannedCards: 0, authored: 0, gatePassed: 0, gateFailed: 0,
@@ -158,6 +170,31 @@ export async function readGenerationProgressV2(
   progress.gatePassed = counts.get("passed") ?? 0;
   progress.gateFailed = counts.get("failed") ?? 0;
   progress.authored = [...counts.values()].reduce((sum, count) => sum + count, 0);
+  if (LIVE_PROGRESS_STATUSES.has(runStatus)) {
+    const liveRows = await tx.execute(sql`
+      SELECT p.progress AS progress
+      FROM public.card_generation_run_progress_v2 p
+      -- 只认"这条读数出自一条还活着的租约"。写读数的短事务自己也核这一条，但那一侧
+      -- 拦不住"worker 崩了、读数留在半路"——加了这个 JOIN，租约过期后陈旧读数就自动
+      -- 不可见，界退回候选表（此时是 0，那也是真的 0）。
+      JOIN public.card_generation_run_outbox_v2 j
+        ON j.run_id = p.run_id
+       AND j.status = 'processing'
+       AND j.lease_token = p.lease_token
+       AND j.lease_expires_at > now()
+      WHERE p.workspace_id = ${workspaceId} AND p.run_id = ${runId}
+      LIMIT 1
+    `);
+    const live = cardGenerationLiveProgressV2Schema.safeParse(
+      (liveRows[0] as { progress?: unknown } | undefined)?.progress ?? null,
+    );
+    if (live.success) {
+      // 取 max：读数是"已写到哪"，候选表是"已提交到哪"，任何一方都不该被对方抹掉。
+      // 门数（gatePassed/gateFailed）只从候选表来——它们只在提交后才有意义。
+      progress.plannedCards = Math.max(progress.plannedCards, live.data.plannedCards);
+      progress.authored = Math.max(progress.authored, live.data.authored);
+    }
+  }
   return progress;
 }
 

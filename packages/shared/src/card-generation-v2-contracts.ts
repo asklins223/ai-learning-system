@@ -1342,3 +1342,21 @@ export function parseCardActivationReceiptV2(
 export function parseCandidateRevealV2(input: unknown): CandidateRevealV2 {
   return candidateRevealV2Schema.parse(input);
 }
+
+// ─── 0249 实时进度读数（migration 0249，计划 §21 的 A2）─────────────────────
+
+/**
+ * 写进 `card_generation_run_progress_v2.progress` 的形状。它与桌面合同里的
+ * `cardGenerationProgressV1Schema` **同形**（同样那四格计数），读取端因此可以在
+ * "实时读数 / 候选表"之间整体换源，界面不必知道数字是从哪来的。
+ *
+ * 定义在服务端合同而不是复用桌面合同：这张表是 worker→API 的内部通道，
+ * 它的合同不该由桌面端文件来定。
+ */
+export const cardGenerationLiveProgressV2Schema = z.strictObject({
+  plannedCards: z.number().int().min(0).max(1000),
+  authored: z.number().int().min(0).max(1000),
+  gatePassed: z.number().int().min(0).max(1000),
+  gateFailed: z.number().int().min(0).max(1000),
+});
+export type CardGenerationLiveProgressV2 = z.infer<typeof cardGenerationLiveProgressV2Schema>;

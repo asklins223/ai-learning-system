@@ -169,9 +169,9 @@ describe("card-generation-status", () => {
     expect(cardGenerationSyncReportText("planning", false)).not.toContain("这次生成到了");
   });
 
-  it("在途时口径是「写完一批一次给齐」，不报第几步", () => {
-    // 2026-09-21 两次真跑实测：planning → 终态一步跨完，中途 authored 恒为 0，
-    // 因为整条管道在一个事务里，状态与候选都到提交才可见。
+  it("在途时不报第几步（run.status 仍在大事务里，到提交才可见）", () => {
+    // 2026-09-21 两次真跑实测：planning → 终态一步跨完。0249 把**候选计数**挪出了那个
+    // 事务（下一条用例），但状态本身没挪——挪它要先解决重放语义，见计划 §21 的 A1。
     for (const status of ["planning", "authoring", "checking"]) {
       const view = cardGenerationProgressView(status, {
         plannedCards: 4, authored: 0, gatePassed: 0, gateFailed: 0,
@@ -180,6 +180,24 @@ describe("card-generation-status", () => {
       expect(view?.eyebrow, status).toBe("正在生成 · 写完一批一次给齐");
       expect(view?.eyebrow, status).not.toContain("步");
     }
+  });
+
+  it("planning 阶段里候选计数是真的在一格格走", () => {
+    expect(cardGenerationProgressView("planning", {
+      plannedCards: 0, authored: 0, gatePassed: 0, gateFailed: 0,
+    })?.detail).toBe("正在规划这一批要出哪些目标");
+
+    const steps = [1, 4, 8].map((authored) => cardGenerationProgressView("planning", {
+      plannedCards: 8, authored, gatePassed: 0, gateFailed: 0,
+    }));
+    expect(steps.map((view) => view?.detail)).toEqual([
+      "已写出 1 / 8 张候选", "已写出 4 / 8 张候选", "已写出 8 / 8 张候选",
+    ]);
+    const percents = steps.map((view) => view?.percent ?? 0);
+    expect(percents[0]).toBeLessThan(percents[1] as number);
+    expect(percents[1]).toBeLessThan(percents[2] as number);
+    // 计数走，步数不走：两个读数同时"前进"会互相打脸。
+    for (const view of steps) expect(view?.eyebrow).not.toContain("步");
   });
 
   it("到终态才报第几步，让轨道停在能说清的位置", () => {
