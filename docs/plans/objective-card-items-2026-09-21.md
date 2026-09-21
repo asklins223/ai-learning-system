@@ -1288,3 +1288,50 @@ gauge    存在、未被 hidden 遮住，aria-valuenow=49
 收掉（`phase: skipped`），没留在队列里。顺带记一次工具用错：`skip_run` 的
 `confirmationRequired` 是**签发侧**的字段，请求里带上它会 400；本地 `safeParse` 一跑
 就看清了（`Unrecognized key(s): confirmationRequired`）——又一次印证"别猜 schema"。
+
+## 35. 第二批 D6 + 关停交还租约的第一次现场生效
+
+为了等一次真判 `repair` 的批次，用同一篇内容新建了一篇夹具笔记跑真生成
+（run `6f0047e2`）。这一批没等到 repair（见第 4 条），但捡到了三件别的东西。
+
+### 1. `releaseInflightV2OutboxLeases` 第一次在真实事故里跑通
+
+13:26:27 companion 侧存 `companion-thought.ts` → tsx 5 秒后 force kill。日志：
+
+```
+[13:26:27] V2 outbox leases returned so the next worker can take over immediately
+[13:26:27] shutdown signal received, waiting for in-flight jobs to finish…
+[13:26:48] V2 outbox job processing        ← 新 worker 接手，相隔 21 秒
+```
+
+§24 里我写过"调用点那 6 行没测到，要测得开测试后门"——现在它被现场测到了：
+交还发生在 drain 之前，所以赶上了 5 秒窗口；没有这一步，这条 run 要挂满 30 分钟。
+（第一次尝试已付的调用仍然作废，那是强杀的固有代价，这条改动只解决"多久能重来"。）
+
+### 2. 阶梯在第二批上复现
+
+`authored` 序列 `[0,0,1,2,3,0,0,1,2,3,4,5,6,6]`——前半是第一次尝试（跑到 3 被杀），
+后半是重投后完整走到 6。终态 `review_ready`，5 过 1 挂。
+
+### 3. D6 配额第二批：点名 3、兑现 3，形状与第一批逐个相同
+
+| 目标 | 形态 | 点名 | 实交 | 判定 |
+|---|---|---|---|---|
+| obj-atom-1 | definition | single_choice | single_choice | 兑现 |
+| obj-atom-2 | comparison | matching | matching | 兑现 |
+| obj-atom-3 | causal_model | true_false | true_false | 兑现 |
+| obj-atom-6 | sequence | - | ordering | 未点名（自愿交） |
+
+两批独立真跑都是 3/3 兑现、都出了 matching（库里 matching 累计 2 张），
+`practice_quota_short` 两批都没落——因为没有缺额，这正是"只在缺的时候喊"。
+配额这一头可以认为稳定了。
+
+### 4. repair 尾段仍未被现场验到（不粉饰）
+
+这批 pedagogy 判的是 keep/drop：候选表里 `revision` 全是 1，没有任何一条重写修订。
+两批里一批判了 repair（就是撞出 `strategy` 替身崩溃的那批）、一批没判——
+**它是内容相关的，等不来**。要关掉这条只能二选一：给 repair 开一个可注入 provider 的缝
+（设计决定，我不顺手做），或者去库里找一批历史上真判过 repair 的旧 run 复现它。
+下次动这块先做这个决定，不再"等下一次"。
+
+夹具笔记 `a75da5d4` 已进回收站（软删可恢复），它留下的 6 张候选未激活。
