@@ -1,11 +1,14 @@
-import { useMemo, useState, type ReactNode } from "react";
-import { CalendarDays, ChevronLeft, ChevronRight } from "lucide-react";
-import type { CompanionMessageV1 } from "@ailearn/shared/companion-conversation-contracts";
+import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { CalendarDays, ChevronLeft, ChevronRight, CornerDownRight } from "lucide-react";
+import type { CompanionContentBlockV1, CompanionMessageV1 } from "@ailearn/shared/companion-conversation-contracts";
 import type { CompanionChatSession } from "../../app/companion-chat-session";
-import { companionMessageText } from "../../app/companion-chat-session";
+import { companionMessageText, desktopRouteFromAgentRoute } from "../../app/companion-chat-session";
 import type { CompanionRunTrace } from "../../app/companion-agent-nodes";
 import { CompanionProposalChoice } from "./CompanionProposalChoice";
 import { CompanionRunTraceView } from "./CompanionRunTraceView";
+import { ZoomableReadingImage } from "../surfaces/image-viewer";
+import { useSourceImage } from "../surfaces/source-image";
+import { renderCompanionMarkdown } from "./companion-markdown";
 import "./companion-chat-record.css";
 
 /**
@@ -79,6 +82,112 @@ export function highlightText(text: string, keyword: string): ReactNode {
   return parts;
 }
 
+/**
+ * 她带我去哪儿（方案 29 §4.8，抱怨 #5「连跳到某个笔记都做不到」的收尾）。
+ *
+ * 落点以前只活在 `agent.tool` 事件和一行游离在消息之外的 chip 里：事件有 TTL、
+ * chip 不进正文顺序，于是回看时"她带我去看的那篇笔记"根本不存在。
+ * V2→桌面路由仍走 `desktopRouteFromAgentRoute` 那一份诚实映射；映射不到时只留痕、
+ * 不给按钮——点了没反应的按钮比没有按钮更糟。
+ */
+function NavBlockLine({
+  block,
+  chat,
+}: {
+  readonly block: Extract<CompanionContentBlockV1, { type: "nav" }>;
+  readonly chat: CompanionChatSession;
+}) {
+  const target = desktopRouteFromAgentRoute(block.route);
+  if (!target) {
+    return <p className="companion-record__nav companion-record__nav--plain"><span>{block.label}</span></p>;
+  }
+  return (
+    <p className="companion-record__nav">
+      <button type="button" onClick={() => { void chat.goToRoute(target); }}>
+        <CornerDownRight size={12} />
+        {block.label}
+      </button>
+    </p>
+  );
+}
+
+/**
+ * 她摆到对话里的那张图（§4.8 的 image 块，`companion_show_image` 服务端拼的 url）。
+ *
+ * 字节必须走 main 的站内图片通道：渲染层的 origin 是 `ailearn-app://`，
+ * `/api/uploads/…` 会落到应用包里（404），而外链又被 CSP 的 `img-src` 拦掉。
+ * 载入中与取不回来都不给 `<img>`——破图图标比一句人话更像"她坏了"。
+ * 取不回来时留一个重试：这类失败通常是瞬时的（API 正在重启），
+ * 而这块内容一旦落成消息就会一直在，不该一次失败就永久空白。
+ */
+export function CompanionRecordImage({
+  block,
+}: {
+  readonly block: Extract<CompanionContentBlockV1, { type: "image" }>;
+}) {
+  const { state, retry } = useSourceImage(block.url);
+  if (state.status === "ready" || state.status === "external") {
+    return (
+      <figure className="companion-record__image">
+        <ZoomableReadingImage
+          src={state.src}
+          alt={block.alt ?? block.label}
+          retryable={state.status === "ready"}
+          onRetry={retry}
+          ownedByCompanion
+        />
+        <figcaption>{block.label}</figcaption>
+      </figure>
+    );
+  }
+  if (state.status === "loading") {
+    return <p className="companion-record__image-note">正在载入图片…</p>;
+  }
+  return (
+    <p className="companion-record__image-note">
+      图片取不回来（{block.label}）。
+      <button type="button" onClick={retry}>重试</button>
+    </p>
+  );
+}
+
+/**
+ * 引用块（她读到的原文）。
+ *
+ * 折叠是**量出来**的，不是按字数猜的：抽屉实测 406px 宽，同一条规则下 165px 的短引用
+ * 该整段摊开、1256px 的长原文（实机真的出现过，等于三个视口）才出「展开原文」。
+ * 上限必须由 CSS **一直挂着**（`.companion-record__quote` 的 `max-height`）：
+ * 元素自己不受限时 `scrollHeight === clientHeight`，溢出永远量不出来——
+ * 实机第一版就是这么错的（四条引用全部 1256/1256，一个按钮都没有）。
+ * 展开之后也不再复检：那时量到的就是全文高度，会把「收起」自己量没掉。
+ */
+export function CompanionQuoteBlock({
+  block,
+}: {
+  readonly block: Extract<CompanionContentBlockV1, { type: "quote" }>;
+}) {
+  const textRef = useRef<HTMLParagraphElement>(null);
+  const [overflowing, setOverflowing] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  useLayoutEffect(() => {
+    const text = textRef.current;
+    if (!text || expanded) return;
+    // 8px 容差：一行的零头不值得为它多一个按钮。
+    setOverflowing(text.scrollHeight - text.clientHeight > 8);
+  }, [block.text, expanded]);
+  return (
+    <figure className="companion-record__quote" data-expanded={expanded ? "true" : undefined}>
+      <figcaption>{block.label}</figcaption>
+      <p ref={textRef}>{block.text}</p>
+      {overflowing ? (
+        <button type="button" onClick={() => setExpanded((value) => !value)}>
+          {expanded ? "收起原文" : "展开原文"}
+        </button>
+      ) : null}
+    </figure>
+  );
+}
+
 /** 单条消息（时间线 / 某日视图共用）。 */
 export function CompanionChatRecordArticle({
   message,
@@ -94,7 +203,45 @@ export function CompanionChatRecordArticle({
   return (
     <article data-message-id={message.id} data-role={message.role} data-kind={message.kind} data-cancelled={message.kind === "cancelled" || undefined}>
       <header><span>{message.role === "user" ? "你" : "Mao"}{message.kind === "voice_transcript" ? " · 语音" : ""}</span><time>{messageTime(message.createdAt)}</time></header>
-      <p>{companionMessageText(message)}</p>
+      {/* 正文从 §4.8 起保留 markdown，由这里排版（抽屉与记录页共用本组件）。 */}
+      <div className="companion-record__body">{renderCompanionMarkdown(companionMessageText(message))}</div>
+      {message.role === "assistant"
+        ? message.blocks
+          .filter((block) => block.type === "nav" || block.type === "quote"
+            || block.type === "diagram" || block.type === "card" || block.type === "image")
+          .map((block, index) => (
+            block.type === "nav"
+              ? <NavBlockLine key={`nav-${index}`} block={block} chat={chat} />
+              : block.type === "quote"
+                ? <CompanionQuoteBlock key={`quote-${index}`} block={block} />
+                : block.type === "diagram"
+                  ? (
+                      <figure className="companion-record__diagram" key={`diagram-${index}`}>
+                        <figcaption>{block.title}</figcaption>
+                        <ol>
+                          {block.steps.map((step, n) => (
+                            <li key={n}>
+                              <span className="companion-record__step-no">{n + 1}</span>
+                              <span>{step.label}</span>
+                              {step.detail ? <small>{step.detail}</small> : null}
+                            </li>
+                          ))}
+                        </ol>
+                      </figure>
+                    )
+                  : block.type === "card"
+                    ? (
+                        <figure className="companion-record__card" key={`card-${index}`}>
+                          <figcaption>{block.knowledgeForm ? `卡片 · ${block.knowledgeForm}` : "卡片"}</figcaption>
+                          <p>{block.front}</p>
+                          {block.summary ? <small>{block.summary}</small> : null}
+                        </figure>
+                      )
+                    : block.type === "image"
+                      ? <CompanionRecordImage key={`image-${index}`} block={block} />
+                      : null
+          ))
+        : null}
       {message.kind === "cancelled" ? <p className="companion-record__stopped">你在这里停下了{stopSummary(trace)}</p> : null}
       {message.kind === "error" ? <p className="companion-record__stopped">这一轮没能说完{stopSummary(trace)}</p> : null}
       {trace && shouldShowRunTrace(trace) ? (

@@ -17,7 +17,10 @@ import {
   companionMouthTarget,
   smoothCompanionMouthLevel,
 } from "../../app/companion-mouth-meter";
-import type { CompanionVoiceSpeakSegmentRequestV2 } from "@ailearn/shared/companion-voice-contracts";
+import type {
+  CompanionVoicePlaybackOutcomeRequestV1,
+  CompanionVoiceSpeakSegmentRequestV2,
+} from "@ailearn/shared/companion-voice-contracts";
 
 type HomeV2SoundKind = "page" | "footstep" | "magic";
 
@@ -424,6 +427,19 @@ export function HomeV2AudioController() {
     return decodeBase64Audio(graph.context, unwrapGatewayResult(response).audioBase64);
   }, []);
 
+  /**
+   * 一段音频的结局上报（0247）。不 await、不 unwrap、不抛——**上报反噬朗读**是
+   * 比"少一行统计"严重得多的失败，所以这里把所有异常咽掉。
+   */
+  const reportSegmentOutcome = useCallback((request: CompanionVoicePlaybackOutcomeRequestV1): void => {
+    const reportApi = window.ailearn?.companion?.voice?.reportPlaybackOutcome;
+    if (!reportApi) return;
+    void reportApi.call(window.ailearn.companion.voice, {
+      meta: createRequestMeta(workspaceEpochRef.current ?? undefined),
+      request,
+    }).catch(() => undefined);
+  }, []);
+
   // 把音频出口交给伴星台词播放服务：它只管排队与计时，解码、播放、振幅仍在这里，
   // 全应用因此只有一个 AudioContext 和一条嘴型通道。
   useEffect(() => {
@@ -433,9 +449,10 @@ export function HomeV2AudioController() {
       synthesizeSegment: synthesizeVoiceSegment,
       play: playVoiceBuffer,
       stop: stopVoicePlayback,
+      reportSegmentOutcome,
     });
     return () => setCompanionVoiceHost(null);
-  }, [playVoiceBuffer, stopVoicePlayback, synthesizeVoice, synthesizeVoiceSegment]);
+  }, [playVoiceBuffer, stopVoicePlayback, synthesizeVoice, synthesizeVoiceSegment, reportSegmentOutcome]);
 
   useEffect(() => {
     const graph = graphRef.current;

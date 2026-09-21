@@ -1,0 +1,189 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "c_0120.moc3",
+		"Textures": [
+			"c_0120.2048/texture_00.png",
+			"c_0120.2048/texture_01.png"
+		],
+		"Physics": "c_0120.physics3.json",
+		"DisplayInfo": "c_0120.cdi3.json",
+		"Expressions": [
+			{
+				"Name": "happy",
+				"File": "expressions/开心兴奋.exp3.json"
+			},
+			{
+				"Name": "starstruck",
+				"File": "expressions/星星眼.exp3.json"
+			},
+			{
+				"Name": "heart-eyes",
+				"File": "expressions/爱心眼.exp3.json"
+			},
+			{
+				"Name": "surprised",
+				"File": "expressions/感叹号.exp3.json"
+			},
+			{
+				"Name": "blush",
+				"File": "expressions/脸红.exp3.json"
+			},
+			{
+				"Name": "mischievous",
+				"File": "expressions/调皮.exp3.json"
+			},
+			{
+				"Name": "question",
+				"File": "expressions/问号.exp3.json"
+			},
+			{
+				"Name": "sweat",
+				"File": "expressions/流汗.exp3.json"
+			},
+			{
+				"Name": "dizzy",
+				"File": "expressions/晕晕.exp3.json"
+			},
+			{
+				"Name": "angry",
+				"File": "expressions/生气.exp3.json"
+			},
+			{
+				"Name": "sad",
+				"File": "expressions/悲伤.exp3.json"
+			},
+			{
+				"Name": "cry",
+				"File": "expressions/哭.exp3.json"
+			},
+			{
+				"Name": "dazed",
+				"File": "expressions/呆呆眼.exp3.json"
+			},
+			{
+				"Name": "drool",
+				"File": "expressions/闭眼口水.exp3.json"
+			},
+			{
+				"Name": "gloomy",
+				"File": "expressions/阴暗.exp3.json"
+			},
+			{
+				"Name": "tongue",
+				"File": "expressions/吐舌.exp3.json"
+			},
+			{
+				"Name": "glasses-round",
+				"File": "expressions/圆眼镜.exp3.json"
+			},
+			{
+				"Name": "glasses-square",
+				"File": "expressions/方眼镜.exp3.json"
+			},
+			{
+				"Name": "glasses-oval",
+				"File": "expressions/椭圆眼镜.exp3.json"
+			},
+			{
+				"Name": "sunglasses",
+				"File": "expressions/墨镜.exp3.json"
+			},
+			{
+				"Name": "cat-sticker",
+				"File": "expressions/猫猫贴纸.exp3.json"
+			},
+			{
+				"Name": "rabbit-sticker",
+				"File": "expressions/兔兔贴纸.exp3.json"
+			},
+			{
+				"Name": "bow-sticker",
+				"File": "expressions/蝴蝶结贴纸.exp3.json"
+			},
+			{
+				"Name": "flowers",
+				"File": "expressions/情绪花花.exp3.json"
+			},
+			{
+				"Name": "heartbeat",
+				"File": "expressions/心跳.exp3.json"
+			},
+			{
+				"Name": "soul",
+				"File": "expressions/吐魂.exp3.json"
+			},
+			{
+				"Name": "hearts",
+				"File": "expressions/love.exp3.json"
+			},
+			{
+				"Name": "cat-paw",
+				"File": "expressions/喵喵手~喵~动画.exp3.json"
+			},
+			{
+				"Name": "peace",
+				"File": "expressions/双手比耶.exp3.json"
+			},
+			{
+				"Name": "whale-on-head",
+				"File": "expressions/鲸鱼.exp3.json"
+			}
+		],
+		"Motions": {
+			"Idle": [
+				{
+					"File": "motions/idle.motion3.json",
+					"FadeInTime": 0.5,
+					"FadeOutTime": 0.5
+				}
+			],
+			"Bubble": [
+				{
+					"File": "motions/bubble.motion3.json",
+					"FadeInTime": 0.3,
+					"FadeOutTime": 0.4
+				}
+			],
+			"Spray": [
+				{
+					"File": "motions/spray.motion3.json",
+					"FadeInTime": 0.3,
+					"FadeOutTime": 0.4
+				}
+			],
+			"Selfie": [
+				{
+					"File": "motions/selfie.motion3.json",
+					"FadeInTime": 0.3,
+					"FadeOutTime": 0.4
+				}
+			],
+			"SelfieQuick": [
+				{
+					"File": "motions/selfie-quick.motion3.json",
+					"FadeInTime": 0.3,
+					"FadeOutTime": 0.4
+				}
+			]
+		}
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": [
+				"ParamEyeLOpen",
+				"ParamEyeROpen"
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Name": "LipSync",
+			"Ids": [
+				"ParamMouthOpenY"
+			]
+		}
+	],
+	"HitAreas": []
+}

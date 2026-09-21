@@ -67,10 +67,16 @@ function stubGatewayWithFailingSave() {
           },
         },
       })),
-      save: vi.fn(async () => {
-        state.saveAttempts += 1;
-        throw new Error("gateway unavailable");
-      }),
+      // 自动保存现在走文档增量（批次 4.4），所以"提交失败"要钉在这一条路上；
+      // 还挂在 `save` 上的话，这个用例测的就已经不是页面真正走的那条路了。
+      doc: {
+        state: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { blocks: [], title: "", titleSource: "auto", revision: 0, backfilled: false } })),
+        syncBlocks: vi.fn(async () => {
+          state.saveAttempts += 1;
+          throw new Error("gateway unavailable");
+        }),
+        presence: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { shared: false } })),
+      },
     },
     capabilities: {
       get: vi.fn(async () => ({

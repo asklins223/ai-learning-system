@@ -217,3 +217,222 @@
   background: rgba(205, 235, 217, .58);
   cursor: pointer;
 }
+
+/* 她带我去哪儿（方案 29 §4.8）：落点跟在正文下面，属于这条消息本身。 */
+.companion-record__nav {
+  display: flex;
+  margin: 6px 0 0;
+}
+
+.companion-record__nav button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 3px 9px;
+  color: var(--companion-ink);
+  font-size: 10px;
+  border: 1px solid rgba(201, 164, 126, .66);
+  border-radius: 9px;
+  background: rgba(255, 241, 207, .54);
+  cursor: pointer;
+}
+
+/* 桌面端没有等价形态的落点：留痕，但不给一个点了不会动的按钮。 */
+.companion-record__nav--plain span {
+  font-size: 10px;
+  opacity: .68;
+}
+
+/* 正文里的 markdown 由渲染层排版（§4.8）。字号/行距跟着消息本身，
+   这里只管结构：列表缩进、代码块不撑破消息列、标题行稍重一点。 */
+.companion-md__para {
+  margin: 0;
+}
+
+.companion-md__heading {
+  margin: 2px 0 0;
+  font-weight: 700;
+}
+
+.companion-md__list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+.companion-md__list li {
+  margin: 1px 0;
+}
+
+.companion-md__code {
+  overflow-x: auto;
+  margin: 5px 0 0;
+  padding: 6px 8px;
+  font: 10.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre;
+  border-radius: 9px;
+  background: rgba(52, 38, 24, .08);
+}
+
+.companion-record__body code {
+  padding: 0 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .96em;
+  border-radius: 4px;
+  background: rgba(52, 38, 24, .08);
+}
+
+/* 步骤流与卡片（§4.8 diagram / card 块）。 */
+.companion-record__diagram,
+.companion-record__card {
+  margin: 8px 0 0;
+  padding: 7px 9px;
+  border-radius: 11px;
+  background: rgba(255, 241, 207, .42);
+  border: 1px solid rgba(201, 164, 126, .34);
+}
+
+.companion-record__diagram figcaption,
+.companion-record__card figcaption {
+  font-size: 9.5px;
+  font-weight: 700;
+  opacity: .74;
+}
+
+.companion-record__diagram ol {
+  display: grid;
+  gap: 4px;
+  margin: 5px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.companion-record__diagram li {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 2px 6px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.companion-record__step-no {
+  display: inline-grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  font-size: 9.5px;
+  font-weight: 700;
+  color: rgba(60, 42, 24, .82);
+  border-radius: 50%;
+  background: rgba(201, 164, 126, .34);
+}
+
+.companion-record__diagram li small,
+.companion-record__card small {
+  grid-column: 2;
+  font-size: 10px;
+  opacity: .72;
+}
+
+.companion-record__card p {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+/* 她读到的原文（§4.8 quote 块）：一眼能和她说过的话分开。 */
+.companion-record__quote {
+  margin: 7px 0 0;
+  padding: 6px 9px;
+  border-left: 2px solid rgba(145, 195, 168, .7);
+  border-radius: 0 10px 10px 0;
+  background: rgba(205, 235, 217, .26);
+}
+
+.companion-record__quote figcaption {
+  font-size: 9.5px;
+  opacity: .72;
+}
+
+.companion-record__quote p {
+  margin: 3px 0 0;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+/*
+ * 她摆进对话里的那张图（§4.8 的 image 块）。
+ *
+ * 只用 max-*：`.reading-image` 在 styles.css 里只有 `cursor: zoom-in`，宽度靠各页面
+ * 自己限（笔记正文、HUD 阅读区各有规则），所以图放进抽屉时**没人限过它**——
+ * 库里的图实测有 1536×1024，直接把消息列撑破（抱怨 #11 那一类）。`max-height` 管的是
+ * 另一头：竖长截图（实测 1024×1536）会把整条消息顶出屏幕。
+ * 不写 `width: 100%`——那会把 990×150 这种小图放大糊掉；两个 max- 只缩不放，
+ * 宽高比由浏览器自己保。点它是灯箱放大，所以缩着显示不影响看清。
+ */
+.companion-record__image {
+  margin: 8px 0 0;
+}
+
+.companion-record__image img {
+  display: block;
+  max-width: 100%;
+  max-height: 240px;
+  border-radius: 11px;
+  border: 1px solid rgba(201, 164, 126, .34);
+  background: rgba(255, 241, 207, .42);
+}
+
+.companion-record__image figcaption {
+  margin-top: 4px;
+  font-size: 9.5px;
+  font-weight: 700;
+  opacity: .74;
+}
+
+.companion-record__image-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 0;
+  font-size: 10.5px;
+  opacity: .8;
+}
+
+/*
+ * 引用块的折叠（2026-09-21 抽屉实机量到：一条长引用的正文把气泡撑到 1256px ≈ 三个视口高，
+ * 而同层的 image 块早就有 `max-*`——同一层里两种脾气）。
+ *
+ * 三个不显然的点：
+ * 1. **上限必须一直挂着**。元素自己不受限时 `scrollHeight === clientHeight`，
+ *    组件永远量不出"溢出"，于是永远不出按钮——第一版就是这个错（四条引用全 1256/1256）。
+ * 2. **限制只加在正文 `<p>` 上，不加在 `<figure>` 上**：`overflow: hidden` 会把
+ *    折叠按钮一起裁掉，用户就没法展开了。
+ * 3. 168px 约等于 11px/1.55 的 10 行：实机 140px 左右那几条短引用照旧整段摊开。
+ */
+.companion-record__quote p {
+  max-height: 168px;
+  overflow: hidden;
+}
+
+.companion-record__quote[data-expanded="true"] p {
+  max-height: none;
+}
+
+/* 这层没有通用的 .companion-record button 规则，不写就是浏览器默认按钮的样子。 */
+.companion-record__quote button {
+  margin-top: 5px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  opacity: .78;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}

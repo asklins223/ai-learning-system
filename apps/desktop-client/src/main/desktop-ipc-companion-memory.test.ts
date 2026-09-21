@@ -96,9 +96,11 @@ const daily = companionDailySummaryV1Schema.parse({
   date: "2026-09-15",
   status: "generated",
   generatedAt: "2026-09-15T23:50:00.000Z",
-  summary: "今天补全了错误类型的定义。",
-  facts: { notesUpdated: 2, learningRunsCompleted: 1 },
-  conversationHighlights: [{ role: "user", text: "我开始能区分熟悉和理解" }],
+  failureReason: null,
+  blocks: [
+    { type: "text", text: "今天补全了错误类型的定义。" },
+    { type: "quote", label: "《错误类型》里写着", text: "熟悉不等于会。" },
+  ],
   memory: { memoryItemId: MEMORY_ID, candidate: true },
 });
 

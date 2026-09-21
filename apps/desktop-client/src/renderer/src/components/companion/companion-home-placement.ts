@@ -315,39 +315,36 @@ export function companionCueRank(priority: CompanionCuePriority): number {
   return CUE_RANK[priority];
 }
 
-export type CompanionActiveness = "quiet" | "moderate" | "active";
+/** 主动气泡是谁：与投影合同 `proactiveCue.origin` 同一套。 */
+export type CompanionCueOrigin = "thought" | "reminder" | "system";
 
 /**
- * Proactive (low-priority) cue budgets per persona. `quiet` never volunteers a
- * cue; the interval is the floor between two ordinary cues for the personas
- * that do. Key reminders ignore this budget entirely — they are state, not
- * chatter.
+ * 例行气泡的**显示去抖**，不是频率策略。
+ *
+ * "她多久主动说一次"归服务端（`PROACTIVE_CADENCE_MS(intervention_level)`）。
+ * 这一层只剩一件事：投影会在一次揭示节拍里刷新好几回，别把同一次开口叠成两个气泡。
+ *
+ * 原来这里按人格写了第二套节奏，而且 `quiet: null` = **永不**——比服务端更狠：
+ * 用户设成"安静"之后，哪怕服务端放行了一条，客户端也会把它无声吞掉
+ * （抱怨 #8"完全没感知到主动提醒"的另一半）。两套定义同一个"安静"，
+ * 就永远没人能说出她到底会不会开口。
  */
-export const COMPANION_ORDINARY_CUE_INTERVAL_MS: Readonly<Record<CompanionActiveness, number | null>> = Object.freeze({
-  quiet: null,
-  moderate: 10 * 60_000,
-  active: 5 * 60_000,
-});
-
-export function isCompanionActiveness(value: unknown): value is CompanionActiveness {
-  return value === "quiet" || value === "moderate" || value === "active";
-}
+export const COMPANION_ORDINARY_CUE_DEBOUNCE_MS = 90_000;
 
 /**
- * Whether a cue may be shown now. Key reminders are never rate limited; an
- * ordinary cue must be within the persona's proactive budget.
+ * 这条气泡现在能不能显示。触发式（用户先要过的到点提醒、他正在等的系统事件）
+ * 永远能——那是闹钟，不是闲聊，不该被任何去抖压住。
  */
 export function companionCueAllowed(input: {
-  readonly activeness: CompanionActiveness;
+  readonly origin: CompanionCueOrigin;
   readonly priority: CompanionCuePriority;
   readonly lastOrdinaryCueAt: number;
   readonly now: number;
 }): boolean {
   if (input.priority !== "ordinary") return true;
-  const interval = COMPANION_ORDINARY_CUE_INTERVAL_MS[input.activeness];
-  if (interval === null) return false;
+  if (input.origin !== "thought") return true;
   const last = Number.isFinite(input.lastOrdinaryCueAt) ? input.lastOrdinaryCueAt : 0;
-  return input.now - last >= interval;
+  return input.now - last >= COMPANION_ORDINARY_CUE_DEBOUNCE_MS;
 }
 
 /**

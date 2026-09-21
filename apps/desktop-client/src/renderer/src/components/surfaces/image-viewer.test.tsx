@@ -23,6 +23,19 @@ describe("ZoomableReadingImage · 点击放大", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
+  it("灯箱 portal 到 body：祖先带 transform/animation 时 fixed 只会铺满那个祖先", () => {
+    render(
+      <div className="drawer-like" style={{ animation: "x 1s both" }}>
+        <ZoomableReadingImage src="blob:mock" alt="实验装置" />
+      </div>,
+    );
+    fireEvent.click(screen.getByAltText("实验装置"));
+    const lightbox = document.querySelector(".image-lightbox")!;
+    expect(lightbox.parentElement).toBe(document.body);
+    // 非伴星的使用方不该带上这个标记（标记是给存在层的归属判定用的）。
+    expect(lightbox.hasAttribute("data-companion-owned")).toBe(false);
+  });
+
   it("onError 只在声明可重试时透传（blob 失效兜底）", () => {
     const onRetry = vi.fn();
     const { rerender } = render(<ZoomableReadingImage src="blob:x" alt="图" onRetry={onRetry} />);

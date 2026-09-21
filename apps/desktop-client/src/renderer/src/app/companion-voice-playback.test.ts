@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { CompanionVoiceSpeakSegmentRequestV2 } from "@ailearn/shared/companion-voice-contracts";
+import type {
+  CompanionVoicePlaybackOutcomeRequestV1,
+  CompanionVoiceSpeakSegmentRequestV2,
+} from "@ailearn/shared/companion-voice-contracts";
 import {
   COMPANION_SPEECH_FIRST_AUDIO_DEADLINE_MS,
   beginCompanionSpeechLine,
@@ -62,6 +65,13 @@ class FakeHost implements CompanionVoiceHost {
     const resolvers = this.resolvers;
     this.resolvers = [];
     for (const resolve of resolvers) resolve();
+  }
+
+  /** 每一段的结局上报（0247）——这段测试断言的就是这只数组。 */
+  readonly reports: CompanionVoicePlaybackOutcomeRequestV1[] = [];
+
+  reportSegmentOutcome(report: CompanionVoicePlaybackOutcomeRequestV1): void {
+    this.reports.push(report);
   }
 
   /** 让当前这一段播完。 */
@@ -441,5 +451,132 @@ describe("beginCompanionSpeechLine", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+/**
+ * 一段音频的结局上报（0247，抱怨 #4「语音经常没声音」的下半场）。
+ *
+ * 服务端那一半只能证明"字节交出去了"；这段测试固定的是**只有渲染进程知道**的那一半：
+ * 播成了、等到超时被跳过、取段就失败了，三态各上报一次，且都带着能回到那一段的身份。
+ * 反过来两条同样重要：**没 ref 的本地文本路径不产生任何上报**（没有可归因的对象），
+ * **被打断的一轮不把没播完的段记成播过了**（否则"失败率"会随用户打字速度浮动）。
+ */
+describe("逐段播放结局上报", () => {
+  const CONVERSATION_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const RUN_ID = "11111111-2222-3333-4444-555555555555";
+  const segmentIdFor = (ordinal: number): string =>
+    `${ordinal.toString(16).padStart(2, "0")}${"0".repeat(62)}`;
+
+  function refSegment(ordinal: number, text: string) {
+    const start = (ordinal - 1) * 10;
+    return {
+      ref: {
+        version: 2 as const,
+        conversationId: CONVERSATION_ID,
+        runId: RUN_ID,
+        generation: 1,
+        ordinal,
+        segmentId: segmentIdFor(ordinal),
+      },
+      displayText: text,
+      displayStart: start,
+      displayEnd: start + text.length,
+      cue: { version: 1 as const, intent: "explain" as const, emotion: "neutral" as const, intensity: 0.5 },
+    };
+  }
+
+  function strictSessionWithRef(host: FakeHost, count = 1) {
+    const session = beginCompanionSpeechLine({ strictSegments: true });
+    for (let ordinal = 1; ordinal <= count; ordinal += 1) {
+      session.feedSegment(refSegment(ordinal, `第${ordinal}句。`));
+    }
+    session.finish("");
+    return session;
+  }
+
+  it("播完的段上报 played，并带上这段的身份", async () => {
+    const host = new FakeHost();
+    setCompanionVoiceHost(host);
+    strictSessionWithRef(host);
+
+    await waitUntil(() => host.played.length === 1);
+    host.finishSegment();
+    await waitUntil(() => host.reports.length === 1);
+
+    expect(host.reports[0]).toMatchObject({
+      version: 1,
+      conversationId: CONVERSATION_ID,
+      runId: RUN_ID,
+      generation: 1,
+      ordinal: 1,
+      segmentId: segmentIdFor(1),
+      reason: "played",
+    });
+    expect(host.reports[0].durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("等到超时的段上报 deadline，而不是悄悄丢掉", async () => {
+    vi.useFakeTimers();
+    try {
+      const host = new FakeHost();
+      host.hangFor.add(segmentIdFor(1));
+      setCompanionVoiceHost(host);
+      strictSessionWithRef(host, 2);
+
+      await vi.advanceTimersByTimeAsync(COMPANION_SPEECH_FIRST_AUDIO_DEADLINE_MS + 50);
+      await vi.runAllTimersAsync();
+
+      expect(host.reports).toHaveLength(1);
+      expect(host.reports[0]).toMatchObject({ ordinal: 1, reason: "deadline" });
+      // 超时是按段判定的，后面的段仍要能播完并各自上报。
+      host.finishSegment();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(host.reports[1]).toMatchObject({ ordinal: 2, reason: "played" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("取段本身就失败的段上报 synth_failed", async () => {
+    const host = new FakeHost();
+    host.failFor.add(segmentIdFor(1));
+    setCompanionVoiceHost(host);
+    strictSessionWithRef(host);
+
+    await waitUntil(() => host.reports.length === 1);
+    expect(host.reports[0]).toMatchObject({
+      ordinal: 1,
+      segmentId: segmentIdFor(1),
+      reason: "synth_failed",
+    });
+    expect(host.played).toEqual([]);
+  });
+
+  it("本地文本路径（服务端没签段引用）不产生任何上报", async () => {
+    const host = new FakeHost();
+    setCompanionVoiceHost(host);
+    const session = beginCompanionSpeechLine();
+    session.feed("第一句。");
+    session.finish("");
+
+    await waitUntil(() => host.played.length === 1);
+    host.finishSegment();
+    await flush();
+    expect(host.reports).toEqual([]);
+  });
+
+  it("被打断的一轮不把没播完的段记成播过了", async () => {
+    const host = new FakeHost();
+    setCompanionVoiceHost(host);
+    strictSessionWithRef(host, 2);
+
+    await waitUntil(() => host.played.length === 1);
+    // 用户开口打断：generation 前进 + host.stop() 让 play() resolve。
+    stopCompanionSpeech();
+    await flush();
+    await flush();
+
+    expect(host.reports.filter((report) => report.reason === "played")).toEqual([]);
   });
 });

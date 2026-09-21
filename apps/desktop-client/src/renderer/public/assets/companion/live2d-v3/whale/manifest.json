@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "modelId": "companion-live2d-whale-v3",
+  "displayName": "大肥鱼（DS鲸鱼娘 · DS鼠控版）",
+  "status": "production",
+  "ownerApproved": {
+    "by": "Owner",
+    "date": "2026-09-20",
+    "note": "用户指定接入 DS鲸鱼娘 作为伴星可切换形态；作者《使用须知》允许商用直播与自印物料"
+  },
+  "source": {
+    "origin": "user-provided archive",
+    "sourcePath": "DS鲸鱼娘/DS鼠控版",
+    "author": "B站@氵六青（11272072）",
+    "usageNotesFile": "使用须知.txt（保存在用户原目录，未随仓库分发）"
+  },
+  "modelLicense": {
+    "name": "作者无偿分享许可：商用直播与自印物料允许，禁止盗用与出售",
+    "acceptanceRequired": true,
+    "commercialReleaseAllowed": true,
+    "redistributionAllowed": false,
+    "usage": "作者 B站@氵六青 无偿分享；商用直播 √、自印物料 √；禁止任何形式的盗用以及出售（即不得单独出售模型资产）"
+  },
+  "runtime": {
+    "model3": "/assets/companion/live2d-v3/whale/c_0120.model3.json",
+    "moc3": "/assets/companion/live2d-v3/whale/c_0120.moc3",
+    "textures": [
+      "/assets/companion/live2d-v3/whale/c_0120.2048/texture_00.png",
+      "/assets/companion/live2d-v3/whale/c_0120.2048/texture_01.png"
+    ],
+    "physics": "/assets/companion/live2d-v3/whale/c_0120.physics3.json",
+    "displayInfo": "/assets/companion/live2d-v3/whale/c_0120.cdi3.json",
+    "motions": {
+      "Idle": "/assets/companion/live2d-v3/whale/motions/idle.motion3.json",
+      "Bubble": "/assets/companion/live2d-v3/whale/motions/bubble.motion3.json",
+      "Spray": "/assets/companion/live2d-v3/whale/motions/spray.motion3.json",
+      "Selfie": "/assets/companion/live2d-v3/whale/motions/selfie.motion3.json",
+      "SelfieQuick": "/assets/companion/live2d-v3/whale/motions/selfie-quick.motion3.json"
+    }
+  },
+  "vendorScripts": [
+    "/assets/companion/vendor/pixi.min.js",
+    "/assets/companion/vendor/live2dcubismcore.min.js",
+    "/assets/companion/vendor/cubism4.min.js"
+  ],
+  "fileSha256": {
+    "c_0120.model3.json": "ea5cae7d9b37628b42f233986d3aa9ac1a12ea90a7a021da712589dcc45cc6ce",
+    "c_0120.moc3": "37d62cc7ebe2fe93350c934a2c023aac44e306833f63d83a130c005e2945ce1c",
+    "c_0120.2048/texture_00.png": "d74a8b7ed11f17f086afd22935d27d869b7d6fc19e94486b21445de19483fc0a",
+    "c_0120.2048/texture_01.png": "39a6da7736cbae495494be1dde515874a2e4fe72c21f399c47da33924b3d43b9",
+    "c_0120.physics3.json": "36b71d419c8692e8831641d16e7c16699792531309658b4d71a3f49fc6a00a9c",
+    "c_0120.cdi3.json": "a04133a70c8676a9e8e6e3773d1bd047333791b1d3b84896e73dc57eb489f1c5",
+    "icon.png": "764fb55b5661eaa06733f47f53fb842b00a349edaac7513c4ad4761248f927cb",
+    "motions/idle.motion3.json": "00364b3e9f4502b04a2794b5d2bd455cc50ac0d6876dc3886d04194e37033a38",
+    "expressions/开心兴奋.exp3.json": "25fb0e4d803187eeef9566512c6f96a99e386a5ce1ac1b0ee6bf6773b178d269",
+    "expressions/星星眼.exp3.json": "d4767e003c156c6d7549354dc8caf3ed29925e516b360ab7b9d07da5381ec7f4",
+    "expressions/爱心眼.exp3.json": "5be7abfa7be644592c4dd6c5a8ebaea0462f9ceb96177764d871a47273bea7af",
+    "expressions/感叹号.exp3.json": "0bcfa612595200dcd8ab7894ea31b656adbb48bc54527e34e21703eac3548504",
+    "expressions/脸红.exp3.json": "f9c4b846582dfaa5b2ea6f9b502379bbc2594f8d5de0ddf377ef37ecf2fae429",
+    "expressions/调皮.exp3.json": "390e63e1f7ecdbb04d8a10611f06bc14829b98b34fefe35ed543fc69fb35b737",
+    "expressions/问号.exp3.json": "eb50ace022b7544ae09bfef7a0eb7ccc9f58371ddc665ea4319d7b0a438a9c56",
+    "expressions/流汗.exp3.json": "517e5a0b1cd887c869eda083020526c4c240ff6913f49f9021eeac05655f4961",
+    "expressions/晕晕.exp3.json": "bc0b82f39cb90864e9cdcb8ac33391fe679c097bb049adad42766877da9c1045",
+    "expressions/生气.exp3.json": "ec41aada5b001e9de5cb41cbfd108c7dbed3962fc287e90d6a6ce219d49388ec",
+    "expressions/悲伤.exp3.json": "c4214cb079d1e6b392e1f48327b51e902a64bef3eb6d807b80ad4e8bef4d641e",
+    "expressions/哭.exp3.json": "edf4ff77c26e0cf5d8112bf0d5021738b44d829419314a1a2a97827713120013",
+    "motions/bubble.motion3.json": "c9672aab4e398f7ca096b47511a6b9ad5af65fd3fb62d7388cc6ae5bd67fb820",
+    "motions/spray.motion3.json": "98e36262742639074b73faeffcd4da95c5eca4901fd483f93c7a448b1a1f0ee6",
+    "motions/selfie.motion3.json": "5848a992e0ebc4f3447166eb7e38ac678f32d17198b16c0d56048f13b8c2e110",
+    "motions/selfie-quick.motion3.json": "9a93e9ac0aa77c45c2c9dbf33558bc265d3a58c9a73033446483861ec768fcd6",
+    "expressions/呆呆眼.exp3.json": "fda8633386aa2592baefdc00ff45ddffc84ea4a64e536cea78c4e47916b3f253",
+    "expressions/闭眼口水.exp3.json": "1f493067c7951029c7f2abd77c8888831837d4c55828966e8f386f76804799da",
+    "expressions/阴暗.exp3.json": "8f71ff1b91c03ec2b7dc3773494d94f30c599ee62767fb4e53c98a49cae617cb",
+    "expressions/吐舌.exp3.json": "2edce2e6973ece82a77e114f60d57d283d30527f9b68a7f082134c0a6bc2b1a0",
+    "expressions/圆眼镜.exp3.json": "2efbb7759f14448a76eaf383469960fb76fe47b37014d18ac847eebda083e6f9",
+    "expressions/方眼镜.exp3.json": "111fdc92c2bf916dd982ee2d16d9b005f1acfbf063aa39e28c5ba365701ad493",
+    "expressions/椭圆眼镜.exp3.json": "ffe2b516b9d844d40655ae102dff22829e99af4347cb7e48a1b242f9cb18143d",
+    "expressions/墨镜.exp3.json": "bb6d0e30aeaec829b32fcc41bd9960e6582d5f9029a3a2bda0908bcd72c07623",
+    "expressions/猫猫贴纸.exp3.json": "0f51de511dff88afb09c7b2e80ad262dedc44014578ce9f4a9a4118f6ec08cc1",
+    "expressions/兔兔贴纸.exp3.json": "da65f75a8a64b99af29d81bba1d31806b10ccdeb87e746de1b7ead37eb3e2105",
+    "expressions/蝴蝶结贴纸.exp3.json": "0d6f795fe4ef71af10796cb037515a06fd1df7730415df29fbc9b6156ff1fc6f",
+    "expressions/情绪花花.exp3.json": "ffda77f41d5a0c9df8c53d10ba459022893d2fb237dacb7f5eb41e07cd3e9ed3",
+    "expressions/心跳.exp3.json": "21e51341dd14899f67585774b91f59e1928930f29c2f6a95892dd655fced9512",
+    "expressions/吐魂.exp3.json": "3968bdbc5ef6701cfc13235fa877e0a4cd378f0f7a7e1e3c271abb19831b0e70",
+    "expressions/love.exp3.json": "caa9a2474cf99ea9419d846978e52fff1173c05b36adc555ca3879be06b53694",
+    "expressions/喵喵手~喵~动画.exp3.json": "e0feb354e9fda5df1a4ea973ecbfc8c50569b780011bd442a599a0934dc1c30b",
+    "expressions/双手比耶.exp3.json": "f85650e953d2f8acc9be501270ce7bc512f4d98dfca877b933c4cff009067070",
+    "expressions/鲸鱼.exp3.json": "3627cf66669ebd75ded276188593f5e645cb4e49216f5f4aaeb5912effa29202"
+  }
+}

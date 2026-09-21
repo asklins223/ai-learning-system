@@ -1,9 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-  COMPANION_ORDINARY_CUE_INTERVAL_MS,
+  COMPANION_ORDINARY_CUE_DEBOUNCE_MS,
   companionCueAllowed,
   companionCueRank,
-  isCompanionActiveness,
   shouldCompanionBorrowPlacement,
   type CompanionCuePriority,
 } from "./companion-home-placement";
@@ -25,37 +24,56 @@ describe("companion cue arbitration", () => {
   });
 });
 
-describe("companion proactive budget", () => {
-  it("keeps quiet personas silent and gives moderate/active their frozen intervals", () => {
-    expect(COMPANION_ORDINARY_CUE_INTERVAL_MS.quiet).toBeNull();
-    expect(COMPANION_ORDINARY_CUE_INTERVAL_MS.moderate).toBe(10 * 60_000);
-    expect(COMPANION_ORDINARY_CUE_INTERVAL_MS.active).toBe(5 * 60_000);
+/**
+ * 客户端这一层**不再定义"她多久主动说一次"**——那是服务端的
+ * `PROACTIVE_CADENCE_MS(intervention_level)`（用户 2026-09-21 的口径：
+ * 按偏好定频率，触发式不进频率限制）。
+ *
+ * 原来这里还有第二套节奏：quiet 档是 `null` = **永不**。它比服务端更狠——
+ * 用户设成"安静"之后，哪怕服务端放行了一条，客户端也会把它吞掉，
+ * 而且吞掉的时候没有任何记录（体感就是"她从不主动提醒"，抱怨 #8 的另一半）。
+ * 现在只剩一个固定去抖：投影会在一次揭示节拍里刷新多次，别把同一次开口叠成两个气泡。
+ */
+describe("主动气泡的显示闸", () => {
+  it("节奏不在客户端：只剩一个固定去抖", () => {
+    expect(COMPANION_ORDINARY_CUE_DEBOUNCE_MS).toBe(90_000);
   });
 
-  it("never rate limits a key reminder, even for a quiet persona", () => {
-    for (const priority of PRIORITY_ORDER.filter((entry) => entry !== "ordinary")) {
+  it("例行念头：去抖之内不叠第二条，去抖一到就放行", () => {
+    const now = 1_000_000_000;
+    expect(companionCueAllowed({
+      origin: "thought", priority: "ordinary", lastOrdinaryCueAt: now - 89_000, now,
+    })).toBe(false);
+    expect(companionCueAllowed({
+      origin: "thought", priority: "ordinary", lastOrdinaryCueAt: now - 90_000, now,
+    })).toBe(true);
+    expect(companionCueAllowed({
+      origin: "thought", priority: "ordinary", lastOrdinaryCueAt: 0, now,
+    })).toBe(true);
+  });
+
+  it("触发式（到点提醒、系统事件）永远不被去抖吞掉", () => {
+    const now = 1_000_000_000;
+    for (const origin of ["reminder", "system"] as const) {
       expect(companionCueAllowed({
-        activeness: "quiet",
-        priority,
-        lastOrdinaryCueAt: Date.now(),
-        now: Date.now(),
+        origin, priority: "ordinary", lastOrdinaryCueAt: now, now,
       })).toBe(true);
     }
   });
 
-  it("suppresses ordinary cues for quiet, and gates them by interval otherwise", () => {
-    const now = 1_000_000_000;
-    expect(companionCueAllowed({ activeness: "quiet", priority: "ordinary", lastOrdinaryCueAt: 0, now })).toBe(false);
-    expect(companionCueAllowed({ activeness: "moderate", priority: "ordinary", lastOrdinaryCueAt: now - 9 * 60_000, now })).toBe(false);
-    expect(companionCueAllowed({ activeness: "moderate", priority: "ordinary", lastOrdinaryCueAt: now - 10 * 60_000, now })).toBe(true);
-    expect(companionCueAllowed({ activeness: "active", priority: "ordinary", lastOrdinaryCueAt: now - 5 * 60_000, now })).toBe(true);
-    expect(companionCueAllowed({ activeness: "active", priority: "ordinary", lastOrdinaryCueAt: 0, now })).toBe(true);
+  it("读不到上次时间（隐私模式/第一次）不能判成「刚说过」", () => {
+    expect(companionCueAllowed({
+      origin: "thought", priority: "ordinary", lastOrdinaryCueAt: Number.NaN, now: 1_000,
+    })).toBe(true);
   });
 
-  it("recognises exactly the three persona activeness values", () => {
-    expect(["quiet", "moderate", "active"].every(isCompanionActiveness)).toBe(true);
-    expect(isCompanionActiveness("loud")).toBe(false);
-    expect(isCompanionActiveness(null)).toBe(false);
+  it("非 ordinary 优先级不受这条闸管（它们本来就走另一条通道）", () => {
+    const now = 1_000_000_000;
+    for (const priority of PRIORITY_ORDER.filter((entry) => entry !== "ordinary")) {
+      expect(companionCueAllowed({
+        origin: "thought", priority, lastOrdinaryCueAt: now, now,
+      })).toBe(true);
+    }
   });
 });
 

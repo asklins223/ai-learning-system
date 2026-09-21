@@ -1,4 +1,5 @@
 import { useCallback, useState, useEffect, useRef, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useSourceImage } from "./source-image";
 
 /**
@@ -61,6 +62,7 @@ export function LightboxViewer({
   count,
   index,
   variant = "fullscreen",
+  ownedByCompanion,
   onClose,
   onIndexChange,
   children,
@@ -69,6 +71,8 @@ export function LightboxViewer({
   readonly count: number;
   readonly index: number;
   readonly variant?: LightboxVariant;
+  /** 伴星自己的 surface 打开的灯箱要带这个标记，见 `companion-modal-ownership.ts`。 */
+  readonly ownedByCompanion?: boolean;
   readonly onClose: () => void;
   readonly onIndexChange?: (index: number) => void;
   readonly children: ReactNode;
@@ -82,12 +86,17 @@ export function LightboxViewer({
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") {
+        // 必须声明这次按键被吃掉了：宿主自己的「分层 Escape」（伴星存在层）默认认为
+        // 没人处理就继续往外传，实机上按一次 Esc 会连着把打开灯箱的那层界面一起关掉。
+        event.preventDefault();
+        onClose();
+      }
       if (event.key === "ArrowLeft") navigateRef.current?.(-1);
       if (event.key === "ArrowRight") navigateRef.current?.(1);
     };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [onClose]);
 
   // 灯箱开着时锁住纸面滚动，触摸滑动只属于切换图片。
@@ -99,9 +108,14 @@ export function LightboxViewer({
 
   const touchStartX = useRef<number | null>(null);
 
-  return (
+  // 必须 portal 到 body：`.image-lightbox` 是 `position: fixed; inset: 0`，而伴星抽屉
+  // 带着 `animation: companion-drawer-in … both`——fill-mode 让 transform 一直生效，
+  // 于是抽屉成了 fixed 后代的 containing block，"放大"被关在 406×778 的抽屉里
+  // （实机 2026-09-21 用户报"这里图片放大应该全屏放大"，量的就是这个尺寸）。
+  return createPortal(
     <div
       className={variant === "card" ? "image-lightbox image-lightbox--card" : "image-lightbox"}
+      data-companion-owned={ownedByCompanion ? "true" : undefined}
       role="dialog"
       aria-modal="true"
       aria-label={gallery
@@ -154,7 +168,8 @@ export function LightboxViewer({
       >
         ×
       </button>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -244,6 +259,7 @@ export function ZoomableReadingImage({
   onRetry,
   open,
   onOpenChange,
+  ownedByCompanion,
 }: {
   readonly src: string;
   readonly alt: string;
@@ -251,6 +267,8 @@ export function ZoomableReadingImage({
   readonly onRetry?: () => void;
   readonly open?: boolean;
   readonly onOpenChange?: (open: boolean) => void;
+  /** 由伴星的 surface 打开时置真：灯箱 portal 到 body 后，存在层要靠这个标记认它是自家的。 */
+  readonly ownedByCompanion?: boolean;
 }) {
   const [selfOpen, setSelfOpen] = useState(false);
   const isOpen = open ?? selfOpen;
@@ -268,7 +286,7 @@ export function ZoomableReadingImage({
         onClick={() => setOpen(true)}
       />
       {isOpen && renderLocal ? (
-        <LightboxViewer alt={alt} count={1} index={0} onClose={() => setOpen(false)}>
+        <LightboxViewer alt={alt} count={1} index={0} ownedByCompanion={ownedByCompanion} onClose={() => setOpen(false)}>
           <img src={src} alt={alt} onError={retryable ? onRetry : undefined} />
         </LightboxViewer>
       ) : null}

@@ -355,6 +355,33 @@ function navChipSharesTarget(a: CompanionNavChip, b: CompanionNavChip): boolean 
 }
 
 /**
+ * 已经落进消息里的落点，chip 行就不要再显示一遍（方案 29 §4.8）。
+ *
+ * chip 行原本是 route 的唯一出口，而它游离在正文之外、不进历史顺序、事件还有 TTL。
+ * nav 块进消息之后，两边同时显示就成了"同一句话下面两个一样的按钮"。
+ * 这里只**过滤呈现**，不动 `navChips` 状态——`autoExecute` 的即时跳转靠状态驱动，
+ * 把它一起删了会连带砍掉"预授权就直接跳"这条行为。
+ * 留在 chip 行上的于是只有两类：正在跑的这一轮（消息还没落库）、
+ * 以及确认动作直接给出的落点（不经过工具，消息里自然也没有）。
+ */
+export function navChipsStillOutsideMessages(
+  chips: readonly CompanionNavChip[],
+  messages: readonly CompanionMessageV1[],
+): CompanionNavChip[] {
+  const landed = new Set<string>();
+  for (const message of messages) {
+    for (const block of message.blocks) {
+      if (block.type === "nav") {
+        // 比映射**之后**的桌面路由：chip 存的就是这个形状，映射不到的两边都是 null。
+        landed.add(JSON.stringify(desktopRouteFromAgentRoute(block.route)));
+      }
+    }
+  }
+  if (landed.size === 0) return [...chips];
+  return chips.filter((chip) => !landed.has(JSON.stringify(chip.route)));
+}
+
+/**
  * 这条 409 是不是"会话里已经有活动 run"（而不是别的冲突）。
  *
  * 网关把所有 409 都归到 `conflict` 这一档，而 turn 提交在这个形状下只可能是

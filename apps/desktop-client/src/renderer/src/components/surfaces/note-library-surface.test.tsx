@@ -109,10 +109,15 @@ function stubGateway(options: {
           currentVersion: { versionId: `${input.noteId}-v1`, versionNo: 1, updatedAt: new Date().toISOString(), contentHash: "h", blocks: [{ ordinal: 1, type: "paragraph", content: "正文" }] },
         },
       })),
-      save: vi.fn(async () => {
-        state.saveCalls += 1;
-        return { ok: true as const, workspaceEpoch: 1, data: { noteId: "n1", savedAt: new Date().toISOString(), isAutosave: false } };
-      }),
+      // 改名现在走文档增量的标题那一半（`blocks` 缺省 = 正文不动），不再是 `note.save`。
+      doc: {
+        state: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { blocks: [], title: "", titleSource: "auto", revision: 0, backfilled: false } })),
+        syncBlocks: vi.fn(async () => {
+          state.saveCalls += 1;
+          return { ok: true as const, workspaceEpoch: 1, data: { via: "uploaded" as const, revision: 1, savedAt: new Date().toISOString() } };
+        }),
+        presence: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { shared: false } })),
+      },
       delete: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { noteId: "n1", status: "deleted" } })),
       restore: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { noteId: "n1", status: "restored" } })),
     },

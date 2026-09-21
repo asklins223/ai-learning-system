@@ -39,7 +39,6 @@ import {
   companionTranslationBounds,
   companionViewportCorrection,
   companionWorldAnchorFromProjectedFoot,
-  isCompanionActiveness,
   shouldCommitCompanionDrag,
   type CompanionCuePriority,
 } from "./companion-home-placement";
@@ -51,6 +50,8 @@ import {
 } from "./window-live2d-contract";
 import { CompanionBubble } from "./CompanionBubble";
 import { CompanionHud, type CompanionHudAction } from "./CompanionHud";
+import { createCueDeliveryReporter, findCueDelivery } from "./companion-cue-delivery";
+import { hasForeignModal } from "./companion-modal-ownership";
 import { useCompanionChat } from "../../app/companion-chat-session";
 import type { CompanionAgentNodeState } from "../../app/companion-agent-nodes";
 import { HOME_FEATURE_ICONS } from "../home-v2/home-feature-icons";
@@ -299,12 +300,9 @@ export function CompanionPresence() {
   }, [hudPage, setMode]);
 
   useEffect(() => {
-    const sync = () => {
-      const open = Array.from(document.querySelectorAll<HTMLElement>(
-        "dialog[open], [role='dialog'][aria-modal='true'], [role='alertdialog'][aria-modal='true']",
-      )).some((element) => !element.classList.contains("companion-chat") && !element.closest(".companion-presence"));
-      setExternalModalOpen(open);
-    };
+    // 归属判定住在 companion-modal-ownership.ts（有测试）：伴星**自己**的灯箱就是
+    // role=dialog + aria-modal，旧判定把它算成外部模态 → 点图片会把抽屉连带关掉。
+    const sync = () => setExternalModalOpen(hasForeignModal(document));
     sync();
     const observer = new MutationObserver(sync);
     observer.observe(document.body, {
@@ -395,6 +393,7 @@ export function CompanionPresence() {
     readonly text: string;
     readonly zone: "desk" | "shelf" | "window" | "rest";
     readonly key: string;
+    readonly inboxSequence: number;
     readonly thoughtId: string | null;
     readonly origin: "thought" | "reminder" | "system";
   } | null => {
@@ -406,10 +405,39 @@ export function CompanionPresence() {
       text: proactive.text,
       zone: "rest",
       key: `ordinary:${proactive.revision}`,
+      // 投影里 cue 的 revision 就是那条投递行的 inboxSequence（readProactiveCue 直接取的），
+      // 展示回执要靠它对回 `assistant_deliveries`。
+      inboxSequence: proactive.revision,
       thoughtId: proactive.thoughtId ?? null,
       origin: proactive.origin,
     };
   }, [companionProjection.failure, companionProjection.loading, companionProjection.projection]);
+
+  /**
+   * 气泡的展示回执：这句话在屏幕上露出来过（displayed）、用户点开过（acted）。
+   * 服务端两条规则都读它——念头日预算只算"被看见过的"，划走降权只看已送达之后的状态；
+   * 在补上这一步之前，首页这一路的投递 22 条里 21 条永远停在 `queued`。
+   */
+  const cueDeliveryReporter = useMemo(() => createCueDeliveryReporter({
+    lookup: async (inboxSequence) => {
+      const response = await window.ailearn.companion.activity.timeline({ meta: createRequestMeta() });
+      return findCueDelivery(unwrapGatewayResult(response).items, inboxSequence);
+    },
+    present: (ref) => window.ailearn.companion.activity.present({
+      meta: createRequestMeta(),
+      deliveryId: ref.deliveryId,
+      inboxSequence: ref.inboxSequence,
+    }),
+    act: (ref) => window.ailearn.companion.activity.ack({
+      meta: createRequestMeta(),
+      request: {
+        deliveryId: ref.deliveryId,
+        inboxSequence: ref.inboxSequence,
+        transition: "acted",
+      },
+    }),
+  }), []);
+  const revealedCueRef = useRef<{ readonly cueKey: string; readonly inboxSequence: number } | null>(null);
 
   const projectCompanionIntoCamera = useCallback(() => {
     if (!HOME_V2_ENABLED || !homeMode || dragRef.current) return;
@@ -572,9 +600,6 @@ export function CompanionPresence() {
   useEffect(() => {
     if (!HOME_V2_ENABLED || presencePaused || companionSilenced || homeV2IntroVisible || !prioritizedCue) return;
     if (shownCueRef.current === prioritizedCue.key) return;
-    const activeness = isCompanionActiveness(companionProjection.projection?.profileSummary.activeness)
-      ? companionProjection.projection.profileSummary.activeness
-      : "quiet";
     if (prioritizedCue.priority === "ordinary") {
       let lastAt = 0;
       try {
@@ -582,8 +607,10 @@ export function CompanionPresence() {
       } catch {
         // A privacy-restricted session may not expose persistent storage.
       }
+      // 只是显示去抖：她多久主动开口一次由服务端按 intervention_level 决定。
+      // 触发式（提醒/系统事件）在这一步直接放行。
       if (!companionCueAllowed({
-        activeness,
+        origin: prioritizedCue.origin,
         priority: prioritizedCue.priority,
         lastOrdinaryCueAt: lastAt,
         now: Date.now(),
@@ -597,8 +624,13 @@ export function CompanionPresence() {
       ? (prioritizedCue.thoughtId || isCommitment ? 30 : 7.4)
       : 5;
     const cueTimeline = gsap.timeline();
+    const cueTarget = {
+      cueKey: prioritizedCue.key,
+      inboxSequence: prioritizedCue.inboxSequence,
+    };
     cueTimeline.call(() => {
       shownCueRef.current = prioritizedCue.key;
+      revealedCueRef.current = cueTarget;
       // Cues may choose a contextual semantic perch, but a hand-placed world
       // anchor is immutable until the user drags or explicitly resets it.
       if (!dragRef.current && placementOwnerRef.current === "semantic") {
@@ -619,10 +651,12 @@ export function CompanionPresence() {
           // The cue can still be shown without persisting its low-frequency gate.
         }
       }
+      void cueDeliveryReporter.shown(cueTarget);
     }, undefined, revealAt);
     cueTimeline.call(() => {
       setHomeCue(null);
       setHomeCueThoughtId(null);
+      revealedCueRef.current = null;
     }, undefined, hideAt);
     return () => {
       cueTimeline.kill();
@@ -632,8 +666,9 @@ export function CompanionPresence() {
       // borrowed position immediately.
       setHomeCue(null);
       setHomeCueThoughtId(null);
+      revealedCueRef.current = null;
     };
-  }, [companionProjection.projection, companionSilenced, homeV2IntroVisible, presencePaused, prioritizedCue, setCompanionHomePlacement]);
+  }, [companionProjection.projection, companionSilenced, cueDeliveryReporter, homeV2IntroVisible, presencePaused, prioritizedCue, setCompanionHomePlacement]);
 
   useLayoutEffect(() => {
     const root = rootRef.current;
@@ -1232,6 +1267,7 @@ export function CompanionPresence() {
 
   // 念头气泡点击（切片④）：她的开场消息落进会话并打开聊天抽屉。
   const openThoughtCue = useCallback(async (thoughtId: string) => {
+    const revealed = revealedCueRef.current;
     try {
       await window.ailearn.companion.chat.openThought({
         meta: createRequestMeta(),
@@ -1240,10 +1276,13 @@ export function CompanionPresence() {
       setHomeCue(null);
       setHomeCueThoughtId(null);
       setMode("history");
+      revealedCueRef.current = null;
+      // `revealed` 与可点的气泡是同一处代码同时设的，取不到就是这条气泡不该有回执。
+      if (revealed) void cueDeliveryReporter.opened(revealed);
     } catch {
       // 打不开（已点过/过期）就静默，气泡按自身时间线消失。
     }
-  }, [setMode]);
+  }, [cueDeliveryReporter, setMode]);
 
   const runActionItem = useCallback((id: string) => {
     setMode("closed");

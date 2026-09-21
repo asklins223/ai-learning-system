@@ -1,5 +1,8 @@
 import { gatewayErrorMessage } from "./desktop-client";
-import type { CompanionVoiceSpeakSegmentRequestV2 } from "@ailearn/shared/companion-voice-contracts";
+import type {
+  CompanionVoicePlaybackOutcomeRequestV1,
+  CompanionVoiceSpeakSegmentRequestV2,
+} from "@ailearn/shared/companion-voice-contracts";
 import type { CharacterCuePayloadV1 } from "@ailearn/shared/companion-conversation-contracts";
 import {
   COMPANION_SPEECH_FEED_INITIAL,
@@ -35,6 +38,11 @@ export interface CompanionVoiceHost {
   readonly play: (buffer: AudioBuffer, onProgress: (fraction: number) => void) => Promise<void>;
   /** 立刻停掉当前播放。 */
   readonly stop: () => void;
+  /**
+   * 回报一段音频的结局（0247）。**同步且自吞异常**：这一段播没播成不该有任何方式
+   * 影响下一段，所以宿主负责把网络失败咽下去，这里只负责在每一段的结局确定时喊一声。
+   */
+  readonly reportSegmentOutcome: (report: CompanionVoicePlaybackOutcomeRequestV1) => void;
 }
 
 export type CompanionSpeechPhase = "speaking" | "finished" | "stopped" | "failed" | "text_only";
@@ -316,7 +324,29 @@ async function runQueuedSpeech(args: {
    * 合成路上。深度 1 时段间仍会露出一个合成往返的空档（qwen/edge 都有网络
    * 往返），实测听感就是"句与句之间卡一下"；深度 2 让下一段几乎总是就绪。
    */
-  const prefetched: Array<{ key: string; buffer: Promise<AudioBuffer> }> = [];
+  const prefetched: Array<{ key: string; buffer: Promise<AudioBuffer>; startedAtMs: number }> = [];
+  /**
+   * 一段的结局要回到服务端才算得清"没声音"是谁的锅（0247）。
+   * 只有带 ref 的段可报——本地文本路径没有 run/segment 身份，没有可归因的对象。
+   */
+  const report = (
+    segment: CompanionQueuedSpeechSegment,
+    reason: CompanionVoicePlaybackOutcomeRequestV1["reason"],
+    startedAtMs: number,
+  ): void => {
+    const ref = segment.ref;
+    if (!ref) return;
+    args.host.reportSegmentOutcome({
+      version: 1,
+      conversationId: ref.conversationId,
+      runId: ref.runId,
+      generation: ref.generation,
+      ordinal: ref.ordinal,
+      segmentId: ref.segmentId,
+      reason,
+      durationMs: Math.max(0, Date.now() - startedAtMs),
+    });
+  };
   const synthesize = (segment: CompanionQueuedSpeechSegment): Promise<AudioBuffer> => segment.ref
     ? args.host.synthesizeSegment(segment.ref)
     : args.host.synthesize(segment.text);
@@ -337,20 +367,23 @@ async function runQueuedSpeech(args: {
     }
     throw lastError instanceof Error ? lastError : new Error("VOICE_SEGMENT_SYNTH_FAILED");
   };
-  const takePrefetched = (key: string): Promise<AudioBuffer> | null => {
+  const takePrefetched = (key: string): { buffer: Promise<AudioBuffer>; startedAtMs: number } | null => {
     const index = prefetched.findIndex((entry) => entry.key === key);
     if (index < 0) return null;
     const [entry] = prefetched.splice(index, 1);
-    return entry.buffer;
+    return entry ? { buffer: entry.buffer, startedAtMs: entry.startedAtMs } : null;
   };
   const prefetchUpcoming = (): void => {
     for (const upcoming of queue.segments.slice(0, 2)) {
       if (prefetched.length >= 2) break;
       if (prefetched.some((entry) => entry.key === upcoming.key)) continue;
+      // startedAtMs 记在**发起合成**的那一刻，不是取用的那一刻：预取的段在队列里
+      // 等着的时候等待时间也在走，而那正是"首字等了多久"的真相。
+      const startedAtMs = Date.now();
       const promise = synthesizeWithRetry(upcoming);
       // 预取失败会在用到它的那一轮被 await 到；先挂个空 handler 免得变成未处理拒绝。
       promise.catch(() => undefined);
-      prefetched.push({ key: upcoming.key, buffer: promise });
+      prefetched.push({ key: upcoming.key, buffer: promise, startedAtMs });
     }
   };
   const visibleAt = (segment: CompanionQueuedSpeechSegment, fraction: number): number => {
@@ -368,13 +401,13 @@ async function runQueuedSpeech(args: {
         await new Promise<void>((resolve) => { queue.wake = resolve; });
         continue;
       }
-      const prefetchedBuffer = takePrefetched(segment.key);
-      const current = prefetchedBuffer ?? synthesizeWithRetry(segment);
+      const pending = takePrefetched(segment.key)
+        ?? { buffer: synthesizeWithRetry(segment), startedAtMs: Date.now() };
       prefetchUpcoming();
       let buffer: AudioBuffer;
       try {
         buffer = await withDeadline(
-          current,
+          pending.buffer,
           hasStartedAudio ? COMPANION_SPEECH_GAP_DEADLINE_MS : COMPANION_SPEECH_FIRST_AUDIO_DEADLINE_MS,
         );
       } catch (error) {
@@ -387,6 +420,7 @@ async function runQueuedSpeech(args: {
         const deadlineHit = error instanceof Error && error.message === "VOICE_SEGMENT_DEADLINE";
         missedSegments += 1;
         lastMissReason = deadlineHit ? "deadline" : "synth_failed";
+        report(segment, deadlineHit ? "deadline" : "synth_failed", pending.startedAtMs);
         continue;
       }
       if (args.runGeneration !== generation) return;
@@ -417,6 +451,9 @@ async function runQueuedSpeech(args: {
       if (args.runGeneration !== generation) return;
       previousEnd = segment.endIndex;
       playedCount += 1;
+      // 走到这里才算"播成了"：`play()` 被打断时同样 resolve，所以必须排在上面那道
+      // generation 检查之后——否则"用户三秒后打断"会被记成一次成功播放。
+      report(segment, "played", pending.startedAtMs);
     }
     activePlanId = null;
     // 降级只发生在"**一段都没播出来**且确实尝试过"的整轮上——这才是

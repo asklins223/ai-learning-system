@@ -3,6 +3,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { GatewayResultV1, SessionContextV1 } from "@ailearn/shared/desktop-ipc-contracts";
 import type {
+  CompanionDailySummaryV1,
   CompanionHistoryItemV1,
   CompanionMemoryItemV1,
   CompanionMemoryStarMapV2,
@@ -156,7 +157,14 @@ function installApi() {
       learningContext: { get: vi.fn(async () => { throw new Error("learning context unavailable"); }) },
       journey: { bootstrap: vi.fn(async () => { throw new Error("journey unavailable"); }) },
       activity: { timeline: vi.fn(async () => { throw new Error("activity unavailable"); }) },
-      daily: { get: vi.fn(async () => { throw new Error("daily unavailable"); }) },
+      // 默认是"读不到"，各用例再 mockResolvedValue 成自己的形状。
+      // 这里必须把返回类型标出来：不标的话 `async () => { throw }` 推成
+      // `Promise<never>`，第一个 mockResolvedValue 就把 mock 钉死在那个对象上。
+      daily: {
+        get: vi.fn(async (): Promise<GatewayResultV1<CompanionDailySummaryV1>> => {
+          throw new Error("daily unavailable");
+        }),
+      },
     },
     subscriptions: {
       subscribe: vi.fn(async () => ok({ version: 1, subscriptionId: "subscription-1" })),
@@ -268,5 +276,101 @@ describe("the companion center reads the shell's companion session", () => {
     fireEvent.click(screen.getByRole("button", { name: /这个月完成力学复习/ }));
     expect(screen.queryByRole("button", { name: "确认删除" })).toBeNull();
     expect(screen.getByRole("button", { name: "删除" })).toBeTruthy();
+  });
+
+  /**
+   * 日记页（用户 2026-09-21 的裁决：「这跟系统统计数据有什么区别？」）。
+   * 旧实现把 12 个计数拼成一句"…的学习小结：新增学习卡 4 张；…"再挂一张数字表；
+   * 现在这一页只有她自己写的那段话，所以这两条用例守的是"数字不许回来"。
+   */
+  it("renders the diary as her own prose, with no statistics table", async () => {
+    const api = installApi();
+    api.companion.daily.get.mockResolvedValue(ok<CompanionDailySummaryV1>({
+      version: 1,
+      date: "2026-09-20",
+      status: "generated",
+      generatedAt: "2026-09-20T16:00:00.000Z",
+      failureReason: null,
+      blocks: [{ type: "text", text: "晚上十点他说想慢慢来，我就把复习那件事咽回去了。" }],
+      memory: { memoryItemId: MEMORY_ID, candidate: true },
+    }));
+    renderCompanionCenter();
+    fireEvent.click(await screen.findByRole("tab", { name: "日记" }));
+
+    const prose = await screen.findByText(/晚上十点他说想慢慢来/);
+    expect(prose.tagName).toBe("P");
+    // 正文里不许有阿拉伯数字——那正是"这跟系统统计数据有什么区别"的形状。
+    expect(prose.textContent).not.toMatch(/\d/);
+    const card = prose.closest("article");
+    expect(card?.querySelectorAll("dl")).toHaveLength(0);
+    expect(card?.textContent).not.toMatch(/新建笔记|生成学习卡|发起后台任务|到访页面|你说的话|伴星回复|学习小结/);
+
+    fireEvent.click(screen.getByRole("button", { name: "查看关联记忆" }));
+    expect(screen.getByRole("tab", { name: "记忆" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  /**
+   * 她自己摆进来的图与原文，按她给的顺序出现在正文里。
+   *
+   * jsdom 取不到图片字节（没有真实的 source.getImage 通道），所以这里断言的是
+   * **位置与图注**——图那一格无论显示成图还是显示成"图片取不回来（图注）"，
+   * 都占在她放它的那个位置上。真的显示出来没有，走 CDP 在运行中的界面里看。
+   */
+  it("places her embedded image and quote where she put them, not all at the end", async () => {
+    const api = installApi();
+    api.companion.daily.get.mockResolvedValue(ok<CompanionDailySummaryV1>({
+      version: 1,
+      date: "2026-09-20",
+      status: "generated",
+      generatedAt: "2026-09-20T16:00:00.000Z",
+      failureReason: null,
+      blocks: [
+        { type: "text", text: "下午那张图我看了很久。" },
+        { type: "image", url: "/api/uploads/notes/alpha.png", label: "《IndexTTS》· 第 1 张", alt: "声码器流程图" },
+        { type: "text", text: "原文里那句话我一直记着。" },
+        { type: "quote", label: "《IndexTTS》里写着", text: "降低语义 Codec 帧率之后，音质几乎没掉。" },
+      ],
+      memory: null,
+    }));
+    renderCompanionCenter();
+    fireEvent.click(await screen.findByRole("tab", { name: "日记" }));
+
+    const first = await screen.findByText(/下午那张图我看了很久/);
+    const card = first.closest("article");
+    const order = [...(card?.children ?? [])].map((node) => node.textContent ?? "");
+    expect(order[0]).toContain("下午那张图我看了很久");
+    expect(order[1]).toContain("《IndexTTS》· 第 1 张");
+    expect(order[2]).toContain("原文里那句话我一直记着");
+    expect(order[3]).toContain("降低语义 Codec 帧率之后");
+    // 引用块用的是记录页那个组件：长原文自己会量高折叠，这里不重复实现。
+    expect(card?.querySelector("figure.companion-record__quote")).toBeTruthy();
+    expect(screen.queryByText(/查看关联记忆/)).toBeNull();
+  });
+
+  it.each([
+    ["consent_required", /「允许发送到外部模型服务」没有开启/],
+    ["model_unavailable", /她试了几次没写出来/],
+    ["diary_output_invalid", /还是在报数/],
+    // 这次改动之前写下的失败行没有成因这一列。
+    [null, /不会用推测内容填充这一天/],
+  ] as const)("names why she could not write the day (%s) instead of promising a retry on read", async (reason, expected) => {
+    const api = installApi();
+    api.companion.daily.get.mockResolvedValue(ok<CompanionDailySummaryV1>({
+      version: 1,
+      date: "2026-09-20",
+      status: "failed",
+      generatedAt: "2026-09-20T16:00:00.000Z",
+      failureReason: reason,
+      blocks: [],
+      memory: null,
+    }));
+    renderCompanionCenter();
+    fireEvent.click(await screen.findByRole("tab", { name: "日记" }));
+
+    await screen.findByText("这一天她没能写下来");
+    expect(screen.getByText(expected)).toBeTruthy();
+    // 读取不会触发重新生成，旧文案那句"可稍后重试"是假承诺；正文也不许出现在失败态里。
+    expect(screen.queryByText(/可稍后重试/)).toBeNull();
+    expect(screen.queryByText(/晚上十点/)).toBeNull();
   });
 });

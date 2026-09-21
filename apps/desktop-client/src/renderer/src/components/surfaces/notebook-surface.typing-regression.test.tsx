@@ -65,22 +65,26 @@ function stubGatewayForNote(initialBlocks: readonly { ordinal: number; type: str
           },
         },
       })),
-      save: vi.fn(async (input: { request: { blocks?: typeof state.blocks; title: string } }) => {
-        state.saveCount += 1;
-        state.title = input.request.title;
-        if (input.request.blocks) state.blocks = input.request.blocks.map((block) => ({ ...block }));
-        return {
-          ok: true as const,
-          workspaceEpoch: 1,
-          data: {
-            noteId: NOTE_ID,
-            versionId: `v-${state.saveCount}`,
-            savedAt: new Date().toISOString(),
-            isAutosave: true,
-            workspaceId: "w-1",
-          },
-        };
-      }),
+      // 自动保存走的是文档增量（批次 4.4）。这条用例测的是"敲字之后恰好提交一次、
+      // 页面不塌"，mock 必须挂在页面真的会调的那个口上，否则它绿的是旧路。
+      doc: {
+        state: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { blocks: [], title: "", titleSource: "auto", revision: 0, backfilled: false } })),
+        syncBlocks: vi.fn(async (input: { blocks?: typeof state.blocks; title?: { title: string } }) => {
+          state.saveCount += 1;
+          if (input.title) state.title = input.title.title;
+          if (input.blocks) state.blocks = input.blocks.map((block) => ({ ...block }));
+          return {
+            ok: true as const,
+            workspaceEpoch: 1,
+            data: {
+              via: "uploaded" as const,
+              revision: state.saveCount,
+              savedAt: new Date().toISOString(),
+            },
+          };
+        }),
+        presence: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { shared: false } })),
+      },
     },
     capabilities: {
       get: vi.fn(async () => ({

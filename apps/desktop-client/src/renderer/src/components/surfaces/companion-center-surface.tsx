@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { AlertTriangle, Archive, ChevronLeft, ChevronRight, CircleDot, Database, Download, ExternalLink, Map as MapIcon, MessageCircle, Pencil, Pin, RefreshCw, Search, Sparkles, Trash2, X } from "lucide-react";
 import type { GatewayResultV1 } from "@ailearn/shared/desktop-ipc-contracts";
-import type { CompanionActivityDeliveryV1, CompanionActivityTimelineV1, CompanionDailyFactsV1, CompanionDailySummaryV1, CompanionExportKindV1, CompanionHistoryItemV1, CompanionMemoryItemV1, CompanionMemoryKindV1, CompanionMemoryStarMapV2, CompanionPersonaProfileV1, CompanionPersonaPresetV1, CompanionPersonaV1 } from "@ailearn/shared/companion-memory-desktop-contracts";
+import type { CompanionActivityDeliveryV1, CompanionActivityTimelineV1, CompanionDailyFailureReasonV1, CompanionDailySummaryV1, CompanionExportKindV1, CompanionHistoryItemV1, CompanionMemoryItemV1, CompanionMemoryKindV1, CompanionMemoryStarMapV2, CompanionPersonaProfileV1, CompanionPersonaPresetV1, CompanionPersonaV1 } from "@ailearn/shared/companion-memory-desktop-contracts";
 import type { CompanionJourneyAction, CompanionJourneyBootstrap } from "@ailearn/shared/companion-journey-contracts";
 import type { CompanionLearningContextV1 } from "@ailearn/shared/companion-conversation-contracts";
 import { companionPersonaPatchFromPreset, companionPersonaPatchFromProfile } from "@ailearn/shared/companion-memory-desktop-contracts";
@@ -10,6 +10,7 @@ import { useCompanionChat } from "../../app/companion-chat-session";
 import { useRoomStore } from "../../app/room-store";
 import { HudPage } from "../hud/HudPage";
 import { useHudPage } from "../hud/use-hud-page";
+import { CompanionQuoteBlock, CompanionRecordImage } from "../companion/CompanionChatRecord";
 import { CompanionSelect, type CompanionSelectOption } from "./companion-select";
 import { diaryDayLabel, diaryDayStrip, shiftIsoDate, todayIsoDate } from "./companion-diary-day";
 import { buildCompanionMemoryUniverse, routeForMemoryEntityTarget } from "./companion-memory-universe";
@@ -34,10 +35,18 @@ const MEMORY_STATE_LABEL: Record<string, string> = {
   candidate: "待确认", active: "已写入", pinned: "已固定", archived: "已归档", linked: "真实关联", orphaned: "关联失效",
 };
 const ENTITY_LABEL: Record<string, string> = { note: "笔记", source: "来源", card: "学习卡", key_point: "知识点", learning_run: "学习运行" };
-const DAILY_FACT_LABEL: Record<keyof CompanionDailyFactsV1, string> = {
-  notesCreated: "新建笔记", notesUpdated: "更新笔记", cardsCreated: "生成学习卡", sourcesCreated: "采集来源",
-  jobsCreated: "发起后台任务", jobsCompleted: "完成任务", learningRunsCreated: "开始学习运行", learningRunsCompleted: "完成学习运行",
-  pageContexts: "到访页面", conversationMessages: "对话消息", userMessages: "你说的话", assistantMessages: "伴星回复",
+/**
+ * 「这一天她没能写下来」的三种成因（0250 的 failure_reason）。
+ *
+ * 旧文案只有一句"生成失败"，用户分不清是自己没开设置还是我们出了问题；
+ * 那句「可稍后重试读取」也是假话——读取不会触发重新生成，只有第二天会。
+ * `unknown` 是这次改动之前写下的失败行（当时没有成因这一列）。
+ */
+const DIARY_FAILURE_DETAIL: Record<CompanionDailyFailureReasonV1 | "unknown", string> = {
+  consent_required: "日记要由她来写，而「允许发送到外部模型服务」没有开启。开启后从第二天开始写。",
+  model_unavailable: "她试了几次没写出来，明天会再试。",
+  diary_output_invalid: "她写回来的东西还是在报数，不像日记，没有收下来。",
+  unknown: "不会用推测内容填充这一天。",
 };
 // 「导出记忆」和「导出操作记录」曾经共用同一句副标题，三个按钮看上去
 // 像同一件事的三个副本；各自说清自己带走哪些表。
@@ -841,7 +850,27 @@ function DiaryPanel(props: { section: Section<CompanionDailySummaryV1> | null; l
   if (!props.section) return <SectionState message="日记当前不可用" detail={props.failure ?? undefined} onRetry={props.onRetry} />;
   if (!props.section.ok) return <SectionState message="日记当前不可用" detail={props.section.message} onRetry={props.onRetry} />;
   const daily = props.section.value; const anchor = props.date ?? daily.date ?? todayIsoDate();
-  return <div className="companion-panel-stack"><div className="companion-panel-heading"><div><h3>日记</h3><p>只呈现真实日汇总与它关联的记忆。</p></div></div><div className="companion-date-nav"><button type="button" onClick={() => props.onDate(shiftIsoDate(anchor, -1))}><ChevronLeft size={15} />前一天</button><strong>{diaryDayLabel(anchor)}</strong><button type="button" disabled={anchor >= todayIsoDate()} onClick={() => props.onDate(shiftIsoDate(anchor, 1))}>后一天<ChevronRight size={15} /></button></div><div className="companion-day-strip">{diaryDayStrip(anchor, 5).map((day) => <button key={day} type="button" aria-pressed={day === anchor} className={day === anchor ? "is-active" : undefined} onClick={() => props.onDate(day)}>{day.slice(5)}</button>)}</div>{daily.status === "generated" ? <article className="companion-diary-entry"><strong>{daily.summary || "这一天没有可展示的文字汇总。"}</strong><small>{daily.generatedAt ? `生成于 ${formatDate(daily.generatedAt)}` : "生成时间未提供"}</small><dl>{Object.entries(daily.facts).map(([key, value]) => typeof value === "number" ? <div key={key}><dt>{DAILY_FACT_LABEL[key as keyof CompanionDailyFactsV1]}</dt><dd>{value}</dd></div> : null)}</dl>{daily.memory ? <button type="button" onClick={() => props.onMemory(daily.memory!.memoryItemId)}>查看关联记忆</button> : null}</article> : <SectionState message={daily.status === "failed" ? "这一天的日记生成失败" : "这一天还没有日记"} detail={daily.status === "failed" ? "可稍后重试读取；不会用推测内容填充。" : undefined} />}</div>;
+  return <div className="companion-panel-stack">
+    <div className="companion-panel-heading"><div><h3>日记</h3><p>她自己写的，不是统计。</p></div></div>
+    <div className="companion-date-nav"><button type="button" onClick={() => props.onDate(shiftIsoDate(anchor, -1))}><ChevronLeft size={15} />前一天</button><strong>{diaryDayLabel(anchor)}</strong><button type="button" disabled={anchor >= todayIsoDate()} onClick={() => props.onDate(shiftIsoDate(anchor, 1))}>后一天<ChevronRight size={15} /></button></div>
+    <div className="companion-day-strip">{diaryDayStrip(anchor, 5).map((day) => <button key={day} type="button" aria-pressed={day === anchor} className={day === anchor ? "is-active" : undefined} onClick={() => props.onDate(day)}>{day.slice(5)}</button>)}</div>
+    {daily.status === "generated"
+      ? <article className="companion-diary-entry">
+          {/* 按她给的顺序排：图跟在说到它的那段后面，不是全堆在末尾。
+              渲染器直接复用对话记录那两处（含长引用的量高折叠与图片取回重试），
+              不在这页再抄一份"图片显示不出来时说什么"。 */}
+          {daily.blocks.map((block, index) => block.type === "text"
+            ? <p className="companion-diary-prose" key={`text-${index}`}>{block.text}</p>
+            : block.type === "quote"
+              ? <CompanionQuoteBlock block={block} key={`quote-${index}`} />
+              : block.type === "image"
+                ? <CompanionRecordImage block={block} key={`image-${index}`} />
+                : null)}
+          <small>{daily.generatedAt ? `生成于 ${formatDate(daily.generatedAt)}` : "生成时间未提供"}</small>
+          {daily.memory ? <button type="button" onClick={() => props.onMemory(daily.memory!.memoryItemId)}>查看关联记忆</button> : null}
+        </article>
+      : <SectionState message={daily.status === "failed" ? "这一天她没能写下来" : "这一天还没有日记"} detail={daily.status === "failed" ? DIARY_FAILURE_DETAIL[daily.failureReason ?? "unknown"] : undefined} />}
+  </div>;
 }
 
 type PersonaPanelProps = { section: Section<CompanionPersonaV1>; persona: CompanionPersonaV1 | null; busy: string | null; error: string | null; notice: string | null; onPreset: (preset: CompanionPersonaPresetV1) => void; onActiveness: (value: CompanionPersonaProfileV1["activeness"]) => void; onBoundary: (key: (typeof BOUNDARY_ITEMS)[number][0]) => void; onReset: () => void; onRetry: () => void };

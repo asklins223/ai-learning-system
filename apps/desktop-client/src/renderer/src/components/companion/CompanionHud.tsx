@@ -41,6 +41,7 @@ import type { CompanionMessageV1 } from "@ailearn/shared/companion-conversation-
 import { gatewayErrorMessage } from "../../app/desktop-client";
 import {
   companionMessageText,
+  navChipsStillOutsideMessages,
   useCompanionChat,
   type CompanionNavChip,
 } from "../../app/companion-chat-session";
@@ -84,6 +85,7 @@ import {
   type CompanionBubbleFollow,
 } from "./companion-bubble-follow";
 import { COMPANION_BUBBLE_FRAME_INSET, companionBubbleClearance } from "./companion-bubble-clearance";
+import { plainCompanionBubbleText } from "./companion-markdown";
 import { useCompanionVoiceInput, type CompanionVoiceInput } from "./use-companion-voice-input";
 import { DIRECTORY_RAIL_MODE_EVENT, DIRECTORY_RAIL_STATE_EVENT } from "../DirectoryRail";
 import type { Rect } from "./companion-home-placement";
@@ -989,8 +991,8 @@ export function CompanionHud({
     void chat.cancel();
   }, [chat]);
 
-  const replyText = chat.liveReply ? companionHudReplyText(chat.liveReply) : "";
-  const draftText = chat.draft?.text ?? "";
+  const replyText = chat.liveReply ? plainCompanionBubbleText(companionHudReplyText(chat.liveReply)) : "";
+  const draftText = plainCompanionBubbleText(chat.draft?.text ?? "");
   const phase = voice.phase === "listening" ? "listening"
     : voice.phase === "transcribing" ? "transcribing"
       : replyText || draftText ? "replying"
@@ -1014,7 +1016,7 @@ export function CompanionHud({
    * 说到一半被打断（失败/超时）：那半句继续留在气泡里，按同一套显现节奏露完。
    * 说明句单独一行挂在下面（`.companion-hud__output-note`），不挤进正文。
    */
-  const interruptedText = chat.interrupted?.text ?? "";
+  const interruptedText = plainCompanionBubbleText(chat.interrupted?.text ?? "");
   const interruptedSlotText = interruptedText ? companionBubbleText(interruptedText, revealedChars) : "";
   const interruptedNote = interruptedSlotText && chat.failure ? chat.failure : null;
   const slot: { readonly tone: "reply" | "process" | "stopped" | "note"; readonly text: string } | null =
@@ -1548,7 +1550,7 @@ function CompanionQuickSettings({ settings }: { readonly settings: CompanionHudS
     ? "读取失败"
     : !account
       ? "读取中…"
-      : `${settings.rendererLabel} · 修订 ${account.revision}${settings.accountSaving ? " · 保存中" : ""}`;
+      : `${settings.rendererLabel} · 版本 ${account.revision}${settings.accountSaving ? " · 保存中" : ""}`;
   return (
     <div className="companion-hud__settings">
       <section className="companion-hud__setting-group">
@@ -2327,7 +2329,12 @@ function CompanionHistoryDrawer({
         )}
       </form>
       ) : null}
-      {chat.navChips.length > 0 && !recordOpen ? <div className="companion-history__nav">{chat.navChips.map((chip) => <div key={chip.id}><span>{chip.summary}</span>{chip.route ? <button type="button" onClick={() => void openRoute(chip)}>前往</button> : <small>桌面端暂不支持这个跳转</small>}<button type="button" onClick={() => chat.dismissNavChip(chip.id)} aria-label="知道了"><X size={12} /></button></div>)}</div> : null}
+      {(() => {
+        // 同一条落点如果已经作为 nav 块进了消息，chip 行就不再重复它（§4.8）。
+        // chip 行因此只剩"正在跑的这一轮"和"确认后直接给出的落点"两种即时提示。
+        const visible = navChipsStillOutsideMessages(chat.navChips, chat.messages);
+        return visible.length > 0 && !recordOpen ? <div className="companion-history__nav">{visible.map((chip) => <div key={chip.id}><span>{chip.summary}</span>{chip.route ? <button type="button" onClick={() => void openRoute(chip)}>前往</button> : <small>桌面端暂不支持这个跳转</small>}<button type="button" onClick={() => chat.dismissNavChip(chip.id)} aria-label="知道了"><X size={12} /></button></div>)}</div> : null;
+      })()}
       {!recordOpen && jumpNotice ? <p className="companion-history__error" role="status">{jumpNotice}</p> : null}
       {!recordOpen && (navNote || chat.failure) ? <p className="companion-history__error" role="status">{navNote ?? chat.failure}</p> : null}
       </aside>
