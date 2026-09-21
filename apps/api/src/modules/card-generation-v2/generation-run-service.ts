@@ -699,7 +699,7 @@ export async function retryGenerationRunV2(ctx: RunContext, runId: string) {
     }
     // 来源过期守卫：run 绑定的 note 版本已不是最新 → 重跑只会对着过期内容再产出一批
     // 注定要被 source_outdated 标记的候选，用户应当先回笔记重开一次生成。
-    if (await checkSourceOutdated(tx, ctx.workspaceId, run.noteId, run.noteVersionId)) {
+    if (await checkSourceOutdated(tx, ctx.workspaceId, run.noteId, run.noteVersionId, run.sourceContentHash)) {
       throw new CardGenerationV2ServiceError(
         "source_outdated",
         409,

@@ -12,7 +12,7 @@ import {
   cardDomainEventsV2,
 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
-import { noteVersions } from "@ailearn/shared/db-schema/note";
+import { noteBlocks, notes } from "@ailearn/shared/db-schema/note";
 import { cardGenerationRunStatusV2Schema, isCandidateReviewReadyV2 } from "@ailearn/shared/card-generation-v2-contracts";
 import { projectCardGenerationRecoveryV1 } from "./desktop-projection.ts";
 import type { CardGenerationProgressV1 } from "@ailearn/shared/card-generation-desktop-contracts";
@@ -87,28 +87,34 @@ export function sanitizeEventPayloadV2(
 
 /**
  * 方案 20 §17.2：Note 在 seal 后继续编辑只产生派生提示 `sourceOutdated=true`，
- * 不使旧 Run stale。通过比较 run.noteVersionId 与 note 的最新 versionId 来检测。
+ * 不使旧 Run stale。判据有两条：版本指针换了（建新版本 / 恢复旧版本），或版本 id 没变
+ * 但正文变了（自动保存是原地改写版本行的，只比 id 永远看不出来）。
  */
 export async function checkSourceOutdated(
   tx: ApiTransaction,
   workspaceId: string,
   noteId: string,
   runNoteVersionId: string,
+  runSourceContentHash: string,
 ): Promise<boolean> {
-  // 查找 note 的最新版本
-  const latestVersions = await tx.select({ id: noteVersions.id, versionNo: noteVersions.versionNo })
-    .from(noteVersions)
-    .where(and(
-      eq(noteVersions.noteId, noteId),
-      eq(noteVersions.workspaceId, workspaceId),
-    ))
-    .orderBy(sql`${noteVersions.versionNo} DESC`)
-    .limit(1);
-  if (latestVersions.length === 0) return false;
-  // 如果 run 绑定的版本不是最新版本，则 source outdated
-  return latestVersions[0].id !== runNoteVersionId;
-}
+  const note = await tx.query.notes.findFirst({
+    where: and(eq(notes.id, noteId), eq(notes.workspaceId, workspaceId)),
+    columns: { currentVersionId: true },
+  });
+  if (!note?.currentVersionId) return false;
+  // ① 换版本了（手动保存建新版本、恢复历史版本都走这条）。
+  if (note.currentVersionId !== runNoteVersionId) return true;
 
+  // ② 版本 id 没变，但正文可能已经变了——自动保存是**原地**改写版本行的，
+  // 只看 id 的话这条永远不成立，卡片明明是从改之前的正文生成的却说自己不过时。
+  // 这里用与生成时完全相同的算法（§9.2：只覆盖 block 内容，不含版本 id）重算一遍。
+  const blocks = await tx.query.noteBlocks.findMany({
+    where: eq(noteBlocks.versionId, runNoteVersionId),
+    orderBy: (b, { asc }) => [asc(b.ordinal)],
+  });
+  const blockContents = blocks.map((block) => block.content).join("\n");
+  return hashCanonicalV2("card-generation-v2/source-content", { blockContents }) !== runSourceContentHash;
+}
 /**
  * 一次生成的逐候选进度聚合（2026-09-20 实走复盘 #2）。
  *
@@ -163,7 +169,7 @@ export async function serializeRunPublic(
   let sourceOutdated = false;
   if (tx) {
     try {
-      sourceOutdated = await checkSourceOutdated(tx, row.workspaceId, row.noteId, row.noteVersionId);
+      sourceOutdated = await checkSourceOutdated(tx, row.workspaceId, row.noteId, row.noteVersionId, row.sourceContentHash);
     } catch {
       // 如果查询失败（如 mock tx 不支持某些方法），保守返回 false
       sourceOutdated = false;

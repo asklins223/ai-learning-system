@@ -17,6 +17,7 @@ import { closeDatabase, withWorkspaceTransaction } from "../db/client.ts";
 import { createNote, restoreNoteVersion, updateNote } from "../modules/note/service.ts";
 import { applyNoteDocUpdate, loadNoteDoc } from "../modules/note/document-state.ts";
 import { importMarkdownNotes, prepareMarkdownImport } from "../modules/import/markdown-import-service.ts";
+import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
 import {
   projectNoteBlocks,
   readNoteTitle,
@@ -203,6 +204,30 @@ test("自动保存不再另起一套正文：写完行之后文档必须与投�
     submitted.map((block) => block.content),
     "投影与文档分叉",
   );
+});
+
+test("来源过期守卫：版本指针没变、正文改了，也要被判成过时", async () => {
+  // `checkSourceOutdated` 原来只比版本指针。自动保存是原地改写版本行的（批次 4.1），
+  // 指针一点不动，于是卡片明明是从改之前的正文生成的，却永远报告"来源没变"。
+  const { checkSourceOutdated } = await import("../modules/card-generation-v2/helpers.ts");
+  const pointer = await sql`SELECT current_version_id FROM notes WHERE id = ${noteId}`;
+  const versionIdNow = String(pointer[0].current_version_id);
+  const rows = await sql`
+    SELECT content FROM note_blocks WHERE version_id = ${versionIdNow} ORDER BY ordinal
+  `;
+  const hashNow = hashCanonicalV2("card-generation-v2/source-content", {
+    blockContents: rows.map((row) => String(row.content)).join("\n"),
+  });
+
+  const same = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
+    checkSourceOutdated(tx, workspaceId, noteId, versionIdNow, hashNow),
+  );
+  assert.equal(same, false, "内容没改却说过时（正向对照，否则下面的断言毫无意义）");
+
+  const changed = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
+    checkSourceOutdated(tx, workspaceId, noteId, versionIdNow, "一个来自旧正文的 hash"),
+  );
+  assert.equal(changed, true, "版本 id 没变但正文变了，守卫必须看出来——这正是原地自动保存那条路");
 });
 
 test("恢复历史版本走同一入口：内容回到旧版且投影与文档一致", async () => {
