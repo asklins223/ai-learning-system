@@ -467,3 +467,31 @@
     animation: none;
   }
 }
+
+/* ── B10：贯穿列表 / 详情 / 结算的那一条进度带（§9.1）───────────────────
+ *
+ * 三段是**刻度**，不是三个状态：走到第 N 段，就把第 1..N 格画满。
+ * 没有读数时一格都不画，末尾补一个 —（DESIGN.md:178：不许拿 0 冒充"还没答过"）。
+ * 只用已存在的 token（DESIGN.md:197：先有代码声明，再谈新 token）。        */
+.objective-progress { display: flex; align-items: flex-end; gap: 6px; }
+.objective-progress__seg { display: grid; min-width: 0; flex: 1 1 0; gap: 4px; justify-items: stretch; }
+.objective-progress__bar {
+  height: 5px;
+  border-radius: 3px 4px 3px 4px;
+  background: var(--v3-line);
+  transition: background-color 220ms var(--v3-ease);
+}
+.objective-progress__seg[data-lit="true"] .objective-progress__bar { background: var(--v3-clay); }
+.objective-progress__label {
+  color: var(--v3-soft);
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+.objective-progress__seg[data-current="true"] .objective-progress__label { color: var(--v3-ink); font-weight: 700; }
+.objective-progress__none { color: var(--v3-soft); font-size: 11px; }
+/* 结算页那张绿纸上的读数比列表卡重要一档：动词那句就在它上面。 */
+.hud-surface .learning-run-result-summary .objective-progress { margin-top: 10px; }
+/* 焦点卡顶部：三段带是这张卡的第一行，先回答"走到哪"，再说"这是什么"。 */
+.hud-surface .v3-goal-focus .objective-progress { margin: 0 0 10px; }
+.hud-surface .v3-objective-intro .objective-progress { margin: 0 24px 12px; }

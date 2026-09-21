@@ -44,6 +44,8 @@ import {
 import { SurfaceReturnControl } from "./SurfaceReturnControl";
 import { learningRunPhaseLabels } from "./learning-run-surface";
 import { startObjectiveJourney } from "./objective-primary-action";
+import { ObjectiveProgressBand } from "./ObjectiveProgressBand";
+import { progressSegmentForState } from "./objective-progress-band";
 import {
   formatObjectiveDateTime,
   formatObjectiveState,
@@ -394,6 +396,7 @@ export function ObjectiveLibrarySurface() {
       {!loading && !failure && activeGoal ? (
         <div className="v3-goal-workbench">
           <section className="v3-goal-focus" aria-labelledby="goal-focus-title">
+            <ObjectiveProgressBand segment={progressSegmentForState(activeGoal.personalState.state)} />
             <div className="v3-goal-focus__topline">
               <span className={`v3-objective-state v3-objective-state--${objectiveStateTone(activeGoal.personalState.state)}`}><CircleDot size={12} aria-hidden="true" />{formatObjectiveState(activeGoal.personalState.state)}</span>
               <span>{formatKnowledgeForm(activeGoal.knowledgeForm)}</span>
@@ -574,6 +577,7 @@ export function ObjectiveDetailSurface() {
         <div className="v3-objective-workspace">
           <article className="v3-objective-sheet">
             <div className="v3-objective-intro">
+              <ObjectiveProgressBand segment={progressSegmentForState(detailState ?? "")} />
               <header className="v3-objective-sheet__header">
                 <span className={`v3-objective-state v3-objective-state--${objectiveStateTone(detailState)}`}><CircleDot size={12} aria-hidden="true" />{formatObjectiveState(detailState)}</span>
                 <span>更新于 {formatObjectiveDateTime(objective.updatedAt)}</span>

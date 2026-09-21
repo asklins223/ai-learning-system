@@ -255,6 +255,28 @@ describe("LearningRunSurface · 结算页结构", () => {
 
   // ---- B3：下次到期不能再读成「刚刚」（31 号文档 P4）----
 
+  it("结算页那条带子和列表/详情是同一个对象，位置读本次的结论", async () => {
+    renderResult();
+    await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
+
+    const band = document.querySelector(".learning-run-result-summary .objective-progress");
+    expect(band, "结算页没有那条进度带").not.toBeNull();
+    expect(band?.getAttribute("data-segment")).toBe("2");
+    expect([...band!.querySelectorAll(".objective-progress__seg")].map((s) => s.getAttribute("data-lit")))
+      .toEqual(["true", "true", "true"]);
+  });
+
+  it("全说清但只算练习时，带子停在「练过了」而不是「说清了」", async () => {
+    // 这条正是 P1 的原始形态：四条 rubric 全 covered，但结论是 practice_completed。
+    // 带子如果按 rubric 自己数，就会在这里撒一个更好看的谎。
+    renderResult(12, allCoveredPractice());
+    await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
+
+    const band = document.querySelector(".learning-run-result-summary .objective-progress");
+    expect(band?.getAttribute("data-segment")).toBe("1");
+    expect(band?.getAttribute("aria-label")).toContain("练过了");
+  });
+
   it("三天后的复习写「3 天后」，不是「刚刚」", async () => {
     renderResult();
     await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());

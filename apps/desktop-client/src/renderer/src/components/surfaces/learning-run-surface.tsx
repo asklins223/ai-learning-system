@@ -67,6 +67,8 @@ import {
 } from "../learning-run-activity-lease";
 import { SurfaceDataState } from "./surface-data";
 import { formatObjectiveDay } from "./objective-state-copy";
+import { ObjectiveProgressBand } from "./ObjectiveProgressBand";
+import { progressSegmentForOutcome } from "./objective-progress-band";
 import { VoiceTeachbackEditor } from "./run-voice-input";
 import { microphoneAvailabilityCopy, probeMicrophone, type MicrophoneAvailability } from "../voice-capability";
 
@@ -2020,6 +2022,12 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
               }</strong>
             )}
             <p>{snapshot.target.publicSummary}</p>
+            {/* B10：这一条带和列表焦点卡、详情页顶部是**同一个组件**。
+                这里画的是"这一轮把位置推到第几段"，读的是服务端签发的
+                result.outcome——不是这条目标的累计位置：run 快照的 target 里
+                根本没有 personalState（只有题面、评分规则与练习件），
+                累计那一格要等服务端发这个字段，不能本机推。 */}
+            <ObjectiveProgressBand segment={progressSegmentForOutcome(result?.outcome)} />
             <dl>
               {thisTime.coveredCount ? (
                 <div><dt>这次说清</dt><dd>{thisTime.coveredCount} 条</dd></div>
