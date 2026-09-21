@@ -14,13 +14,17 @@ import {
 import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
 import { noteBlocks, notes } from "@ailearn/shared/db-schema/note";
 import { visibleNotesCondition } from "../note/visibility.ts";
-import { cardGenerationRunStatusV2Schema, cardGenerationLiveProgressV2Schema, isCandidateReviewReadyV2 } from "@ailearn/shared/card-generation-v2-contracts";
+import { cardGenerationRunStatusV2Schema, cardGenerationLiveProgressV2Schema, cardPlanResultV2Schema, isCandidateReviewReadyV2, type PracticeItemFormV2 } from "@ailearn/shared/card-generation-v2-contracts";
 import { projectCardGenerationRecoveryV1 } from "./desktop-projection.ts";
 import type { CardGenerationProgressV1 } from "@ailearn/shared/card-generation-desktop-contracts";
 // 2026-08-24（AI 设计审查 §4.4 第二批）：ServiceError 继承 shared 纯逻辑层的
 // CardGenerationPipelineErrorV2——seal/binding-plan 纯函数抛出 shared 类，
 // API 错误边界通过同一继承链识别 code/statusCode。
-import { CardGenerationPipelineErrorV2 } from "@ailearn/shared/card-generation-v2-pipeline";
+import {
+  CardGenerationPipelineErrorV2,
+  budgetedPlanObjectives,
+  summarizePracticeQuotaV2,
+} from "@ailearn/shared/card-generation-v2-pipeline";
 export { CardGenerationPipelineErrorV2 };
 
 export class CardGenerationV2ServiceError extends CardGenerationPipelineErrorV2 {
@@ -319,6 +323,35 @@ export function serializeCandidatePublic(row: typeof cardGenerationCandidatesV2.
       publishState: row.publishState as "unpublished" | "activating" | "activated" | "activation_failed" | "superseded" | "expired",
     }),
   };
+}
+
+/**
+ * 整批练习件配额的结算（D6 缺额 → 审核页头部读数）。
+ *
+ * 必须复用 worker 落 `card_generation.practice_quota_short` 事件时用的同一支函数：
+ * 缺额若在服务端和界面各算一遍，事件里的数和屏幕上写的数就会给出两个答案。
+ *
+ * 只读计划的 `result`，不读候选的 objectiveDraft：候选侧的形状已经在
+ * `serializeCandidatePublic` 里投影成公开视图了，这里直接吃那份，避免同一个
+ * jsonb 字段被解析两次。
+ *
+ * 老批次（D6 之前封存的 plan 行没有 `practiceForm`）解析不过 → `{0,0}`，
+ * 意思是"这批没点名要练习件"，头部因此不会为一次没有发生过的要求报缺额。
+ */
+export function summarizePlanPracticeQuotaV2(
+  planResult: unknown,
+  candidates: readonly { planObjectiveLocalId: string; practiceItem: { kind: PracticeItemFormV2 } | null }[],
+): { requiredCount: number; metCount: number } {
+  const parsed = cardPlanResultV2Schema.safeParse(planResult ?? null);
+  if (!parsed.success) return { requiredCount: 0, metCount: 0 };
+  const { requiredCount, metCount } = summarizePracticeQuotaV2(
+    budgetedPlanObjectives({ result: parsed.data }),
+    new Map(candidates.map((candidate) => [
+      candidate.planObjectiveLocalId,
+      candidate.practiceItem?.kind ?? null,
+    ])),
+  );
+  return { requiredCount, metCount };
 }
 
 export async function insertEvent(

@@ -6,7 +6,7 @@
  * - createGenerationRunV2 note_version_not_found
  * - createGenerationRunV2 happy path（seal → planning + outbox 入队；终态由 worker 推进）
  * - getGenerationRunV2 查询（存在 / 不存在）
- * - getGenerationRunCandidatesV2（最新 revision 去重）
+ * - getGenerationRunCandidatesV2（最新 revision 去重 + 整批练习件配额结算）
  * - closeGenerationRunV2 状态守卫（非 review_ready → 409）
  * - cancelGenerationRunV2 可取消状态守卫
  */
@@ -16,6 +16,7 @@ import { describe, it, beforeEach, afterEach } from "node:test";
 import { db } from "../db/client.ts";
 import {
   cardGenerationRunsV2,
+  cardGenerationPlansV2,
   cardGenerationEventsV2,
   cardGenerationRunOutboxV2,
 } from "@ailearn/shared/db-schema/card-generation-v2";
@@ -518,19 +519,20 @@ describe("getGenerationRunCandidatesV2", () => {
       { ...makeBaseCandidateRow(), candidateId: "c2", revision: 2 },
     ];
 
-    let selectCount = 0;
     setupTx({
       select: () => ({
         from: (table: unknown) => {
           if (table === cardGenerationRunsV2) {
             return {
               where: () => ({
-                limit: async () => [{ id: RUN_ID }],
+                limit: async () => [{ id: RUN_ID, currentPlanVersion: 1 }],
               }),
             };
           }
+          if (table === cardGenerationPlansV2) {
+            return { where: () => ({ limit: async () => [] }) };
+          }
           // candidates query
-          selectCount++;
           return {
             where: () => ({
               orderBy: () => candidates, // return all, ordered by revision desc
@@ -546,11 +548,99 @@ describe("getGenerationRunCandidatesV2", () => {
     );
     assert.ok(result);
     // Should only have the latest revision per candidateId
-    assert.equal(result!.length, 2);
-    assert.equal(result![0].candidateId, "c1"); // revision 2 first (ordered by desc)
-    assert.equal(result![0].revision, 2);
-    assert.equal(result![1].candidateId, "c2");
-    assert.equal(result![1].revision, 3);
+    assert.equal(result!.candidates.length, 2);
+    assert.equal(result!.candidates[0].candidateId, "c1"); // revision 2 first (ordered by desc)
+    assert.equal(result!.candidates[0].revision, 2);
+    assert.equal(result!.candidates[1].candidateId, "c2");
+    assert.equal(result!.candidates[1].revision, 3);
+  });
+
+  /**
+   * D6 缺额要看得见（2026-09-21 决定：显示在审核页头部），所以整批结算必须走
+   * 候选列表这一条读路径——审核页此前只有一张一张的随卡练习，没有任何一处说
+   * "整批点名要几张、缺几张"。
+   *
+   * 三个目标分别盯三件事：形状对上才算兑现、形状交错算缺额、没点名的自愿交不算数。
+   */
+  it("reports the batch practice quota next to the candidates", async () => {
+    const planResult = {
+      kind: "author_candidates",
+      recommendedCardCount: 3,
+      activationHardMax: 3,
+      existingActions: [],
+      objectives: [
+        makePlanObjective("obj-1", "single_choice"),
+        makePlanObjective("obj-2", "true_false"),
+        makePlanObjective("obj-3", null),
+      ],
+    };
+    const base = makeBaseCandidateRow();
+    const candidates = [
+      { ...base, candidateId: "c1", planObjectiveLocalId: "obj-1", objectiveDraft: { ...base.objectiveDraft, practiceItem: { kind: "single_choice", options: [{ unitId: "u1", text: "对" }, { unitId: "u2", text: "错" }, { unitId: "u3", text: "也许" }] } } },
+      { ...base, candidateId: "c2", planObjectiveLocalId: "obj-2", objectiveDraft: { ...base.objectiveDraft, practiceItem: { kind: "ordering", units: [{ unitId: "u1", text: "一" }, { unitId: "u2", text: "二" }, { unitId: "u3", text: "三" }, { unitId: "u4", text: "四" }] } } },
+      { ...base, candidateId: "c3", planObjectiveLocalId: "obj-3", objectiveDraft: { ...base.objectiveDraft, practiceItem: { kind: "matching", pairs: [{ left: "a", right: "b" }, { left: "c", right: "d" }] } } },
+    ];
+
+    setupTx({
+      select: () => ({
+        from: (table: unknown) => {
+          if (table === cardGenerationRunsV2) {
+            return { where: () => ({ limit: async () => [{ id: RUN_ID, currentPlanVersion: 1 }] }) };
+          }
+          if (table === cardGenerationPlansV2) {
+            return { where: () => ({ limit: async () => [{ result: planResult }] }) };
+          }
+          return { where: () => ({ orderBy: () => candidates }) };
+        },
+      }),
+    });
+
+    const result = await getGenerationRunCandidatesV2(
+      { workspaceId: WORKSPACE_ID, userId: USER_ID },
+      RUN_ID,
+    );
+    assert.ok(result);
+    // 点名 2 张（obj-3 没点名），其中只有 obj-1 按形状配上。
+    assert.deepEqual(result!.practiceQuota, { requiredCount: 2, metCount: 1 });
+  });
+
+  /**
+   * D6 之前封存的 plan 行没有 `practiceForm`。这种批次不能被报成"缺额 0"以外的
+   * 任何数——更准确地说，它压根没有过这个要求，头部就不该出现这一行。
+   */
+  it("reports no quota for a plan sealed before practice forms existed", async () => {
+    const { practiceForm: _droppedForm, ...legacyObjective } = makePlanObjective("obj-1", "single_choice");
+    const planResult = {
+      kind: "author_candidates",
+      recommendedCardCount: 1,
+      activationHardMax: 1,
+      existingActions: [],
+      objectives: [legacyObjective],
+    };
+    setupTx({
+      select: () => ({
+        from: (table: unknown) => {
+          if (table === cardGenerationRunsV2) {
+            return { where: () => ({ limit: async () => [{ id: RUN_ID, currentPlanVersion: 1 }] }) };
+          }
+          if (table === cardGenerationPlansV2) {
+            return { where: () => ({ limit: async () => [{ result: planResult }] }) };
+          }
+          return {
+            where: () => ({
+              orderBy: () => [makeBaseCandidateRow()],
+            }),
+          };
+        },
+      }),
+    });
+
+    const result = await getGenerationRunCandidatesV2(
+      { workspaceId: WORKSPACE_ID, userId: USER_ID },
+      RUN_ID,
+    );
+    assert.ok(result);
+    assert.deepEqual(result!.practiceQuota, { requiredCount: 0, metCount: 0 });
   });
 });
 
@@ -810,5 +900,24 @@ function makeBaseCandidateRow() {
     evidenceBindingPlanHash: null,
     createdAt: new Date(),
     updatedAt: new Date(),
+  };
+}
+
+/**
+ * 计划目标夹具：走 `plannedObjectiveV2Schema` 认得的字段形状，因为配额结算是
+ * 先按计划合同解析 `result` 再算的——夹具过不了合同，测出来的就是"解析失败"而不是配额。
+ */
+function makePlanObjective(objectiveLocalId: string, practiceForm: string | null) {
+  return {
+    objectiveLocalId,
+    objectiveStatement: `目标 ${objectiveLocalId}`,
+    priority: "important" as const,
+    knowledgeForm: "fact" as const,
+    strategy: "recall" as const,
+    practiceForm,
+    sourceAtomIds: ["atom-1"],
+    reasonCodes: ["knowledge_form_fit"],
+    estimatedReviewCostSeconds: 30,
+    changeContext: { kind: "create_new" as const },
   };
 }

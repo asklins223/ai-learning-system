@@ -38,6 +38,7 @@ import {
   readGenerationProgressV2,
   serializeRunPublic,
   serializeCandidatePublic,
+  summarizePlanPracticeQuotaV2,
   type RunContext,
 } from "./helpers.ts";
 
@@ -530,7 +531,7 @@ export async function getGenerationRunPlanV2(ctx: RunContext, runId: string) {
 
 export async function getGenerationRunCandidatesV2(ctx: RunContext, runId: string) {
   return withWorkspaceTransaction(ctx, async (tx) => {
-    const runRows = await tx.select({ id: cardGenerationRunsV2.id })
+    const runRows = await tx.select({ id: cardGenerationRunsV2.id, currentPlanVersion: cardGenerationRunsV2.currentPlanVersion })
       .from(cardGenerationRunsV2)
       .where(and(eq(cardGenerationRunsV2.id, runId), eq(cardGenerationRunsV2.workspaceId, ctx.workspaceId)))
       .limit(1);
@@ -549,8 +550,26 @@ export async function getGenerationRunCandidatesV2(ctx: RunContext, runId: strin
       seen.add(c.candidateId);
       return true;
     });
+    const candidates = latest.map(serializeCandidatePublic);
 
-    return latest.map(serializeCandidatePublic);
+    const planRows = await tx.select({ result: cardGenerationPlansV2.result }).from(cardGenerationPlansV2)
+      .where(and(
+        eq(cardGenerationPlansV2.runId, runId),
+        eq(cardGenerationPlansV2.workspaceId, ctx.workspaceId),
+        eq(cardGenerationPlansV2.planVersion, runRows[0].currentPlanVersion),
+      ))
+      .limit(1);
+
+    return {
+      candidates,
+      practiceQuota: summarizePlanPracticeQuotaV2(
+        planRows[0]?.result,
+        candidates.map((candidate) => ({
+          planObjectiveLocalId: candidate.planObjectiveLocalId,
+          practiceItem: candidate.practiceItem,
+        })),
+      ),
+    };
   });
 }
 

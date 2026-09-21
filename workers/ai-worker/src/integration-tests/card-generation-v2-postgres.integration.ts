@@ -149,10 +149,11 @@ test("V2 纵切：seal → planner/author/critics → review_ready → activatio
     const { getGenerationRunPlanV2 } = await import(
       "../../../../apps/api/src/modules/card-generation-v2/generation-run-service.ts"
     );
-    const candidates = await getGenerationRunCandidatesV2(
+    const candidateList = await getGenerationRunCandidatesV2(
       { workspaceId: WORKSPACE_ID, userId: USER_ID }, runId,
     );
-    assert.ok(candidates && candidates.length >= 1, "review_ready must expose candidates");
+    assert.ok(candidateList && candidateList.candidates.length >= 1, "review_ready must expose candidates");
+    const candidates = candidateList.candidates;
     const kept = candidates.filter((c: { qualityState: string }) => c.qualityState === "passed");
     assert.ok(kept.length >= 1, "passed candidates must exist");
 

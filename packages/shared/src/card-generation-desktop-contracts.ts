@@ -381,10 +381,24 @@ export const cardGenerationCandidateV1Schema = z.strictObject({
 });
 export type CardGenerationCandidateV1 = z.infer<typeof cardGenerationCandidateV1Schema>;
 
+/**
+ * D6 配额的整批结算（审核页头部读数）。由服务端用**同一支** `summarizePracticeQuotaV2`
+ * 算出，与 `card_generation.practice_quota_short` 事件同源，界面不自己重算——
+ * 两处各算一遍，缺额就会在数据和屏幕上给出两个答案。
+ *
+ * `requiredCount: 0` 是有效值：这批 planner 没点名要练习件，头部也就不该有这一行。
+ */
+export const cardGenerationPracticeQuotaV1Schema = z.strictObject({
+  requiredCount: z.number().int().min(0),
+  metCount: z.number().int().min(0),
+});
+export type CardGenerationPracticeQuotaV1 = z.infer<typeof cardGenerationPracticeQuotaV1Schema>;
+
 export const cardGenerationCandidateListV1Schema = z.strictObject({
   version: z.literal(1),
   runId: uuidSchema,
   candidates: z.array(cardGenerationCandidateV1Schema).max(1000),
+  practiceQuota: cardGenerationPracticeQuotaV1Schema,
 });
 export type CardGenerationCandidateListV1 = z.infer<typeof cardGenerationCandidateListV1Schema>;
 

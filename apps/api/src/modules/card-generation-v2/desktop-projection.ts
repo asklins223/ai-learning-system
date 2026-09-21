@@ -1,6 +1,7 @@
 import {
   cardGenerationCandidateListV1Schema,
   cardGenerationCandidateV1Schema,
+  cardGenerationPracticeQuotaV1Schema,
   cardGenerationActiveSummaryListV1Schema,
   cardGenerationCloseResultV1Schema,
   cardGenerationJobAcceptedV1Schema,
@@ -95,11 +96,15 @@ export function parseCardGenerationPlanV2(value: unknown): CardPlanV2 {
 }
 
 export function projectCardGenerationCandidatesV1(runId: string, value: unknown): CardGenerationCandidateListV1 {
-  const candidates = z.array(cardGenerationCandidateV1Schema.omit({ version: true })).max(1000).parse(value);
+  const server = z.strictObject({
+    candidates: z.array(cardGenerationCandidateV1Schema.omit({ version: true })).max(1000),
+    practiceQuota: cardGenerationPracticeQuotaV1Schema,
+  }).parse(value);
   return cardGenerationCandidateListV1Schema.parse({
     version: 1,
     runId,
-    candidates: candidates.map((candidate) => cardGenerationCandidateV1Schema.parse({ version: 1, ...candidate })),
+    candidates: server.candidates.map((candidate) => cardGenerationCandidateV1Schema.parse({ version: 1, ...candidate })),
+    practiceQuota: server.practiceQuota,
   });
 }
 

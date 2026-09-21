@@ -446,6 +446,28 @@ export type PlannedExistingLifecycleActionV2 = z.infer<
   typeof plannedExistingLifecycleActionV2Schema
 >;
 
+/**
+ * 计划的结论单独成 schema：读路径（候选列表要按整批点名结算练习件配额）只拿得到
+ * `result` 这一列，而 `cardPlanV2Schema` 经过 `superRefine` 之后不再暴露 `.shape`，
+ * 没法从它身上取下嵌套合同。两处各写一份联合类型，就会有一份悄悄过期。
+ */
+export const cardPlanResultV2Schema = z.discriminatedUnion("kind", [
+  z.strictObject({
+    kind: z.literal("no_cards_recommended"),
+    reasonCodes: z.array(noCardReasonCodeV2Schema).min(1).max(8),
+  }),
+  z.strictObject({
+    kind: z.literal("author_candidates"),
+    recommendedCardCount: z.number().int().min(0),
+    activationHardMax: z.number().int().min(0),
+    objectives: z.array(plannedObjectiveV2Schema).min(1),
+    existingActions: z
+      .array(plannedExistingLifecycleActionV2Schema)
+      .max(50),
+  }),
+]);
+export type CardPlanResultV2 = z.infer<typeof cardPlanResultV2Schema>;
+
 export const cardPlanV2Schema = z
   .strictObject({
     version: z.literal(2),
@@ -455,21 +477,7 @@ export const cardPlanV2Schema = z
     cardContentEpoch: z.number().int().min(1),
     planVersion: z.number().int().min(1),
     previousPlanRevisionId: z.string().uuid().nullable(),
-    result: z.discriminatedUnion("kind", [
-      z.strictObject({
-        kind: z.literal("no_cards_recommended"),
-        reasonCodes: z.array(noCardReasonCodeV2Schema).min(1).max(8),
-      }),
-      z.strictObject({
-        kind: z.literal("author_candidates"),
-        recommendedCardCount: z.number().int().min(0),
-        activationHardMax: z.number().int().min(0),
-        objectives: z.array(plannedObjectiveV2Schema).min(1),
-        existingActions: z
-          .array(plannedExistingLifecycleActionV2Schema)
-          .max(50),
-      }),
-    ]),
+    result: cardPlanResultV2Schema,
     atomDecisions: z.array(atomDecisionV2Schema).max(1000),
     planHash: z.string().regex(/^[0-9a-f]{64}$/),
   })

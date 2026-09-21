@@ -27,7 +27,9 @@ type CandidateState = {
   publishState: string;
 };
 
-function stubGateway(initial: readonly CandidateState[], runOverride: { status?: string; recovery?: unknown; progress?: Record<string, number> | null } = {}) {
+type PracticeQuota = { requiredCount: number; metCount: number };
+
+function stubGateway(initial: readonly CandidateState[], runOverride: { status?: string; recovery?: unknown; progress?: Record<string, number> | null; practiceQuota?: PracticeQuota | null } = {}) {
   const state = {
     candidates: initial.map((candidate) => ({ ...candidate })),
     reviewCalls: [] as unknown[],
@@ -106,7 +108,16 @@ function stubGateway(initial: readonly CandidateState[], runOverride: { status?:
       })),
       cardGeneration: {
         getRun: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: runSnapshot() })),
-        getCandidates: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { candidates: candidates() } })),
+        getCandidates: vi.fn(async () => ({
+          ok: true as const,
+          workspaceEpoch: 1,
+          data: {
+            candidates: candidates(),
+            // 配额是服务端按整批结算的（D6），界面只读不猜；stub 默认不给，
+            // 等于"这批没点名要练习件"。
+            practiceQuota: runOverride.practiceQuota ?? { requiredCount: 0, metCount: 0 },
+          },
+        })),
         review: vi.fn(async (input: { request: { action: { type: string; candidateId: string; reasonCode?: string } } }) => {
           state.reviewCalls.push(input.request.action);
           if (state.reviewFails) return { ok: false as const, workspaceEpoch: 1, error: { code: "conflict", message: "候选已被改动" } };
@@ -305,6 +316,88 @@ describe("CardGenerationSurface · 候选审核", () => {
     expect(document.querySelector(".card-generation-progress__gauge")?.hasAttribute("hidden")).toBe(false);
     // 步数依旧不报：run.status 还在那个大事务里。
     expect(meta?.textContent).not.toContain("待进行");
+  });
+
+  /**
+   * D6 的缺额必须让人看见（2026-09-21 决定：显示在审核页头部）。
+   *
+   * 配额只在事件里结算过，界面上读不到 —— 于是"这一批该配 3 道练习件、实际只配上 2 道"
+   * 这件事只有翻数据库的人知道。审核页每张卡都逐张写着随卡练习是什么，但没有任何一处
+   * 说"整批缺了几张"，缺额就被摊平成"看起来都配好了"。
+   */
+  it("头部说出整批练习件的缺额", async () => {
+    stubGateway(
+      [
+        {
+          candidateId: "cand-1",
+          statement: "第一张",
+          reviewDecision: "undecided",
+          publishState: "unpublished",
+          practiceItem: { kind: "single_choice", optionCount: 4 },
+        },
+        {
+          candidateId: "cand-2",
+          statement: "第二张",
+          reviewDecision: "undecided",
+          publishState: "unpublished",
+          practiceItem: { kind: "true_false" },
+        },
+        { candidateId: "cand-3", statement: "第三张", reviewDecision: "undecided", publishState: "unpublished" },
+      ],
+      { practiceQuota: { requiredCount: 3, metCount: 2 } },
+    );
+    useRoomStore.setState({ activeCardGenerationRunId: RUN_ID });
+    render(<CardGenerationSurface />);
+
+    await waitFor(() => expect(screen.getByText("第一张")).toBeTruthy());
+    const meta = (document.querySelector(".candidate-card__meta")?.textContent ?? "");
+    expect(meta).toContain("带练习件 2 张");
+    expect(meta).toContain("该配的 3 张里漏了 1 张");
+    // 缺额不能把原有的两个读数挤掉
+    expect(meta).toContain("候选 1 / 3");
+    expect(meta).toContain("3 张还没决定");
+  });
+
+  it("配额配齐时头部只报配齐，不硬造一句缺额", async () => {
+    stubGateway(
+      [
+        {
+          candidateId: "cand-1",
+          statement: "第一张",
+          reviewDecision: "undecided",
+          publishState: "unpublished",
+          practiceItem: { kind: "single_choice", optionCount: 4 },
+        },
+        {
+          candidateId: "cand-2",
+          statement: "第二张",
+          reviewDecision: "undecided",
+          publishState: "unpublished",
+          practiceItem: { kind: "true_false" },
+        },
+      ],
+      { practiceQuota: { requiredCount: 2, metCount: 2 } },
+    );
+    useRoomStore.setState({ activeCardGenerationRunId: RUN_ID });
+    render(<CardGenerationSurface />);
+
+    await waitFor(() => expect(screen.getByText("第一张")).toBeTruthy());
+    const meta = (document.querySelector(".candidate-card__meta")?.textContent ?? "");
+    expect(meta).toContain("该配的都配上了");
+    expect(meta).not.toContain("漏了");
+  });
+
+  it("这批没点名要练习件时，头部不提练习件计数", async () => {
+    stubGateway([
+      { candidateId: "cand-1", statement: "第一张", reviewDecision: "undecided", publishState: "unpublished" },
+    ]);
+    useRoomStore.setState({ activeCardGenerationRunId: RUN_ID });
+    render(<CardGenerationSurface />);
+
+    await waitFor(() => expect(screen.getByText("第一张")).toBeTruthy());
+    const meta = (document.querySelector(".candidate-card__meta")?.textContent ?? "");
+    expect(meta).not.toContain("带练习件");
+    expect(meta).not.toContain("该配的");
   });
 
   it("没配练习件的卡直说没有，不假装有一道题", async () => {

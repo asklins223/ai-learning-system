@@ -149,7 +149,7 @@ export interface AuthorResult {
  * 现在预算在 shared 层收敛成单一实现：`executeAuthor` 与 worker 的按候选流水线都
  * 只对预算内的目标出卡，decisions 里被截断的原子由 planner 记 `omit_over_budget`。
  */
-export function budgetedPlanObjectives(plan: CardPlanV2): PlannedObjectiveV2[] {
+export function budgetedPlanObjectives(plan: Pick<CardPlanV2, "result">): PlannedObjectiveV2[] {
   if (plan.result.kind !== "author_candidates") return [];
   const budget = Math.max(0, plan.result.activationHardMax);
   return plan.result.objectives.slice(0, budget);

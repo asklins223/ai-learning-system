@@ -206,9 +206,9 @@ export async function cardGenerationV2Routes(app: FastifyInstance) {
       return reply.code(400).send({ error: "invalid_id", message: "无效的 runId 格式" });
     }
     try {
-      const candidates = await getGenerationRunCandidatesV2(context(req), req.params.runId);
-      if (!candidates) return reply.code(404).send({ error: "run_not_found", message: "生成运行不存在" });
-      return projectCardGenerationCandidatesV1(req.params.runId, candidates);
+      const candidateList = await getGenerationRunCandidatesV2(context(req), req.params.runId);
+      if (!candidateList) return reply.code(404).send({ error: "run_not_found", message: "生成运行不存在" });
+      return projectCardGenerationCandidatesV1(req.params.runId, candidateList);
     } catch (error) {
       return sendServiceError(reply, error);
     }

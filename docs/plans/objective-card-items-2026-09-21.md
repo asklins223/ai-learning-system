@@ -1358,3 +1358,46 @@ SSE 走的是同一个查询（`getGenerationRunEventsV2`），所以两条路�
 
 到这里，配额这一头从"planner 点名 → 作者交付 → 结算 → 事件 → api 出口"整条都能读到了，
 只是界面上还没有任何地方显示它（§26 里留的那个产品决定）。
+
+## 37. 缺额显示在哪：审核页头部（决定 + 落地 + 实测量）
+
+§26 留的那个产品决定这一轮定了：**审核页头部加计数**（不是完成回执，也不是不显示）。
+
+落地的形状是"服务端结算、界面只读"：
+
+- `GET /v2/card-generation-runs/:runId/candidates` 的响应多一个 `practiceQuota`
+  （`{requiredCount, metCount}`），由 `summarizePlanPracticeQuotaV2(planResult, candidates)`
+  算，内部调的还是 worker 落 `practice_quota_short` 事件那支 `summarizePracticeQuotaV2`。
+  缺额若在服务和界面各算一遍，事件里的数和屏幕上写的数就会给出两个答案。
+- 头部那一行：`候选 1 / 6 · 6 张还没决定 · 带练习件 4 张，该配的都配上了`
+  （这一行的前两段是 `6f0047e2` 的真实读数，后一段是新加的），
+  有缺额时后半句换成 `该配的 3 张里漏了 1 张`。`requiredCount: 0`（这批没点名要练习件，
+  或 plan 是 D6 之前封存的）时后半句整段不出现——不给一次没有发生过的要求报缺额。
+- 两个数各自成立：`带练习件 N 张` 数的是卡上真的有道题的张数（含自愿交的），
+  `该配的 M 张` 是点名数。实测那一批就是 4 与 3 同时出现，两句话都不假。
+
+一处 shared 的结构性障碍值得记：`cardPlanV2Schema` 用了 `superRefine`，包一层之后
+不再暴露 `.shape`，读路径拿不到嵌套的 `result` 合同（第一次实现就在这一点上抛
+`Cannot read properties of undefined`）。改成把结论联合类型抽成 `cardPlanResultV2Schema`
+再被 `cardPlanV2Schema` 引用，而不是复制一份——复制的那份会悄悄过期。
+
+**测试先写、并且验过它真的会红**：
+
+- 桌面组件测 3 条（缺额 / 配齐 / 没点名）。改动前 2 红（缺额、配齐），实现后全绿；
+  再把"requiredCount 为 0 就整段不显示"这一句拿掉，第 3 条转红——它不是永远绿的负向断言。
+- api 单测 `getGenerationRunCandidatesV2` 3 条：去重（顺带确认返回结构）、
+  点名的 3 张里"形状对上才算兑现"（obj-1 交 single_choice 算、obj-2 要求 true_false 却交
+  ordering 算缺额、obj-3 没点名的自愿交 matching 不占配额 → `{requiredCount:2, metCount:1}`）、
+  以及 D6 之前的 plan 行（没有 `practiceForm` 键）解析不过 → `{0,0}`。
+- 回归面：shared 340/340、api `run-service` 23/23、桌面 30/30（含文案守卫）、
+  api / shared / desktop / worker 四份 typecheck 全过。
+
+**服务端这一步是真跑出来的**，不是只测函数：owner 登录打真实 HTTP，
+`6f0047e2` 与 `dbf061fb` 两批都回 `practiceQuota:{requiredCount:3, metCount:3}`，
+同一批候选里带练习件的是 4 张（4>3 正是"自愿交的不算进配额"那个形状），
+与直接在库里按最新 revision 对的 `required / delivered` 逐条一致。
+
+**界面这一屏今天量不了**：桌面 dev 渲染层 5173 已经没人监听（`curl` 直接 000），
+在跑的 Electron 窗口停在 `chrome-error://`，而它的渲染层没有 HMR——按并发会话的说明，
+要看到新头部必须重启桌面端。所以这一条的主张只到"服务端已下发 + jsdom 已断言文本"，
+真机读数等下一次重启窗口。

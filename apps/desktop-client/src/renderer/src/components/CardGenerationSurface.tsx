@@ -15,6 +15,7 @@ import type {
   CardActivationReceiptDesktopV1,
   CardGenerationCandidateV1,
   CardGenerationExposureEligibilityV1,
+  CardGenerationPracticeQuotaV1,
   CardGenerationRunSnapshotV1,
   DesktopCandidateRevealV2,
   DesktopCardRejectReasonV2,
@@ -83,6 +84,20 @@ function candidateDecisionLabel(candidate: CardGenerationCandidateV1): string {
   if (candidate.reviewDecision === "keep") return "已保留 · 在激活队列里";
   if (candidate.reviewDecision === "merged") return "已合并";
   return "待审核";
+}
+
+/**
+ * 整批练习件的读数（D6 的缺额要有地方看得见）。
+ *
+ * 两个数各说各的：`bearingCount` 是这一批实际带上练习件的张数（每张卡自己那一行
+ * 也写着），`requiredCount / metCount` 是整批点名要几张、其中几张按要求的形状配上了。
+ * 缺额只由后者算，且算的是服务端的结算结果——这里不再自己判断形状对不对。
+ */
+function practiceQuotaLabel(quota: CardGenerationPracticeQuotaV1 | null, bearingCount: number): string | null {
+  if (!quota || quota.requiredCount === 0) return null;
+  const missed = quota.requiredCount - quota.metCount;
+  if (missed <= 0) return `带练习件 ${bearingCount} 张，该配的都配上了`;
+  return `带练习件 ${bearingCount} 张，该配的 ${quota.requiredCount} 张里漏了 ${missed} 张`;
 }
 
 function isActivatableCandidate(candidate: CardGenerationCandidateV1): candidate is CardGenerationCandidateV1 & { candidateEvidenceBindingPlanHash: string } {
@@ -250,6 +265,7 @@ export function CardGenerationSurface() {
   const setReturnTarget = useRoomStore((state) => state.setReturnTarget);
   const [run, setRun] = useState<CardGenerationRunSnapshotV1 | null>(null);
   const [candidates, setCandidates] = useState<CardGenerationCandidateV1[]>([]);
+  const [practiceQuota, setPracticeQuota] = useState<CardGenerationPracticeQuotaV1 | null>(null);
   const [activeCandidateId, setActiveCandidateId] = useState<string | null>(null);
   const [receipt, setReceipt] = useState<CardActivationReceiptDesktopV1 | null>(null);
   const [loading, setLoading] = useState(true);
@@ -346,13 +362,16 @@ export function CardGenerationSurface() {
           runId,
         });
         if (candidateResponse.workspaceEpoch) epochRef.current = candidateResponse.workspaceEpoch;
-        const nextCandidates = unwrapGatewayResult(candidateResponse).candidates;
+        const nextList = unwrapGatewayResult(candidateResponse);
+        const nextCandidates = nextList.candidates;
         setCandidates(nextCandidates);
+        setPracticeQuota(nextList.practiceQuota);
         setActiveCandidateId((current) => nextCandidates.some((candidate) => candidate.candidateId === current)
           ? current
           : nextCandidates.find((candidate) => candidate.reviewDecision === "undecided")?.candidateId ?? nextCandidates[0]?.candidateId ?? null);
       } else {
         setCandidates([]);
+        setPracticeQuota(null);
         setActiveCandidateId(null);
       }
       setFailure(null);
@@ -385,6 +404,7 @@ export function CardGenerationSurface() {
   useEffect(() => {
     setRun(null);
     setCandidates([]);
+    setPracticeQuota(null);
     setActiveCandidateId(null);
     setReceipt(null);
     setFailure(null);
@@ -618,6 +638,7 @@ export function CardGenerationSurface() {
   /** 保留即排队：待激活数 = 已保留且可激活的候选数。 */
   const activatableCount = candidates.filter(isActivatableCandidate).length;
   const undecidedCount = candidates.filter((candidate) => candidate.reviewDecision === "undecided").length;
+  const practiceQuotaView = practiceQuotaLabel(practiceQuota, candidates.filter((candidate) => candidate.practiceItem).length);
   const progressView = run ? cardGenerationProgressView(run.status, run.progress) : null;
   const generationStage = progressView?.stage ?? 0;
   const waitingForRun = !runId && !runIdHealed;
@@ -955,7 +976,7 @@ export function CardGenerationSurface() {
               <>
                 <div className="candidate-study-card__body">
                   <div className="candidate-card__meta" role="status" aria-live="polite">
-                    <span>候选 {activeCandidateIndex + 1} / {candidates.length}{undecidedCount ? ` · ${undecidedCount} 张还没决定` : " · 都已决定"}</span>
+                    <span>候选 {activeCandidateIndex + 1} / {candidates.length}{undecidedCount ? ` · ${undecidedCount} 张还没决定` : " · 都已决定"}{practiceQuotaView ? ` · ${practiceQuotaView}` : ""}</span>
                     <span>{candidateDecisionLabel(activeCandidate)}</span>
                   </div>
                   <p className="candidate-card__kicker">这张卡准备验证</p>
