@@ -2141,6 +2141,23 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
               <div><span>专注时间</span><b>{formatClock(clock.seconds)}</b></div>
               <small className="meta">{clock.paused ? "离开页面时不计时" : `已到 ${formatClock(clock.seconds)}`}</small>
             </div>
+          </aside>
+          <section className="learning-run-stage">
+            <header className="learning-run-stage__header">
+              <div>
+                <span>{activeTask ? `${facetLabels[activeTask.intent] ?? activeTask.intent} · ${interactionLabel(activeTask)}` : phaseLabels[processingPhase]}</span>
+                <small>{activeTask && snapshot.phase === "active" ? draftStatus : "进度"}</small>
+              </div>
+              {/* 旅程页的初始焦点落点。此前它只有纸外那颗「返回书房」胶囊，
+                  于是键盘用户一进作答页，焦点停在"离开"上而不是题目上。 */}
+              <h2 ref={primaryHeadingRef} tabIndex={-1} data-surface-initial-focus="true">
+                {activeTask && snapshot.phase === "active" ? activeTask.prompt : processingHeadline}
+              </h2>
+              {activeTask && snapshot.phase === "active" ? <p>{activeTask.targetSummary}</p> : null}
+            </header>
+            {/* P21（B4）：求助面板从左侧导航栏搬进题面区。此前提示文字落在侧栏里
+                207px 宽的一栏、9px 字号，而"看过提示这轮只计练习分"那句只有 **7.5px**
+                ——全链路最小、却是最该看清的一句；求助信息和它要帮的题还隔着 250px。 */}
             <div className={`learning-run-hint${hints.length > 0 ? " learning-run-hint--shown" : ""}`} role={hints.length > 0 ? "status" : undefined}>
               <Lightbulb size={15} aria-hidden="true" />
               {/*
@@ -2164,20 +2181,6 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
                 {hints.some((entry) => entry.downgraded) ? <small>看过提示之后，这张卡本轮只计练习分，不再计正式理解分。</small> : null}
               </div>
             </div>
-          </aside>
-          <section className="learning-run-stage">
-            <header className="learning-run-stage__header">
-              <div>
-                <span>{activeTask ? `${facetLabels[activeTask.intent] ?? activeTask.intent} · ${interactionLabel(activeTask)}` : phaseLabels[processingPhase]}</span>
-                <small>{activeTask && snapshot.phase === "active" ? draftStatus : "进度"}</small>
-              </div>
-              {/* 旅程页的初始焦点落点。此前它只有纸外那颗「返回书房」胶囊，
-                  于是键盘用户一进作答页，焦点停在"离开"上而不是题目上。 */}
-              <h2 ref={primaryHeadingRef} tabIndex={-1} data-surface-initial-focus="true">
-                {activeTask && snapshot.phase === "active" ? activeTask.prompt : processingHeadline}
-              </h2>
-              {activeTask && snapshot.phase === "active" ? <p>{activeTask.targetSummary}</p> : null}
-            </header>
             <div className="learning-run-response">
               {canAnswerNow && activeTask ? (
                 <InteractionEditor task={activeTask} value={editor ?? emptyEditor(activeTask)} onChange={updateEditor} />

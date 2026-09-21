@@ -352,6 +352,45 @@
 .hud-surface .learning-run-result-summary dt,
 .hud-surface .learning-run-result-summary dd { font-size: 11px; }
 
+/* ── B4 剩下的两条：提示面板（P21）与紧凑档（P33）────────────────────────
+ *
+ * 提示此前挂在左侧导航栏里：正文 9px、宽 207px，而"看过提示这轮只计练习分"
+ * 那句惩罚说明实测 **7.5px**——全链路最小的字，却是最该看清的一句。JSX 已把
+ * 整个面板搬进题面区（题干正下方），这里补上它在新位置该有的字号与颜色。 */
+.hud-surface .learning-run-stage .learning-run-hint {
+  margin: 0 0 14px;
+  padding: 11px 13px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.hud-surface .learning-run-stage .learning-run-hint__body,
+.hud-surface .learning-run-stage .learning-run-hint__body > span,
+.hud-surface .learning-run-stage .learning-run-hint__levels li,
+.hud-surface .learning-run-stage .learning-run-hint__levels span {
+  font-size: 12px;
+  line-height: 1.6;
+}
+/* 惩罚说明从 7.5px 灰字提到 12px 陶土色：它改变这次作答的计分性质。 */
+.hud-surface .learning-run-stage .learning-run-hint__body small {
+  color: var(--hud-clay);
+  font-size: 12px;
+  line-height: 1.5;
+}
+/* P33：紧凑档（720–760px，`.hud-surface` 自己 min-width 720px）此前把
+ * .button 打到 6px/20px 高、.meta 打到 5px、确认框正文 5px。同特异性、源码
+ * 顺序在后即可稳定抬回来。 */
+@media (max-width: 760px) {
+  .hud-surface .button {
+    min-height: 30px;
+    padding: 0 10px;
+    font-size: 11px;
+  }
+  .hud-surface .small,
+  .hud-surface .meta { font-size: 9px; }
+  .hud-surface .run-confirmation p { font-size: 10px; line-height: 1.6; }
+  .hud-surface .task-title p { font-size: 9px; }
+}
+
 /* ── B2：让 data-outcome 真的驱动视觉（P2）───────────────────────────────
  *
  * 这两个属性此前从 JSX 发出去、全仓没有任何一条 CSS 接手，所以「已理解」和
