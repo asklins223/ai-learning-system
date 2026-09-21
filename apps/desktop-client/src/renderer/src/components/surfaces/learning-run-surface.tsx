@@ -65,7 +65,8 @@ import {
   isActivityLeaseEligible,
   type ActivityLeaseWindow,
 } from "../learning-run-activity-lease";
-import { SurfaceDataState, formatRelative } from "./surface-data";
+import { SurfaceDataState } from "./surface-data";
+import { formatObjectiveDay } from "./objective-state-copy";
 import { VoiceTeachbackEditor } from "./run-voice-input";
 import { microphoneAvailabilityCopy, probeMicrophone, type MicrophoneAvailability } from "../voice-capability";
 
@@ -287,8 +288,11 @@ function facetText(facets: readonly string[], empty: string): string {
 }
 
 function scheduleImpactText(impact: ScheduleImpact): string {
-  if (impact.kind === "created") return `已创建复习安排，下次到期 ${formatRelative(impact.dueAt)}。`;
-  if (impact.kind === "rescheduled") return `已重新安排复习，下次到期 ${formatRelative(impact.dueAt)}。`;
+  // 到期时间是**未来**，不能用 formatRelative：它算的是 (now - value)，未来时间
+  // 得到负 minutes，`minutes < 1` 直接命中「刚刚」——于是明天和下个月都显示
+  // 「下次到期 刚刚。」（31 号文档 P4）。复用列表行那套「今天/明天/N 天后」。
+  if (impact.kind === "created") return `已创建复习安排，下次到期 ${formatObjectiveDay(impact.dueAt)}。`;
+  if (impact.kind === "rescheduled") return `已重新安排复习，下次到期 ${formatObjectiveDay(impact.dueAt)}。`;
   return `本次没有改变复习安排：${scheduleReasonLabels[impact.reasonCode] ?? impact.reasonCode}。`;
 }
 

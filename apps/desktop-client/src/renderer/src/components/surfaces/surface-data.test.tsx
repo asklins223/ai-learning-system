@@ -231,3 +231,18 @@ describe("noteBodyText 遇到图片块", () => {
     expect(noteBodyText(blocks)).toBe("");
   });
 });
+
+describe("formatRelative 只量过去，不许拿去量未来", () => {
+  // 31 号文档 P4：结算页的「下次到期」此前用它格式化未来的 dueAt。它算的是
+  // (now - value)，未来时间得到负 minutes，`minutes < 1` 直接命中「刚刚」——
+  // 明天和下个月读起来一模一样。这里把这条边界钉住，防止再被复用。
+  const offsets = [60_000, 3_600_000, 26 * 3_600_000, 40 * 86_400_000];
+
+  it.each(offsets)("未来 +%dms 读成「刚刚」，所以到期时间必须走 formatObjectiveDay", (offset) => {
+    expect(formatRelative(new Date(Date.now() + offset).toISOString())).toBe("刚刚");
+  });
+
+  it("过去的时间照常给出相对说法——不是整个函数坏了", () => {
+    expect(formatRelative(new Date(Date.now() - 10 * 60_000).toISOString())).toBe("10 分钟前");
+  });
+});

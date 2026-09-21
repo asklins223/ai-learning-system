@@ -27,6 +27,14 @@ const OBJECTIVE_ID = "00000000-0000-4000-8000-000000000004";
 const origin = { kind: "card", cardId: CARD_ID, objectiveId: OBJECTIVE_ID } as const;
 const returnTarget = { kind: "card", cardId: CARD_ID, objectiveId: OBJECTIVE_ID } as const;
 
+/** 相对今天算，别让断言随日历腐烂。 */
+const dayOffset = (days: number) => {
+  const at = new Date();
+  at.setDate(at.getDate() + days);
+  at.setHours(9, 0, 0, 0);
+  return at.toISOString();
+};
+
 const completedSnapshot = () => learningRunPublicSnapshotV2Schema.parse({
   version: 2,
   runId: RUN_ID,
@@ -65,7 +73,7 @@ const resultWithRubric = (
   outcome: "demonstrated",
   demonstratedFacets: ["recall", "explain"],
   gapFacets: [],
-  scheduleImpact: { kind: "created", dueAt: "2026-09-24T09:00:00+08:00", policyReason: "demonstrated" },
+  scheduleImpact: { kind: "created", dueAt: dayOffset(3), policyReason: "demonstrated" },
   returnTargetV2: returnTarget,
   assessment: {
     source: "assessment_critic",
@@ -243,5 +251,28 @@ describe("LearningRunSurface · 结算页结构", () => {
 
     expect(document.querySelector(".learning-run-result-summary__seal")?.textContent).toBe("已理解");
     expect(document.querySelector(".learning-run-result-summary__quiet")).toBeNull();
+  });
+
+  // ---- B3：下次到期不能再读成「刚刚」（31 号文档 P4）----
+
+  it("三天后的复习写「3 天后」，不是「刚刚」", async () => {
+    renderResult();
+    await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
+
+    const schedule = [...document.querySelectorAll(".learning-run-result-evidence > div")]
+      .find((d) => d.textContent?.startsWith("复习安排"));
+    expect(schedule?.textContent).toContain("下次到期 3 天后。");
+    expect(schedule?.textContent).not.toContain("刚刚");
+  });
+
+  it("明天的复习写「明天」", async () => {
+    renderResult(12, resultWithRubric(1, {
+      scheduleImpact: { kind: "created", dueAt: dayOffset(1), policyReason: "demonstrated" },
+    }));
+    await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
+
+    const schedule = [...document.querySelectorAll(".learning-run-result-evidence > div")]
+      .find((d) => d.textContent?.startsWith("复习安排"));
+    expect(schedule?.textContent).toContain("下次到期 明天。");
   });
 });

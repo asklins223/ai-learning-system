@@ -293,7 +293,7 @@
 | **B0** | 结算页溢出 + 出口槽 + 印章裁切（P5/P27） | ✅ 已上线，见 §14。**口径改过**：原写「report 不再 `overflow-y:auto`」是错的——纸面高度固定时总得有一列可滚，病在出口落在那一列里。改成三条可判定的：主按钮下沿离纸面下沿 ≥8px、出口不在任何 `scrollHeight>clientHeight` 的祖先内、`__seal` `scrollHeight <= clientHeight` |
 | **B1** | 结算页自相矛盾（P1/P6/P30） | ✅ 已上线（除「接下来」便签里的真按钮，见下），见 §14。口径：同一次 `covered` 判定下「还需补上」不出现该 facet；「这次说清 N 条」数判定行；`skipped`/`declared_unable` 时 DOM 里**没有** `__seal` 节点。**「接下来」便签的可点动作没做**——它需要在结算页起一次新 Run，而 start 命令只在目标详情的 `primaryAction` 里，属于新功能不是修复，单独留出来 |
 | **B2** | `data-outcome` 真的驱动视觉 + 一次性压印（P2/P32） | 三种 outcome（demonstrated / partial / not_assessable）截图像素差异 ≥ 背景色与印章区两处；`[data-outcome]` 在 CSS 里 ≥ 3 条规则；动效只改 `transform/opacity`，`data-motion-mode="off"` 时 `getAnimations().length === 0` |
-| **B3** | 「下次到期 刚刚」（P4） | 造一条 `dueAt` 为明天 / 5 天后 / 下月的评估，页面分别显示 `明天 / 5 天后 / M月D日`；`formatRelative` 不再被未来时间调用（新增单测断言负 minutes） |
+| **B3** | 「下次到期 刚刚」（P4） | ✅ 已上线，见 §14。没有新增 `formatDue`——`objective-state-copy.ts:114` 的 `formatObjectiveDay` 已经是「今天/昨天/明天/N 天后/M月D日」且被列表行在用，直接复用；另在 `surface-data.test.tsx` 钉住 `formatRelative` 的「只量过去」契约 |
 | **B4** | 字号地板（P7/P13/P21/P33） | 列表 / 详情 / 结算三屏 `<11px` 文本段占比 = 0；提示惩罚说明 ≥12px；720×405 视口下 `.button` ≥ 11px、`.meta` ≥ 9px、`.run-confirmation p` ≥ 9px |
 | **B5** | 空带与骨架（P8/P14/P28） | 焦点卡内最大连续空白 ≤ 64px；四屏内容左边界一致（`x` 差 ≤ 2px）；结算绿栏空带 ≤ 80px |
 | **B6** | 动作区分层（P19/P20/P26） | dock 主按钮唯一且 `right` 对齐；`.learning-run-dock__status` 宽度 ≥ 200px 且不折行；右下浮层与 dock 的交叠面积 = 0；`.return-home` 在 page-16/17 不渲染；aria-label 不再出现「返回返回」 |
@@ -380,3 +380,15 @@ UI 侧三处：① 新增「这次说清了」行与「这次说清 N 条」计�
 **没做的那一条**：「接下来」便签里的可点动作。它要在结算页直接起一次新 Run，而 start 命令只存在于目标详情的 `primaryAction` 里——这是新功能，不是修复，留给 B11。
 
 **环境**：并发的 dev 实例把 vite 弄掉两次，最后那个占着 9222 与 Electron 单实例锁的死窗口让新 `npm run dev` 一起来就自杀。现在跑的是我自己的实例：`npx electron-vite dev -w --remoteDebuggingPort 9231 -- --user-data-dir=/tmp/objflow-udd`，探针用 `OBJFLOW_CDP=http://127.0.0.1:9231` 指过去。它是全新数据目录，所以脚本里带了一段登录与掉线重连。
+
+### B3 「下次到期 刚刚」 — 已完成（2026-09-22）
+
+**没有照原文的方案做**（原文写「新增 `formatDue`」）。查了一遍发现 `objective-state-copy.ts:114` 的 `formatObjectiveDay` 已经是「今天 / 昨天 / 明天 / N 天后 / M月D日」，而且列表行的「正式答过 · 昨天」就在用它、`objective-state-copy.test.ts` 已经钉过格式。再造一个同义函数就是第四套时间写法。所以只改调用点：`learning-run-surface.tsx:290-291` 两处换成它，`formatRelative` 从 import 里退掉。
+
+顺带把「还有谁在拿 `formatRelative` 量未来」全量扫了一遍：桌面端 11 个调用点，**只有这两处是未来时间**，其余全是 `updatedAt` / `createdAt` / `lastCanonicalAt`，用法正确。所以这不是一个普遍的坑，是这一个点。
+
+测试两处：
+- `surface-data.test.tsx` 新增一组 `describe`，把 `formatRelative` 的**过去专用契约**钉在它自己家里——四个未来偏移全部读成「刚刚」，同时保留一条「过去 10 分钟前」证明不是整个函数坏了。以后谁想拿它格式化 due 时间，会先撞见这条注释。
+- `learning-run-surface.result.test.tsx` 新增两条：三天后的复习写「3 天后」、明天的写「明天」，并断言那行**不含**「刚刚」。fixture 里的 `dueAt` 改成按今天算（`dayOffset(3)`），不写死日期，免得断言随日历腐烂。
+
+**一次无效的自我打脸**：第一次跑变异检验我用 sed 只把调用点换回 `formatRelative`，忘了它已经从 import 里删掉——模块直接 `ReferenceError`，10 条测试全红、每条 5 秒超时。那证明的是"代码崩了"，不是"断言有效"。重做时把 import 一起加回去，结果才是**恰好 2 条转红、其余 8 条保持绿**。变异检验要移的是**被测行为**，不是让被测对象起不来。
