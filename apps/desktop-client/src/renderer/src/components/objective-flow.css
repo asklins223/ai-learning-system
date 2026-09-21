@@ -47,24 +47,28 @@
  * 那颗按钮此前印着服务端的动词、按下去却只打开详情页。现在它真的开始/继续，
  * 「看详情」拆成下面一条单独的路。三行新文案都按 B4 的地板给 ≥12px，
  * 不再往 8px 那一档里塞要参与决策的句子。                              */
+/* 这三行原本是**给深色底写的近白色**（rgba(255,248,232,…)），可这张焦点卡是
+ * 薄荷绿纸——像素采样实测 hint 只有 1.25:1、detail 更低，等于印在纸上但读不到。
+ * 与 B6 那条"语音说明浅色字"是同一类错。全部换成卡片的墨色族。            */
 .hud-surface .v3-goal-focus__hint {
   margin: 10px 0 0;
-  color: rgba(255, 248, 232, 0.78);
+  color: #4a3a2b;
   font-size: 12px;
   line-height: 1.6;
 }
 .hud-surface .v3-goal-focus__error {
   margin: 8px 0 0;
-  color: var(--hud-butter);
+  color: #8c2f16;
   font-size: 12px;
   line-height: 1.6;
+  font-weight: 600;
 }
 .hud-surface .v3-goal-focus__detail {
   margin-top: 14px;
   padding: 0;
   border: 0;
   background: none;
-  color: rgba(255, 248, 232, 0.66);
+  color: #4a3a2b;
   font-size: 12px;
   font-weight: 650;
   text-align: left;
@@ -486,13 +490,17 @@
 }
 .objective-progress__seg[data-lit="true"] .objective-progress__bar { background: var(--v3-clay); }
 .objective-progress__label {
-  color: var(--v3-soft);
+  /* 三段标签落在三种纸上（薄荷绿焦点卡、奶油详情纸、结算页绿/石板栏），
+   * 所以取最暗的那一档：像素采样在薄荷绿上实测 --v3-soft 只有 2.62:1。
+   * 走到哪一段由**条**表达，标签不再靠变淡来分层。 */
+  color: var(--v3-ink);
   font-size: 11px;
   line-height: 1.35;
   white-space: nowrap;
 }
-.objective-progress__seg[data-current="true"] .objective-progress__label { color: var(--v3-ink); font-weight: 700; }
-.objective-progress__none { color: var(--v3-soft); font-size: 11px; }
+.objective-progress__seg[data-current="true"] .objective-progress__label { font-weight: 700; }
+.objective-progress__seg[data-lit="false"] .objective-progress__label { opacity: 0.62; }
+.objective-progress__none { color: var(--v3-ink); font-size: 11px; }
 /* 结算页那张绿纸上的读数比列表卡重要一档：动词那句就在它上面。 */
 .hud-surface .learning-run-result-summary .objective-progress { margin-top: 10px; }
 /* 焦点卡顶部：三段带是这张卡的第一行，先回答"走到哪"，再说"这是什么"。 */

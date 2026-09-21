@@ -305,14 +305,26 @@
 
 **顺序建议**：B0→B1→B2→B3 是「反馈兑现」，先做；B4/B5 是「层级与版式」，其次；B6/B7 是「操作面」，可以并行；B8/B9/B10 需要产品口径确认（尤其 B10 的进度语义和 23 号文档的「不许客户端推断」边界）。
 
-## 11. 没量到的（不装成量过）
+## 11. 没量到的（2026-09-22 §11 收尾之后：只剩两条真的还量不了）
 
-- **判断题 / 配对题 / 关系搭建 / 纠错修补 / 组合证明 / 语音讲解这六种作答界面实机不可达**：库里 `practice_item` 现在只有 `ordering ×2`、`single_choice ×2`，`true_false` 与 `matching` 各 **0 条**（`learning_objective_revisions_v2` 计数）；`canonical_answer` 只有 `ordered_steps ×4`、`mapping ×1`、`bullets ×1`；本机无麦克风（实测 dock 里 `改用语音讲解` 被禁用并给出理由）。这五种我只能给出源码级诊断（P23/P25 的样式归属、`InteractionEditor:782-901` 的 DOM），**版面与动效结论要等能造出样本再补**。
-- **窄视口（1280×720 / 720×405）下的四屏版面**：没有改用户窗口尺寸，P33 全部是源码事实。
-- **`prefers-reduced-motion` / 动效档位 `lite|off` 下的实际表现**：没测。
-- **夜间模式**：只看到 `styles.css:131-133` 的 `color-scheme: dark` 会影响 P25 那个无样式 textarea，没做像素采样。
-- **对比度**：本轮没有做像素采样（30 号文档的 `tmp-cc-pixel.mjs` 那套）。P21 的 7.5px 灰字、P19 的 `.learning-run-switch-note` 淡洗句大概率不合格，但**我不写成结论**，留给 B4 的验收一起量。
-- **复习队列（`ReviewSurface`）与今日学习（`StudySurface`）**：它们也通向同一个作答壳，但本文没量；P18/P19/P20 的结论对它们同样成立（同一个 dock、同一个伴星保留带）。
+原始这一节列了六条"不装成量过"。收尾之后四条已量、其中两条量出了真缺陷并修掉。**下面是量过的与还欠的**：
+
+- ✅ **动效档与 `prefers-reduced-motion`（原"没测"）**。`tmp-objflow-v-s11b.mjs` 在结算页对印章做 `getAnimations()`：`full` → 1 条 `objective-seal-press:running`；`lite` → 1 条但 `finished`（动画对象在，但不占时间）；`off` → **0 条**；`emulateMedia(reducedMotion=reduce)` → **0 条**。三档闸门都按 DESIGN.md:151 落到位。
+  **口径要写清**：历史 run 的 `data-acknowledgement` 是 `idle`（只有本机刚结算完才 `active`），所以这里显式把属性设成 `active` 再测——**验的是 CSS 那三档闸门，不是用户触发路径**（后者由 `learning-run-result-policy.ts:123` 保证，B2 已验）。
+- ✅ **夜间模式（原"没做像素采样"）**。量出来一条**与本文所有批次都相关的事实**：`setTheme('night')` 确实把 `.desktop-app[data-theme]` 翻成 `night`（也翻回来了），但**这条链路的纸面完全不变色**——日夜两轮采样 9 个文本项**数字逐条相同**。原因是 `approved-surfaces.css` 的纸色/字色全是字面 hex（`#f3d678`、`#a9c7a2`、`#705d4d`…），不吃 `styles.css:130` 那套被夜间重定义的 token。**这是一个独立的、比本文任何一条都大的口子，不在 B0–B10 范围内**：要么给 v3 纸面建夜间色板，要么承认这些纸面是"纸"、不随主题变。留给你定。
+- ✅ **对比度（原"不做像素采样，不写成结论"）**。`tmp-objflow-lib.mjs` 加了 `contrastAudit()`：截图 → 页内 canvas → 在文字矩形内取最暗/最亮两端做图/底，算 WCAG 比值。**量出两条真不合格，都在列表焦点卡上**：
+  | 项 | 改前 | 改后 |
+  |---|---|---|
+  | `.v3-goal-focus__hint`（"上次保存的进度还在…"） | **1.25:1** | 7.79 |
+  | `.v3-goal-focus .objective-progress__label` | **2.62:1** | 6.10 |
+  | `.v3-goal-focus__detail`（"先看这条目标的详情"） | 未列进清单，一并量 | 4.50 |
+  | `.v3-lineage-ledger > header > span` | 3.72（第一版口径假象） | 5.12 |
+  hint 那 1.25 的根因和 B6 那条语音说明**一模一样**：`rgba(255,248,232,.78)` 是**给深色底写的近白色**，却落在薄荷绿纸上。`__detail` 同一条。进度带标签是我 B10 自己引入的（`--v3-soft` 在绿纸上不够），改成 `--v3-ink` + 未达段用 `opacity` 分层，位置区分仍由**条**承担。
+  **采样口径本身错过一次**：第一版取"矩形内最暗 vs 矩形外一圈"，浅字深底时两边都是同一块底色，报出 1.0 的**假不合格**；改成矩形内取明暗两端才是真图/底。
+- ✅ **窄视口四屏（原"没改用户窗口尺寸，全是源码事实"）**。1280×720 与 720×405 各扫结果页 / 列表 / 详情：**内容越界 0、硬裁字 0**。第一版扫描报了 6 处"横向溢出"，逐条认清后全是噪音：`.sr-only`（读屏盒，scrollWidth 必然超）、`.scene-stage` 与 `.v3-goal-focus::after`（绝对定位装饰层撑大 scrollWidth——**P8 就是被同一个伪元素骗过一次**）、`.companion-hud`/`.room-control` 图标按钮 +3~9px（别的会话在改）。判据因此改成"**有没有子矩形越过自己的内容盒**"，而不是 `scrollWidth > clientWidth`。
+  顺带一条真的：`.v3-goal-focus__source` 是 `nowrap + ellipsis`，720 宽下 212px 内容装进 179px 盒，尾部约四个字被裁且**没有任何第二条路拿得到** → 补 `title`，并加一条断言（去掉 `title` 会变红）。
+- ⛔ **判断题 / 配对题 / 关系搭建 / 纠错修补 / 组合证明 / 语音讲解六种作答界面仍不可达**。库里 `practice_item` 只有 `ordering ×2`、`single_choice ×2`，`true_false` 与 `matching` 各 0 条；本机无麦克风。**这一条不靠伪造解决**——要量得先让卡片生成真的产出这两种题型。
+- ⛔ **复习队列（`ReviewSurface`）与今日学习（`StudySurface`）两屏没量**。它们通向同一个作答壳，P18/P19/P20 的结论**推定**同样成立（同一个 dock、同一个伴星保留带），但我没有实机走过那两条入口。
 
 ## 12. 必须尊重的既有合同（改之前先读这几条）
 

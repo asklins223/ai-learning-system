@@ -422,7 +422,9 @@ export function ObjectiveLibrarySurface() {
                 <div key={bucket.key} title={bucket.hint}><dt>{bucket.label}</dt><dd>{counts[bucket.key]}</dd></div>
               ))}
             </dl>
-            <p className="v3-goal-focus__source"><BookOpenText size={13} aria-hidden="true" />{activeGoal.primaryNoteTitle ?? "未关联主笔记"}</p>
+            {/* 这一行是 nowrap + ellipsis：720 宽实测 212 的内容装进 179 的盒，
+                标题尾部约四个字被裁掉。截断本身可以，但被裁的字要在界面上还能拿到。 */}
+            <p className="v3-goal-focus__source" title={activeGoal.primaryNoteTitle ?? "未关联主笔记"}><BookOpenText size={13} aria-hidden="true" />{activeGoal.primaryNoteTitle ?? "未关联主笔记"}</p>
           </section>
 
           <section className="v3-goal-ledger" aria-labelledby="goal-ledger-title">

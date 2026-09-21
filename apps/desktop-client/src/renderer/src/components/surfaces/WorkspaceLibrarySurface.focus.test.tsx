@@ -157,6 +157,21 @@ describe("列表焦点卡的主行动", () => {
     // 服务端的动词只该出现在焦点卡那颗真会执行它的按钮上。
     expect(next).not.toContain("开始首次验证");
   });
+
+  it("来源行被省略号截断时，完整标题仍然拿得到", async () => {
+    installApi([listItem()]);
+    render(<ObjectiveLibrarySurface />);
+
+    const source = await waitFor(() => {
+      const el = document.querySelector(".v3-goal-focus__source");
+      expect(el).not.toBeNull();
+      return el;
+    });
+    // 这一行是 nowrap + ellipsis：窄视口实测 212px 的内容装进 179px 的盒。
+    // 截断可以，但被裁掉的那几个字必须在界面上还有第二条路拿到。
+    expect(source!.getAttribute("title")).toBe("物理笔记");
+    expect(source!.textContent).toContain("物理笔记");
+  });
 });
 
 describe("读取计数的说法", () => {
