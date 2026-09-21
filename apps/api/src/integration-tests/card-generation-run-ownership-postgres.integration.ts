@@ -18,6 +18,7 @@ import { createNote } from "../modules/note/service.ts";
 import { getLatestGenerationRunForNoteV2 } from "../modules/card-generation-v2/generation-run-service.ts";
 import { listActiveCardsV2, readPublicCardV2 } from "../modules/card-generation-v2/card-service.ts";
 import { addV2ObjectiveToWorkspace } from "./helpers/v2-card-fixture.ts";
+import { assembleObjectiveSurfaceV3, listObjectiveSurfacesV3 } from "../modules/learning-objectives/surface-service.ts";
 import { CardGenerationV2ServiceError } from "../modules/card-generation-v2/helpers.ts";
 
 const CONN = process.env.DATABASE_URL_API ?? process.env.DATABASE_URL;
@@ -284,3 +285,60 @@ test("重新生成别人的私有笔记卡：按不存在处理，而不是 403"
   }
   assert.notEqual(mine, "card_not_found", "作者自己也拿不到这张卡（判据太严）");
 });
+
+// ─── 目标的可见性跟着卡、卡跟着笔记（批次 4.5 最后一段）───────────────
+
+const listObjectivesFor = (userId: string) =>
+  withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
+    listObjectiveSurfacesV3(tx, { workspaceId, userId }, { lifecycle: "active", limit: 100 }));
+
+test("私有笔记生成的目标不进别人的列表与详情", async () => {
+  // 判据走"目标 → 卡 → 笔记版本 → 笔记"，不走 origins：dev 真实数据上 214 条 active
+  // 目标只有 43 条有 origin 行，按 origins 判等于给 80% 的目标发"没有私有来源"的通行证。
+  const seeded = await addV2ObjectiveToWorkspace(sql, workspaceId, author, {
+    publicSummary: `只有作者看得见的目标 ${tag}`,
+    objectiveStatement: `只有作者看得见的目标 ${tag}`,
+  });
+  const idsIn = async (userId: string) => (await listObjectivesFor(userId)).items.map((item) => item.objectiveId);
+
+  expectLike(await idsIn(author), seeded.objectiveId, "作者看不见自己的目标");
+  expectNotLike(await idsIn(other), seeded.objectiveId, "别人读到了「仅自己可见」笔记的目标");
+  assert.equal(
+    (await listObjectivesFor(other)).items.find((item) => item.objectiveId === seeded.objectiveId)?.content.publicSummary,
+    undefined,
+    "目标的摘要从这一侧漏了出去",
+  );
+  await assert.rejects(
+    () =>
+      withWorkspaceTransaction({ workspaceId, userId: other }, (tx) =>
+        assembleObjectiveSurfaceV3(tx, { workspaceId, userId: other }, seeded.objectiveId)),
+    "别人按 id 直读目标的详情拿到了内容",
+  );
+
+  // 正向对照：共享之后同一个目标必须回到对方列表里。少了这一条，上面的"看不见"
+  // 可能只是判据把两张目标都挡了。
+  await sql`UPDATE notes SET share_scope = 'shared' WHERE id = ${seeded.noteId}`;
+  expectLike(await idsIn(other), seeded.objectiveId, "共享之后目标仍然看不见");
+
+  // 撤回：作者随时能收回去。
+  await sql`UPDATE notes SET share_scope = 'private' WHERE id = ${seeded.noteId}`;
+  expectNotLike(await idsIn(other), seeded.objectiveId, "撤回之后目标还留在别人列表里");
+  expectLike(await idsIn(author), seeded.objectiveId, "撤回把作者自己也挡掉了");
+});
+
+test("没有笔记来源的目标不受这条边界约束", async () => {
+  const seeded = await addV2ObjectiveToWorkspace(sql, workspaceId, author, {
+    publicSummary: `与笔记无关的一个目标 ${tag}`,
+  });
+  await sql`UPDATE learning_cards_v2 SET note_version_id = NULL WHERE objective_id = ${seeded.objectiveId}`;
+  const ids = (await listObjectivesFor(other)).items.map((item) => item.objectiveId);
+  expectLike(ids, seeded.objectiveId, "没有笔记来源的目标也被挡了");
+});
+
+function expectLike(ids: string[], objectiveId: string, message: string) {
+  assert.ok(ids.includes(objectiveId), `${message}（${ids.length} 条：${ids.slice(0, 3).join(", ")}）`);
+}
+
+function expectNotLike(ids: string[], objectiveId: string, message: string) {
+  assert.equal(ids.find((id) => id === objectiveId), undefined, message);
+}

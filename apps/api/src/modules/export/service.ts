@@ -1,7 +1,7 @@
 import { and, asc, count, desc, eq, gt, inArray, isNull, lt, or } from "drizzle-orm";
 import { withWorkspaceTransaction, type ApiTransaction } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks, sources, sourceSegments } from "@ailearn/shared/db-schema/note";
-import { visibleCardsCondition, visibleNotesCondition } from "../note/visibility.ts";
+import { visibleCardsCondition, visibleNotesCondition, visibleObjectivesCondition } from "../note/visibility.ts";
 import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
 import { aiArtifacts } from "@ailearn/shared/db-schema/ai";
 import { workspaces, workspaceMembers, users, onboardingStates } from "@ailearn/shared/db-schema/identity";
@@ -538,6 +538,7 @@ export async function exportWorkspace(workspaceId: string, userId: string) {
         load: (c: PlainIdCursor | null) =>
           tx.select().from(learningObjectivesV2).where(and(
             eq(learningObjectivesV2.workspaceId, workspaceId),
+            visibleObjectivesCondition(userId, learningObjectivesV2.objectiveId),
             c ? lt(learningObjectivesV2.id, c.id) : undefined,
           )).orderBy(desc(learningObjectivesV2.id)).limit(EXPORT_BATCH),
         cursorFrom: (last) => ({ id: last.id }),
@@ -547,6 +548,7 @@ export async function exportWorkspace(workspaceId: string, userId: string) {
         load: (c: PlainIdCursor | null) =>
           tx.select().from(learningObjectiveRevisionsV2).where(and(
             eq(learningObjectiveRevisionsV2.workspaceId, workspaceId),
+            visibleObjectivesCondition(userId, learningObjectiveRevisionsV2.objectiveId),
             c ? lt(learningObjectiveRevisionsV2.id, c.id) : undefined,
           )).orderBy(desc(learningObjectiveRevisionsV2.id)).limit(EXPORT_BATCH),
         cursorFrom: (last) => ({ id: last.id }),

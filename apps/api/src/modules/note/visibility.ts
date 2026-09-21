@@ -1,5 +1,8 @@
 import { eq, exists, isNull, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import { notes, noteVersions } from "@ailearn/shared/db-schema/note";
+// 目标那一层的判据要经卡才能回到笔记（见 `visibleObjectivesCondition` 的说明），
+// 所以这一句确实需要知道 `learning_cards_v2` 存在。仍然只有这一个文件说这句话。
+import { learningCardsV2 } from "@ailearn/shared/db-schema/card-generation-v2";
 
 /**
  * 笔记归属的唯一判据（批次 4.5）。
@@ -100,6 +103,41 @@ export function visibleCardsCondition(
     exists(
       sql`(SELECT 1 FROM ${noteVersions} JOIN ${notes} ON ${notes.id} = ${noteVersions.noteId}
            WHERE ${noteVersions.id} = ${cardNoteVersionId} AND ${visibleNotesCondition(userId)})`,
+    ),
+  ) as SQL;
+}
+
+/**
+ * 目标（objective）的可见性跟着它的**卡**走，因为卡跟着笔记走（批次 4.5 收尾）。
+ *
+ * 为什么这里不直接 join `learning_objective_origins_v2`：那是"目标从哪篇笔记来"的
+ * 正规记录，但 2026-09-21 在 dev 真实数据上量过——214 条 active 目标里只有 43 条有
+ * origin 行，**171 条（80%）一条都没有**。按那条路判等于给 80% 的目标发"没有私有来源"
+ * 的通行证，而"没登记就当可见"正是本轮审查反复撞到的那类失败。
+ * 反过来，同一份数据里 214/214 条 active 目标都有卡、且卡都带 `note_version_id`
+ * （目标是随卡一起激活出来的，那条链是这批对象的生成路径本身写的）。
+ *
+ * 没有卡的目标（手动建立、还没生成过卡）不受这条约束：它没有可追溯的笔记正文。
+ * 判据仍然只有一句——里面复用的还是 `visibleNotesCondition`。
+ */
+export function visibleObjectivesCondition(
+  userId: string,
+  objectiveId: SQLWrapper,
+): SQL {
+
+  return or(
+    // 第一支：这个目标**没有任何一张带笔记来源的卡** —— 和卡片那条 `IS NULL` 同一句话。
+    // 写成"没有卡"是错的（我自己那条对照用例抓到的）：一张没来源笔记的卡会把目标
+    // 永久留在两支之外，谁都不该看见它，可它并没有可追溯的私有来源。
+    sql`NOT EXISTS (SELECT 1 FROM ${learningCardsV2}
+                    WHERE ${learningCardsV2.objectiveId} = ${objectiveId}
+                      AND ${learningCardsV2.noteVersionId} IS NOT NULL)`,
+    exists(
+      sql`(SELECT 1 FROM ${learningCardsV2}
+           JOIN ${noteVersions} ON ${noteVersions.id} = ${learningCardsV2.noteVersionId}
+           JOIN ${notes} ON ${notes.id} = ${noteVersions.noteId}
+           WHERE ${learningCardsV2.objectiveId} = ${objectiveId}
+             AND ${visibleNotesCondition(userId)})`,
     ),
   ) as SQL;
 }

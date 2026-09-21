@@ -37,7 +37,7 @@ import {
 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { learningRuns, canonicalLearningEventOutbox, practiceTrailEventOutbox } from "@ailearn/shared/db-schema/learning-runs";
 import { notes } from "@ailearn/shared/db-schema/note";
-import { visibleNotesCondition } from "../note/visibility.ts";
+import { visibleNotesCondition, visibleObjectivesCondition } from "../note/visibility.ts";
 import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
 import type {
   LearningObjectiveSurfaceV3,
@@ -270,6 +270,7 @@ async function assembleObjectiveSurfaceV3Inner(
     .where(and(
       eq(learningObjectivesV2.workspaceId, ctx.workspaceId),
       eq(learningObjectivesV2.objectiveId, objectiveId),
+      visibleObjectivesCondition(ctx.userId, learningObjectivesV2.objectiveId),
     ))
     .limit(1);
   const objective = objectiveRows[0];
@@ -284,6 +285,7 @@ async function assembleObjectiveSurfaceV3Inner(
         .where(and(
           eq(learningObjectiveRevisionsV2.workspaceId, ctx.workspaceId),
           eq(learningObjectiveRevisionsV2.objectiveRevisionId, objective.currentObjectiveRevisionId),
+          visibleObjectivesCondition(ctx.userId, learningObjectiveRevisionsV2.objectiveId),
         ))
         .limit(1)
     : [];
@@ -386,6 +388,7 @@ async function assembleObjectiveSurfaceV3Inner(
         .where(and(
           eq(learningObjectiveRevisionsV2.workspaceId, ctx.workspaceId),
           eq(learningObjectiveRevisionsV2.objectiveRevisionId, lineageRows[0].successorRevisionId),
+          visibleObjectivesCondition(ctx.userId, learningObjectiveRevisionsV2.objectiveId),
         ))
         .limit(1);
       if (successorRevisionRows[0]) {
@@ -592,7 +595,9 @@ async function listObjectiveSurfacesV3Inner(
       })
       .from(learningObjectivesV2)
       .innerJoin(learningObjectiveRevisionsV2, validCurrentRevision)
-      .where(where)
+      // 可见性判据写在两条查询各自身上，不塞进上面的 `where` 常量：那条离这两处
+      // 都太远，"每个读点就近带判据"那条棘轮按局部窗口判，塞进常量等于把它藏起来。
+      .where(and(where, visibleObjectivesCondition(ctx.userId, learningObjectivesV2.objectiveId)))
       .orderBy(desc(learningObjectivesV2.createdAt), desc(learningObjectivesV2.id))
       .limit(limit + 1),
     tx
@@ -602,6 +607,7 @@ async function listObjectiveSurfacesV3Inner(
       .where(and(
         eq(learningObjectivesV2.workspaceId, ctx.workspaceId),
         eq(learningObjectivesV2.lifecycle, lifecycle),
+        visibleObjectivesCondition(ctx.userId, learningObjectivesV2.objectiveId),
       )),
   ]);
   const pageRows = rows.slice(0, limit);
@@ -646,6 +652,7 @@ async function batchAssembleObjectiveSurfacesV3(
     .where(and(
       eq(learningObjectivesV2.workspaceId, ctx.workspaceId),
       inArray(learningObjectivesV2.objectiveId, objectiveIds),
+      visibleObjectivesCondition(ctx.userId, learningObjectivesV2.objectiveId),
     ));
   const fullObjectiveByMap = new Map(fullObjectiveRows.map((r) => [r.objectiveId, r]));
 
@@ -660,6 +667,7 @@ async function batchAssembleObjectiveSurfacesV3(
         .where(and(
           eq(learningObjectiveRevisionsV2.workspaceId, ctx.workspaceId),
           inArray(learningObjectiveRevisionsV2.objectiveRevisionId, revisionIds),
+          visibleObjectivesCondition(ctx.userId, learningObjectiveRevisionsV2.objectiveId),
         ))
     : [];
   const revisionByObjective = new Map(
@@ -876,6 +884,7 @@ async function batchAssembleObjectiveSurfacesV3(
         .where(and(
           eq(learningObjectiveRevisionsV2.workspaceId, ctx.workspaceId),
           inArray(learningObjectiveRevisionsV2.objectiveRevisionId, successorRevisionIds),
+          visibleObjectivesCondition(ctx.userId, learningObjectiveRevisionsV2.objectiveId),
         ))
     : [];
   const successorObjByRevision = new Map(successorRevisionRows.map((r) => [r.objectiveRevisionId, r.objectiveId]));

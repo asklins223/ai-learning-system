@@ -6,7 +6,7 @@
  */
 
 import { sql } from "drizzle-orm";
-import { noteVisibleSqlText, visibleCardsCondition } from "../note/visibility.ts";
+import { noteVisibleSqlText, visibleCardsCondition, visibleObjectivesCondition } from "../note/visibility.ts";
 import type { ApiTransaction } from "../../db/client.ts";
 
 export interface MemoryStarMapNode {
@@ -93,6 +93,9 @@ export async function getMemoryStarMap(
             SELECT COALESCE(r.concept_label, r.public_summary)
             FROM learning_objective_revisions_v2 r
             WHERE r.objective_id = l.entity_id AND r.workspace_id = m.workspace_id
+              -- 目标的那句摘要也是从笔记正文生成的：判据走"目标 → 卡 → 笔记"，
+              -- 与卡那一支同一个口径（作者撤回共享之后不该继续挂在别人的记忆图上）。
+              AND ${visibleObjectivesCondition(scope.userId, sql.raw("r.objective_id"))}
             ORDER BY r.revision DESC
             LIMIT 1
           )
@@ -128,6 +131,7 @@ export async function getMemoryStarMap(
           WHEN 'key_point' THEN CASE WHEN EXISTS (
             SELECT 1 FROM learning_objective_revisions_v2 r
             WHERE r.objective_id = l.entity_id AND r.workspace_id = m.workspace_id
+              AND ${visibleObjectivesCondition(scope.userId, sql.raw("r.objective_id"))}
           ) THEN jsonb_build_object('kind', 'understanding', 'objectiveId', l.entity_id) END
           WHEN 'learning_run' THEN CASE WHEN EXISTS (
             SELECT 1 FROM learning_runs r

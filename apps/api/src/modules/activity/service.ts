@@ -26,7 +26,7 @@
 import { and, eq, gte, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
 import { notes, sources } from "@ailearn/shared/db-schema/note";
-import { visibleNotesCondition } from "../note/visibility.ts";
+import { visibleNotesCondition, visibleObjectivesCondition } from "../note/visibility.ts";
 import { jobs } from "@ailearn/shared/db-schema/job";
 import { learningRuns } from "@ailearn/shared/db-schema/learning-runs";
 import {
@@ -197,6 +197,7 @@ export async function getTodayActivity(
         eq(learningObjectivesV2.lifecycle, "active"),
         gte(learningObjectivesV2.createdAt, from),
         lt(learningObjectivesV2.createdAt, to),
+        visibleObjectivesCondition(ctx.userId, learningObjectivesV2.objectiveId),
       ))
       .limit(SOURCE_LIMIT),
     tx

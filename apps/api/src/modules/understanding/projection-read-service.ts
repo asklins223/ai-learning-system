@@ -21,7 +21,7 @@ import {
   learningObjectiveRevisionsV2,
 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { notes, noteVersions, sources } from "@ailearn/shared/db-schema/note";
-import { visibleCardsCondition, visibleNotesCondition } from "../note/visibility.ts";
+import { visibleCardsCondition, visibleNotesCondition, visibleObjectivesCondition } from "../note/visibility.ts";
 import {
   understandingProjectionCheckpoints,
   understandingRoutePlans,
@@ -470,6 +470,7 @@ export async function loadUnderstandingProjection(
         .where(and(
           eq(learningObjectivesV2.workspaceId, scope.workspaceId),
           inArray(learningObjectivesV2.objectiveId, kpObjectiveIds),
+          visibleObjectivesCondition(scope.userId, learningObjectivesV2.objectiveId),
           continuation
             ? or(
                 sql`${projectionKpCreatedAtText()} > ${continuation.createdAtText}`,
@@ -499,6 +500,7 @@ export async function loadUnderstandingProjection(
         .where(and(
           eq(learningObjectivesV2.workspaceId, scope.workspaceId),
           inArray(learningObjectivesV2.objectiveId, kpObjectiveIds),
+          visibleObjectivesCondition(scope.userId, learningObjectivesV2.objectiveId),
         ));
     }
   }
@@ -533,6 +535,7 @@ export async function loadUnderstandingProjection(
       .where(and(
         eq(learningObjectiveRevisionsV2.workspaceId, scope.workspaceId),
         inArray(learningObjectiveRevisionsV2.objectiveId, kpObjectiveIds),
+        visibleObjectivesCondition(scope.userId, learningObjectiveRevisionsV2.objectiveId),
       ));
     const latestByObj = new Map<string, { publicSummary: string; conceptLabel: string | null; revision: number }>();
     for (const r of revRows) {

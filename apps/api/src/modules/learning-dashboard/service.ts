@@ -17,7 +17,7 @@ import { learningObjectivesV2 } from "@ailearn/shared/db-schema/card-generation-
 import { learningRuns } from "@ailearn/shared/db-schema/learning-runs";
 import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
 import { notes } from "@ailearn/shared/db-schema/note";
-import { visibleNotesCondition } from "../note/visibility.ts";
+import { visibleNotesCondition, visibleObjectivesCondition } from "../note/visibility.ts";
 import type { LearningDashboardV2 } from "@ailearn/shared";
 import { reviewScheduleTargetsConsumableCardPredicate } from "../review/consumer-eligibility.ts";
 import {
@@ -74,9 +74,12 @@ export async function buildLearningDashboardV2(
       tx
         .select({ n: sql<number>`count(*)::int` })
         .from(learningObjectivesV2)
+        // 批次 4.5 收尾：目标可见性跟着它的来源笔记走，所以这一格与上面的 notes
+        // 计数同一个人判据——它同样进 `mode` 和 `dashboardRevision` 的哈希。
         .where(and(
           eq(learningObjectivesV2.workspaceId, ctx.workspaceId),
           eq(learningObjectivesV2.lifecycle, "active"),
+          visibleObjectivesCondition(ctx.userId, learningObjectivesV2.objectiveId),
         )),
       tx
         .select({ n: sql<number>`count(*)::int` })
@@ -109,6 +112,7 @@ export async function buildLearningDashboardV2(
         .where(and(
           eq(learningObjectivesV2.workspaceId, ctx.workspaceId),
           eq(learningObjectivesV2.lifecycle, "active"),
+          visibleObjectivesCondition(ctx.userId, learningObjectivesV2.objectiveId),
           sql`NOT EXISTS (SELECT 1 FROM learning_objective_origins_v2 o
              WHERE o.workspace_id = learning_objectives_v2.workspace_id
                AND o.objective_id = learning_objectives_v2.objective_id)`,
@@ -149,6 +153,7 @@ export async function buildLearningDashboardV2(
         .where(and(
           eq(learningObjectivesV2.workspaceId, ctx.workspaceId),
           inArray(learningObjectivesV2.lifecycle, ["archived", "superseded"]),
+          visibleObjectivesCondition(ctx.userId, learningObjectivesV2.objectiveId),
         ));
       const hasArchivedObjectives = Number(totalObjectives[0]?.n ?? 0) > 0;
       mode = hasArchivedObjectives ? "empty_after_filter" : "notes_without_objectives";

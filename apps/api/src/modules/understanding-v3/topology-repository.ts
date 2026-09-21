@@ -22,7 +22,7 @@ import { and, eq, inArray, isNull, sql, desc } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
 import { logger } from "../../lib/logger.ts";
 import { notes, sources } from "@ailearn/shared/db-schema/note";
-import { visibleNotesCondition } from "../note/visibility.ts";
+import { visibleNotesCondition, visibleObjectivesCondition } from "../note/visibility.ts";
 import {
   learningObjectivesV2,
   learningObjectiveRevisionsV2,
@@ -204,7 +204,10 @@ export async function buildTopologySnapshotV3(
     await tx
       .select()
       .from(learningObjectivesV2)
-      .where(eq(learningObjectivesV2.workspaceId, ctx.workspaceId))
+      .where(and(
+        eq(learningObjectivesV2.workspaceId, ctx.workspaceId),
+        visibleObjectivesCondition(ctx.userId, learningObjectivesV2.objectiveId),
+      ))
       .orderBy(learningObjectivesV2.objectiveId)
       .limit(probeLimit),
     "objectives",
@@ -231,6 +234,7 @@ export async function buildTopologySnapshotV3(
         .where(and(
           eq(learningObjectiveRevisionsV2.workspaceId, ctx.workspaceId),
           inArray(learningObjectiveRevisionsV2.objectiveRevisionId, objectiveRows.map((o) => o.currentObjectiveRevisionId).filter(Boolean) as string[]),
+          visibleObjectivesCondition(ctx.userId, learningObjectiveRevisionsV2.objectiveId),
         ))
     : [];
   const revisionByObjective = new Map(
@@ -502,6 +506,7 @@ export async function buildTopologySnapshotV3(
         .where(and(
           eq(learningObjectiveRevisionsV2.workspaceId, ctx.workspaceId),
           inArray(learningObjectiveRevisionsV2.objectiveRevisionId, successorRevisionIds),
+          visibleObjectivesCondition(ctx.userId, learningObjectiveRevisionsV2.objectiveId),
         ))
     : [];
   const successorObjByRevision = new Map(successorRevisionRows.map((r) => [r.objectiveRevisionId, r.objectiveId]));

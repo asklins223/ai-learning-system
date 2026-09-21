@@ -33,6 +33,7 @@ import {
   notes,
   petProfiles,
 } from "@ailearn/shared/db-schema";
+import { visibleObjectivesCondition } from "../note/visibility.ts";
 
 export interface CompanionHomeScope {
   workspaceId: string;
@@ -175,6 +176,7 @@ async function readMilestones(
       eq(learningObjectivesV2.workspaceId, scope.workspaceId),
       eq(learningObjectivesV2.lifecycle, "active"),
       gt(learningObjectivesV2.currentRevision, 0),
+      visibleObjectivesCondition(scope.userId, learningObjectivesV2.objectiveId),
     ))
     .limit(1);
   const completedReview = await executor

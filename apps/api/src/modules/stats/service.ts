@@ -3,7 +3,7 @@ import { withWorkspaceTransaction } from "../../db/client.ts";
 import { learningCardsV2, learningObjectiveEvidenceBindingsV2, learningObjectiveRevisionsV2, learningObjectivesV2 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
 import { notes } from "@ailearn/shared/db-schema/note";
-import { visibleCardsCondition, visibleNotesCondition } from "../note/visibility.ts";
+import { visibleCardsCondition, visibleNotesCondition, visibleObjectivesCondition } from "../note/visibility.ts";
 import { ReviewStatus } from "@ailearn/shared";
 
 export interface StatsOverview {
@@ -91,6 +91,7 @@ export async function getStatsOverview(workspaceId: string, userId: string): Pro
       .where(and(
         eq(learningObjectivesV2.workspaceId, workspaceId),
         eq(learningObjectivesV2.lifecycle, "active"),
+        visibleObjectivesCondition(userId, learningObjectivesV2.objectiveId),
       )),
     tx
       .select({ count: count() })

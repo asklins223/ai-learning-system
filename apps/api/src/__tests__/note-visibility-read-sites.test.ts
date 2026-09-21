@@ -68,6 +68,59 @@ const SYSTEM_LEVEL_READS: Record<string, number> = {
 };
 
 /**
+ * 目标读点的可见性棘轮（批次 4.5 最后一段）。
+ *
+ * 目标的 `concept_label` / `public_summary` / `objective_statement` 也是从笔记正文
+ * 生成的，所以同一句话必须盖到这一层。判据走"目标 → 卡 → 笔记版本 → 笔记"，
+ * 而不是"目标 → origins → 笔记"：dev 真实数据上量过，214 条 active 目标只有 43 条
+ * 有 origin 行，按 origins 判等于给 80% 的目标发通行证；而 214/214 都有卡。
+ */
+const OBJECTIVE_READ_PATTERNS = [
+  /\bfrom\(learningObjectivesV2\)/g,
+  /\bfrom\(learningObjectiveRevisionsV2\)/g,
+  /\b\w*[jJ]oin\(learningObjectivesV2[,)]/g,
+  /\b\w*[jJ]oin\(learningObjectiveRevisionsV2[,)]/g,
+  /\bFROM\s+learning_objectives_v2\b/gi,
+  /\bFROM\s+learning_objective_revisions_v2\b/gi,
+];
+const OBJECTIVE_GUARD_TOKENS = [
+  "visibleObjectivesCondition",
+  // 更严的形式：只放自己写的笔记那一条，或按人筛过的卡。
+  "eq(learningObjectivesV2.createdBy",
+  "visibleCardsCondition",
+  "visibleNotesCondition",
+];
+/**
+ * 系统级 / 非展示读点。口径与上面两条一样：数的是"判据 token 抵不上的读点条数"，
+ * 只能随着修好而变小。
+ */
+const OBJECTIVE_SYSTEM_LEVEL_READS: Record<string, number> = {
+  // 生成与激活侧：调用方刚提交的那一批的闭环（能走到这里说明这篇笔记对他可读），
+  // 以及按 objectiveId 精确取一行的 CAS。
+  "modules/card-generation-v2/activation-service.ts": 7,
+  "modules/card-generation-v2/target-snapshot-adapter.ts": 2,
+  "modules/card-generation-v2/card-service.ts": 5,
+  // 练习与复习：排程/回合本身就是按人的行（RLS + user_id），这里读的是"自己要做什么"，
+  // 不是把目标的正文广播给别人。
+  "modules/learning-runs/run-service.ts": 3,
+  "modules/learning-runs/run-processing-tick.ts": 2,
+  "modules/review/service.ts": 3,
+  // 排程"这条目标还有没有能做的卡"的多态判定：只回答是/否，不返回任何文字。
+  "modules/review/consumer-eligibility.ts": 1,
+  // 目标自己的附属记录：origin 的增删与历史，都按 objectiveId 精确取。
+  "modules/learning-objectives/origin-service.ts": 1,
+  "modules/learning-objectives/origin-migration.ts": 1,
+  "modules/learning-objectives/history-route-service.ts": 2,
+  // 搜索索引是全空间共用的一份，按某个人裁会把他的视角烧进共用数据（见 notes 那条
+  // 同样的理由）；目标这一侧的出口按同一套口径判。
+  "modules/search/service.ts": 1,
+  // `checkExportSize` 的体积保险丝，刻意取超集。
+  "modules/export/service.ts": 2,
+  // 游标行：只取 createdAt / id 定位分页，不返回任何文字。
+  "modules/learning-objectives/surface-service.ts": 1,
+};
+
+/**
  * 抹掉注释内容但**保住行号**：直接删掉整行会让报出来的 `file:line` 对不上源码，
  * 而这条测试存在的意义就是告诉人来修——行号错了就没人修。
  */
@@ -130,11 +183,18 @@ const CARD_SYSTEM_LEVEL_READS: Record<string, number> = {
   "modules/export/service.ts": 1,
 };
 
+/**
+ * `forward` 是"判据最远可以离读点几行"。默认 12 够一条普通查询；
+ * 目标那一层的几个站点中间夹着 `leftJoin(...)` 与一长串 select 列，
+ * 判据落在 13-18 行外，所以那一族单独放宽到 18 —— 仍然是"同一条查询内"，
+ * 不是文件级计数（文件级计数的害处见上面那条注释）。
+ */
 function unguarded(
   file: string,
   rel: string,
   patterns: RegExp[],
   tokens: string[],
+  forward = 12,
 ): string[] {
   const source = stripComments(readFileSync(file, "utf8"));
   const lines = source.split("\n");
@@ -144,7 +204,7 @@ function unguarded(
       const line = source.slice(0, match.index ?? 0).split("\n").length - 1;
       // 判据通常在 `where(and(...))` 里，紧跟读点之后；往前几行覆盖 join 条件写在
       // 上方的写法。窗口太宽会退化成"文件级计数"，所以只取 ±12 行。
-      const window = lines.slice(Math.max(0, line - 4), line + 12).join("\n");
+      const window = lines.slice(Math.max(0, line - 4), line + forward).join("\n");
       if (tokens.some((token) => window.includes(token))) continue;
       out.push(`${rel}:${line + 1} (${match[0]})`);
     }
@@ -191,8 +251,26 @@ test("返回正文的卡片读点都带上「跟着来源笔记判」", () => {
   assert.deepEqual(staleExemptions, [], "卡片豁免比实际需要的多（棘轮只能缩短）：\n" + staleExemptions.join("\n"));
 });
 
+test("返回正文的目标读点都带上「跟着来源笔记判」", () => {
+  const offenders: string[] = [];
+  const staleExemptions: string[] = [];
+  for (const file of sourceFiles(join(API_ROOT, "modules"))) {
+    const rel = relative(API_ROOT, file).split("\\").join("/");
+    const allowance = OBJECTIVE_SYSTEM_LEVEL_READS[rel] ?? 0;
+    const misses = unguarded(file, rel, OBJECTIVE_READ_PATTERNS, OBJECTIVE_GUARD_TOKENS, 18);
+    if (misses.length > allowance) {
+      offenders.push(`${rel}: ${misses.length} 处目标读点没带判据，豁免只给了 ${allowance} 个 → ${misses.join(", ")}`);
+    }
+    if (allowance > misses.length) {
+      staleExemptions.push(`${rel}: 豁免写了 ${allowance} 个，实际只有 ${misses.length} 处没带判据——调下来`);
+    }
+  }
+  assert.deepEqual(offenders, [], "新增的目标读点没带可见性判据：\n" + offenders.join("\n"));
+  assert.deepEqual(staleExemptions, [], "目标豁免比实际需要的多（棘轮只能缩短）：\n" + staleExemptions.join("\n"));
+});
+
 test("豁免清单里的文件确实存在（防止改名后豁免悬空）", () => {
-  for (const rel of Object.keys(SYSTEM_LEVEL_READS)) {
+  for (const rel of [...Object.keys(SYSTEM_LEVEL_READS), ...Object.keys(OBJECTIVE_SYSTEM_LEVEL_READS)]) {
     assert.equal(statSync(join(API_ROOT, rel)) !== null, true, `${rel} 已经不在了，豁免要删`);
   }
 });
