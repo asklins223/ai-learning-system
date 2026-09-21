@@ -563,6 +563,13 @@ const noteDocPresenceInputSchema = z.strictObject({
 type NoteDocStreamEntry = {
   handle: NoteDocWatchHandle;
   workspaceEpoch: number;
+  /**
+   * 服务端给的读写范围，`null` = 还没收到状态帧。**写入只认 `read-write`**：
+   * 把只读成员（或服务端还没开口）的提交并进本机文档、再回一句 `via:"stream"`，
+   * 就是"界面以为写进去了、服务端其实没落盘"那一类假状态。判据仍然只有服务端那一处，
+   * 这里只是不再把它的答复猜成正面。
+   */
+  authorizedScope: "read-write" | "readonly" | null;
 };
 const cardGenerationStartInputSchema = z.strictObject({
   ...m1InputBase,
@@ -1002,6 +1009,12 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
    * 连接的文档，才能与订阅者共用一份 CRDT 状态。
    */
   const noteDocStreams = new Map<string, NoteDocStreamEntry>();
+  /**
+   * 订阅回执比连接早：`ensureNoteDocStream` 是异步建连的，界面那声"我也开着这一篇"
+   * 几乎总抢在句柄就位之前到达，当场丢掉就成了"我这侧一切正常、对端永远等不到我"
+   * （2026-09-22 两个真客户端实测）。所以最近一次报的状态先记在这儿，连接就位时补交。
+   */
+  const noteDocPresenceToReplay = new Map<string, string>();
   /** 门控判据（决定 7b）：当前空间的类型与本人角色，由 `rememberSession` 实时更新。 */
   let activeWorkspaceKind: "personal" | "collaborative" | null = null;
   let activeWorkspaceRole: "owner" | "member" | null = null;
@@ -1290,7 +1303,14 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
    *  - collaborative 的只读成员：本来就不能写，正文走既有读路径。
    * 判据的**唯一**来源仍是服务端；这里只是决定要不要占一条长连接。
    */
-  const noteDocStreamAllowed = (): boolean => activeWorkspaceKind === "collaborative" && activeWorkspaceRole === "owner";
+  /**
+   * 门控（决定 7b 的那一半按实测改了）：`personal` 不建连——那里物理上没有第二个人，
+   * 占一条长连接只是白耗电。但**只读成员要建**：他读得到这篇（HTTP 就能读），实时看到
+   * 别人的改动才是共享空间对他唯一的意义，而"谁还开着这一篇"那一排头像也要求他在场。
+   * 服务端本来就会用 `Authenticated("readonly")` 告诉他（也告诉这台机器）他能不能写；
+   * 主进程先前自己按角色挡在门外，等于把这道答复换成了自己的第二套判据。
+   */
+  const noteDocStreamAllowed = (): boolean => activeWorkspaceKind === "collaborative";
 
   const hasNoteDocSubscription = (noteId: string): boolean => {
     for (const subscription of subscriptions.values()) {
@@ -1303,6 +1323,9 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     const entry = noteDocStreams.get(noteId);
     if (!entry) return;
     noteDocStreams.delete(noteId);
+    // 欠的那份在场状态跟着连接一起作废：留给下一条连接补交，就是把上一个视图的
+    // "我还开着"报到下一次真正打开这篇的时候。
+    noteDocPresenceToReplay.delete(noteId);
     entry.handle.stop();
   };
 
@@ -1316,6 +1339,9 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
   const ensureNoteDocStream = (noteId: string): void => {
     if (!noteDocStreamAllowed() || !hasNoteDocSubscription(noteId) || noteDocStreams.has(noteId)) return;
     const streamWorkspaceEpoch = activeWorkspaceEpoch;
+    // 服务端的第一批帧可能在句柄入表之前就到了（建连是异步的，回调却是立刻挂上的），
+    // 所以先落在闭包里，入表时一并带进去——漏掉这句答复的话，可写的那位也会被当成只读。
+    let authorizedScope: "read-write" | "readonly" | null = null;
     // 连上了还压着一批离线增量，界面上就是"已经同步"的假象：先把欠的交清再建连接。
     // 交不掉（还是没网）不挡建连——那条链自己也会失败，而队列仍然原样留着。
     void gateway.flushNoteDocPending(noteId).catch(() => undefined)
@@ -1324,6 +1350,11 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
       .then(() => persistNoteDocLocal(noteId))
       .then(() => gateway.watchNoteDocument(noteId, ({ noteId: _framedByGateway, ...event }) => {
       if (streamWorkspaceEpoch !== activeWorkspaceEpoch) return;
+      if (event.type === "status" && event.authorizedScope) {
+        authorizedScope = event.authorizedScope;
+        const entry = noteDocStreams.get(noteId);
+        if (entry) entry.authorizedScope = event.authorizedScope;
+      }
       emit("noteDoc", { kind: "note_doc_event", noteId, event }, activeWorkspaceEpoch);
     })).then((handle) => {
       // 服务端说这篇不该有实时连接（仅自己可见）时拿到的是 null：不建连，
@@ -1334,7 +1365,11 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
         handle.stop();
         return;
       }
-      noteDocStreams.set(noteId, { handle, workspaceEpoch: streamWorkspaceEpoch });
+      noteDocStreams.set(noteId, { handle, workspaceEpoch: streamWorkspaceEpoch, authorizedScope });
+      // 订阅回执比连接早，界面上那声报名字大概率已经落过一次空。连接就位就把记下的
+      // 那份补交出去，否则对端永远少一枚印章，而这在这台机器上看不出来。
+      const presence = noteDocPresenceToReplay.get(noteId);
+      if (presence !== undefined) handle.setPresence(presence);
     }).catch(() => undefined);
   };
 
@@ -2479,10 +2514,12 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     assertEpoch(input.meta, activeWorkspaceEpoch);
     // 可写性这里一律不判：判据只在服务端那一处（WS 侧 `Authenticated("readonly")`、
     // HTTP 侧 `requireOwner`）。这里只决定"走哪条出口"。
-    // 走哪条出口只判一次（同一个表达式），因为两条出口的判据必须是同一句话：有活连接
-    // 就并进那份文档（服务端由 WS 落盘），没有就取起点差分后走 HTTP。
+    // 走哪条出口只判一次（同一个表达式），因为两条出口的判据必须是同一句话：连接被服务端
+    // 认定可写，才并进那份文档（服务端由 WS 落盘）；否则取起点差分后走 HTTP，让同一句
+    // `requireOwner` 给出答复。只读成员现在也建连（他要看到别人的改动），所以"有连接"
+    // 本身不再等于"写得进去"。
     const stream = noteDocStreams.get(input.noteId);
-    const onStream = Boolean(stream && stream.workspaceEpoch === activeWorkspaceEpoch);
+    const onStream = Boolean(stream && stream.workspaceEpoch === activeWorkspaceEpoch && stream.authorizedScope === "read-write");
     if (onStream && stream) {
       const update = stream.handle.applyBlocks(input.blocks ?? null, input.title);
       // 本机没产生任何增量时不报"同步中"——那一次什么都没写，报成提交过就是在骗回执。
@@ -2513,6 +2550,9 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
 
   installHandler(DESKTOP_IPC_CHANNELS.noteDocPresence, noteDocPresenceInputSchema, options, (_event, _window, input) => {
     assertEpoch(input.meta, activeWorkspaceEpoch);
+    // 先记下，再看有没有连接可以马上交：连接的建立是异步的（见 `noteDocPresenceToReplay`），
+    // 只按"此刻有没有句柄"回答就会把第一次报名字吞掉。
+    noteDocPresenceToReplay.set(input.noteId, input.state);
     const stream = noteDocStreams.get(input.noteId);
     if (!stream || stream.workspaceEpoch !== activeWorkspaceEpoch) return { shared: false as const };
     stream.handle.setPresence(input.state);

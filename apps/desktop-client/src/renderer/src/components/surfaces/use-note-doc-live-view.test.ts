@@ -60,20 +60,22 @@ describe("笔记协同的实时视图订阅", () => {
     expect(result.current.presencePeers).toEqual([]);
   });
 
-  it("订阅上就报一次自己在场，卸载时收回", async () => {
+  it("订阅上就报一次自己的名字；卸载时不报空（离场跟着连接走）", async () => {
     const { unmount } = renderHook(() => useNoteDocLiveView(NOTE_ID, true, () => undefined, "Asklins"));
     await act(async () => { vi.advanceTimersByTime(0); });
     // 名字是广播出去的，不是查名册查出来的：对端看到的必须是你自己报的那个。
+    expect(presence).toHaveBeenCalledTimes(1);
     expect(presence).toHaveBeenLastCalledWith(expect.objectContaining({
       noteId: NOTE_ID,
       state: JSON.stringify({ name: "Asklins" }),
     }));
-    presence.mockClear();
-    // 离场走同一条通道、报空串——主进程据此把 awareness 的本地状态置 null。
     unmount();
     await act(async () => { vi.advanceTimersByTime(0); });
+    // 实测（2026-09-22，两个真客户端）：报空串不越过对端，关掉连接才会。而连接
+    // 是不是该关，归主进程按订阅数判——这里再报一次只会在"另一个窗口还开着同一篇"
+    // 时说出一句假话。
     expect(presence).toHaveBeenCalledTimes(1);
-    expect(presence).toHaveBeenLastCalledWith(expect.objectContaining({ state: "" }));
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
   });
 
   it("没有显示名也照样在场：不报的话人数比头像多出一个来历不明的人", async () => {

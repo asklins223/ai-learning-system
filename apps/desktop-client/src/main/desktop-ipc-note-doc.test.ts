@@ -69,12 +69,16 @@ async function setup(session: {
   workspaceType: "personal" | "collaborative";
   role: "owner" | "member";
   noteDocCache?: NoteDocCacheStore;
+  /** 把建连按住，用来量"订阅回执比连接早"那一段窗口里的行为。 */
+  deferStream?: boolean;
 }) {
   // `registerM1DesktopIpc` 一个模块实例只准注册一次（重复注册会抛错，这是有意的），
   // 所以每个用例换一个干净的模块实例，而不是共享同一张订阅表。
   vi.resetModules();
   const { registerM1DesktopIpc } = await import("./desktop-ipc");
   const noteDocCache = session.noteDocCache ?? new MemoryNoteDocCacheStore();
+  let releaseStream: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => { releaseStream = resolve; });
   const streamHandle = {
     // 返回一条增量 = 这次提交确实改了文档（回执 `stream`）；返回 null 是"没改动"。
     applyBlocks: vi.fn(() => "AA==" as string | null),
@@ -83,7 +87,11 @@ async function setup(session: {
     stop: vi.fn(),
   };
   type WatchCall = [string, (event: { noteId: string } & Record<string, unknown>) => void | Promise<void>];
-  const watchNoteDocument = vi.fn(async (..._args: WatchCall) => streamHandle) as unknown as ReturnType<typeof vi.fn> & {
+  const watchNoteDocument = vi.fn(async (...args: WatchCall) => {
+    if (session.deferStream) await gate;
+    void args;
+    return streamHandle;
+  }) as unknown as ReturnType<typeof vi.fn> & {
     mock: { calls: WatchCall[] };
   };
   const uploadNoteDocUpdate = vi.fn(async () => ({ revision: 7, savedAt: "2026-09-21T00:00:00.000Z" }));
@@ -174,6 +182,7 @@ async function setup(session: {
     noteDocCache,
     localDoc,
     restored,
+    releaseStream,
   };
 }
 
@@ -247,26 +256,35 @@ describe("笔记协同的 IPC 通道", () => {
     expect(syncViaGateway).toHaveBeenCalledWith(NOTE_ID, [{ type: "paragraph", content: "改过的正文" }], undefined, meta.requestId);
   });
 
-  it("协作空间的只读成员同样不建连，写入也拿不到流", async () => {
-    const { event, watchNoteDocument, syncViaGateway, uploadNoteDocUpdate } = await setup({ workspaceType: "collaborative", role: "member" });
+  it("只读成员也建连（他要看到别人的改动），但写入不走那条流", async () => {
+    const { event, streamHandle, watchNoteDocument, syncViaGateway, uploadNoteDocUpdate } = await setup({ workspaceType: "collaborative", role: "member" });
     await handler(DESKTOP_IPC_CHANNELS.subscriptionsSubscribe)(event, {
       meta,
       topic: { kind: "noteDoc", noteId: NOTE_ID },
     });
     await settle();
-    expect(watchNoteDocument).not.toHaveBeenCalled();
-    // 可写性的判据只在服务端那一处：主进程不自己挡，交给 API 回 403。
+    // 改这条断言的理由：先前主进程按角色把自己挡在门外，于是"只读成员能实时看到
+    // 别人的编辑"这条服务端专门实现过的能力在产品里根本不存在，"谁还开着这一篇"
+    // 也永远数不到他。可写与否的答复由服务端的 `Authenticated("readonly")` 给。
+    expect(watchNoteDocument).toHaveBeenCalledTimes(1);
+
+    const onEvent = watchNoteDocument.mock.calls[0][1] as (e: unknown) => void | Promise<void>;
+    await onEvent({ noteId: NOTE_ID, type: "status", status: "authenticated", authorizedScope: "readonly" });
+
+    // 只读答复之后，写入仍然照走 HTTP：那条路上的 403 才是真判据，本机不自证清白。
     const written = await handler(DESKTOP_IPC_CHANNELS.noteDocSyncBlocks)(event, {
       meta,
-      commandId: "command-upload-2",
+      commandId: "command-readonly-write",
       noteId: NOTE_ID,
       blocks: [{ type: "paragraph", content: "成员想改的正文" }],
     });
     expect(written).toMatchObject({ ok: true, data: { via: "uploaded" } });
-    // 只读成员在主进程这一层不被"再判一次"：那样会变成两套判据。差分与上送照走，
-    // 真拒绝由 API 的 requireOwner 给 403。
     expect(syncViaGateway).toHaveBeenCalledTimes(1);
+    expect(streamHandle.applyBlocks).not.toHaveBeenCalled();
     expect(uploadNoteDocUpdate).not.toHaveBeenCalled();
+    // 只读不影响在场广播：他也得出现在别人那一排头像里。
+    await handler(DESKTOP_IPC_CHANNELS.noteDocPresence)(event, { meta, noteId: NOTE_ID, state: JSON.stringify({ name: "小琳" }) });
+    expect(streamHandle.setPresence).toHaveBeenCalledWith(JSON.stringify({ name: "小琳" }));
   });
 
   it("有连接时写入并进那份文档，不再走 HTTP", async () => {
@@ -280,6 +298,10 @@ describe("笔记协同的 IPC 通道", () => {
     });
     await settle();
     expect(watchNoteDocument).toHaveBeenCalledTimes(1);
+    // 并进流之前先要拿到服务端那句"你可以写"。没拿到时写入退回 HTTP，两条路上的
+    // 判据仍然是同一句话——而不是"有连接就算写得进"。
+    const onEvent = watchNoteDocument.mock.calls[0][1] as (e: unknown) => void | Promise<void>;
+    await onEvent({ noteId: NOTE_ID, type: "status", status: "authenticated", authorizedScope: "read-write" });
 
     const written = await handler(DESKTOP_IPC_CHANNELS.noteDocSyncBlocks)(event, {
       meta,
@@ -292,12 +314,57 @@ describe("笔记协同的 IPC 通道", () => {
     expect(uploadNoteDocUpdate).not.toHaveBeenCalled();
   });
 
+  it("服务端还没答复可写之前，写入退回 HTTP（不把没落盘的东西报成 stream）", async () => {
+    const { event, streamHandle, watchNoteDocument, syncViaGateway } = await setup({
+      workspaceType: "collaborative",
+      role: "owner",
+    });
+    await handler(DESKTOP_IPC_CHANNELS.subscriptionsSubscribe)(event, {
+      meta,
+      topic: { kind: "noteDoc", noteId: NOTE_ID },
+    });
+    await settle();
+    expect(watchNoteDocument).toHaveBeenCalledTimes(1);
+
+    const written = await handler(DESKTOP_IPC_CHANNELS.noteDocSyncBlocks)(event, {
+      meta,
+      commandId: "command-no-scope-yet",
+      noteId: NOTE_ID,
+      blocks: [{ type: "paragraph", content: "改过的正文" }],
+    });
+    expect(written).toMatchObject({ ok: true, data: { via: "uploaded" } });
+    expect(streamHandle.applyBlocks).not.toHaveBeenCalled();
+    expect(syncViaGateway).toHaveBeenCalledTimes(1);
+  });
+
   it("编辑起点是视图（blocks + 标题），编码不出主进程", async () => {
     const { event, getNoteDocState } = await setup({ workspaceType: "collaborative", role: "owner" });
     const state = await handler(DESKTOP_IPC_CHANNELS.noteDocState)(event, { meta, noteId: NOTE_ID });
     expect(state).toMatchObject({ ok: true, data: { blocks: [{ ordinal: 0, type: "paragraph", content: "正文" }], title: "标题", revision: 3 } });
     expect(JSON.stringify(state)).not.toContain("state-as-base64");
     expect(getNoteDocState).toHaveBeenCalledWith(NOTE_ID, meta.requestId);
+  });
+
+  it("订阅回执比连接早时报名字不会被吞：连接一就位就补交", async () => {
+    const { event, streamHandle, releaseStream } = await setup({ workspaceType: "collaborative", role: "owner", deferStream: true });
+    await handler(DESKTOP_IPC_CHANNELS.subscriptionsSubscribe)(event, {
+      meta,
+      topic: { kind: "noteDoc", noteId: NOTE_ID },
+    });
+    // 这一刻连接还在建（`ensureNoteDocStream` 是异步的），界面那声报名字已经打进来了。
+    const early = await handler(DESKTOP_IPC_CHANNELS.noteDocPresence)(event, {
+      meta,
+      noteId: NOTE_ID,
+      state: JSON.stringify({ name: "Asklins" }),
+    });
+    expect(requireData(early)).toEqual({ shared: false });
+    expect(streamHandle.setPresence).not.toHaveBeenCalled();
+
+    releaseStream();
+    await settle();
+    await settle();
+    expect(streamHandle.setPresence).toHaveBeenCalledTimes(1);
+    expect(streamHandle.setPresence).toHaveBeenCalledWith(JSON.stringify({ name: "Asklins" }));
   });
 
   it("退订之后连接被收掉；同一篇的另一个订阅者还在时不收", async () => {

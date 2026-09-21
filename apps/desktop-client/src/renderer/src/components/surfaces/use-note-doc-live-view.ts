@@ -81,15 +81,14 @@ export function useNoteDocLiveView(
       }));
     };
 
-    const publishPresence = (here: boolean) => {
+    const publishPresence = () => {
       void api.note.doc.presence({
         meta: createRequestMeta(),
         noteId,
-        // 空串 = 我离开了这一篇（主进程那一侧据此把 awareness 本地状态清掉）。
         // 没有显示名也照样报名字为空：不报的话这一行的人数会比头像多出一个来历不明的
         // 位置，而"有人在看却没名字"比"这个人凭空不算"更贴合事实。
         // 整条 JSON 远小于 awareness 的 2KB 上限；上限由主进程那条检查守着，这里不重复一套数。
-        state: here ? JSON.stringify({ name: (presenceName ?? "").slice(0, 40) }) : "",
+        state: JSON.stringify({ name: (presenceName ?? "").slice(0, 40) }),
       }).catch(() => undefined);
     };
 
@@ -107,7 +106,7 @@ export function useNoteDocLiveView(
           if (payload.kind !== "note_doc_event" || payload.noteId !== noteId) return;
           handle(payload.event);
         });
-        publishPresence(true);
+        publishPresence();
       } catch {
         // 订阅不通只是看不到实时帧，正文本身仍由读路径保证。
       }
@@ -118,7 +117,10 @@ export function useNoteDocLiveView(
       disposed = true;
       if (timer) clearTimeout(timer);
       unsubscribeEvent?.();
-      publishPresence(false);
+      // 离场不在这里报。实测（2026-09-22，两个真客户端）：把本机 awareness 报成空串
+      // 并不会传到对端——那一排头像要等这条连接关掉才会少掉一个人。而连接的生死归
+      // 主进程按订阅数管：这是最后一个订阅时，退订就把连接关了，对端随即看到我离开；
+      // 还有别的窗口开着同一篇时，我确实还开着，报空反而是假话。
       if (subscriptionId) {
         void api.subscriptions.unsubscribe({ meta: createRequestMeta(), subscriptionId }).catch(() => undefined);
       }
