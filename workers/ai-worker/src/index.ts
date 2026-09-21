@@ -19,6 +19,7 @@ import { tickCompanionReminderDelivery } from "./handlers/companion-reminder-sch
 import {
   getV2OutboxInflightCount,
   pollV2Outbox,
+  releaseInflightV2OutboxLeases,
   V2_POLL_TICK_BUDGET_MS,
   waitForV2OutboxDrain,
 } from "./handlers/card-generation-v2-handler.ts";
@@ -617,6 +618,21 @@ export async function main() {
       // F-010: 优雅关停 — 不再认领新作业，等待在途 job 完成后退出。
       if (shuttingDown) {
         if (inflight.size > 0 || getV2OutboxInflightCount() > 0) {
+          // 先把在途的 V2 租约交还，再等 drain：dev 里 tsx watch 只给 5 秒
+          // （`Process didn't exit in 5s. Force killing...`），一条付费管道跑不完。
+          // 不交还的话，强杀后这条 run 的租约要挂满 30 分钟才可能被重投——那半小时里
+          // 笔记被 in-flight 守卫锁住，而钱已经付过了。交还后本进程迟到的写入会被
+          // 自己的 token fence 挡掉（见 releaseV2OutboxLease），不会双写。
+          if (getV2OutboxInflightCount() > 0) {
+            const released = await releaseInflightV2OutboxLeases().catch((error) => {
+              logger.warn({ error: String(error) }, "V2 lease release on shutdown threw");
+              return 0;
+            });
+            logger.info(
+              { released, v2Inflight: getV2OutboxInflightCount() },
+              "V2 outbox leases returned so the next worker can take over immediately",
+            );
+          }
           logger.info(
             {
               inflight: inflight.size,

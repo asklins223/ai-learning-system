@@ -198,7 +198,17 @@ export const V2_OUTBOX_MAX_CONCURRENCY = (() => {
   return 4;
 })();
 
-const v2Inflight = new Set<Promise<void>>();
+/**
+ * 本进程在途的 V2 job：promise → 它认领时拿到的租约凭据。
+ * 记凭据是为了关停时能把租约**交还**（`releaseInflightV2OutboxLeases`）；
+ * 只记 promise 的话，强杀之后只能等 30 分钟租约自然过期。
+ */
+const v2Inflight = new Map<Promise<void>, { jobId: string; leaseToken: string }>();
+
+/** 本进程在途 V2 job 数。 */
+export function getV2OutboxInflightCount(): number {
+  return v2Inflight.size;
+}
 
 /**
  * V2 管线**阶段内**并发上限（2026-09-17 极限延迟改造）。
@@ -232,15 +242,11 @@ export const V2_STAGE_CONCURRENCY = (() => {
   return 12;
 })();
 
-export function getV2OutboxInflightCount(): number {
-  return v2Inflight.size;
-}
-
 /** 等待当前 worker 已认领的 V2 管道结束；返回是否在 deadline 内排空。 */
 export async function waitForV2OutboxDrain(timeoutMs: number): Promise<boolean> {
   if (v2Inflight.size === 0) return true;
 
-  const pending = Promise.allSettled([...v2Inflight]).then(() => true);
+  const pending = Promise.allSettled([...v2Inflight.keys()]).then(() => true);
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<boolean>((resolve) => {
     timeoutHandle = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
@@ -345,6 +351,51 @@ async function fenceV2OutboxLease(tx: WorkerTransaction, job: PendingOutboxJob):
   if (rows.length === 0) {
     throw new Error("V2 outbox lease lost before transaction commit");
   }
+}
+
+/**
+ * 交还本进程持有的**一条** V2 租约：清空 token 并把过期时间推到当下。
+ *
+ * 为什么不直接改回 pending：`reapStaleV2OutboxJobs` 已经是"过期租约 → attempts+1 +
+ * 退避 + 重投"的唯一实现，另起一条接管路径会让两处语义漂移；这里只是把它的前提
+ * （`lease_expires_at < now()`）提前造成。
+ *
+ * 为什么连 `lease_token` 一起清空：本进程此刻可能还有在途 LLM 调用与一个未提交的
+ * 大事务。token 一空，它的 `fenceV2OutboxLease` 当场失败（整个事务回滚），迟到的
+ * complete/fail 也过不了 token CAS（0 行）——防双付的语义照旧成立，只是不再挂满
+ * 30 分钟。
+ */
+export async function releaseV2OutboxLease(jobId: string, leaseToken: string): Promise<boolean> {
+  const rows = await db.execute<{ id: string }>(sql`
+    UPDATE public.card_generation_run_outbox_v2
+    SET lease_token = NULL, lease_expires_at = now()
+    WHERE id = ${jobId} AND status = 'processing' AND lease_token = ${leaseToken}
+    RETURNING id
+  `);
+  return rows.length > 0;
+}
+
+/**
+ * 关停前交还所有在途租约（由 `index.ts` 的 drain 分支调用）。
+ *
+ * dev 里 tsx watch 只给 5 秒（日志原话：`Process didn't exit in 5s. Force killing...`），
+ * 而一条付费管道要跑几分钟。不在这一刻交还，进程被强杀后这条 run 的租约会一直挂到
+ * 自然过期（30 分钟）：其间那篇笔记被 in-flight 守卫锁住（再点生成只吃 409），
+ * 已经花掉的钱也白付。返回交还条数，仅用于日志。
+ */
+export async function releaseInflightV2OutboxLeases(): Promise<number> {
+  let released = 0;
+  for (const { jobId, leaseToken } of v2Inflight.values()) {
+    try {
+      if (await releaseV2OutboxLease(jobId, leaseToken)) released += 1;
+    } catch (error) {
+      logger.warn(
+        { jobId, error: sanitizeOperationalError(error) },
+        "V2 outbox lease release failed",
+      );
+    }
+  }
+  return released;
 }
 
 /**
@@ -3364,7 +3415,7 @@ export async function pollV2Outbox(limit = 1, awaitBudgetMs = V2_POLL_TIMEOUT_MS
       const jobs = await claimV2OutboxJobs(Math.min(limit, capacity));
       const running = jobs.map((job) => {
         const promise = processV2OutboxJob(job);
-        v2Inflight.add(promise);
+        v2Inflight.set(promise, { jobId: job.id, leaseToken: job.leaseToken });
         promise.then(
           () => v2Inflight.delete(promise),
           (error) => {

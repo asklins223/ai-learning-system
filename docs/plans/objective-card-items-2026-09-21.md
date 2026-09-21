@@ -609,3 +609,44 @@ poll 路径）。我新加的那个文件因此用 `UPDATE … WHERE status='pen
 真跑阶梯**目前不是关键路径**：tick 落在活路径上这件事已由第 5 条确定性用例钉住
 （`authored` 读数 == 候选表张数）。真跑只剩"真实时间尺度上每一格都会被采到"这一条观感，
 需要的前提有两个：api 能起来，且那一次生成期间没有 agent 在存 `workers/ai-worker/src`。
+
+## 24. 把"被并发保存杀掉"的代价从 30 分钟压到秒级（关停时交还租约）
+
+§22 那次的真实损失不是"跑失败了"，而是**付费管道被 tsx 强杀之后，这条 run 的租约还要挂
+满 30 分钟**：`reapStaleV2OutboxJobs` 的认领条件是 `lease_expires_at < now()`，而 V2 的租约
+本来就是 30 分钟（为了不把正常的分钟级管道误回收）。这半小时里那篇笔记被 in-flight 守卫
+锁死，钱也已经付了。drain 分支帮不上：它的注释早就写明"orphaned running jobs will be
+reaped by the next worker startup"，但下一个 worker 启动时租约**还没过期**，reap 空转。
+
+改法是加一条"交还"，不改任何既有的接管语义：
+
+- `releaseV2OutboxLease(jobId, leaseToken)`：`SET lease_token = NULL, lease_expires_at = now()`
+  （带 `status='processing' AND lease_token=$token` 的 CAS）。
+  清 token 是关键——本进程那个还没提交的大事务随后会在自己的 `fenceV2OutboxLease` 上失败并
+  回滚，迟到的 complete/fail 也过不了 token CAS，**双付防护照常成立**，只是不再挂 30 分钟。
+- 不动 `status`：重投继续由唯一那条 reaper 路径负责（attempts+1 + 退避 + pending），
+  不另起一条"快速接管"，免得两处语义漂移。
+- `index.ts` 的 drain 分支在等排空**之前**调用 `releaseInflightV2OutboxLeases()`。
+  顺序是有意的：tsx 只给 5 秒，交还必须先发生。为此把 `v2Inflight` 从 `Set<Promise>` 换成
+  `Map<Promise, {jobId, leaseToken}>`（`getV2OutboxInflightCount` / `waitForV2OutboxDrain`
+  跟着改，行为不变）。
+
+### 测到了什么、没测到什么（说清楚）
+
+用例 6（`…live-progress-postgres.integration.ts`）钉住三件事，全在真 Postgres 上：
+交还返回 true、重复交还返回 false；**迟到的 `completeV2OutboxJob` 0 行**（job 仍 processing，
+不会由将死的进程替别人结算）；交还后的行**正好落在 reaper 自己的认领谓词里**
+（`status='processing' AND lease_expires_at < now()`），即"下一轮 sweep 必重投"。
+
+没测的是那 6 行调用点本身：`releaseInflightV2OutboxLeases` 需要一个在途 job 才有条目，
+而模拟它要么给产品代码开测试后门，要么在本机再起一个 worker 抢同一张队列——两个都不做。
+日志里新加的那行 `V2 outbox leases returned…` 会在下一次"保存正好撞上有 run 在跑"时给出实证。
+
+### 一处我造成的副作用（如实记）
+
+写第一版用例 6 时我直接调了 `reapStaleV2OutboxJobs(100)`。它按 `ORDER BY created_at LIMIT n`
+**全表扫**，于是把库里若干条早就没人管的 outbox 行顺手结了（worker 日志里三条
+`V2 outbox job failed … semantic spec schema violation`）。核对后没有伤到活数据：
+那 25 分钟内没有任何 run 行被改写（查过），仍在进行中的 run 还是 1 条（就是 §22 提到的
+那挂 8-19 僵尸 `9b536df1`，它的 job 早就是 `failed`，reaper 也救不动它）。
+用例已改成上面那条**本地谓词断言**，不再调全局 reaper——测试不该扫别人的表。

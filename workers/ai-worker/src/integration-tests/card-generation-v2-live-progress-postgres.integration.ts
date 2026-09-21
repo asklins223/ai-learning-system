@@ -281,3 +281,36 @@ test("真跑一遍确定性管道：作者循环里的 tick 确实落了盘", as
   assert.equal(live.progress.authored, authoredCards);
   assert.equal(live.progress.plannedCards >= authoredCards, true);
 });
+
+/**
+ * 关停时交还租约的那条路（`releaseInflightV2OutboxLeases` 的底层 SQL）。
+ * 这条用例真正钉的是**交还之后仍然没有双写窗口**：
+ * 迟到的 complete 必须 0 行，重投必须立刻可行而不是等 30 分钟。
+ */
+test("交还租约：迟到的完成写不进去，reaper 当场就能重投", async () => {
+  const {
+    releaseV2OutboxLease, completeV2OutboxJob,
+  } = await import("../handlers/card-generation-v2-handler.ts");
+  const job = await claimPlanJob();
+
+  assert.equal(await releaseV2OutboxLease(job.id, job.leaseToken), true);
+  // 第二次交还：token 已经不属于这次认领了，必须报"没我的事"。
+  assert.equal(await releaseV2OutboxLease(job.id, job.leaseToken), false);
+
+  // 被强杀的进程收尾时仍会尝试结算——这一步必须静默落空，否则它会替别人把 job 结掉。
+  await completeV2OutboxJob(job.id, job.leaseToken);
+  const settled = await admin`SELECT status FROM card_generation_run_outbox_v2 WHERE id = ${job.id}`;
+  assert.equal((settled[0] as { status: string }).status, "processing",
+    "迟到的 complete 把已交还的 job 结算了");
+
+  // 交还的意义就在这一步：不用等 30 分钟租约自然过期。
+  // 这里**不调用** `reapStaleV2OutboxJobs`——它按 `ORDER BY created_at LIMIT n` 全表扫，
+  // 在共享 dev 库上会把别人的月级僵尸 job 一起结算掉（真调过一次，副作用记在计划 §24）。
+  // 改用 reaper 自己的那条认领谓词做本地断言：命中它 = 下一轮 sweep 必定重投这一行。
+  const takeable = await admin`
+    SELECT 1 FROM card_generation_run_outbox_v2
+    WHERE id = ${job.id} AND status = 'processing' AND lease_expires_at < now()
+  `;
+  assert.equal(takeable.length, 1,
+    "交还后的行必须正好落在 reaper 的认领条件里，否则'秒级接管'只是说法");
+});
