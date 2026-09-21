@@ -351,8 +351,9 @@ describe("CardGenerationSurface · 候选审核", () => {
 
     await waitFor(() => expect(screen.getByText("第一张")).toBeTruthy());
     const meta = (document.querySelector(".candidate-card__meta")?.textContent ?? "");
-    expect(meta).toContain("带练习件 2 张");
-    expect(meta).toContain("该配的 3 张里漏了 1 张");
+    // 两个数只说"点名的那几张"：一句里混进"带练习件 N 张"（含自愿交的）与
+    // "点名 3 张里漏了 1 张"，读者按前者数出 4、按后者数出 2，两句互相打脸。
+    expect(meta).toContain("该配练习件的 3 张里，2 张配上了、1 张没配上");
     // 缺额不能把原有的两个读数挤掉
     expect(meta).toContain("候选 1 / 3");
     expect(meta).toContain("3 张还没决定");
@@ -383,8 +384,8 @@ describe("CardGenerationSurface · 候选审核", () => {
 
     await waitFor(() => expect(screen.getByText("第一张")).toBeTruthy());
     const meta = (document.querySelector(".candidate-card__meta")?.textContent ?? "");
-    expect(meta).toContain("该配的都配上了");
-    expect(meta).not.toContain("漏了");
+    expect(meta).toContain("该配练习件的 2 张都配上了");
+    expect(meta).not.toContain("没配上");
   });
 
   it("这批没点名要练习件时，头部不提练习件计数", async () => {
@@ -396,7 +397,7 @@ describe("CardGenerationSurface · 候选审核", () => {
 
     await waitFor(() => expect(screen.getByText("第一张")).toBeTruthy());
     const meta = (document.querySelector(".candidate-card__meta")?.textContent ?? "");
-    expect(meta).not.toContain("带练习件");
+    expect(meta).not.toContain("练习件");
     expect(meta).not.toContain("该配的");
   });
 

@@ -29,6 +29,7 @@ import {
   cardGenerationStageCount,
   cardGenerationStatusLabel,
   cardGenerationSyncReportText,
+  practiceQuotaLabel,
   isCardGenerationInFlight,
   isCardGenerationReviewOpen,
   isCardGenerationReviewStage,
@@ -84,20 +85,6 @@ function candidateDecisionLabel(candidate: CardGenerationCandidateV1): string {
   if (candidate.reviewDecision === "keep") return "已保留 · 在激活队列里";
   if (candidate.reviewDecision === "merged") return "已合并";
   return "待审核";
-}
-
-/**
- * 整批练习件的读数（D6 的缺额要有地方看得见）。
- *
- * 两个数各说各的：`bearingCount` 是这一批实际带上练习件的张数（每张卡自己那一行
- * 也写着），`requiredCount / metCount` 是整批点名要几张、其中几张按要求的形状配上了。
- * 缺额只由后者算，且算的是服务端的结算结果——这里不再自己判断形状对不对。
- */
-function practiceQuotaLabel(quota: CardGenerationPracticeQuotaV1 | null, bearingCount: number): string | null {
-  if (!quota || quota.requiredCount === 0) return null;
-  const missed = quota.requiredCount - quota.metCount;
-  if (missed <= 0) return `带练习件 ${bearingCount} 张，该配的都配上了`;
-  return `带练习件 ${bearingCount} 张，该配的 ${quota.requiredCount} 张里漏了 ${missed} 张`;
 }
 
 function isActivatableCandidate(candidate: CardGenerationCandidateV1): candidate is CardGenerationCandidateV1 & { candidateEvidenceBindingPlanHash: string } {
@@ -638,7 +625,7 @@ export function CardGenerationSurface() {
   /** 保留即排队：待激活数 = 已保留且可激活的候选数。 */
   const activatableCount = candidates.filter(isActivatableCandidate).length;
   const undecidedCount = candidates.filter((candidate) => candidate.reviewDecision === "undecided").length;
-  const practiceQuotaView = practiceQuotaLabel(practiceQuota, candidates.filter((candidate) => candidate.practiceItem).length);
+  const practiceQuotaView = practiceQuotaLabel(practiceQuota);
   const progressView = run ? cardGenerationProgressView(run.status, run.progress) : null;
   const generationStage = progressView?.stage ?? 0;
   const waitingForRun = !runId && !runIdHealed;

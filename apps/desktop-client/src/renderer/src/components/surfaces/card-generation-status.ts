@@ -1,5 +1,6 @@
 import type {
   CardGenerationActiveSummaryV1,
+  CardGenerationPracticeQuotaV1,
   CardGenerationProgressV1,
 } from "@ailearn/shared/card-generation-desktop-contracts";
 import { isCardGenerationReviewOpen } from "@ailearn/shared/card-generation-desktop-contracts";
@@ -181,6 +182,29 @@ export const cardGenerationRecoveryReasonLabels: Record<string, string> = {
 export function cardGenerationRecoveryReasonLabel(reasonCode: string): string {
   return cardGenerationRecoveryReasonLabels[reasonCode] ?? "需要后台再看一次才能继续";
 }
+
+/**
+ * 整批练习件的读数（D6 的缺额要有地方看得见）。
+ *
+ * 只报"点名的那几张"这一个集合：`requiredCount` 张里配上了 `metCount` 张，差的就是缺额。
+ * 过去这句还把"带练习件 N 张"并进来，而那个 N 含**自愿多交的**——于是同一行里
+ * "带练习件 4 张"与"点名 3 张里漏了 1 张"（只对上 2 张）互相打脸，读者两处数出两个数。
+ * 更要紧的是：被点名却整张被门禁丢掉的目标，卡面上根本没有"那张卡"，所以也不能说成
+ * "这 N 张里的 M 张"——只有"点名的 R 张里配上了 M 张"在两种缺额下都成立。
+ *
+ * 数用的是服务端结算的 `practiceQuota`（与 `practice_quota_short` 事件同源）：这里再判
+ * 一次形状对不对，就会出现"事件里一个数、屏幕上一个数"。
+ *
+ * 放在这份共享文件里而不是界面里：这样"接口回来的数 → 用户那句读数"可以被脚本直接
+ * 跑一遍量出来，不必等在跑的桌面端里。
+ */
+export function practiceQuotaLabel(quota: CardGenerationPracticeQuotaV1 | null): string | null {
+  if (!quota || quota.requiredCount === 0) return null;
+  const missed = quota.requiredCount - quota.metCount;
+  if (missed <= 0) return `该配练习件的 ${quota.requiredCount} 张都配上了`;
+  return `该配练习件的 ${quota.requiredCount} 张里，${quota.metCount} 张配上了、${missed} 张没配上`;
+}
+
 
 /**
  * What the note page's one button says for a run of this note. The button no
