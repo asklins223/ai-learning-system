@@ -104,10 +104,17 @@ test("偏离最自然题型时留下可审计理由码", () => {
  * 决定，逐张出题的作者看不到同批其他卡。
  */
 test("练习件配额：至少一半的卡被点名，形状在本批铺开，且不越形态边界", () => {
+  // §49：1 张的批次不再点名（库里 41% 的批次是 1–2 张）。旧口径是 ⌈1/2⌉=1，
+  // 等于"整批只有一张卡，还必须交一道选择题"——作者凑不出第二个有出处的干扰项时
+  // 正确行为是写 null（D4），但 100% 的配额会把那句 null 变成长期缺额。
   const one = allocatePracticeForms(["definition"]);
   assert.equal(one.length, 1);
-  assert.equal(one[0]?.form, "single_choice");
-  assert.equal(one[0]?.reasonCode, "practice_quota_required");
+  assert.equal(one[0]?.form, null, "单张批次被点名了：小批豁免失效");
+  const two = allocatePracticeForms(["definition", "boundary"]);
+  assert.ok(two.every((entry) => entry.form === null), "2 张的批次也不该点名");
+  const three = allocatePracticeForms(["definition", "fact", "boundary"]);
+  assert.equal(three.filter((entry) => entry.form !== null).length, 2,
+    "n≥3 才回到 ⌈n/2⌉：3 张点 2 张");
 
   // 4 张 → 至少 2 张被点名；同形态允许的两种形状要铺开，不能两张都出选择题。
   const batch = allocatePracticeForms(["definition", "definition", "fact", "boundary"]);
@@ -117,12 +124,13 @@ test("练习件配额：至少一半的卡被点名，形状在本批铺开，�
   // 没被点名的卡是 null（不强制），而不是被硬塞一个形状。
   assert.equal(batch.filter((entry) => entry.form === null).length, 2);
 
-  // 形态边界优先于铺开：这两张的允许形状里根本没有选择题，被点名的也只会落在
-  // ordering / matching 上（N=2 的配额是 1，所以第二张是 null 而不是硬塞）。
-  const sequences = allocatePracticeForms(["sequence", "procedure"]);
-  assert.equal(sequences[0]?.form, "ordering");
-  assert.ok(sequences.every((entry) =>
-    entry.form === null || entry.form === "ordering" || entry.form === "matching"));
+  // 形态边界优先于铺开：这四张的允许形状里根本没有选择题，被点名的只会落在
+  // ordering / matching 上。（原先用 N=2 举这个例子，那条现在归到"小批豁免"里了。）
+  const sequences = allocatePracticeForms(["sequence", "procedure", "sequence", "procedure"]);
+  const seqRequired = sequences.filter((entry) => entry.form !== null);
+  assert.equal(seqRequired.length, 2);
+  assert.ok(seqRequired.every((entry) => entry.form === "ordering" || entry.form === "matching"),
+    "点名的形状越出了该知识形态允许的范围");
 
   // 空批次不炸。
   assert.deepEqual(allocatePracticeForms([]), []);

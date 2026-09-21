@@ -682,7 +682,11 @@ export function allocatePracticeForms(
   forms: readonly KnowledgeFormV2[],
 ): PracticeFormAllocation[] {
   const total = forms.length;
-  const quota = total >= 2 ? Math.ceil(total / 2) : total;
+  // §49：小批不点名。库里 41% 的批次是 1–2 张（1 张的 175 个），旧口径 ⌈1/2⌉=1
+  // 等于"整批只有一张卡还必须交一道选择题"——作者按 D4 老实写 null 时，
+  // 那批会长期顶着一个不该存在的缺额。比例为 0 的代价是短笔记少一道练习件，
+  // 而配额本来的目的（§2）是铺开供给，不是逼单张批次交差。
+  const quota = total >= 3 ? Math.ceil(total / 2) : 0;
   const used = new Map<PracticeItemFormV2, number>();
   let required = 0;
   return forms.map((form) => {
