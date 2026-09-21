@@ -273,6 +273,85 @@
   outline-offset: 3px;
 }
 
+/* ── B4：目标链路的字号地板（P7 / P13）──────────────────────────────────
+ *
+ * 实机直方图：列表 61 个可见文本段里 49 段（80%）< 11px，其中 24 段是 8px；
+ * 详情 58 段里 53 段（91%）< 11px，41 段是 8px。DESIGN.md:62 说正文与操作
+ * 用 12–15px、:63 说元数据用 9–11px——8px 那一整档在合同下沿之外，而且它们
+ * 不是元数据：状态标签、知识形态、复习到期、下一步动词的补充说明，全是要参与
+ * 决策的句子。
+ *
+ * 地板取两级：元数据 11px、可交互与成句的文字 12px。抬完必然挤，所以同批做
+ * B5（焦点卡改成按内容长高、不再固定 654px 把内容裁掉）。              */
+.hud-surface .v3-goal-focus__topline,
+.hud-surface .v3-objective-state,
+.hud-surface .v3-goal-focus__copy > p,
+.hud-surface .v3-goal-focus__action small,
+.hud-surface .v3-goal-pulse dt,
+.hud-surface .v3-goal-focus__source,
+.hud-surface .v3-goal-ledger__header p,
+.hud-surface .v3-goal-filters button,
+.hud-surface .v3-goal-row__summary,
+.hud-surface .v3-goal-row__meta,
+.hud-surface .v3-goal-row__next small,
+.hud-surface .v3-goal-list__empty span,
+.hud-surface .v3-goal-list__paging,
+.hud-surface .v3-goal-list__end,
+.hud-surface .v3-objective-sheet__header,
+.hud-surface .v3-objective-tags span,
+.hud-surface .v3-next-action span,
+.hud-surface .v3-next-action p,
+.hud-surface .v3-action-error,
+.hud-surface .v3-section-heading > span {
+  font-size: 11px;
+}
+.hud-surface .v3-goal-focus blockquote,
+.hud-surface .v3-goal-search input,
+.hud-surface .v3-next-action button {
+  font-size: 12px;
+}
+/* 第二批：实机追问出来的——第一批只覆盖了 approved-surfaces.css:181-254，
+ * 学习账本三列与整条证据栏还在 8px（13 段）与 10px（5 段）。 */
+.hud-surface .v3-learning-ledger dt,
+.hud-surface .v3-learning-ledger small,
+.hud-surface .v3-lineage-ledger header > span,
+.hud-surface .v3-primary-note small,
+.hud-surface .v3-origin-row__index,
+.hud-surface .v3-origin-row span,
+.hud-surface .v3-origin-row p,
+.hud-surface .v3-origin-row small,
+.hud-surface .v3-lineage-boundary p {
+  font-size: 11px;
+}
+.hud-surface .v3-learning-ledger dd,
+.hud-surface .v3-primary-note strong,
+.hud-surface .v3-origin-row strong,
+.hud-surface .v3-lineage-boundary strong {
+  font-size: 12px;
+}
+
+/* ── B5：焦点卡按内容长高（P8）──────────────────────────────────────────
+ *
+ * 实机：卡 410×654，内容高 733——**87px 被 overflow:hidden 裁掉**；同时
+ * CTA 底边到计数器顶边之间空 281px（占卡高 43%）。两件事同一个根因：
+ * `.v3-goal-workbench` 是 `height:100%` 的网格，卡片被拉成整列高，而
+ * `.v3-goal-pulse` 用 `margin: auto 0 0` 顶到底部。
+ * 抬完字号（B4）只会更挤，所以必须同批改：让卡按内容长，不再撑满列。 */
+.hud-surface .v3-goal-workbench { align-items: start; }
+.hud-surface .v3-goal-focus { min-height: 0; }
+.hud-surface .v3-goal-pulse { margin-top: 22px; }
+/* 右侧账本仍占满整列——它有自己的滚动列表，缩到内容高会让账本下面出现大空洞。 */
+.hud-surface .v3-goal-ledger { align-self: stretch; }
+
+/* P28（B5 的另一半）：结算绿栏 665px 高里有 374px 是空的，同一个病根——
+ * `.learning-run-result-summary dl { margin: auto 0 0 }` 把计数器顶到栏底，
+ * 中间留出一个洞。改成跟着内容走。
+ * 注意区别：详情页那张纸的底部留白是**对的**（纸就是纸），要修的只有这种
+ * "被 margin:auto 劈成上下两段、中间悬空"的洞。 */
+.hud-surface .learning-run-result-summary dl { margin-top: 24px; }
+.hud-surface .learning-run-result-summary dt,
+.hud-surface .learning-run-result-summary dd { font-size: 11px; }
+
 /* ── B2：让 data-outcome 真的驱动视觉（P2）───────────────────────────────
  *
  * 这两个属性此前从 JSX 发出去、全仓没有任何一条 CSS 接手，所以「已理解」和
