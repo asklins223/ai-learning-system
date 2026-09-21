@@ -36,10 +36,10 @@ function readSql(): string {
   return existsSync(path) ? readFileSync(path, "utf8") : "";
 }
 
-function readJournal(): { idx: number; tag: string }[] {
+function readJournal(): { idx: number; tag: string; when: number }[] {
   const raw = JSON.parse(
     readFileSync(resolve(MIGRATION_DIR, "meta/_journal.json"), "utf8"),
-  ) as { entries: { idx: number; tag: string }[] };
+  ) as { entries: { idx: number; tag: string; when: number }[] };
   return raw.entries;
 }
 
