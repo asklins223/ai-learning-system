@@ -14,9 +14,9 @@ import { useRoomStore } from "../../app/room-store";
  * 读的人看到的是上一次的正文，而且没有第二帧来纠它。jsdom 里把这条喂成"服务端
  * 仍返回旧正文"，界面就得画帧里那份。
  *
- * **编辑态不接那一帧，也不接回读来的新正文。** 这条在下面按"现状取证"钉住：
- * 守卫的一句话同时挡住两件不同的事（我没保存 / 是服务端前进了），所以编辑态
- * 收到远端改动时停在旧文字上。阅读态没有草稿，才有资格直接画那一帧。
+ * **编辑态：没动过就跟上那一份，动过就守住自己的字。** 两边都在这文件里钉着——
+ * 前者关掉的是实测到的丢字（旧页一次提交把对方那句按块删掉），后者关掉的是
+ * 反向的覆盖（别人的改动盖掉我没保存的句子）。逐字符合并仍要 `y-prosemirror`。
  */
 
 const NOTE_ID = "11111111-1111-4111-8111-111111111111";
@@ -177,34 +177,43 @@ describe("阅读态用那一帧的正文", () => {
   });
 });
 
-describe("编辑态不跟远端改动（这条是现状的取证，不是许可）", () => {
+describe("编辑态：没动过就跟上新的一份，动过就守住自己的字", () => {
   /**
-   * `notebook-surface` 里那条守卫写的是"草稿与服务端那份不一致就不动草稿"，
-   * 而这**一句话同时在说两件不同的事**：① 我手上有没交出去的字（该不动），
-   * ② 我没动，是服务端自己往前走了（该跟上）。它在两者之间分不开——所以编辑态
-   * 收到远端改动时永远停在旧文字上，页面上还会显出一枚「草稿」。
+   * 判"作者手上有没有待提交的改动"只能跟**本机上一次交出去/接进来的那一份**比。
+   * 此前它比的是"草稿 vs 那次 HTTP 读回来的正文"，而那份会过期（作者的自动保存要过
+   * 本机 debounce 才进 API，实测量到 3.5 秒）——于是第二个人的页面既看不到对方那段、
+   * 标签还写着「已同步」，他随手再敲一个字就把对方那句按块删了
+   * （2026-09-22 两个真窗口实测：服务端里对方那段不见了）。
    *
-   * 这条用例因此是**特征刻画**：它钉的是"今天就是这样"，两向都钉——
-   * 脏与不脏的两种输入得到同一个结果（不换），而回读确实发生了。
-   * 把编辑器绑成 CRDT（`y-prosemirror`）时应连同这条一起改掉；那之前别把它
-   * 当成"未保存内容受保护"的证据：保护是 ① 那半，② 那半是同一个分支顺带挡住的。
+   * 这两条一起钉住分界：没动 → 跟上（那次覆盖就没有发生的条件）；动了 → 我的字优先。
+   * "动了"这一侧仍不接远端改动，逐字符合并要把编辑器绑成 CRDT（`y-prosemirror`）
+   * 才做得到，届时这条要连着改。
    */
-  for (const [label, dirty] of [["我改了标题", true], ["我什么都没动", false]] as const) {
-    it(`${label}时，远端改动到了编辑态这一屏仍然不动（回读确实跑了）`, async () => {
-      const { reads } = stub([[STALE, STALE], [REMOTE, REMOTE]]);
-      ownerRoom();
-      await open("edit");
-      if (dirty) {
-        const title = document.getElementById("notebook-surface-title") as HTMLInputElement;
-        fireEvent.input(title, { target: { value: MINE } });
-        await settle(2);
-      }
-      const readsBefore = reads();
+  it("我什么都没动时，远端那一帧直接进我这一屏", async () => {
+    const { reads } = stub([[STALE, STALE], [REMOTE, REMOTE]]);
+    ownerRoom();
+    await open("edit");
+    const readsBefore = reads();
 
-      deliverFrame();
-      await settle();
-      expect(reads()).toBeGreaterThan(readsBefore);
-      expect(titleValue()).toBe(dirty ? MINE : STALE);
-    });
-  }
+    deliverFrame();
+    await settle();
+    expect(reads()).toBeGreaterThan(readsBefore);
+    // 上屏的是帧里那份——既不是回读到的旧的，也不是编辑器里原来那段。
+    expect(titleValue()).toBe(FRESH);
+  });
+
+  it("我改了标题时，远端那一帧与那次回读都不许动我写的字", async () => {
+    const { reads } = stub([[STALE, STALE], [REMOTE, REMOTE]]);
+    ownerRoom();
+    await open("edit");
+    const title = document.getElementById("notebook-surface-title") as HTMLInputElement;
+    fireEvent.input(title, { target: { value: MINE } });
+    await settle(2);
+    const readsBefore = reads();
+
+    deliverFrame();
+    await settle();
+    expect(reads()).toBeGreaterThan(readsBefore);
+    expect(titleValue()).toBe(MINE);
+  });
 });

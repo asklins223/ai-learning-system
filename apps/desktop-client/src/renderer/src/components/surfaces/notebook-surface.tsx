@@ -316,6 +316,17 @@ export function NotebookSurface() {
    * draft without a render-phase read.
    */
   const draftRef = useRef({ title: "", content: "" });
+  /**
+   * 「上一次这台机器交出去（或刚接到）的那一份」——判断"作者手上有没有待提交的改动"
+   * 只能跟它比。
+   *
+   * 原先是拿草稿跟**那次 HTTP 读回来的正文**比，而那一份会过期：协同帧是改动一进活
+   * 文档就发的，作者的自动保存却要过本机 debounce 才进 API（实窗量到 3.5 秒）。于是
+   * 两个人同开一篇时，第二个人的页面既看不到对方那段、标签还写着「已同步」，而他随手
+   * 敲一个字就会把对方那句按块删掉（2026-09-22 两个真窗口实测：服务端里对方那段没了）。
+   * 比"我交出去的那一份"是本地事实，不会被一次抢跑的回读改变。
+   */
+  const syncedDraftRef = useRef<{ title: string; content: string } | null>(null);
 
   /** The one way the draft changes, so state and ref cannot drift apart. */
   const applyDraft = useCallback((next: { title: string; content: string }) => {
@@ -429,16 +440,18 @@ export function NotebookSurface() {
   // 草稿/有未提交编辑 and disabled the generation entry for one frame before the
   // sync effect ran.
   const draftSeeded = Boolean(note && syncedNoteRef.current === note.noteId);
-  // Dirty is a statement about versions: the editor's Markdown must save into a
-  // different block list than the committed one. Whitespace the block model
-  // cannot represent (a trailing newline, a collapsed blank line) must not keep
-  // the page dirty forever — that re-saved the same version on every autosave
-  // tick. Both sides go through `blockBody`, so a version written by the Web
-  // client also compares as clean instead of looking edited the moment it opens.
-  const dirty = Boolean(
-    draftSeeded && note
-    && (draft.title !== note.title || (editable && !blocksMatchMarkdown(draft.content, note.currentVersion.blocks))),
+  // Dirty is a statement about **this machine's own keystrokes**: the draft differs
+  // from the last thing it submitted (or was seeded with). It used to compare the
+  // draft against the freshly-read server record, which a collab peer can move ahead
+  // of — that made an untouched page look clean while its text was already stale, and
+  // its next autosave deleted the peer's sentence (measured 2026-09-22, two windows).
+  // Whitespace the block model cannot represent still must not keep the page dirty
+  // forever, so both sides compare through the same markdown the seeding produced.
+  const pendingLocalEdit = Boolean(
+    draftSeeded && syncedDraftRef.current
+    && (draft.title !== syncedDraftRef.current.title || draft.content !== syncedDraftRef.current.content),
   );
+  const dirty = pendingLocalEdit;
   // 别人（同机另一个窗口、另一台机器、另一个人）改了这一篇。阅读态直接画这一帧，
   // 并同时叫醒一次回读去取版本/权限那半边（为什么帧比回读新：见 use-note-doc-live-view
   // 里那段 3.5 秒的实测）。编辑态不接这一帧——作者手上有还没交出去的字时，替换与否
@@ -501,20 +514,22 @@ export function NotebookSurface() {
       setShowAllBlocks(false);
       noteGallery.close();
     }
-    const pendingLocalEdit = !firstLoadForNote
-      && (draft.title !== note.title || (editable && !blocksMatchMarkdown(draft.content, note.currentVersion.blocks)));
     if (pendingLocalEdit) return;
-    // A server-confirmed version is not an undo step: it is where the draft is
-    // supposed to be.
-    const content = blocksToMarkdown(note.currentVersion.blocks);
-    applyDraft({ title: note.title, content });
+    // 作者这台机器没有待提交的字，就把"目前知道的最新一份"接进来：优先那一帧（它比
+    // 回读新），没有帧就用读回来的那份。不接的话这一屏是一份已经过期的正文，而他随手
+    // 敲一个字就会把别人刚写的那句按块删掉——2026-09-22 两个真窗口实测到的丢字。
+    const incomingTitle = noteDocLive.remoteView?.title.trim() || note.title;
+    const incomingBlocks = noteDocLive.remoteView?.blocks ?? note.currentVersion.blocks;
+    const content = blocksToMarkdown(incomingBlocks);
+    applyDraft({ title: incomingTitle, content });
+    syncedDraftRef.current = { title: incomingTitle, content };
     // 编辑器只在正文确实与这一版不同时才被整体替换。每次自动保存之后的回读都会
     // 走到这里，而那时的正文本来就一致——整体替换会把作者刚敲下的撤销栈一起抹掉。
     const current = editorRef.current?.getMarkdown() ?? null;
-    if (current === null || !blocksMatchMarkdown(current, note.currentVersion.blocks)) {
+    if (current === null || !blocksMatchMarkdown(current, incomingBlocks)) {
       editorRef.current?.setMarkdown(content, firstLoadForNote);
     }
-  }, [note, editable, activeNoteRef?.mode, applyDraft]);
+  }, [note, editable, activeNoteRef?.mode, applyDraft, pendingLocalEdit, noteDocLive.remoteView]);
 
   const save = useCallback(async (reason: "auto" | "manual") => {
     const api = desktopApi();
@@ -559,6 +574,9 @@ export function NotebookSurface() {
         setReceipt({ savedAt: written.savedAt, isAutosave: true, via: written.via });
       }
       setSaveState("committed");
+      // 交出去的就是这一份了：同步点跟着走，之后别人再怎么动，这一屏都不该被算成
+      // "我有待提交的改动"（那个判断曾经把过期当成干净，于是下一次提交删了别人的字）。
+      syncedDraftRef.current = { title: nextTitle, content: nextContent };
       await reload();
     } catch (error) {
       setSaveState("error");
