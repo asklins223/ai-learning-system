@@ -1499,3 +1499,43 @@ A1 本身还没做：这条索引只是让它有可能开始写。剩下的两�
 一处**已知代价**要写在前头：提前提交意味着崩溃窗口里会留下 `quality_state='authored'`
 的半成品行。读端不会把它们当候选（`isCandidateReviewReadyV2` 要求 `passed`），恢复态文案
 也已经存在；但"半成品行 + 重放复用"这条路径必须被 B2 的用例覆盖，不能只靠推理。
+
+## 40. repair 尾段怎么验：验证方式定了，而且不需要为它给产品开缝
+
+#31 要的是"定下验证方式，不再等运气"。读到底之后，今天这条分支**不可达**有三级门：
+
+1. `allowBoundedRepair` 默认 true，但只有 `card_generation_plan` 那条主管线会带着 true 进来
+   （regenerate 与 recheck 两处调用点显式传 `false`，理由写在 `handler:2929-2934`：
+   初次生成已经花掉了那一次修复预算，否则 recheck → authored → recheck 是无界链）。
+2. 门本身：`if (allowBoundedRepair && useLLM && providers && rewriteSet.size > 0 && !repaired)`
+   ——`useLLM` 与 `providers` 都在条件里。
+3. 而 pedagogy 判 `rewrite` 本身要真模型：`DeterministicPedagogyProvider` 恒 pass。
+
+所以"等一次真跑正好判 repair"确实不可行（三批真跑都没遇到）。但**也不需要**新开缝：
+
+- `providers` 早就是 `critiqueAndFinalizeCandidates` 的入参，`buildCardGenerationProviders`
+  的注释明写"若传入 `providerInstance` 则直接使用（测试注入 mock）"（`providers.ts:1387`）。
+  注入点在产品里已经存在，缺的只是从测试够到它。
+- 条件里的 `useLLM` 是 `providers` 的**代理**，不是它自己要表达的性质：真正的前提是
+  "调用方给了能重写这张卡的 author provider"。丢掉 `useLLM` 这一项，生产行为一个字都不变
+  （生产里 `providers` 当且仅当 `useLLM` 才被构造），测试就能拿一对脚本 provider 进来。
+  `useLLM` 留在条件里反而会把"确定性作者重写出同一张卡"这种真事故留在暗处——
+  确定性 author 对同一目标返回同内容，哈希不变，修复就成了原地打转，这正是必须被测试
+  钉住而不是被 env 挡住的性质。
+
+**定下来的做法（B 组，零 AI 调用）**：把 `critiqueAndFinalizeCandidates` 加 `export`
+（这个文件已有 33 个 export，其中 `insertAuthoredCandidatesBatched` 就是只有内部调用的
+阶段函数，导出内部件是本文件的既有写法），集成测试里传一对脚本 provider：
+pedagogy 第一次对候选 1 判 `rewrite`、修复后对集合判 `keep`；author 返回**内容不同**的
+新 revision（否则哈希不变，测试就测不出"修了什么"）。断言按这段代码的真实承诺来：
+
+| 断言 | 为什么是这条 |
+|---|---|
+| 该目标多出一行 `revision=2`，且旧行仍在 | immutable + 有界一次；0253 那条唯一索引保证不会多出第三行 |
+| 新行的 `candidate_revision_hash` 与旧行不同 | 哈希真重算了，不是把旧内容复制一遍 |
+| run 停在 `checking`，并排出一条 `card_generation_recheck_candidate` | 修复后的 revision **不进** deck gate（`handler:2252-2259` 写明混入必触发 `candidate_revision_mismatch`，整 run 打回 needs_attention） |
+| 第二次仍判 `rewrite` 时不再修 | `!repaired` 那一支；有界性靠它，不靠运气 |
+| 走的是 `plannedObjectiveForCandidateV2`（真计划目标，不是三字段替身） | §34 钉住的那个崩溃点：替身会让 author 提示在 `spec.label` 上 TypeError |
+
+顺带一条只有真跑才能量、但不花钱的问题留给 B5 一起看：repair 之后那张卡在审核页
+以什么状态出现（它停在 `authored`，`isCandidateReviewReadyV2` 会把它判为不可审核）。
