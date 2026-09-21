@@ -12,6 +12,18 @@
 - 来源：https://github.com/yjs/yjs
 - 引入批次：批次 4（4.0 前置验证已通过，见 `apps/api/src/__tests__/note-doc-collab-kernel.test.ts`）
 
+## Hocuspocus（`@hocuspocus/server` + `@hocuspocus/common` 4.7.0，`apps/api`；`@hocuspocus/provider` 同版本，devDependency 用于协同契约测试，批次 4.3 将由 `apps/desktop-client` 主进程使用）
+- 用途：把 Yjs 同步协议接成服务端 WS 通道（`apps/api/src/modules/note/collaboration.ts`）；
+  升级仍由 `@fastify/websocket` 完成，本组件只吃 `handleConnection` + 宿主接线的
+  `handleMessage`/`handleClose`
+- 许可：MIT License（Copyright (c) 2023, Tiptap GmbH；企业版模块不在依赖树里）
+- 来源：https://github.com/ueberdosis/hocuspocus
+
+## y-protocols（1.0.7）与 lib0（0.2.117）（`apps/api`；后续 `apps/desktop-client`）
+- 用途：Yjs 的同步/awareness 协议编解码与工具库，是 Hocuspocus 的运行时依赖
+- 许可：MIT License
+- 来源：https://github.com/yjs/y-protocols 、https://github.com/dmonad/lib0
+
 ## PIXI.js（`apps/desktop-client`）
 - 用途：Live2D 渲染器宿主
 - 许可：MIT License

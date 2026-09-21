@@ -9,6 +9,7 @@ import { logger } from "./lib/logger.ts";
 import { runWithRequestContext } from "./lib/request-context.ts";
 import { authRoutes } from "./modules/identity/routes.ts";
 import { noteRoutes } from "./modules/note/routes.ts";
+import { noteCollaborationRoutes, closeNoteCollaboration } from "./modules/note/collaboration.ts";
 import { jobRoutes } from "./modules/job/routes.ts";
 import { reviewRoutes } from "./modules/review/routes.ts";
 import { sourceRoutes } from "./modules/source/routes.ts";
@@ -319,6 +320,9 @@ async function main() {
   await app.register(authRoutes);
   await app.register(desktopTrustRoutes);
   await app.register(noteRoutes);
+  // 笔记协同的 WS 通道：必须与 `noteRoutes` 平级注册，不能嵌在它下面——那条链顶部有
+  // `preHandler: requireSession`，而 v4 的 token 在握手之后的 Auth 消息里，不在请求头上。
+  await app.register(noteCollaborationRoutes);
   // §21.5：Card Generation V2 是原子 capability bundle，默认 fail-closed。
   if (isCardGenerationV2Enabled()) {
     await app.register(cardGenerationV2Routes);
@@ -398,7 +402,12 @@ async function main() {
       if (learningRunProcessingTimer) clearInterval(learningRunProcessingTimer);
       learningRunProcessingTimer = undefined;
     },
-    closeServer: () => app.close(),
+    // 先刷协同快照再关服务器：`onStoreDocument` 是 debounce 的，反过来会把窗口里
+    // 最后一段编辑连同连接一起丢掉。
+    closeServer: async () => {
+      await closeNoteCollaboration();
+      await app.close();
+    },
     // 2026-08-11：NOTIFY listener 连接必须显式关闭，否则进程退出挂起
     afterClose: () => {
       void closeStructuredSolutionSql();

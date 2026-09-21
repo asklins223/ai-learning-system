@@ -539,6 +539,23 @@ jobs:
           node --import tsx --test src/integration-tests/workspace-collab-postgres.integration.ts \
             2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/workspace-collab.tap"
 
+      # 笔记协同内核（批次 4.1/4.2）：文档快照是正文的唯一事实源（补齐/投影/revision
+      # 单调/组合外键/RLS 换角色才测得出来），以及 WS 通道的鉴权（只读连接收到
+      # Authenticated("readonly")、上送被否定且不落库、被拒的理由不泄露笔记存在性、
+      # 关停刷 debounce 窗口）。两份此前都没有接入 CI——不接就等于不存在。
+      - name: Verify note document state and collaboration authorization behaviour
+        working-directory: apps/api
+        env:
+          NODE_ENV: test
+          DATABASE_URL_MIGRATOR: ${{ env.DATABASE_URL_MIGRATOR }}
+          DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
+        run: |
+          set -o pipefail
+          node --import tsx --test --test-concurrency=1 \
+            src/integration-tests/note-document-state-postgres.integration.ts \
+            src/integration-tests/note-collaboration-postgres.integration.ts \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/note-collaboration.tap"
+
       # 空间隔离 schema 棘轮：把当前"带 workspace_id 但缺外键 / 缺 RLS"的表如实登记为
       # 基线，要求实际集合与基线完全相等——新增违规变红，修好一条也必须同步删基线，
       # 所以清单只能缩短。一次性补齐 89 个外键不现实，用棘轮换"不再恶化"。
