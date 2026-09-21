@@ -338,3 +338,24 @@ node scripts/tmp-objflow-s4-clean.mjs        # 动作区逐按钮遮挡（elemen
 `tmp-objflow-lib.mjs` 里的 `tree()` 会打印每个节点的盒 + 字号 + 行高 + 字色 + `CLIP` 标记，是逐条复核本文数字最快的入口；`s16-density` 是「只算视口内未被裁矩形」的密度口径，B4/B5 直接用它做改前改后对比。
 
 **这批脚本是本轮唯一的手段，也是后续每个批次的验收夹具**——按 30 号文档的先例，落地后若仍是唯一手段就转成受控脚本。
+
+## 14. 实施进度（滚动更新）
+
+版式修正统一落在**新文件** `components/objective-flow.css`（`main.tsx` 里排在 hud 层之后）。不写进 `hud-surface.css` 的理由写在该文件头部：这条链路的规则覆盖的是同文件更早处的声明，必须整体后置才稳定取胜，而且那个 6000+ 行的文件同时被伴星中心共用。
+
+### B0 结算页出口槽与印章裁切 — 已完成（2026-09-21）
+
+改动：`learning-run-surface.tsx:2004-2029` 把 `.learning-run-result-actions` 从 `<article class="…-report">` 里移出来，成为结算板的直接子节点；`objective-flow.css` 给板加 `grid-template-rows: minmax(0,1fr) auto`、把出口钉在第 2 行横跨两列、印章行高 1.32→1.45。
+
+| 指标 | 改前（实量） | 改后（实量） |
+|---|---|---|
+| 主按钮下沿离纸面下沿 | **−34px**（在折叠线以下，须滚内层列） | **+26px** |
+| 出口是否落在可滚容器内 | 是（report `overflow:auto`，727 vs 665） | **否**（`actionsInsideScroller: null`） |
+| report 需要滚动的像素 | 62px | **0** |
+| `__seal` `scrollHeight` / `clientHeight` | 54 / 48（裁 6px） | **61 / 61**（不裁） |
+
+行高这一条值得记着：**1.32 不够**。第一次改完实测仍是 57 vs 55，差 2px；CJK 衬线在 42px 下要 1.45 才收得住。凡是按 `line-height` 估字形高度的，都要实量一次而不是算一次。
+
+新增结构回归 `learning-run-surface.result.test.tsx`（3 例，含 12 条 rubric 的长判定场景）。**做过变异检验**：把出口挪回 report 内部后，两条结构断言转红（`expected true to be false` / 子节点数组少一项），第三条「两个出口都还在」保持绿——它钉的是另一件事。几何类指标 jsdom 量不了，由 `scripts/tmp-objflow-v-b0.mjs` 在实机上出上面那张表。
+
+**顺带修掉的一个自埋坑**：`objective-flow.css` 第一版顺手重写了 `.learning-run-result-board` 的 `grid-template-columns`，会盖掉 `hud-surface.css:5348` 在 `@media (max-width:760px)` 里的另一档列宽。已删掉那行——后置层只加行、不动列。
