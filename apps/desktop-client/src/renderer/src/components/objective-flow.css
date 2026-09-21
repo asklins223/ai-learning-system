@@ -78,6 +78,82 @@
  * （approved-surfaces.css:286-288 那一档）。 */
 .hud-surface .v3-objective-revision span { font-size: 11px; }
 
+/* ── B6：动作区分层（P19）──────────────────────────────────────────────
+ *
+ * 原来 dock 是「状态 + 一排 flex-wrap 按钮」：7 个控件时状态列被挤到 74px 宽、
+ * 折成两行，主按钮掉到第二排。现在两排是定死的版式——上排「状态 + 出口」，
+ * 下排「求助 + 主按钮」。出口在上排是有意弱化：它不该和提交抢同一个视觉重量。 */
+.hud-surface .learning-run-dock {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.hud-surface .learning-run-dock__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+.hud-surface .learning-run-dock__status {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11px;
+}
+.hud-surface .learning-run-dock__row--exit .actions { flex: 0 0 auto; }
+.hud-surface .learning-run-dock__row--act .actions {
+  flex: 1 1 auto;
+  min-width: 0;
+  justify-content: flex-start;
+}
+.hud-surface .learning-run-dock__row--act > .button.primary { flex: 0 0 auto; }
+/* 按钮不许被压扁：实测「改做排序题」「给我一点提示」「更多选择」在 671px 的
+ * 求助行里被挤到折成两三个字一行，「更多选择」竖成了一条。 */
+.hud-surface .learning-run-dock .actions .button,
+.hud-surface .learning-run-dock .actions summary {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+/* 说明条现在是 dock 的独立一行（原来挤在 .actions 里换行，压在按钮身上）。
+ * 字色从 rgba(255,248,232,.7) 改成墨色——那是给深色底写的字，落在
+ * --hud-cream 纸面上等于没写（31 号文档 P19 附）。 */
+.hud-surface .learning-run-dock .learning-run-switch-note {
+  flex: 0 0 auto;
+  color: var(--hud-soft);
+  font-size: 11px;
+  line-height: 1.5;
+}
+/* P20：伴星的不可用提示条锚在视口右下，实测正好盖住「暂时不会」与「提交回答」
+ * 两个按钮的中心点。作答与结算页给纸面下方留出一条保留带——纸面底边距视口
+ * 55px，提示条抬到 63px 就完全落在纸面之外。 */
+.hud-surface.page-16 .companion-unavailable-notice,
+.hud-surface.page-17 .companion-unavailable-notice,
+.hud-surface.page-16 .companion-restore-chip,
+.hud-surface.page-17 .companion-restore-chip {
+  bottom: 63px;
+}
+/* 出口排整排降一档重量：字色更淡、无边框，hover 才回来。 */
+.hud-surface .learning-run-dock__row--exit .actions .button {
+  border-color: transparent;
+  background: none;
+  color: var(--hud-soft);
+}
+.hud-surface .learning-run-dock__row--exit .actions .button:hover {
+  border-color: var(--hud-line-strong);
+  color: var(--hud-ink);
+}
+
+/* P26：作答与结算页上「离开」有三个入口——纸内主按钮、纸外那颗胶囊、Esc。
+ * 胶囊先隐藏，但**必须**先给这两页一个自己的初始焦点落点（题干与结果标题的
+ * h2 已经带 data-surface-initial-focus），否则 TaskSurface 找不到落点、
+ * 键盘用户的焦点会留在左侧 rail 上。 */
+.hud-surface.page-16 .return-home,
+.hud-surface.page-17 .return-home {
+  display: none;
+}
+
 /* ── B2：让 data-outcome 真的驱动视觉（P2）───────────────────────────────
  *
  * 这两个属性此前从 JSX 发出去、全仓没有任何一条 CSS 接手，所以「已理解」和

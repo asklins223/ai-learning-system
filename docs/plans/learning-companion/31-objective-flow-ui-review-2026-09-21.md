@@ -296,7 +296,7 @@
 | **B3** | 「下次到期 刚刚」（P4） | ✅ 已上线，见 §14。没有新增 `formatDue`——`objective-state-copy.ts:114` 的 `formatObjectiveDay` 已经是「今天/昨天/明天/N 天后/M月D日」且被列表行在用，直接复用；另在 `surface-data.test.tsx` 钉住 `formatRelative` 的「只量过去」契约 |
 | **B4** | 字号地板（P7/P13/P21/P33） | 列表 / 详情 / 结算三屏 `<11px` 文本段占比 = 0；提示惩罚说明 ≥12px；720×405 视口下 `.button` ≥ 11px、`.meta` ≥ 9px、`.run-confirmation p` ≥ 9px |
 | **B5** | 空带与骨架（P8/P14/P28） | 焦点卡内最大连续空白 ≤ 64px；四屏内容左边界一致（`x` 差 ≤ 2px）；结算绿栏空带 ≤ 80px |
-| **B6** | 动作区分层与出口唯一（P19/P20/P26） | 🟡 只做了可静态钉的两条：`aria-label` 不再念成「返回返回书房」、`returnTarget` label 自带「返回」这件事有守卫。剩下的 dock 三段分层、状态列最小宽、右下浮层保留带、page-16/17 隐藏 `.return-home` **都要实机量交叠与折行**，环境还堵着 |
+| **B6** | 动作区分层与出口唯一（P19/P20/P26） | ✅ 已上线，见 §14。实机：状态列 74px/2 行 → **148px/1 行**；求助行不再折字；说明条抬成独立一行且换成墨色（11px）；主按钮唯一、`elementFromPoint` 未被覆盖；纸外胶囊在 page-16/17 隐藏，焦点改落题干 |
 | **B7** | 题型语法统一（P22/P23/P24/P25） | `styles.css:1429-1481` 三条旧配方删除；choice/matching/true_false 行的 `border-radius` 与 `background` 与 ordering 行一致；切换 variant 后 `h2` 文本发生变化；排序行出现序号徽章；语音 textarea 的 computed `border`/`font-size` 与 `.run-text-editor` 一致 |
 | **B8** | 列表与详情的动作语义（P9/P10/P11/P12/P15/P16/P17） | 🟡 P9 与 P16 已上线（见 §14）。P10 只做掉「行右端不再重复服务端的动词」，chip 收敛、P11 双滚动、P12 标题与搜索范围、P15 详情主行动块、P17 空证据栏**都还要实机量或要先定产品口径** |
 | **B9** | 文案（P34 + 各处内部词） | ✅ 已上线，见 §14。守卫 `src/main/objective-flow-copy-guard.test.ts` 第一次跑就抓到一条我漏的（评估等待那句「客户端只会在收到真实结果后…」），所以它不是空转 |
@@ -434,4 +434,25 @@ UI 侧三处：① 新增「这次说清了」行与「这次说清 N 条」计�
 
 测试：`WorkspaceLibrarySurface.focus.test.tsx` 4 例。**一次值得记下的自我打脸**：第一版 4/4 直接绿，我以为是对的——typecheck 却在我自己的测试文件里报 `Tuple type '[]' has no element at index '0'`，因为 `vi.fn(async () => …)` 推成零参，读 `calls[0][0]` 根本没类型。vitest 不做类型检查，所以"跑绿"把这条错一路带进仓库。补上入参签名后才算真绿。随后做变异检验：把焦点按钮的 `onClick` 换回 `openObjective` 并让行右端重新显示服务端动词，**恰好 3 条转红、第 3 条（详情那颗才走 open-objective）保持绿**——它量的正是没被动过的那条路。
 
-全量回归：`src/main` + `src/renderer/src/components/surfaces` 共 **55 个文件 571 条测试全绿**，`tsconfig.web.json` 类型干净（唯一残留错误在 `companion-home-cue.test.ts`，是别的会话正在改的文件）。
+全量回归：`src/main` + `src/renderer/src/components/surfaces` 共 **56 个文件 575 条测试全绿**，`tsconfig.web.json` 类型干净（唯一残留错误在 `companion-home-cue.test.ts`，是别的会话正在改的文件）。
+
+### B6 动作区分层与出口唯一 — 已完成（2026-09-22）
+
+dock 从「状态 + 一排 flex-wrap 按钮」改成**两排定死的版式**：上排「状态 + 出口」，下排「求助 + 主按钮」，说明条再抬成第三行。出口排整排去掉边框与底色、hover 才回来——它不该和提交抢同一个视觉重量。
+
+实机（1440×810，`.objflow-caps/b6-final.png`、`b6-focus.png`）：
+
+| | 改前 | 改后 |
+|---|---|---|
+| 状态列 | `[375,665,74,26]`，**折成 2 行** | `[605,630,148,16]`，**1 行** |
+| 控件排布 | 7 个挤在一排 flex-wrap，主按钮掉到 y=693 | 出口排 y=630（稍后再做/暂时不会）、求助排 y=667（改做排序题/暂停/提示/更多选择）、主按钮独占下排右 |
+| 语音不可用的说明 | 压在按钮身上，字色 `rgba(255,248,232,.7)` 落在奶油纸上**几乎不可见** | 独立一行 `[504,715,528,17]`，`--hud-soft` 11px，读得清 |
+| 主按钮被浮层盖住 | `elementFromPoint` 实测 covered | **covered: false** |
+
+顺带修掉两个第一次量出来才发现的：按钮被压扁到「改做 排序题」折字（`flex:0 0 auto; white-space:nowrap`）、说明条那句浅色字本来就是给深色底写的（`styles.css:1689` 夜间段）。
+
+**出口从三个减到一个**：`page-16/17` 隐藏纸外那颗 `.return-home`。但不能直接删——它是这两页**唯一**的 `data-surface-initial-focus` 落点（`TaskSurface.tsx:155-156` 靠它进面），删了焦点会留在左侧 rail。所以先给题干与结果标题的 `h2`（本来就有 `tabIndex={-1}`）补上这个标记，再隐藏胶囊。实机验证：`document.activeElement` 现在是 **`请回忆这个主题的关键信息（先不要查看任何材料）`**——键盘用户一进作答页，焦点在题目上而不是"离开"上。
+
+右下浮层保留带：`.companion-unavailable-notice` / `.companion-restore-chip` 在 page-16/17 抬到 `bottom: 63px`（纸面底边距视口 55px），落在纸面之外。这条是结构性的——此前那次遮挡虽然由 Live2D 失败触发，但提示条锚右下、主按钮也在右下，任何右下浮层都会盖住提交键。**当前会话 Live2D 正常，所以这条只验了规则存在，没复现遮挡本身**；要复现得把伴星弄挂，我没做。
+
+一处测试改动要报备：`learning-run-surface.actions.test.tsx:323` 钉的是「现在还不能改用语音**作答**」，我把说明条措辞对齐成按钮上的「语音**讲解**」（D5 定的命名，此前一句作答一句讲解，用户会以为是两件事），断言随之更新并写明"要钉的是必须说出原因，不是那个词"。

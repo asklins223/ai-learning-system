@@ -1958,6 +1958,42 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   quickActions.push(...checkpointActions);
   if (exitAction) quickActions.push(exitAction);
   const quickActionKeys = new Set(quickActions.map(actionKey));
+  /**
+   * 出口（离开这次作答）与求助（换个走法继续）是两类东西，此前却和主按钮平铺在
+   * 同一个 flex-wrap 行里：控件一多，状态文字被挤到 74px 宽折成两行、主按钮掉到
+   * 第二排（31 号文档 P19，1440×810 实测 dock 高 123px、两排在 y=625 与 y=693）。
+   * 现在分成定死的两排——出口在上、主按钮在下排右端，不再靠换行碰运气。
+   */
+  const isExitAction = (action: LearningRunAllowedActionV2) => action.kind === "skip_run" || action.kind === "end";
+  const exitActions = quickActions.filter(isExitAction);
+  const helpActions = quickActions.filter((action) => !isExitAction(action));
+  const quickButton = (action: LearningRunAllowedActionV2) => {
+    const isHint = action.kind === "request_hint";
+    const isSwitch = action.kind === "switch_variant";
+    const blockedSwitch = isSwitch && blockedSwitchIds.has(action.alternativeId);
+    const label = isSwitch
+      ? switchActionLabel(alternativeKindById.get(action.alternativeId))
+      : !isHint
+        ? actionLabel(action)
+        : hints.length === 0
+          ? "给我一点提示"
+          : hintsExhausted
+            ? "提示已经给完"
+            : "再看一层提示";
+    return (
+      <button
+        key={actionKey(action)}
+        type="button"
+        className="button"
+        disabled={busy || (isHint && hintsExhausted) || blockedSwitch}
+        title={blockedSwitch ? microphoneReason : undefined}
+        onClick={() => void dispatchAction(action)}
+      >
+        {actionIcon(action)}
+        {label}
+      </button>
+    );
+  };
   // request_hint 一律由那**一个**阶梯按钮代表：服务端按 hintLevels 签发了 1..N 个
   // 动作，若只把"下一个"放进快捷区、其余留在更多菜单里，用户看到的还是两个提示
   // 按钮（复盘 #11 的原始形态）。
@@ -1992,7 +2028,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
           <article className="learning-run-result-report">
             <header>
               <span>{runOriginLabel(snapshot.originV2)}</span>
-              <h2 ref={primaryHeadingRef} tabIndex={-1}>
+              <h2 ref={primaryHeadingRef} tabIndex={-1} data-surface-initial-focus="true">
                 {result ? outcomeHeadline[result.outcome] : "这次旅程没有形成新的学习结果"}
               </h2>
             </header>
@@ -2131,7 +2167,9 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
                 <span>{activeTask ? `${facetLabels[activeTask.intent] ?? activeTask.intent} · ${interactionLabel(activeTask)}` : phaseLabels[processingPhase]}</span>
                 <small>{activeTask && snapshot.phase === "active" ? draftStatus : "进度"}</small>
               </div>
-              <h2 ref={primaryHeadingRef} tabIndex={-1}>
+              {/* 旅程页的初始焦点落点。此前它只有纸外那颗「返回书房」胶囊，
+                  于是键盘用户一进作答页，焦点停在"离开"上而不是题目上。 */}
+              <h2 ref={primaryHeadingRef} tabIndex={-1} data-surface-initial-focus="true">
                 {activeTask && snapshot.phase === "active" ? activeTask.prompt : processingHeadline}
               </h2>
               {activeTask && snapshot.phase === "active" ? <p>{activeTask.targetSummary}</p> : null}
@@ -2193,80 +2231,58 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
             )}
           </div>
           <footer className="learning-run-dock">
-            <span className="learning-run-dock__status" role="status">
-              {recovery
-                ? recoveryHeading
-                : activeTask && snapshot.phase === "active"
-                  ? `回答不会自动提交 · ${draftStatus}`
-                  : draftStatus}
-            </span>
-            <div className="actions">
-              {recovery ? (
-                <button type="button" className="button" disabled={resyncing} onClick={() => void resyncLearningRun(recovery)}>
-                  {resyncing ? <LoaderCircle size={14} aria-hidden="true" /> : <RotateCcw size={14} aria-hidden="true" />}
-                  {resyncing ? "正在同步…" : "同步当前状态"}
-                </button>
-              ) : null}
-              {!recovery && (resultQueryBudgetExhausted || processingFailure) ? (
-                <button type="button" className="button" disabled={resultQueryBusy} onClick={retryResultQuery}>
-                  {resultQueryBusy ? "正在重新检查…" : "重新检查结果"}
-                </button>
-              ) : null}
-              {quickActions.map((action) => {
-                const isHint = action.kind === "request_hint";
-                const isSwitch = action.kind === "switch_variant";
-                const blockedSwitch = action.kind === "switch_variant" && blockedSwitchIds.has(action.alternativeId);
-                const label = isSwitch
-                  ? switchActionLabel(alternativeKindById.get(action.alternativeId))
-                  : !isHint
-                    ? actionLabel(action)
-                    : hints.length === 0
-                      ? "给我一点提示"
-                      : hintsExhausted
-                        ? "提示已经给完"
-                        : "再看一层提示";
-                return (
+            <div className="learning-run-dock__row learning-run-dock__row--exit">
+              <span className="learning-run-dock__status" role="status">
+                {recovery
+                  ? recoveryHeading
+                  : activeTask && snapshot.phase === "active"
+                    ? `回答不会自动提交 · ${draftStatus}`
+                    : draftStatus}
+              </span>
+              <div className="actions">
+                {exitActions.map(quickButton)}
+                {/* 复盘 #12：两个出口必须一眼看得见——「稍后再做」= 不想做，
+                    「暂时不会」= 不会做（这是一种真实作答结果，会记为需要复习）。
+                    此前它藏在「更多选择」里，和 skip_task / end 挤在同一个菜单。 */}
+                {canSubmitUnable ? (
                   <button
-                    key={actionKey(action)}
                     type="button"
                     className="button"
-                    disabled={busy || (isHint && hintsExhausted) || blockedSwitch}
-                    title={blockedSwitch ? microphoneReason : undefined}
-                    onClick={() => void dispatchAction(action)}
+                    disabled={busy || submitting}
+                    onClick={() => void submit({ kind: "declared_unable", reasonCode: "cannot_recall" })}
                   >
-                    {actionIcon(action)}
-                    {label}
+                    <span>暂时不会</span>
                   </button>
-                );
-              })}
-              {/* 复盘 #12：两个出口必须一眼看得见——「稍后再做」= 不想做，
-                  「暂时不会」= 不会做（这是一种真实作答结果，会记为需要复习）。
-                  此前它藏在「更多选择」里，和 skip_task / end 挤在同一个菜单。 */}
-              {canSubmitUnable ? (
-                <button
-                  type="button"
-                  className="button"
-                  disabled={busy || submitting}
-                  onClick={() => void submit({ kind: "declared_unable", reasonCode: "cannot_recall" })}
-                >
-                  <span>暂时不会</span>
-                </button>
-              ) : null}
-              {blockedSwitchIds.size > 0 ? (
-                <p className="learning-run-switch-note" role="status">{`现在还不能改用语音作答：${microphoneReason}`}</p>
-              ) : null}
-              {moreActions.length > 0 ? (
-                <details className="learning-run-more">
-                  <summary>更多选择</summary>
-                  <div className="learning-run-more__menu">
-                    {moreActions.map((action) => (
-                      <button type="button" key={actionKey(action)} disabled={busy} onClick={() => void dispatchAction(action)}>
-                        {actionIcon(action)}<span>{actionLabel(action)}</span>
-                      </button>
-                    ))}
-                  </div>
-                </details>
-              ) : null}
+                ) : null}
+              </div>
+            </div>
+            <div className="learning-run-dock__row learning-run-dock__row--act">
+              <div className="actions">
+                {recovery ? (
+                  <button type="button" className="button" disabled={resyncing} onClick={() => void resyncLearningRun(recovery)}>
+                    {resyncing ? <LoaderCircle size={14} aria-hidden="true" /> : <RotateCcw size={14} aria-hidden="true" />}
+                    {resyncing ? "正在同步…" : "同步当前状态"}
+                  </button>
+                ) : null}
+                {!recovery && (resultQueryBudgetExhausted || processingFailure) ? (
+                  <button type="button" className="button" disabled={resultQueryBusy} onClick={retryResultQuery}>
+                    {resultQueryBusy ? "正在重新检查…" : "重新检查结果"}
+                  </button>
+                ) : null}
+                {helpActions.map(quickButton)}
+                {moreActions.length > 0 ? (
+                  <details className="learning-run-more">
+                    <summary>更多选择</summary>
+                    <div className="learning-run-more__menu">
+                      {moreActions.map((action) => (
+                        <button type="button" key={actionKey(action)} disabled={busy} onClick={() => void dispatchAction(action)}>
+                          {actionIcon(action)}<span>{actionLabel(action)}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </details>
+                ) : null}
+              </div>
               {canAnswerNow ? (
                 <button
                   type="button"
@@ -2283,6 +2299,12 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
                 </button>
               )}
             </div>
+            {/* 说明条从 .actions 里搬出来单独占一行：它此前 flex-basis:100% 挤在按钮
+                同一容器里换行，结果压在按钮身上（实测与「暂停」「给我一点提示」重叠），
+                而且用的是给深色底的浅色字，落在奶油纸上几乎看不见。 */}
+            {blockedSwitchIds.size > 0 ? (
+              <p className="learning-run-switch-note" role="status">{`现在还不能改用语音讲解：${microphoneReason}`}</p>
+            ) : null}
           </footer>
           </section>
         </section>

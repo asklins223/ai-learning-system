@@ -322,7 +322,9 @@ describe("LearningRunSurface · 动作区", () => {
     const button = await waitFor(() => screen.getByRole("button", { name: /改用语音讲解/ }));
     expect((button as HTMLButtonElement).disabled).toBe(true);
     // jsdom 没有 navigator.mediaDevices → 探测结论是"这个窗口不支持录音"。
-    await waitFor(() => expect(document.body.textContent).toContain("现在还不能改用语音作答"));
+    // 说明条的措辞跟着按钮走（D5 定的是「语音讲解」，此前一句写「作答」一句写
+    // 「讲解」，用户会以为是两件事）。要钉的是"必须把原因说出来"，不是那个词。
+    await waitFor(() => expect(document.body.textContent).toContain("现在还不能改用语音讲解"));
     expect(document.body.textContent).toContain("录音");
   });
 
