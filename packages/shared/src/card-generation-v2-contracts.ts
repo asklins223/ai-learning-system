@@ -378,6 +378,23 @@ export const atomDecisionV2Schema = z.discriminatedUnion("decision", [
 ]);
 export type AtomDecisionV2 = z.infer<typeof atomDecisionV2Schema>;
 
+/**
+ * v25：按知识形态限定"这道客观题该长什么样"。
+ *
+ * 依据（2026-09-21 真跑实测）：v24 之后模型愿意填 practiceItem 了，但它总挑
+ * `ordering`。看着像偷懒，查了知识形态才发现——那两张卡本来就是 sequence/procedure，
+ * ordering 是**正确形状**。真正的空白是另一头：fact / definition / boundary 这类
+ * 没有内在次序的知识，一条选择题都没产出过。所以不能靠"多写点提示"碰运气，
+ * 得按形态给形状，并把这条变成一个可以单点断言的表。
+ *
+ * 顺序即优先级：第一个是首选形状。声明放在这里（而不是紧挨着 practiceItem 合同），
+ * 是因为 planner 分配的 `practiceForm` 要用它做枚举——同一份清单不另抄一遍。
+ */
+export const PracticeItemFormValuesV2 = [
+  "single_choice", "true_false", "ordering", "matching",
+] as const;
+export type PracticeItemFormV2 = (typeof PracticeItemFormValuesV2)[number];
+
 export const plannedObjectiveV2Schema = z
   .strictObject({
     objectiveLocalId: z.string().min(1).max(160),
@@ -390,6 +407,12 @@ export const plannedObjectiveV2Schema = z
      * 示例都写死 `recall`，模型照抄导致整批卡同一个题型。
      */
     strategy: cardStrategyV2Schema,
+    /**
+     * 这张卡本轮**必须**交出的客观练习件形状（D6 的批次配额，planner 分配）。
+     * null = 不强制，作者仍可自愿交。和 `strategy` 同一个道理：整批层面的配额
+     * 不能在 author 逐张出题时决定——它看不到别的卡。
+     */
+    practiceForm: z.enum(PracticeItemFormValuesV2).nullable(),
     sourceAtomIds: z.array(z.string().min(1).max(160)).min(1).max(100),
     reasonCodes: z.array(z.string().min(1).max(120)).min(1).max(20),
     estimatedReviewCostSeconds: z.number().int().min(1).max(3600),
@@ -678,22 +701,6 @@ export const practiceItemV2Schema = z.discriminatedUnion("kind", [
   }),
 ]);
 export type PracticeItemV2 = z.infer<typeof practiceItemV2Schema>;
-
-/**
- * v25：按知识形态限定"这道客观题该长什么样"。
- *
- * 依据（2026-09-21 真跑实测）：v24 之后模型愿意填 practiceItem 了，但它总挑
- * `ordering`。看着像偷懒，查了知识形态才发现——那两张卡本来就是 sequence/procedure，
- * ordering 是**正确形状**。真正的空白是另一头：fact / definition / boundary 这类
- * 没有内在次序的知识，一条选择题都没产出过。所以不能靠"多写点提示"碰运气，
- * 得按形态给形状，并把这条变成一个可以单点断言的表。
- *
- * 顺序即优先级：第一个是首选形状。
- */
-export const PracticeItemFormValuesV2 = [
-  "single_choice", "true_false", "ordering", "matching",
-] as const;
-export type PracticeItemFormV2 = (typeof PracticeItemFormValuesV2)[number];
 
 export const PRACTICE_FORMS_BY_KNOWLEDGE_FORM: Record<KnowledgeFormV2, readonly PracticeItemFormV2[]> = {
   fact: ["single_choice", "true_false"],

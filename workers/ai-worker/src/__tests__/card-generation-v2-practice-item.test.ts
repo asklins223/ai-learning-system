@@ -99,6 +99,20 @@ describe("practiceFormsForKnowledgeForm", () => {
     assert.ok(seqPrompt.includes("ordering → ") || seqPrompt.includes("ordering"), "序列表仍应拿到 ordering");
     assert.ok(!seqPrompt.includes("single_choice → "), "次序类知识不该被提示成选择题优先");
   });
+
+  /**
+   * D6：整批配额里被点名的那张卡，提示必须点名到**具体形状**——否则模型只知道
+   * "尽量交"，又回到 v23 那种一整批全不交、或者一律挑最省事的 ordering。
+   */
+  it("配额点名的卡在提示里被点名到具体形状，没点名的直说不强制", () => {
+    const required = buildAuthorSystemPrompt("recall", "fact", "true_false");
+    assert.match(required, /这一批要求本卡必须交出一道 true_false 练习件/);
+    assert.match(required, /配额不是伪造干扰项的理由/);
+
+    const optional = buildAuthorSystemPrompt("recall", "fact", null);
+    assert.match(optional, /本卡不在配额点名之列/);
+    assert.ok(!optional.includes("必须交出一道"));
+  });
 });
 
 describe("sanitizePracticeItem", () => {

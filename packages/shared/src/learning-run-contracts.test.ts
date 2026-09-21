@@ -54,7 +54,13 @@ function makeTask() {
       revision: 1,
     },
     availableAlternatives: [
-      { alternativeId: "alt-voice", family: "voice", estimatedActiveSeconds: 50, maximumPurpose: "formal" },
+      {
+        alternativeId: "alt-voice",
+        family: "voice",
+        interactionKind: "voice_teachback",
+        estimatedActiveSeconds: 50,
+        maximumPurpose: "formal",
+      },
     ],
     assistancePolicy: { hintLevels: 3, exposureLowersTrust: true },
     status: "active",

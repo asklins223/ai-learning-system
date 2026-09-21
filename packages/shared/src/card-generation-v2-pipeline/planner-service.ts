@@ -40,8 +40,9 @@ import type {
   GenerationInputSnapshotV2,
   KnowledgeFormV2,
   CardStrategyV2,
+  PracticeItemFormV2,
 } from "../card-generation-v2-contracts.ts";
-import { CardStrategyValuesV2 } from "../card-generation-v2-contracts.ts";
+import { CardStrategyValuesV2, practiceFormsForKnowledgeForm } from "../card-generation-v2-contracts.ts";
 import type { TaskIntentV1 } from "../learning-run-contracts.ts";
 import {
   computeCardPlanHashV2,
@@ -350,8 +351,12 @@ export async function executePlanner(input: PlannerInput): Promise<PlannerResult
       objectivesToCreate.map((atom) => atom.knowledgeFormHint),
       input.semanticSpec.semanticRequest.preferredStrategies,
     );
+    // D6：练习件配额与题型配额**独立**（策略是认知框架，模态是作答方式，两者正交）。
+    const practiceAllocations = allocatePracticeForms(
+      objectivesToCreate.map((atom) => atom.knowledgeFormHint),
+    );
     const plannedObjectives = objectivesToCreate.map((atom, idx) =>
-      createPlannedObjective(atom, idx, allocations[idx]!),
+      createPlannedObjective(atom, idx, allocations[idx]!, practiceAllocations[idx]!),
     );
     const existingActions: PlannedExistingLifecycleActionV2[] = [];
 
@@ -538,6 +543,7 @@ function createPlannedObjective(
   atom: ExtractedKnowledgeAtom,
   index: number,
   strategy: StrategyAllocation,
+  practice: PracticeFormAllocation,
 ): PlannedObjectiveV2 {
   const objectiveLocalId = `obj-${atom.atomId}`;
   const reasonCodes = [
@@ -545,12 +551,14 @@ function createPlannedObjective(
     `importance-${atom.importanceBps}`,
   ];
   if (strategy.reasonCode) reasonCodes.push(strategy.reasonCode);
+  if (practice.reasonCode) reasonCodes.push(practice.reasonCode);
   return {
     objectiveLocalId,
     objectiveStatement: atom.proposition.slice(0, 2000),
     priority: index === 0 ? "critical" : index < 3 ? "important" : "optional",
     knowledgeForm: atom.knowledgeFormHint,
     strategy: strategy.strategy,
+    practiceForm: practice.form,
     sourceAtomIds: [atom.atomId],
     reasonCodes,
     estimatedReviewCostSeconds: Math.min(300, Math.max(30, atom.proposition.length)),
@@ -644,6 +652,48 @@ export function allocateStrategies(
     if (unlocked !== bestFit) return { strategy: unlocked, reasonCode: "strategy_diversity_capped" };
     if (bestFit !== natural) return { strategy: unlocked, reasonCode: "strategy_preference_applied" };
     return { strategy: unlocked };
+  });
+}
+
+/** D6：一张卡本轮要不要交练习件、交哪一种。 */
+export interface PracticeFormAllocation {
+  /** 必须交出的形状；null = 不强制（作者仍可自愿交，反推兜底也照旧）。 */
+  form: PracticeItemFormV2 | null;
+  reasonCode?: string;
+}
+
+/**
+ * 整批的**客观练习件配额**（方案 D6）。
+ *
+ * 三条与 `allocateStrategies` 同源的理由：
+ * 1. 配额是整批的事，不能交给 author 逐张决定——它看不到别的卡，也看不到这一批
+ *    已经出了几道题；v24/v25 的实测就是这么从"一张都没有"走到"形状偏置"的。
+ * 2. 下限取 ⌈N/2⌉：一批 N 张卡里至少一半带练习件，剩下的留给产出型框架
+ *    （§2 的产品约束：客观题是练习件，不是卡的本体）。
+ * 3. **模态铺开**：在同一形态允许的形状里取本批用得最少的那个，并列时取该形态的
+ *    首选。`sequence` 只有 ordering、`application_rule` 只有 single_choice，
+ *    这些形态不会被硬凑成别的形状——形态边界优先于铺开。
+ *
+ * 凑不满不强造（D4）：这里只决定"要求谁交"，作者给不出有证据的干扰项时照样交 null，
+ * 缺额由 `practice_quota_short` 记账，而不是伪造一道题。
+ */
+export function allocatePracticeForms(
+  forms: readonly KnowledgeFormV2[],
+): PracticeFormAllocation[] {
+  const total = forms.length;
+  const quota = total >= 2 ? Math.ceil(total / 2) : total;
+  const used = new Map<PracticeItemFormV2, number>();
+  let required = 0;
+  return forms.map((form) => {
+    const allowed = practiceFormsForKnowledgeForm(form);
+    if (allowed.length === 0 || required >= quota) return { form: null };
+    required += 1;
+    const pick = allowed.reduce(
+      (best, candidate) => ((used.get(candidate) ?? 0) < (used.get(best) ?? 0) ? candidate : best),
+      allowed[0]!,
+    );
+    used.set(pick, (used.get(pick) ?? 0) + 1);
+    return { form: pick, reasonCode: "practice_quota_required" };
   });
 }
 

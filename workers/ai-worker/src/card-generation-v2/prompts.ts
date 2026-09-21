@@ -130,7 +130,7 @@
  *    答案的可判分命题）+ 整类清单（玩笑段子/情绪吐槽/闲聊寒暄/无意义字符/
  *    个人事务/身份凭据/传闻八卦/纯链接/无答案的提问/口味偏好）。
  */
-import type { CardStrategyV2, KnowledgeFormV2 } from "@ailearn/shared/card-generation-v2-contracts";
+import type { CardStrategyV2, KnowledgeFormV2, PracticeItemFormV2 } from "@ailearn/shared/card-generation-v2-contracts";
 import { practiceFormsForKnowledgeForm } from "@ailearn/shared/card-generation-v2-contracts";
 import { taskIntentsForStrategy } from "@ailearn/shared/card-generation-v2-pipeline";
 
@@ -166,8 +166,11 @@ import { taskIntentsForStrategy } from "@ailearn/shared/card-generation-v2-pipel
  * 修法把决策权收回服务端：planner 在**整批**目标上按 knowledgeForm 适配边界 + 用户
  * 偏好 + 单一题型 ≤⌈N/2⌉ 分配 strategy，author 只能执行。模型逐张出题时看不到同批
  * 其他卡，题型多样性不可能靠提示词自觉达成。
+ *
+ * v26（方案 D6）：同一件事再做一次，对象换成**客观练习件的配额**——planner 按整批
+ * 分配"哪几张必须交、交哪种形状"（`allocatePracticeForms`），author 提示里点名。
  */
-export const CARD_GENERATION_V2_PROMPT_VERSION = "card-generation-v2/v25";
+export const CARD_GENERATION_V2_PROMPT_VERSION = "card-generation-v2/v26";
 
 export const PLANNER_PROMPT_VERSION = `${CARD_GENERATION_V2_PROMPT_VERSION}/planner`;
 export const AUTHOR_PROMPT_VERSION = `${CARD_GENERATION_V2_PROMPT_VERSION}/author`;
@@ -552,6 +555,7 @@ const exampleHintsForStrategy: Record<CardStrategyV2, { level1: string; level2: 
 export const buildAuthorSystemPrompt = (
   strategy: CardStrategyV2,
   knowledgeFormHint?: KnowledgeFormV2,
+  requiredPracticeForm?: PracticeItemFormV2 | null,
 ): string => {
   const spec = authorStrategySpecs[strategy];
   // v25：按知识形态限定客观题形状。顺序即优先级，第一个是首选。
@@ -561,6 +565,14 @@ export const buildAuthorSystemPrompt = (
       + "，practiceItem 只允许这些形状（按优先级）："
       + allowedForms.join(" → ")
       + "。交不出这个形状就写 null，不要退而求其次换成别的形状。\n"
+      // v26（方案 D6）：整批配额里"必须交"的那几张卡在这里点名。配额是整批的事，
+      // 逐张出题的作者看不到别的卡，所以由 planner 分配后写进提示。
+      + (requiredPracticeForm
+        ? "- **这一批要求本卡必须交出一道 " + requiredPracticeForm + " 练习件**（整批口径："
+          + "至少一半的卡带练习件，形状在这一批里铺开）。只要能从证据里给出有出处的"
+          + "干扰项/配对项就必须交；证据确实不支持时仍然写 null —— "
+          + "配额不是伪造干扰项的理由。\n"
+        : "- 本卡不在配额点名之列：能给出有证据的干扰项就交，给不出就写 null。\n")
     : "";
   return `
 你是 Candidate Author。你为规划好的学习目标编写候选卡片：objective（含 canonical

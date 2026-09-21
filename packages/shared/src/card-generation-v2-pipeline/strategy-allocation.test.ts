@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  allocatePracticeForms,
   allocateStrategies,
   strategyForKnowledgeForm,
 } from "./index.ts";
@@ -91,4 +92,36 @@ test("偏离最自然题型时留下可审计理由码", () => {
 
   const preferred = allocateStrategies(["definition"], ["cloze"])[0];
   assert.equal(preferred?.reasonCode, "strategy_preference_applied");
+});
+
+/**
+ * D6：整批的客观练习件配额。
+ *
+ * 缺陷形态（2026-09-21 真跑）：practiceItem 既可省略又没有形状约束时，一整批模型
+ * 要么全不交、要么一律挑最省事的 ordering。配额与题型分配同源——它必须在整批层面
+ * 决定，逐张出题的作者看不到同批其他卡。
+ */
+test("练习件配额：至少一半的卡被点名，形状在本批铺开，且不越形态边界", () => {
+  const one = allocatePracticeForms(["definition"]);
+  assert.equal(one.length, 1);
+  assert.equal(one[0]?.form, "single_choice");
+  assert.equal(one[0]?.reasonCode, "practice_quota_required");
+
+  // 4 张 → 至少 2 张被点名；同形态允许的两种形状要铺开，不能两张都出选择题。
+  const batch = allocatePracticeForms(["definition", "definition", "fact", "boundary"]);
+  const required = batch.filter((entry) => entry.form !== null);
+  assert.equal(required.length, 2, "4 张卡至少 2 张必须带练习件");
+  assert.notEqual(required[0]?.form, required[1]?.form, "同形态内也要把形状铺开");
+  // 没被点名的卡是 null（不强制），而不是被硬塞一个形状。
+  assert.equal(batch.filter((entry) => entry.form === null).length, 2);
+
+  // 形态边界优先于铺开：这两张的允许形状里根本没有选择题，被点名的也只会落在
+  // ordering / matching 上（N=2 的配额是 1，所以第二张是 null 而不是硬塞）。
+  const sequences = allocatePracticeForms(["sequence", "procedure"]);
+  assert.equal(sequences[0]?.form, "ordering");
+  assert.ok(sequences.every((entry) =>
+    entry.form === null || entry.form === "ordering" || entry.form === "matching"));
+
+  // 空批次不炸。
+  assert.deepEqual(allocatePracticeForms([]), []);
 });
