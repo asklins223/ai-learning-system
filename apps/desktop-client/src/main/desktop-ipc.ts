@@ -82,7 +82,8 @@ import {
   inviteListResultV1Schema,
   markdownImportResultV1Schema,
   memberListResultV1Schema,
-  NOTE_DOC_FRAME_MAX_BASE64_CHARS,
+  NOTE_DOC_BLOCKS_MAX_COUNT,
+  noteDocSubmittedBlockV1Schema,
   noteDocStateResultV1Schema,
   noteDocWriteResultV1Schema,
   noteDocPresenceResultV1Schema,
@@ -144,6 +145,8 @@ import {
   companionVoiceSpeakRequestV1Schema,
   companionVoiceSpeakResultV1Schema,
   companionVoiceSpeakSegmentRequestV2Schema,
+  companionVoicePlaybackOutcomeRequestV1Schema,
+  companionVoicePlaybackOutcomeResultV1Schema,
   companionVoiceTranscribeRequestV1Schema,
   companionVoiceTranscribeResultV1Schema,
 } from "@ailearn/shared/companion-voice-contracts";
@@ -315,6 +318,10 @@ const companionVoiceSpeakInputSchema = z.strictObject({
 const companionVoiceSpeakSegmentInputSchema = z.strictObject({
   meta: requestMetaSchema,
   request: companionVoiceSpeakSegmentRequestV2Schema,
+});
+const companionVoicePlaybackOutcomeInputSchema = z.strictObject({
+  meta: requestMetaSchema,
+  request: companionVoicePlaybackOutcomeRequestV1Schema,
 });
 // 语音转文本 + 聊天链路的入参（2026-09-18）。转写的音频 base64 上限在 schema
 // 与 main 侧字节解码后双重收口（10MB，与 API multipart 全局上限一致）。
@@ -512,16 +519,17 @@ const noteDocStateInputSchema = z.strictObject({
   noteId: uuidSchema,
 });
 /**
- * 写入的正门。有连接就并进那条连接的文档（同一份 CRDT 状态，多个窗口共用），
- * 没有连接（personal 空间、只读成员、或还没订阅上）就走一次性 HTTP 上送。
- * 界面只需要记一条规则：改了就发这里。
+ * 写入的正门。界面交的都是它眼前这份块（顺序即 ordinal）：有连接就并进那条连接的文档
+ * （同一份 CRDT 状态，多个窗口共用），没有连接就主进程取一次起点、就地差分、走 HTTP。
+ * 一条规则："改了就发这里"。
  */
-const noteDocApplyUpdateInputSchema = z.strictObject({
+const noteDocSyncBlocksInputSchema = z.strictObject({
   ...m1InputBase,
   commandId: commandIdSchema,
   noteId: uuidSchema,
-  // 上限与下行帧共用同一个常量：两侧各写一个数，迟早一边放行一边拒收。
-  update: z.string().min(1).max(NOTE_DOC_FRAME_MAX_BASE64_CHARS),
+  // 上限与下行帧同一处定义：两边各写一个数，迟早一边放行一边拒收。
+  blocks: z.array(noteDocSubmittedBlockV1Schema).max(NOTE_DOC_BLOCKS_MAX_COUNT),
+  title: z.strictObject({ title: z.string().max(200), titleSource: z.enum(["auto", "manual"]) }).optional(),
 });
 const noteDocPresenceInputSchema = z.strictObject({
   ...m1InputBase,
@@ -1955,6 +1963,14 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     return gateway.speakCompanionVoiceSegment(input.request, input.meta.requestId);
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionVoiceSpeakResultV1Schema);
 
+  // 一段音频播没播成（0247）：与合成同一路由门控。渲染层是 fire-and-forget，
+  // 这条链路失败只会变成"少一行统计"，不会打断朗读。
+  installHandler(DESKTOP_IPC_CHANNELS.companionVoicePlaybackOutcome, companionVoicePlaybackOutcomeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.recordCompanionVoicePlaybackOutcome(input.request, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionVoicePlaybackOutcomeResultV1Schema);
+
   // 语音转文本 + 聊天发送链路（2026-09-18）：与其余伴星通道同一路由门控。
   installHandler(DESKTOP_IPC_CHANNELS.companionVoiceTranscribe, companionVoiceTranscribeInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "room.home");
@@ -2393,19 +2409,22 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     return await gateway.getNoteDocState(input.noteId, input.meta.requestId);
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, noteDocStateResultV1Schema);
 
-  installHandler(DESKTOP_IPC_CHANNELS.noteDocApplyUpdate, noteDocApplyUpdateInputSchema, options, async (_event, _window, input): Promise<NoteDocWriteResultV1> => {
+  installHandler(DESKTOP_IPC_CHANNELS.noteDocSyncBlocks, noteDocSyncBlocksInputSchema, options, async (_event, _window, input): Promise<NoteDocWriteResultV1> => {
     requireM2Route(contract, "note.detail");
     assertEpoch(input.meta, activeWorkspaceEpoch);
+    // 可写性这里一律不判：判据只在服务端那一处（WS 侧 `Authenticated("readonly")`、
+    // HTTP 侧 `requireOwner`）。这里只决定"走哪条出口"。
     const stream = noteDocStreams.get(input.noteId);
     if (stream && stream.workspaceEpoch === activeWorkspaceEpoch) {
-      // ack 用 commandId：同机另一个窗口要收到这一帧，发的那个窗口收到也无妨
-      // （CRDT 上是一次空操作）。
-      stream.handle.applyLocalUpdate(input.update, input.commandId);
+      stream.handle.applyBlocks(input.blocks, input.title);
       return { via: "stream", revision: null };
     }
-    // 没有连接不等于不能写：personal 空间与离线重连的队列都从这里出去。
-    // 可写性的判据仍然只在服务端那一处（`requireOwner`），这里不重复判。
-    const receipt = await gateway.uploadNoteDocUpdate(input.noteId, input.update, input.meta.requestId);
+    const receipt = await gateway.syncNoteDocBlocks(
+      input.noteId,
+      input.blocks,
+      input.title,
+      input.meta.requestId,
+    );
     return { via: "uploaded", revision: receipt.revision };
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, noteDocWriteResultV1Schema);
 

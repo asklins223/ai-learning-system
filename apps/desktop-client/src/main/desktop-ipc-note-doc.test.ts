@@ -66,8 +66,8 @@ async function setup(session: { workspaceType: "personal" | "collaborative"; rol
   vi.resetModules();
   const { registerM1DesktopIpc } = await import("./desktop-ipc");
   const streamHandle = {
-    applyLocalUpdate: vi.fn(),
-    currentState: vi.fn(() => "state-as-base64"),
+    applyBlocks: vi.fn(() => null),
+    view: vi.fn(() => ({ blocks: [], title: "", titleSource: "auto" })),
     setPresence: vi.fn(),
     stop: vi.fn(),
   };
@@ -76,7 +76,14 @@ async function setup(session: { workspaceType: "personal" | "collaborative"; rol
     mock: { calls: WatchCall[] };
   };
   const uploadNoteDocUpdate = vi.fn(async () => ({ revision: 7 }));
-  const getNoteDocState = vi.fn(async () => ({ update: "state-as-base64", revision: 3, backfilled: false }));
+  const getNoteDocState = vi.fn(async () => ({
+    blocks: [{ ordinal: 0, type: "paragraph", content: "正文" }],
+    title: "标题",
+    titleSource: "auto",
+    revision: 3,
+    backfilled: false,
+  }));
+  const syncViaGateway = vi.fn(async () => ({ revision: 11 }));
   const send = vi.fn();
   const fakeWindow = {
     isDestroyed: () => false,
@@ -107,6 +114,7 @@ async function setup(session: { workspaceType: "personal" | "collaborative"; rol
     }),
     watchNoteDocument,
     uploadNoteDocUpdate,
+    syncNoteDocBlocks: syncViaGateway,
     getNoteDocState,
   } as unknown as DesktopGateway;
 
@@ -120,7 +128,7 @@ async function setup(session: { workspaceType: "personal" | "collaborative"; rol
 
   const event = { sender: {}, senderFrame: { url: "ailearn://renderer/" } };
   await handler(DESKTOP_IPC_CHANNELS.authGetState)(event, { meta });
-  return { event, streamHandle, watchNoteDocument, uploadNoteDocUpdate, getNoteDocState, send };
+  return { event, streamHandle, watchNoteDocument, uploadNoteDocUpdate, syncViaGateway, getNoteDocState, send };
 }
 
 const settle = () => new Promise((resolve) => setImmediate(resolve));
@@ -154,14 +162,18 @@ describe("笔记协同的 IPC 通道", () => {
     send.mockClear();
     // 这就是风险 3 的那一条：kind 白名单或 payload union 漏一处，下面就是 0 次调用。
     const onEvent = watchNoteDocument.mock.calls[0][1] as (e: unknown) => void | Promise<void>;
-    await onEvent({ noteId: NOTE_ID, type: "update", update: "incremental-frame" });
+    await onEvent({ noteId: NOTE_ID, type: "blocks", blocks: [{ ordinal: 0, type: "paragraph", content: "别人的改动" }], title: "标题", titleSource: "auto" });
     expect(send).toHaveBeenCalledTimes(1);
     const [channel, payload] = send.mock.calls[0];
     expect(channel).toBe(DESKTOP_IPC_CHANNELS.subscriptionsEvent);
     expect(payload).toMatchObject({
       kind: "note_doc_event",
       workspaceEpoch: WORKSPACE_EPOCH,
-      data: { kind: "note_doc_event", noteId: NOTE_ID, event: { type: "update", update: "incremental-frame" } },
+      data: {
+        kind: "note_doc_event",
+        noteId: NOTE_ID,
+        event: { type: "blocks", blocks: [{ ordinal: 0, type: "paragraph", content: "别人的改动" }], title: "标题", titleSource: "auto" },
+      },
     });
 
     await onEvent({ noteId: NOTE_ID, type: "status", status: "authenticated", authorizedScope: "readonly" });
@@ -171,7 +183,7 @@ describe("笔记协同的 IPC 通道", () => {
   });
 
   it("personal 空间不建长连接，写入改走一次性上送", async () => {
-    const { event, watchNoteDocument, uploadNoteDocUpdate } = await setup({ workspaceType: "personal", role: "owner" });
+    const { event, watchNoteDocument, syncViaGateway, uploadNoteDocUpdate } = await setup({ workspaceType: "personal", role: "owner" });
     await handler(DESKTOP_IPC_CHANNELS.subscriptionsSubscribe)(event, {
       meta,
       topic: { kind: "noteDoc", noteId: NOTE_ID },
@@ -179,18 +191,18 @@ describe("笔记协同的 IPC 通道", () => {
     await settle();
     expect(watchNoteDocument).not.toHaveBeenCalled();
 
-    const written = await handler(DESKTOP_IPC_CHANNELS.noteDocApplyUpdate)(event, {
+    const written = await handler(DESKTOP_IPC_CHANNELS.noteDocSyncBlocks)(event, {
       meta,
       commandId: "command-upload-1",
       noteId: NOTE_ID,
-      update: "incremental-frame",
+      blocks: [{ type: "paragraph", content: "改过的正文" }],
     });
-    expect(written).toMatchObject({ ok: true, data: { via: "uploaded", revision: 7 } });
-    expect(uploadNoteDocUpdate).toHaveBeenCalledWith(NOTE_ID, "incremental-frame", meta.requestId);
+    expect(written).toMatchObject({ ok: true, data: { via: "uploaded", revision: 11 } });
+    expect(syncViaGateway).toHaveBeenCalledWith(NOTE_ID, [{ type: "paragraph", content: "改过的正文" }], undefined, meta.requestId);
   });
 
   it("协作空间的只读成员同样不建连，写入也拿不到流", async () => {
-    const { event, watchNoteDocument, uploadNoteDocUpdate } = await setup({ workspaceType: "collaborative", role: "member" });
+    const { event, watchNoteDocument, syncViaGateway, uploadNoteDocUpdate } = await setup({ workspaceType: "collaborative", role: "member" });
     await handler(DESKTOP_IPC_CHANNELS.subscriptionsSubscribe)(event, {
       meta,
       topic: { kind: "noteDoc", noteId: NOTE_ID },
@@ -198,18 +210,21 @@ describe("笔记协同的 IPC 通道", () => {
     await settle();
     expect(watchNoteDocument).not.toHaveBeenCalled();
     // 可写性的判据只在服务端那一处：主进程不自己挡，交给 API 回 403。
-    const written = await handler(DESKTOP_IPC_CHANNELS.noteDocApplyUpdate)(event, {
+    const written = await handler(DESKTOP_IPC_CHANNELS.noteDocSyncBlocks)(event, {
       meta,
       commandId: "command-upload-2",
       noteId: NOTE_ID,
-      update: "incremental-frame",
+      blocks: [{ type: "paragraph", content: "成员想改的正文" }],
     });
     expect(written).toMatchObject({ ok: true, data: { via: "uploaded" } });
-    expect(uploadNoteDocUpdate).toHaveBeenCalledTimes(1);
+    // 只读成员在主进程这一层不被"再判一次"：那样会变成两套判据。差分与上送照走，
+    // 真拒绝由 API 的 requireOwner 给 403。
+    expect(syncViaGateway).toHaveBeenCalledTimes(1);
+    expect(uploadNoteDocUpdate).not.toHaveBeenCalled();
   });
 
   it("有连接时写入并进那份文档，不再走 HTTP", async () => {
-    const { event, streamHandle, watchNoteDocument, uploadNoteDocUpdate } = await setup({
+    const { event, streamHandle, watchNoteDocument, syncViaGateway, uploadNoteDocUpdate } = await setup({
       workspaceType: "collaborative",
       role: "owner",
     });
@@ -220,21 +235,22 @@ describe("笔记协同的 IPC 通道", () => {
     await settle();
     expect(watchNoteDocument).toHaveBeenCalledTimes(1);
 
-    const written = await handler(DESKTOP_IPC_CHANNELS.noteDocApplyUpdate)(event, {
+    const written = await handler(DESKTOP_IPC_CHANNELS.noteDocSyncBlocks)(event, {
       meta,
       commandId: "command-stream-1",
       noteId: NOTE_ID,
-      update: "incremental-frame",
+      blocks: [{ type: "paragraph", content: "改过的正文" }],
     });
     expect(written).toMatchObject({ ok: true, data: { via: "stream", revision: null } });
-    expect(streamHandle.applyLocalUpdate).toHaveBeenCalledWith("incremental-frame", "command-stream-1");
+    expect(streamHandle.applyBlocks).toHaveBeenCalledWith([{ type: "paragraph", content: "改过的正文" }], undefined);
     expect(uploadNoteDocUpdate).not.toHaveBeenCalled();
   });
 
-  it("编辑起点走 doc-state，不接受界面传的地址", async () => {
+  it("编辑起点是视图（blocks + 标题），编码不出主进程", async () => {
     const { event, getNoteDocState } = await setup({ workspaceType: "collaborative", role: "owner" });
     const state = await handler(DESKTOP_IPC_CHANNELS.noteDocState)(event, { meta, noteId: NOTE_ID });
-    expect(state).toMatchObject({ ok: true, data: { update: "state-as-base64", revision: 3, backfilled: false } });
+    expect(state).toMatchObject({ ok: true, data: { blocks: [{ ordinal: 0, type: "paragraph", content: "正文" }], title: "标题", revision: 3 } });
+    expect(JSON.stringify(state)).not.toContain("state-as-base64");
     expect(getNoteDocState).toHaveBeenCalledWith(NOTE_ID, meta.requestId);
   });
 
@@ -265,20 +281,19 @@ describe("笔记协同的 IPC 通道", () => {
     expect(streamHandle.stop).toHaveBeenCalledTimes(1);
   });
 
-  it("超限的帧不进 IPC：空 update 与超长 update 都在入口被拒", async () => {
+  it("超限的提交不进 gateway：空块数组与超块数都在入口被拒", async () => {
     const { event, uploadNoteDocUpdate } = await setup({ workspaceType: "personal", role: "owner" });
-    const empty = await handler(DESKTOP_IPC_CHANNELS.noteDocApplyUpdate)(event, {
+    const empty = await handler(DESKTOP_IPC_CHANNELS.noteDocSyncBlocks)(event, {
       meta,
       commandId: "command-empty",
       noteId: NOTE_ID,
-      update: "",
+      blocks: [],
     });
-    expect(empty.ok).toBe(false);
-    const oversized = await handler(DESKTOP_IPC_CHANNELS.noteDocApplyUpdate)(event, {
+    const oversized = await handler(DESKTOP_IPC_CHANNELS.noteDocSyncBlocks)(event, {
       meta,
       commandId: "command-oversize",
       noteId: NOTE_ID,
-      update: "A".repeat(5 * 1024 * 1024),
+      blocks: Array.from({ length: 2_500 }, () => ({ type: "paragraph", content: "x" })),
     });
     expect(oversized.ok).toBe(false);
     expect(uploadNoteDocUpdate).not.toHaveBeenCalled();

@@ -156,6 +156,8 @@ const desktopApi: AILearnDesktopApiM2 = {
     voice: {
       speak: (input) => invoke(DESKTOP_IPC_CHANNELS.companionVoiceSpeak, input),
       speakSegment: (input) => invoke(DESKTOP_IPC_CHANNELS.companionVoiceSpeakSegment, input),
+      // 一段音频播没播成（0247）：只有渲染进程知道，所以由它回报。
+      reportPlaybackOutcome: (input) => invoke(DESKTOP_IPC_CHANNELS.companionVoicePlaybackOutcome, input),
       // 语音转文本（2026-09-18）：本地 SenseVoice 优先，这条云通道是兜底。
       transcribe: (input) => invoke(DESKTOP_IPC_CHANNELS.companionVoiceTranscribe, input)
     },
@@ -255,7 +257,7 @@ const desktopApi: AILearnDesktopApiM2 = {
     // presence 都走这里，实时下行是 `subscriptions` 上 kind=noteDoc 的事件。
     doc: {
       state: (input) => invoke(DESKTOP_IPC_CHANNELS.noteDocState, input),
-      applyUpdate: (input) => invoke(DESKTOP_IPC_CHANNELS.noteDocApplyUpdate, input),
+      syncBlocks: (input) => invoke(DESKTOP_IPC_CHANNELS.noteDocSyncBlocks, input),
       presence: (input) => invoke(DESKTOP_IPC_CHANNELS.noteDocPresence, input),
     },
     versions: (input) => invoke(DESKTOP_IPC_CHANNELS.noteVersions, input),

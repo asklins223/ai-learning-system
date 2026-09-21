@@ -39,6 +39,7 @@ import {
   type CompanionRoomProfilePatchV1,
 } from "./companion-home-contracts.ts";
 import {
+  companionVoicePlaybackOutcomeResultV1Schema,
   companionVoiceSpeakResultV1Schema,
   companionVoiceTranscribeResultV1Schema,
   type CompanionVoiceSpeakRequestV1,
@@ -228,6 +229,7 @@ export const DESKTOP_IPC_CHANNELS = {
   companionRoomPatchProfile: "ailearn.v1.companion.room.patchProfile",
   companionVoiceSpeak: "ailearn.v1.companion.voice.speak",
   companionVoiceSpeakSegment: "ailearn.v1.companion.voice.speakSegment",
+  companionVoicePlaybackOutcome: "ailearn.v1.companion.voice.playbackOutcome",
   companionAccountGetState: "ailearn.v1.companion.account.getState",
   companionAccountPatchState: "ailearn.v1.companion.account.patchState",
   companionOnboardingTransition: "ailearn.v1.companion.onboarding.transition",
@@ -308,10 +310,11 @@ export const DESKTOP_IPC_CHANNELS = {
   noteSave: "ailearn.v1.note.save",
   // 批次 4.3：笔记协同。渲染进程不能直连 WS（sandbox + CSP + onBeforeRequest 三层
   // 硬拦截），所以下行是一条订阅事件、上行是一次性通道。
-  // 只有 `noteDocApplyUpdate` 一个写入口：有长连接就并进那份文档，没有就走 HTTP 上送，
-  // 判据在 `note_doc_write_result_v1.via` 里如实回报——分成两个口就是两套可能走偏的路径。
+  // 只有 `noteDocSyncBlocks` 一个写入口，界面交的都是 blocks：有长连接就并进那份文档
+  // （provider 自己送增量），没有就主进程取一次起点、就地差分、按 HTTP 上送。走了哪条
+  // 由 `via` 如实回报；"能不能写"不在这里判，那判据只在服务端一处。
   noteDocState: "ailearn.v1.note.doc.state",
-  noteDocApplyUpdate: "ailearn.v1.note.doc.applyUpdate",
+  noteDocSyncBlocks: "ailearn.v1.note.doc.syncBlocks",
   noteDocPresence: "ailearn.v1.note.doc.presence",
   noteCardGenerationStart: "ailearn.v1.note.cardGeneration.start",
   noteCardGenerationGetRun: "ailearn.v1.note.cardGeneration.getRun",
@@ -1350,10 +1353,29 @@ export type CompanionChatStreamEventV1 = z.infer<typeof companionChatStreamEvent
  * 挡不住一条几 MB 的正文穿过 IPC（主进程要为它做一次结构化克隆，渲染进程再解一遍）。
  * 上限与主进程 `note-doc-transport.ts` 用的是同一个常量，两边不能各写一个数。
  */
-export const NOTE_DOC_FRAME_MAX_BASE64_CHARS = 4 * 1024 * 1024;
+export const NOTE_DOC_BLOCKS_MAX_JSON_CHARS = 4 * 1024 * 1024;
+/** 单篇笔记的块数上限：超它不是"编辑不了"而是形状不对，宁可直接拒。 */
+export const NOTE_DOC_BLOCKS_MAX_COUNT = 2_000;
+
+/** 界面上行提交的块：数组顺序就是 ordinal，所以不带编号。 */
+export const noteDocSubmittedBlockV1Schema = z.strictObject({
+  type: z.string().min(1).max(32),
+  content: z.string().max(200_000),
+  sourceRef: z.strictObject({ sourceId: uuidSchema.optional(), segmentId: uuidSchema.optional() }).nullable().optional(),
+  imageAssetId: uuidSchema.nullable().optional(),
+});
+/** 主进程投影给界面的块：带 ordinal（下标就是它，另存一份才会和数组打架）。 */
+export const noteDocProjectBlockV1Schema = noteDocSubmittedBlockV1Schema.extend({
+  ordinal: nonNegativeIntSchema,
+});
 
 export const noteDocStreamEventV1Schema = z.discriminatedUnion("type", [
-  z.strictObject({ type: z.literal("update"), update: z.string().min(1).max(NOTE_DOC_FRAME_MAX_BASE64_CHARS) }),
+  z.strictObject({
+    type: z.literal("blocks"),
+    blocks: z.array(noteDocProjectBlockV1Schema).max(NOTE_DOC_BLOCKS_MAX_COUNT),
+    title: z.string().max(200),
+    titleSource: z.string().max(16),
+  }),
   z.strictObject({
     type: z.literal("status"),
     status: z.enum(["connecting", "connected", "authenticated", "disconnected", "failed"]),
@@ -1377,11 +1399,21 @@ export const noteDocEventPayloadSchema = z.strictObject({
 });
 export type NoteDocEventPayloadV1 = z.infer<typeof noteDocEventPayloadSchema>;
 
-/** 编辑起点：一篇笔记当前那份可直接喂给 Y.Doc 的编码。 */
-export const noteDocStateResultV1Schema = z.strictObject({
-  update: z.string().min(1).max(NOTE_DOC_FRAME_MAX_BASE64_CHARS),
+/** API `GET /v2/notes/:id/doc-state` 的回执：能直接喂给 Y.Doc 的那份编码。只有主进程读它。 */
+export const noteDocServerStateV1Schema = z.strictObject({
+  update: z.string().min(1).max(NOTE_DOC_BLOCKS_MAX_JSON_CHARS),
   revision: nonNegativeIntSchema,
-  /** true = 这篇建得比 0244 早，返回的是从行里补齐后重新编码的一份。 */
+  backfilled: z.boolean(),
+});
+export type NoteDocServerStateV1 = z.infer<typeof noteDocServerStateV1Schema>;
+
+/** 编辑起点：主进程把编码解成视图再交给界面（界面不碰 yjs 编码）。 */
+export const noteDocStateResultV1Schema = z.strictObject({
+  blocks: z.array(noteDocProjectBlockV1Schema).max(NOTE_DOC_BLOCKS_MAX_COUNT),
+  title: z.string().max(200),
+  titleSource: z.string().max(16),
+  revision: nonNegativeIntSchema,
+  /** true = 这篇建得比 0244 早，服务端给的是从行里补齐后重新编码的一份。 */
   backfilled: z.boolean(),
 });
 export type NoteDocStateResultV1 = z.infer<typeof noteDocStateResultV1Schema>;
@@ -1397,7 +1429,7 @@ export type NoteDocUploadResultV1 = z.infer<typeof noteDocUploadResultV1Schema>;
  * 让界面知道"这次是哪条路"，才不会在断连时把两件事混成一个错误。
  */
 export const noteDocWriteResultV1Schema = z.strictObject({
-  via: z.enum(["stream", "uploaded"]),
+  via: z.enum(["stream", "uploaded", "unchanged"]),
   /** 只有 uploaded 才有：服务端那份快照的 revision。 */
   revision: nonNegativeIntSchema.nullable(),
 });
@@ -1758,6 +1790,15 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
         request: CompanionVoiceSpeakSegmentRequestV2;
       }): Promise<GatewayResultV1<z.infer<typeof companionVoiceSpeakResultV1Schema>>>;
       /**
+       * 一段音频到底播没播成（0247）。服务端那一半只能证明"字节交给了客户端"，
+       * 而"她经常没声音"里的等到超时/取段失败只发生在渲染进程这一侧。
+       * 上报失败不该影响朗读，所以调用方 fire-and-forget，回执只是给统计看的。
+       */
+      reportPlaybackOutcome(input: {
+        meta: RequestMetaV1;
+        request: import("./companion-voice-contracts.ts").CompanionVoicePlaybackOutcomeRequestV1;
+      }): Promise<GatewayResultV1<z.infer<typeof companionVoicePlaybackOutcomeResultV1Schema>>>;
+      /**
        * 语音转文本（2026-09-18 接线）：渲染层本地录好 16kHz WAV，main 送到
        * `POST /voice/transcribe`（purpose=companion_dialogue）。本地 SenseVoice
        * （WASM）优先，这条云通道是本地引擎不可用时的兜底。
@@ -1931,17 +1972,19 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
     restore(input: { meta: RequestMetaV1; noteId: Uuid }): Promise<GatewayResultV1<DesktopNoteMutationResult>>;
     get(input: { meta: RequestMetaV1; noteId: Uuid }): Promise<GatewayResultV1<z.infer<typeof noteDetailV1Schema>>>;
     /**
-     * 协同正文（批次 4.3）。渲染进程不直连 WS：`state` 取编辑起点，`applyUpdate` 是唯一
-     * 写入口（有长连接就并进那份文档，没有就走 HTTP，`via` 如实回报），实时下行走
-     * `subscriptions.subscribe({kind:"noteDoc", noteId})` 的事件。
+     * 协同正文（批次 4.3/4.4）。渲染进程不直连 WS，也不碰 yjs 编码：`state` 取编辑起点
+     * （已经是视图），`syncBlocks` 是唯一写入口（有长连接就并进那份文档，没有就走
+     * HTTP，`via` 如实回报），实时下行走 `subscriptions.subscribe({kind:"noteDoc", noteId})`
+     * 的 `blocks` 帧。
      */
     readonly doc: {
       state(input: { meta: RequestMetaV1; noteId: Uuid }): Promise<GatewayResultV1<NoteDocStateResultV1>>;
-      applyUpdate(input: {
+      syncBlocks(input: {
         meta: RequestMetaV1;
         commandId: string;
         noteId: Uuid;
-        update: string;
+        blocks: z.infer<typeof noteDocSubmittedBlockV1Schema>[];
+        title?: { title: string; titleSource: "auto" | "manual" };
       }): Promise<GatewayResultV1<z.infer<typeof noteDocWriteResultV1Schema>>>;
       presence(input: {
         meta: RequestMetaV1;

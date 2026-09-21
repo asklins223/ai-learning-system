@@ -70,18 +70,22 @@ import {
   type WorkspaceSummaryV1,
   windowStateSnapshotV1Schema,
   workspaceAiSettingsV1Schema,
+  noteDocServerStateV1Schema,
   noteDocStateResultV1Schema,
   noteDocUploadResultV1Schema,
   type NoteDocStateResultV1,
   type NoteDocStreamEventV1,
   type NoteDocUploadResultV1,
 } from "@ailearn/shared/desktop-ipc-contracts";
+import { createNoteDocState } from "./note-doc-state.ts";
+import type { NoteDocBlock } from "./note-doc-blocks.ts";
 import {
   NOTE_DOC_PREFIX,
   defaultNoteDocTransport,
   noteDocStreamUrl,
   toNoteDocStreamEvent,
   type NoteDocTransport,
+  type NoteDocTransportHandle,
   type NoteDocWatchHandle,
 } from "./note-doc-transport.ts";
 import {
@@ -123,8 +127,11 @@ import {
   COMPANION_VOICE_MAX_AUDIO_BYTES,
   COMPANION_VOICE_SPEAK_VOICE,
   COMPANION_VOICE_TRANSCRIBE_MAX_AUDIO_BYTES,
+  companionVoicePlaybackOutcomeResultV1Schema,
   companionVoiceSpeakResultV1Schema,
   companionVoiceTranscribeResultV1Schema,
+  type CompanionVoicePlaybackOutcomeRequestV1,
+  type CompanionVoicePlaybackOutcomeResultV1,
   type CompanionVoiceSpeakRequestV1,
   type CompanionVoiceSpeakSegmentRequestV2,
   type CompanionVoiceSpeakResultV1,
@@ -2986,6 +2993,30 @@ export class DesktopGateway {
     return parsed.data;
   }
 
+  /**
+   * 一段音频的播放结局上报（0247）。
+   *
+   * 与合成的取字节路径分开，是因为这一段音频**有没有真的响**只有渲染进程知道：
+   * 合成请求成功 = 字节交出去了，之后可能等到超时、可能解码失败。调用方是
+   * fire-and-forget，所以这里失败只意味着少一行统计，绝不能冒泡成"朗读中断"。
+   */
+  async recordCompanionVoicePlaybackOutcome(
+    request: CompanionVoicePlaybackOutcomeRequestV1,
+    requestId?: string,
+  ): Promise<CompanionVoicePlaybackOutcomeResultV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request(
+      "/voice/tts/playback-outcome",
+      { method: "POST", body: JSON.stringify(request) },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionVoicePlaybackOutcomeResultV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
   private async getActiveCardGenerationSummaries(requestId?: string): Promise<CardGenerationActiveSummaryListV1> {
     await this.ensureConnected(requestId);
     const result = await this.request(
@@ -3767,11 +3798,11 @@ export class DesktopGateway {
       },
     });
     return {
-      applyLocalUpdate: (update, ack) => {
+      applyBlocks: (blocks, title) => {
         if (stopped) return;
-        handle.applyLocalUpdate(update, ack);
+        handle.applyBlocks(blocks, title);
       },
-      currentState: () => (stopped ? "" : handle.currentState()),
+      view: () => (stopped ? { blocks: [], title: "", titleSource: "auto" } : handle.view()),
       setPresence: (state) => {
         if (stopped) return;
         handle.setPresence(state);
@@ -3789,9 +3820,52 @@ export class DesktopGateway {
     await this.ensureConnected(requestId);
     const safeNoteId = this.safeUuid(noteId);
     const result = await this.request(`/v2/notes/${safeNoteId}/doc-state`, { method: "GET" }, true, true, requestId);
-    const parsed = noteDocStateResultV1Schema.safeParse(result.body);
+    const parsed = noteDocServerStateV1Schema.safeParse(result.body);
     if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
-    return parsed.data;
+    // yjs 编码只活在这一层：主进程解成视图再交给界面。让界面也拿编码，就得在渲染进程
+    // 再装一份 CRDT 依赖，而它要显示的本来就是块。
+    const state = createNoteDocState();
+    try {
+      state.seed(parsed.data.update);
+      return { ...state.view(), revision: parsed.data.revision, backfilled: parsed.data.backfilled };
+    } finally {
+      state.dispose();
+    }
+  }
+
+  /**
+   * 没有长连接时的一次写入（personal 空间、只读门控之外的场景）：取一次起点、就地差分、
+   * 把差出来的增量交给同一个 HTTP 口。
+   *
+   * 为什么不直接"把整篇 POST 上去"：那等于回到覆盖式保存，正是本轮要消灭的形状。起点
+   * 是服务端那份编码，差分才有"只改动真正变过的地方"这个语义。
+   */
+  async syncNoteDocBlocks(
+    noteId: string,
+    blocks: NoteDocBlock[],
+    title: { title: string; titleSource: string } | undefined,
+    requestId?: string,
+  ): Promise<NoteDocUploadResultV1> {
+    const safeNoteId = this.safeUuid(noteId);
+    const start = await this.request(
+      `/v2/notes/${safeNoteId}/doc-state`,
+      { method: "GET" },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = noteDocServerStateV1Schema.safeParse(start.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    const state = createNoteDocState();
+    let update: string | null;
+    try {
+      state.seed(parsed.data.update);
+      update = state.submitBlocks(blocks, title);
+    } finally {
+      state.dispose();
+    }
+    if (update === null) return { revision: parsed.data.revision };
+    return this.uploadNoteDocUpdate(safeNoteId, update, requestId);
   }
 
   /**
