@@ -2020,13 +2020,13 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
                       : "回去之后会接着你真正要练的那一条。"}
               </p>
             </section>
-            <div className="actions learning-run-result-actions">
-              <button type="button" className="button primary" onClick={() => onExit({ route: exitRoute })}>
-                <ArrowLeft size={15} aria-hidden="true" />{resultReturnLabel}
-              </button>
-              <button type="button" className="button" onClick={openObjective}>查看理解目标</button>
-            </div>
           </article>
+          <div className="actions learning-run-result-actions">
+            <button type="button" className="button primary" onClick={() => onExit({ route: exitRoute })}>
+              <ArrowLeft size={15} aria-hidden="true" />{resultReturnLabel}
+            </button>
+            <button type="button" className="button" onClick={openObjective}>查看理解目标</button>
+          </div>
         </section>
       ) : (
         <section className="learning-run-workbench" data-phase={snapshot.phase} data-interaction={activeTask?.activeVariant.interaction.kind ?? "none"}>

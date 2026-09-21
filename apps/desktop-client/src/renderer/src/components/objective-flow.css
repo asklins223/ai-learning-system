@@ -1,0 +1,29 @@
+/* 理解目标链路（列表 → 详情 → 作答 → 结算）的版式修正层。
+ *
+ * 单独成文件而不是写进 hud-surface.css，有两个原因：这条链路的规则散在
+ * hud-surface.css 的 4668-5403 段里，和伴星中心、复习牌堆共用一个 6000+ 行的
+ * 文件；而这里每一条都是对同文件更早处的一条覆盖，必须整体排在 hud 层之后才
+ * 稳定取胜。加载顺序见 main.tsx。
+ *
+ * 每条规则都标了它修的是 31-objective-flow-ui-review 的哪一个问题（Pn）。 */
+
+/* P5：结算页的出口此前长在 .learning-run-result-report 这个 overflow:auto 的
+ * 列里，内容一长就把按钮顶到折叠线以下（实测 actions 底边 789 vs 板底 755），
+ * 用户要滚动内层列才够得着「返回书房」。出口移出滚动列，钉在板的底部一行。 */
+/* 只加行，不动列：列宽在 hud-surface.css 的 ≤760px 段里另有一档
+ * （:5348），这里重写会把它盖掉。 */
+.hud-surface .learning-run-result-board { grid-template-rows: minmax(0, 1fr) auto; }
+.hud-surface .learning-run-result-summary { grid-area: 1 / 1 / 2 / 2; }
+.hud-surface .learning-run-result-report { grid-area: 1 / 2 / 2 / 3; }
+.hud-surface .learning-run-result-actions {
+  grid-area: 2 / 1 / 3 / 3;
+  margin-top: 0;
+  padding: 14px 34px 22px;
+  border-top: 1px solid var(--hud-line);
+  background: var(--hud-cream);
+}
+
+/* P27：印章 42px 在 48px 高的盒子里纵向溢出（scrollHeight 54 vs clientHeight 48），
+ * 四个字被削掉下沿。行高要盖住 CJK 衬线的实际字形高度——1.32 实测仍差 2px
+ * （57 vs 55），给到 1.45。 */
+.hud-surface .learning-run-result-summary__seal { line-height: 1.45; }
