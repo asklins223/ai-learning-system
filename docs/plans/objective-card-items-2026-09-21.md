@@ -284,3 +284,33 @@ worker 695/695、四端 typecheck 干净。桌面 134 文件里有 1 个文件�
 2. 真机复测要等 CDP 端口回来，量的是"在途那一屏到底显示了什么"——
    而这恰好是最难在真机上抓的窗口（管道 <1 分钟且中途不可见），
    现实可行的做法是把 run.status 手工置为 authoring 再截图，而不是追真跑的瞬时窗口。
+
+## 17. #25 结案：模型会写选择题，前提是形状被按知识形态限定
+
+材料：现造的一篇定义集（25 块，8 组「定义 + 适用边界」），note `1e212b93` /
+version `57c31bbf`。run `d375f218` 终态 **review_ready**（不再是 needs_attention）。
+
+| 指标 | v24 流程型笔记 | **v25 定义型笔记** |
+|---|---|---|
+| 候选 / 过门禁 | 3 / 2 | 8 / 6 |
+| 带练习件 | 2 | **5** |
+| single_choice | 0 | **4** |
+| true_false | 0 | **1** |
+| ordering | 2 | 0 |
+| author schema 违规 | 0 | 0 |
+
+形状与知识形态逐条对上，正是 v25 那张表要求的：
+`definition → single_choice`（2 张）、`boundary → true_false`、
+`causal_model → single_choice`、`application_rule → single_choice`。
+
+干扰项证据：4 张选择题里 **3 张的每个选项都带 evidenceRefIds**；另一张只有 1/3 带证据
+（它没有被 sanitize 丢掉，说明该卡有 misconception 兜底——这符合 D4 的判据，但值得抽查
+那条 misconception 是不是真来自证据，属于下一轮该看的点）。
+
+结论：**"模型写不出选择题"是错的判断**。此前 0 产出是因为 practiceItem 既可省略、又没有
+形状约束，模型自然挑最省事的 ordering；把它按知识形态钉住之后，选择题立刻出现。
+所以 #25 从"能力问题"改判为"规格缺口"，缺口已补。
+
+新的待看点（不是回归）：① 4 张选择题的 `correctUnitId` 全是 `opt-1`（作者总把正确项写在
+第一个）——公开顺序由内容哈希重排，界面不会因此泄题，但这说明可以在 prompt 里要求乱序书写
+以增强干扰项质量；② 那张 1/3 证据的卡的 misconception 需要抽查。
