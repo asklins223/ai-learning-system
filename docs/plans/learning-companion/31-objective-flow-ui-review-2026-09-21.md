@@ -292,7 +292,7 @@
 |---|---|---|
 | **B0** | 结算页溢出 + 出口槽 + 印章裁切（P5/P27） | ✅ 已上线，见 §14。**口径改过**：原写「report 不再 `overflow-y:auto`」是错的——纸面高度固定时总得有一列可滚，病在出口落在那一列里。改成三条可判定的：主按钮下沿离纸面下沿 ≥8px、出口不在任何 `scrollHeight>clientHeight` 的祖先内、`__seal` `scrollHeight <= clientHeight` |
 | **B1** | 结算页自相矛盾（P1/P6/P30） | ✅ 已上线（除「接下来」便签里的真按钮，见下），见 §14。口径：同一次 `covered` 判定下「还需补上」不出现该 facet；「这次说清 N 条」数判定行；`skipped`/`declared_unable` 时 DOM 里**没有** `__seal` 节点。**「接下来」便签的可点动作没做**——它需要在结算页起一次新 Run，而 start 命令只在目标详情的 `primaryAction` 里，属于新功能不是修复，单独留出来 |
-| **B2** | `data-outcome` 真的驱动视觉 + 一次性压印（P2/P32） | 🟡 **代码与守卫已上线；实机三档差异未完成**，原因见 §14 的 B2 一节：run 卡在 checkpoint，`POST /learning-runs/:runId/actions/v2` 撞 `learning_tasks_run_sequence_unique` 报 500，走不到 `demonstrated`。已满足：`[data-outcome]` 8 条规则分三档、压印只动 `transform`/`opacity`、`data-motion-mode="off"` 与 `prefers-reduced-motion` 都关、`main.tsx` 加载顺序有守卫 |
+| **B2** | `data-outcome` 真的驱动视觉 + 一次性压印（P2/P32） | 🟡 **代码与守卫已上线；实机三档差异未完成**，原因见 §14 的 B2 一节：**两堵墙**——① 新 run 卡在 checkpoint，`POST /learning-runs/:runId/actions/v2` 撞 `learning_tasks_run_sequence_unique` 报 500；② 想直接渲染库里已存的 `demonstrated` 也走不通，`learningRun.getResult` 对完成态 run 返回 **409 conflict**，结算页只认"这台客户端刚结算完的那一轮"。已满足：`[data-outcome]` 8 条规则分三档、压印只动 `transform`/`opacity`、`data-motion-mode="off"` 与 `prefers-reduced-motion` 都关、`main.tsx` 加载顺序有守卫 |
 | **B3** | 「下次到期 刚刚」（P4） | ✅ 已上线，见 §14。没有新增 `formatDue`——`objective-state-copy.ts:114` 的 `formatObjectiveDay` 已经是「今天/昨天/明天/N 天后/M月D日」且被列表行在用，直接复用；另在 `surface-data.test.tsx` 钉住 `formatRelative` 的「只量过去」契约 |
 | **B4** | 字号地板（P7/P13/P21/P33） | ✅ 全部完成，见 §14 与 §14 的 B4 补充。列表/详情 <11px 段数 49→**0**、53→**0**；提示惩罚说明 7.5px→**12px** 且面板搬进题面区；紧凑档 `.button` 6px→**11px**、`.meta` 5px→**9px** |
 | **B5** | 空带（P8/P28；P14 已撤回） | ✅ 已上线：列表最大连续空白 251px→**24px**，焦点卡块间 281px→**35px**，结算绿栏块间 374px→**36px**。口径改成"块间间隙 ≤64px、尾部留白不判"，见 §14 自我更正第 3 条 |
@@ -543,6 +543,17 @@ route: /learning-runs/:runId/actions/v2   statusCode: 500   ×3（17:51:16 / 17:
 **排除我自己**：唯一约束来自 `0116_learning_runs.sql`（老迁移，不是当晚 `1e4d2e5a` 补进来的那批）；我这轮只改过 `run-processing-tick.ts` 里 `gapFacets` 的算法（不插 task、不碰 actions 路由）。**这条与本文档的批次无关，属 `objective-card-items-2026-09-21.md` 那条线**——它里面正写着"repair 尾段（revision insert / hash recompute / recheck）仍未被真实批次走到"，这大概率就是那个尾段第一次被真走到时露出来的failure。**我只报不修。**
 
 **因此 B2 的验收状态**：`[data-outcome]` 的 8 条规则、三档配色、压印只挂 `data-acknowledgement`、`off` 档与 `prefers-reduced-motion` 关闭——都由 `objective-flow-css-guard.test.ts` 静态钉住并做过变异检验；**"三种 outcome 截图差异 ≥ 两处"这条实机口径未完成**，要等服务端这条 checkpoint 推进的缺陷修好。
+
+**当晚复核：这条路有两堵墙，不是一堵。** 本工作区库里存着 6 种 outcome 的历史结果（`partial 21 / skipped 18 / practice_completed 10 / demonstrated 8 / declared_unable 2 / not_assessable 1`），我本想直接渲染一条**已存的** `demonstrated`（run `46fc6801-…`）来补上那张截图，绕开上面那条缺陷。实测走不通：
+
+```
+window.ailearn.learningRun.getResult({ meta, runId: '46fc6801-…' })
+→ { ok: false, error: { code: "conflict", httpStatus: 409, retry: "never" } }
+```
+
+（第一次探是 `invalid_request`，那是我的 `meta` 写错了——`contractVersion` 要的是字符串 `"desktop-ipc-v1"` 而不是数字；修好后才露出真正的 409。）
+
+也就是说结算页**只能从"这台客户端刚结算完的那一轮"进去**，读不到历史结果。所以要量三档配色，必须先让一条新 run 真的结算完——而那正好撞在 `learning_tasks_run_sequence_unique` 上。**两条都在服务端，都不在本批范围**，仍然只报不修。postgres 日志里那条 ERROR 最后一次出现在 17:51，之后没人再走过这条路，所以它不是"好了"，是"没再被碰"。
 
 ### B8 的 P10：22 种同权重 chip 收敛成 4 种 — 已完成（2026-09-22）
 
