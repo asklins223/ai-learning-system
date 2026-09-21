@@ -100,7 +100,9 @@ export interface DiaryPersona {
  * 她给不出一个指向站外的 img src，也就不用担心她把几百字原文改写一遍再"引用"。
  */
 export type DiaryEmbed =
-  | { ref: string; kind: "image"; url: string; label: string; alt: string }
+  // 没有 alt：我们不知道图里画的是什么（读图要外发字节，政策关着时读不到），
+  // 编一段替代文字比不给更糟。渲染层本来就回落到图注（`alt ?? label`）。
+  | { ref: string; kind: "image"; url: string; label: string }
   | { ref: string; kind: "quote"; label: string; text: string };
 
 export interface DiaryMaterial {
@@ -496,7 +498,6 @@ async function collectMaterial(tx: WorkerTransaction, scope: DayScope): Promise<
       kind: "image",
       url: sourceImageUrlFromObjectKey(row.object_key),
       label,
-      alt: `${label}（${row.width}×${row.height}）`.slice(0, 120),
     });
   }
 
@@ -874,7 +875,7 @@ export function resolveDiaryBlocks(
     }
     used.add(embed.ref);
     blocks.push(embed.kind === "image"
-      ? { type: "image", url: embed.url, label: embed.label, alt: embed.alt }
+      ? { type: "image", url: embed.url, label: embed.label }
       : { type: "quote", label: embed.label, text: embed.text });
   }
   return { blocks, droppedRefs };

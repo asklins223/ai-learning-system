@@ -45,7 +45,7 @@ function material(overrides: Partial<DiaryMaterial> = {}): DiaryMaterial {
 
 const anImage: Extract<DiaryEmbed, { kind: "image" }> = {
   ref: "图1", kind: "image", url: "/api/uploads/notes/2026/09/alpha.png",
-  label: "《欧姆定律》· 第 1 张", alt: "《欧姆定律》· 第 1 张（1536×1024）",
+  label: "《欧姆定律》· 第 1 张",
 };
 const aQuote: DiaryEmbed = { ref: "引1", kind: "quote", label: "《欧姆定律》里写着", text: "电流与电压成正比。" };
 const para = (text: string): DiaryBlock => ({ type: "text", text });
@@ -185,7 +185,7 @@ test("篇幅收口：超长只在段边界截，跟着那段的图一起留下",
 });
 
 function anImageBlock(): DiaryBlock {
-  return { type: "image", url: anImage.url, label: anImage.label, alt: anImage.alt };
+  return { type: "image", url: anImage.url, label: anImage.label };
 }
 
 test("编号换成真货：她不存在的编号丢掉，引用原文由服务端带", () => {
