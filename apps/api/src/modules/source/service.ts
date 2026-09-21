@@ -1,9 +1,16 @@
 import { and, asc, desc, eq, ne, sql, count, inArray, isNull } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
 import { sources, sourceSegments, notes, noteVersions } from "@ailearn/shared/db-schema/note";
+import {
+  cardGenerationRunsV2,
+  learningObjectiveOriginsV2,
+  learningObjectivesV2,
+} from "@ailearn/shared/db-schema/card-generation-v2";
+import { visibleNotesCondition } from "../note/visibility.ts";
 import { applyNoteDocUpdate } from "../note/document-state.ts";
 import { writeNoteBlocks } from "../note/doc.ts";
-import { computeContentHash, ensureImageAssetsForBlocks } from "../note/service.ts";
+import { computeContentHash } from "../note/content-hash.ts";
+import { ensureImageAssetsForBlocks } from "../note/service.ts";
 import { jobs } from "@ailearn/shared/db-schema/job";
 import { searchDocuments } from "@ailearn/shared/db-schema/search";
 import {
@@ -180,22 +187,22 @@ export async function createSource(
 export async function listSources(
   executor: ApiTransaction,
   workspaceId: string,
-  opts?: { status?: string; cursor?: string; limit?: number },
+  opts: { userId: string; status?: string; cursor?: string; limit?: number },
 ) {
   // §2.6: 支持 cursor/limit 分页
-  const limit = Math.max(1, Math.min(100, opts?.limit ?? 100));
+  const limit = Math.max(1, Math.min(100, opts.limit ?? 100));
   let where = and(
     eq(sources.workspaceId, workspaceId),
     ne(sources.status, SourceStatus.ARCHIVED), // 默认排除已归档来源
   );
-  if (opts?.status) {
+  if (opts.status) {
     where = and(eq(sources.workspaceId, workspaceId), eq(sources.status, opts.status as SourceStatus));
   }
   // R-019: 使用 cursor 分页。排序键是 (updatedAt, id)：索引页每一行展示的是
   // updatedAt，按 createdAt 排会让「刚更新但很久前采集」的材料沉到列表末尾，
   // 与行内时间自相矛盾（2026-09-16 来源库复查）。
   const conditions = [where];
-  if (opts?.cursor) {
+  if (opts.cursor) {
     const decoded = decodeCursor(opts.cursor);
     if (decoded) {
       const cursorTs = decoded.timestamp;
@@ -230,7 +237,7 @@ export async function listSources(
 
   // 批量查询每条来源的关联笔记数量，避免 N+1 —— 与总数查询并行（2 RTT 而非 3）。
   const sourceIds = items.map((s) => s.id);
-  const [countRows, noteCountRows] = await Promise.all([
+  const [countRows, noteCountRows, cardProgressRows] = await Promise.all([
     executor
       .select({ count: sql<number>`count(*)::int` })
       .from(sources)
@@ -245,6 +252,32 @@ export async function listSources(
           .where(and(
             inArray(notes.sourceId, sourceIds),
             eq(notes.workspaceId, workspaceId),
+            visibleNotesCondition(opts.userId),
+            isNull(notes.deletedAt),
+          ))
+          .groupBy(notes.sourceId)
+      : Promise.resolve([]),
+    /**
+     * 学习卡进展（实走复盘 #18 后半）：来源 → 笔记 → 生成批次 / 正式目标。
+     * 仍然是一次批量聚合（不按行发请求）：批次按 note_id 直接连，正式目标经
+     * `learning_objective_origins_v2.note_id` 连——目标本身没有 sourceId，
+     * 它的来路记在 origins 上。
+     */
+    sourceIds.length > 0
+      ? executor
+          .select({
+            sourceId: notes.sourceId,
+            pendingReviewRuns: sql<number>`count(DISTINCT ${cardGenerationRunsV2.id}) FILTER (WHERE ${cardGenerationRunsV2.status} IN ('queued','source_sealing','planning','authoring','checking','review_ready'))::int`,
+            activeObjectives: sql<number>`count(DISTINCT ${learningObjectivesV2.objectiveId}) FILTER (WHERE ${learningObjectivesV2.lifecycle} = 'active')::int`,
+          })
+          .from(notes)
+          .leftJoin(cardGenerationRunsV2, eq(cardGenerationRunsV2.noteId, notes.id))
+          .leftJoin(learningObjectiveOriginsV2, eq(learningObjectiveOriginsV2.noteId, notes.id))
+          .leftJoin(learningObjectivesV2, eq(learningObjectivesV2.objectiveId, learningObjectiveOriginsV2.objectiveId))
+          .where(and(
+            inArray(notes.sourceId, sourceIds),
+            eq(notes.workspaceId, workspaceId),
+            visibleNotesCondition(opts.userId),
             isNull(notes.deletedAt),
           ))
           .groupBy(notes.sourceId)
@@ -252,9 +285,14 @@ export async function listSources(
   ]);
   const total = countRows[0]?.count ?? 0;
   const noteCountMap = new Map(noteCountRows.map((r) => [r.sourceId!, r.count]));
+  const cardProgressMap = new Map(cardProgressRows.map((r) => [r.sourceId!, r]));
   const itemsWithCounts = items.map((s) => ({
     ...s,
     noteCount: noteCountMap.get(s.id) ?? 0,
+    cardProgress: {
+      pendingReviewRuns: cardProgressMap.get(s.id)?.pendingReviewRuns ?? 0,
+      activeObjectives: cardProgressMap.get(s.id)?.activeObjectives ?? 0,
+    },
   }));
 
   // R-019: 使用最后一条记录的 (updatedAt, id) 作为下一页 cursor
@@ -388,15 +426,19 @@ export async function listNotesBySource(
   executor: ApiTransaction,
   sourceId: string,
   workspaceId: string,
+  userId: string,
 ) {
   const source = await executor.query.sources.findFirst({
     where: and(eq(sources.id, sourceId), eq(sources.workspaceId, workspaceId)),
   });
   if (!source) return null;
 
+  // 列表与 total 共用这一个 where：那个数字在界面上写的是"共 N 篇"，
+  // 只筛列表不筛数字就会自相矛盾。
   const where = and(
     eq(notes.sourceId, sourceId),
     eq(notes.workspaceId, workspaceId),
+    visibleNotesCondition(userId),
     isNull(notes.deletedAt),
   );
   const [noteRows, countRows] = await Promise.all([
@@ -484,6 +526,7 @@ export async function createNoteFromSource(
       .where(and(
         eq(notes.sourceId, sourceId),
         eq(notes.workspaceId, workspaceId),
+        visibleNotesCondition(userId),
         isNull(notes.deletedAt),
         eq(noteVersions.contentHash, newContentHash),
       ))
@@ -529,7 +572,7 @@ export async function createNoteFromSource(
     // 快照先落，行由文档派生；块级 sourceRef 必须进文档，否则恢复历史版本时
     // 第一个丢的就是证据链回指。
     const blocksWithAssets = await ensureImageAssetsForBlocks(tx, workspaceId, blocks, userId, note.id);
-    await applyNoteDocUpdate(tx, { workspaceId, noteId: note.id }, version.id, (doc) => {
+    await applyNoteDocUpdate(tx, { workspaceId, noteId: note.id, userId }, version.id, (doc) => {
       writeNoteBlocks(
         doc,
         blocksWithAssets.map((b, idx) => ({

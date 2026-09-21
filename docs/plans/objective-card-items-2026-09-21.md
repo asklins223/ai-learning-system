@@ -737,3 +737,81 @@ authored 采样序列: [0 ×39, 1, 2, 3, 5, 6, 6, 6, 6, 8, 8 …]
 `docs` 里那份 note-to-card 文档提到的 `apps/api` typecheck 两处仍在（`note-service-extra.test.ts`
 要 `cleanTitleCandidate` / `deriveNoteTitle`，而 `modules/note/service.ts` 在途改动已不导出）。
 
+## 26. 客观题第一次被真人在界面上答完：第三处"逐字枚举"把判分静默掐了（已修）
+
+### 现场（用户截图 + 库）
+
+在真机上把激活的 `single_choice` 卡答完（选中正确项、提交），界面停在：
+
+> 等待下一步 / 正在准备下一步。 —— 用户原话："我就一直在这里等着？所以我打完题之后是在干嘛"
+
+`learning_assessments`：`source=deterministic_structured`、`status=**not_assessable**`、
+`rubric_results=[]`、run 落在 `checkpoint`。答案本身是对的，判分却什么也没说。
+
+### 根因：`finishStructuredAssessment` 里还留着**第二份**逐字枚举
+
+`run-service.ts` 的**路由**那一侧上一批已经改用共用表（§7 第 2 条记过），但
+`run-processing-tick.ts` 的评估侧仍是：
+
+```ts
+if (payloadKind !== "ordering" && payloadKind !== "relation"
+    && payloadKind !== "repair" && payloadKind !== "structured_bundle") {
+  throw new CriticOutputError("structured assessment: unsupported payload kind");
+}
+```
+
+`choice` / `true_false` / `matching` 三种客观题载荷走到这里必然抛错 → 外层 catch 把它
+收成 `not_assessable` + `checkpoint{kind:"not_assessable"}` → 就是截图那一屏。
+
+**这是同一个失效形状的第三次出现**（§7 的两条 + 这一条）：新种类加进合同与路由，
+却漏了最后一公里那张手抄的表，而且**单测全绿**——`run-structured.test.ts` 测的是
+`assessStructuredPayload` 本身，根本走不到这道闸门。
+
+### 改法
+
+1. 闸门改成共用表：`isDeterministicStructuredPayload(payloadKind)`（`run-structured.ts`
+   导出的那一张），两侧不再各抄一份。
+2. `run-structured.test.ts` 补一条：planner 造得出的七种结构化载荷必须全部为 true，
+   `text_response` / `voice_teachback` / `declared_unable` 必须为 false。
+3. **checkpoint 不再装成"后台在准备"**（同一张截图的第二个问题）：
+   - 真机复测发现 `activate_followup` / `finish_without_commit` 这两个**下一步**落在
+     折叠的「更多选择」里，屏上只剩「安全退出」→ 现在提到明面上；
+   - 文案改成说清为什么停住（"这次没有形成可记录的结论"/"这次只证明了一部分"），
+     不再写"正在准备下一步。"——checkpoint 等的是用户，不是后台。
+   - 桌面测试补一条，断言这两个按钮 `closest("details") === null`（**改前红**：
+     `expected <details> to be null`；只断言"查得到按钮"是不够的，jsdom 在折叠
+     details 里也查得到）。
+
+### 真机复测（第二个目标 `d90329cb`，走完整界面链路）
+
+星窗 → 目标详情 → 开始首次验证 → 「改做选择题」→ 选中正确项 → 提交：
+
+```
+learning_assessments: deterministic_structured | completed | practice_only
+rubric_results: [{facet:"recall", verdict:"covered", userFacingReason:"选择正确"}]
+learning_runs.phase: completed
+同一时段模型调用: 0 次
+```
+
+界面实读「练习完成 / 逐条判定：回忆 · 说清了 / 选择正确 / 本次属于练习，不改变复习」。
+
+### 顺带修好的两件（真机复测的入场券）
+
+1. **备选模态终于说得出名字**（§3 D5 的后半）：`taskAlternativeDescriptorSchema` 增
+   `interactionKind`，`run-view.ts` 随备选一起下发；按钮从清一色「换一种方式」变成
+   「改做选择题」/「改用语音讲解」/「改用自己的话回答」。
+2. **桌面端接上 `packages/shared` 实时源码**（§4 第 2 条记的那笔基建债）：
+   `tsconfig.web/node.json` 加 `paths`、`electron.vite.config.ts` 给 main/preload/renderer
+   加 alias（外加 renderer 的 `server.fs.allow`）。此前改 shared 的合同在桌面端
+   **默认不可见**，只能手工 rsync 覆写 pnpm 快照——这次改 `interactionKind` 时先被它绊了一下。
+
+### 顺带修的别人的断点（只报 + 最小修复）
+
+- 桌面主进程起不来：笔记协同带进来的 `ws` 让 Vite 给可选 peer `bufferutil` 生成了
+  **模块顶层 throw** → 整个 app 打不开。已在 main 的 `rollupOptions.external` 里放行这两个
+  可选原生依赖（运行时 require 失败 → ws 自己退纯 JS）。
+- 笔记库整页「暂时不可用」：`GET /v2/notes/:id` 500。根因不在代码，而在**手写的夹具行**：
+  `note_versions.content_hash` 是 `'staircase-fixture'` 这类非 32 位 hex，strict 投影直接
+  拒绝。按仓库自己的不变量（migration 0029：`md5(content_json::text)`）全库校正了
+  1063 行，接口恢复 200。
+

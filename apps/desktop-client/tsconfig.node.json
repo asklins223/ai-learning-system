@@ -12,7 +12,14 @@
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
     "resolveJsonModule": true,
-    "types": ["node", "electron"]
+    "types": ["node", "electron"],
+    // 同 tsconfig.web.json：主进程/预加载也读 packages/shared 的实时源码。
+    "rootDir": "../..",
+    "baseUrl": ".",
+    "paths": {
+      "@ailearn/shared": ["../../packages/shared/src/index.ts"],
+      "@ailearn/shared/*": ["../../packages/shared/src/*.ts"]
+    }
   },
   "include": [
     "electron.vite.config.ts",

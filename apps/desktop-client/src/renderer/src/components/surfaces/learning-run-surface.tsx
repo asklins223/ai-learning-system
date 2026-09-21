@@ -394,6 +394,25 @@ function actionRequestFor(action: LearningRunAllowedActionV2): DesktopLearningRu
   }
 }
 
+/**
+ * 备选模态的按钮文案（方案 §3 D5）：此前所有备选都写「换一种方式」，
+ * 用户看不出换过去是做题还是说话。kind 由服务端随备选一起下发。
+ */
+function switchActionLabel(kind: LearningTaskPublic["availableAlternatives"][number]["interactionKind"] | undefined): string {
+  switch (kind) {
+    case "single_choice": return "改做选择题";
+    case "true_false": return "改做判断题";
+    case "matching": return "改做配对题";
+    case "ordering": return "改做排序题";
+    case "relation_canvas": return "改用关系搭建";
+    case "repair": return "改用纠错修补";
+    case "structured_bundle": return "改用组合证明";
+    case "voice_teachback": return "改用语音讲解";
+    case "text_response": return "改用自己的话回答";
+    default: return "换一种方式";
+  }
+}
+
 function actionLabel(action: LearningRunAllowedActionV2): string {
   switch (action.kind) {
     case "pause": return "暂停";
@@ -1787,6 +1806,12 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
     () => snapshot?.allowedActions.filter((action) => action.kind === "switch_variant") ?? [],
     [snapshot?.allowedActions],
   );
+  /** 备选 id → 模态，供按钮写出「改做选择题」这类具体文案（方案 §3 D5）。 */
+  const alternativeKindById = useMemo(
+    () => new Map((snapshot?.activeTask?.availableAlternatives ?? [])
+      .map((alternative) => [alternative.alternativeId, alternative.interactionKind])),
+    [snapshot?.activeTask?.availableAlternatives],
+  );
   const canSubmitUnable = snapshot?.activeTask !== null && snapshot?.phase === "active";
   const retryResultQuery = () => {
     setFailure(null);
@@ -1873,11 +1898,22 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
    * `end` 在其它阶段是唯一出口，同样直给。
    */
   const exitAction = actionLinks.find((action) => action.kind === "skip_run" || action.kind === "end");
+  /**
+   * checkpoint 的下一步（补充证据 / 结束但不改变复习 / 结算当前证据）是**用户的选择**，
+   * 不是后台在准备什么——它们必须在明面上（2026-09-21 实机截图：藏在「更多选择」里，
+   * 屏上只剩「安全退出」，用户以为要一直等下去）。
+   */
+  const checkpointActions = actionLinks.filter((action) =>
+    action.kind === "activate_followup"
+    || action.kind === "finish_current_evidence"
+    || action.kind === "finish_without_commit");
+  const checkpointUnassessable = checkpointActions.some((action) => action.kind === "finish_without_commit");
   const quickActions: LearningRunAllowedActionV2[] = [];
   if (switchAction) quickActions.push(switchAction);
   if (phaseAction) quickActions.push(phaseAction);
   if (nextHintAction) quickActions.push(nextHintAction);
   else if (hintLadder.length > 0) quickActions.push(hintLadder[hintLadder.length - 1]!);
+  quickActions.push(...checkpointActions);
   if (exitAction) quickActions.push(exitAction);
   const quickActionKeys = new Set(quickActions.map(actionKey));
   // request_hint 一律由那**一个**阶梯按钮代表：服务端按 hintLevels 签发了 1..N 个
@@ -2070,6 +2106,26 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
                 </p>
                 {processingFailure ? <p className="small" role="alert">{processingFailure.message}</p> : null}
               </div>
+            ) : snapshot.phase === "checkpoint" ? (
+              /*
+                2026-09-21 实机截图：这里原本只写「等待下一步 / 正在准备下一步。」，
+                而 checkpoint 的下一步其实**是用户自己**——服务端签发的是
+                「继续补充证据 / 结束但不改变复习」，它们却落在折叠的「更多选择」里，
+                屏上只剩一个「安全退出」。用户的原话是"我就一直在这里等着？"。
+                所以这一段（1）说清这一轮为什么停在这里，（2）把真正的下一步
+                提到明面上（见下面 quickActions 里的 checkpointActions）。
+              */
+              <div role="status">
+                <strong className="title">
+                  {checkpointUnassessable ? "这次没有形成可记录的结论" : "这次只证明了一部分"}
+                </strong>
+                <p className="small">
+                  {checkpointUnassessable
+                    ? "题目已经交上去了，但这一次判不出结论。你可以继续补充证据，或者结束这一轮——结束不会改变复习安排。"
+                    : "还有几处没被证明。你可以继续补充证据，或者就此结束这一轮。"}
+                </p>
+                {failure ? <p className="small" role="alert">{failure.message}</p> : null}
+              </div>
             ) : (
               <div role="status">
                 <strong className="title">{activeTask ? activeTask.prompt : phaseLabels[snapshot.phase]}</strong>
@@ -2100,14 +2156,17 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
               ) : null}
               {quickActions.map((action) => {
                 const isHint = action.kind === "request_hint";
+                const isSwitch = action.kind === "switch_variant";
                 const blockedSwitch = action.kind === "switch_variant" && blockedSwitchIds.has(action.alternativeId);
-                const label = !isHint
-                  ? actionLabel(action)
-                  : hints.length === 0
-                    ? "给我一点提示"
-                    : hintsExhausted
-                      ? "提示已经给完"
-                      : "再看一层提示";
+                const label = isSwitch
+                  ? switchActionLabel(alternativeKindById.get(action.alternativeId))
+                  : !isHint
+                    ? actionLabel(action)
+                    : hints.length === 0
+                      ? "给我一点提示"
+                      : hintsExhausted
+                        ? "提示已经给完"
+                        : "再看一层提示";
                 return (
                   <button
                     key={actionKey(action)}

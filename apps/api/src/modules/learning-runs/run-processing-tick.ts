@@ -23,6 +23,7 @@
 
 import { and, eq, inArray, sql, desc } from "drizzle-orm";
 import type { StructuredTaskKind } from "./run-structured.ts";
+import { isDeterministicStructuredPayload } from "./run-structured.ts";
 import { db, resolveApiStatementTimeoutMs, withWorkspaceTransaction } from "../../db/client.ts";
 import {
   canonicalLearningEventOutbox,
@@ -955,12 +956,16 @@ async function finishStructuredAssessment(
   const artifact = artifactRows[0];
   const payload = (artifact?.payload ?? {}) as Record<string, unknown>;
   const payloadKind = payload.kind;
-  if (
-    payloadKind !== "ordering"
-    && payloadKind !== "relation"
-    && payloadKind !== "repair"
-    && payloadKind !== "structured_bundle"
-  ) {
+  /**
+   * 这张表**必须**与路由共用同一个真相（`isDeterministicStructuredPayload`）。
+   *
+   * 2026-09-21 实机踩到：路由那一侧已经改用了共用表，这里却还留着一份**逐字枚举**，
+   * 于是 choice / true_false / matching 三种客观题载荷走到这里就 fail closed →
+   * `not_assessable` + `checkpoint`，界面上是一屏「等待下一步 / 正在准备下一步」，
+   * 用户点完选项后彻底卡住（截图与 `learning_assessments` 双证据）。
+   * 这正是复盘 §7 记过的同一个失效形状：链路看起来通了，最后一公里静默降级。
+   */
+  if (typeof payloadKind !== "string" || !isDeterministicStructuredPayload(payloadKind)) {
     throw new CriticOutputError("structured assessment: unsupported payload kind");
   }
 

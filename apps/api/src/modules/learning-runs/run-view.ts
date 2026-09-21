@@ -264,6 +264,8 @@ export function buildRunPublicView(input: RunViewInput): LearningRunPublicV1 {
         .map((v) => ({
           alternativeId: v.id,
           family: variantFamily(v.interaction),
+          // D5：把模态一起给界面，按钮才写得出「改做选择题」而不是统一的「换一种方式」。
+          interactionKind: v.interaction.kind,
           estimatedActiveSeconds: v.estimatedActiveSeconds,
           maximumPurpose: v.purpose,
         }));

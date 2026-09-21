@@ -14,6 +14,7 @@ import {
   generateRepairTask,
   generateStructuredBundleTask,
   generateTrueFalseTask,
+  isDeterministicStructuredPayload,
   splitClaimIntoTokens,
 } from "./run-structured.ts";
 
@@ -364,4 +365,22 @@ test("§12.3 bundle 评估：全对 covered、半对 partial、空 part not_asse
   // 空 partAnswers → not_assessable。
   const empty = assessStructuredBundlePayload({ kind: "structured_bundle", partAnswers: [] }, bundle.solution);
   assert.equal(empty.verdict, "not_assessable");
+});
+
+/**
+ * 2026-09-21 实机（用户截图：点完选择题卡在「等待下一步」）：
+ * 评估侧 `finishStructuredAssessment` 曾经**自己逐字枚举**一份载荷种类表，漏了
+ * choice / true_false / matching → 三种客观题提交一律 fail closed 成
+ * `not_assessable` + checkpoint，界面上就是一屏没有出路的等待。
+ *
+ * 现在两侧共用这一张表，所以钉住它的内容就等于钉住那条链路：planner 造得出的
+ * 每一种结构化载荷都必须走确定性判分，自由文本/声明不会答必须不走。
+ */
+test("确定性判分表覆盖 planner 造得出的每一种结构化载荷", () => {
+  for (const kind of ["ordering", "relation", "repair", "structured_bundle", "choice", "true_false", "matching"]) {
+    assert.equal(isDeterministicStructuredPayload(kind), true, `${kind} 必须走确定性判分`);
+  }
+  for (const kind of ["text_response", "voice_teachback", "declared_unable"]) {
+    assert.equal(isDeterministicStructuredPayload(kind), false, `${kind} 不得进确定性通道`);
+  }
 });

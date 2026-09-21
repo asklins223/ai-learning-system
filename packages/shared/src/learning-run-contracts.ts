@@ -1074,6 +1074,22 @@ export const taskAlternativeDescriptorSchema = z
   .object({
     alternativeId: z.string().min(1),
     family: z.enum(["voice", "text", "structured"]),
+    /**
+     * 备选的**作答模态**（2026-09-21 方案 §3 D5）：界面要能直接说出「改做选择题」，
+     * 而不是把所有备选都写成同一个「换一种方式」。kind 本来就是公开信息（切过去之后
+     * `activeVariant.interaction` 就带着它），这里只是提前一格告诉界面。
+     */
+    interactionKind: z.enum([
+      "voice_teachback",
+      "text_response",
+      "ordering",
+      "single_choice",
+      "true_false",
+      "matching",
+      "relation_canvas",
+      "repair",
+      "structured_bundle",
+    ]),
     estimatedActiveSeconds: z.number().int().min(0),
     maximumPurpose: taskPurposeSchema,
   })

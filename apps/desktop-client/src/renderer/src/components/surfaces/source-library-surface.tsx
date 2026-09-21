@@ -381,6 +381,21 @@ export function SourceLibrarySurface() {
                     {source.noteCount > 0 ? `已生成 ${source.noteCount} 篇笔记` : "还没生成笔记"}
                   </span>
                   <br />
+                  {/* 「笔记已出卡」（复盘 #18 后半）：服务端按 sourceId 聚合出批次与
+                      正式目标数，界面不猜。三档互斥，一眼能分清"还没出笔记""笔记出了但
+                      还没出卡""已经有卡可以答"。 */}
+                  {source.noteCount > 0 ? (
+                    <>
+                      <span className={source.cardProgress.activeObjectives > 0 ? "tag green" : "tag"}>
+                        {source.cardProgress.activeObjectives > 0
+                          ? `已出 ${source.cardProgress.activeObjectives} 张学习卡`
+                          : source.cardProgress.pendingReviewRuns > 0
+                            ? `${source.cardProgress.pendingReviewRuns} 批学习卡待审核`
+                            : "还没出学习卡"}
+                      </span>
+                      <br />
+                    </>
+                  ) : null}
                   <time dateTime={source.updatedAt}>{formatSourceStamp(source.updatedAt)}</time>
                 </span>
               </button>

@@ -305,6 +305,7 @@ describe("LearningRunSurface · 动作区", () => {
         availableAlternatives: [{
           alternativeId: VARIANT_ID,
           family: "voice",
+          interactionKind: "voice_teachback",
           estimatedActiveSeconds: 75,
           maximumPurpose: "formal",
         }],
@@ -317,11 +318,41 @@ describe("LearningRunSurface · 动作区", () => {
     });
     renderRun(withVoice);
 
-    const button = await waitFor(() => screen.getByRole("button", { name: /换一种方式/ }));
+    // D5：按钮直接说出模态（「改用语音讲解」），不再是四个备选都写「换一种方式」。
+    const button = await waitFor(() => screen.getByRole("button", { name: /改用语音讲解/ }));
     expect((button as HTMLButtonElement).disabled).toBe(true);
     // jsdom 没有 navigator.mediaDevices → 探测结论是"这个窗口不支持录音"。
     await waitFor(() => expect(document.body.textContent).toContain("现在还不能改用语音作答"));
     expect(document.body.textContent).toContain("录音");
+  });
+
+  /**
+   * 2026-09-21 实机截图：客观题判不出结论时，run 停在 checkpoint，界面上只有
+   * 「等待下一步 / 正在准备下一步。」和一个「安全退出」——真正的下一步
+   * （继续补充证据 / 结束但不改变复习）落在折叠的「更多选择」里。
+   * 用户的原话是"我就一直在这里等着？"。
+   */
+  it("checkpoint 不装成后台在准备：下一步按钮在明面上，且说清为什么停住", async () => {
+    const checkpoint = snapshot({
+      phase: "checkpoint",
+      activeTask: null,
+      allowedActions: [
+        { version: 2, kind: "activate_followup", followupId: "supplement:1" },
+        { version: 2, kind: "finish_without_commit" },
+        { version: 2, kind: "end", abandonLockedEvidence: false, confirmationRequired: true },
+      ],
+    });
+    renderRun(checkpoint);
+
+    // 下一步必须直接可见：`closest("details")` 为 null 才算"在明面上"——
+    // 折叠菜单里的按钮 jsdom 一样按名字查得到，所以"查得到"本身不算数。
+    const followup = await waitFor(() => screen.getByRole("button", { name: /继续补充证据/ }));
+    expect(followup.closest("details")).toBeNull();
+    const finish = screen.getByRole("button", { name: /结束但不改变复习/ });
+    expect(finish.closest("details")).toBeNull();
+    // 不再声称"正在准备下一步"——checkpoint 等的是用户，不是后台。
+    expect(document.body.textContent).not.toContain("正在准备下一步");
+    expect(document.body.textContent).toContain("这次没有形成可记录的结论");
   });
 
   /**

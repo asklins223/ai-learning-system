@@ -23,6 +23,16 @@ export const desktopSourceListItemSchema = z.object({
   createdAt: isoTimestamp,
   updatedAt: isoTimestamp,
   noteCount: z.number().int().min(0).default(0),
+  /**
+   * 学习卡进展（实走复盘 #18 后半）：来源行此前只能看出「有没有生成笔记」，
+   * 看不出笔记有没有出卡。两个数都由服务端按 sourceId 批量聚合，界面不做推断。
+   */
+  cardProgress: z.object({
+    /** 还在生成或等着审核的批次（含 review_ready）。 */
+    pendingReviewRuns: z.number().int().min(0),
+    /** 已经从这条来源出出来的、可作答的正式目标数。 */
+    activeObjectives: z.number().int().min(0),
+  }).default({ pendingReviewRuns: 0, activeObjectives: 0 }),
 }).passthrough();
 export type DesktopSourceListItem = z.infer<typeof desktopSourceListItemSchema>;
 

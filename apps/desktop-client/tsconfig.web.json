@@ -14,7 +14,18 @@
     "isolatedModules": true,
     "moduleDetection": "force",
     "jsx": "react-jsx",
-    "types": ["vite/client"]
+    "types": ["vite/client"],
+    // 2026-09-21：与 apps/api、workers/ai-worker 对齐，把 @ailearn/shared 指到
+    // **实时源码**。此前桌面端经 node_modules 里的 pnpm 安装期快照解析，对
+    // packages/shared 的契约改动在 typecheck 与打包里默认不可见（只能手工 rsync
+    // 覆写快照，或者改动"看起来没生效"）。运行时那一半在 electron.vite.config.ts
+    // 的 resolve.alias 里，两边必须一起改。
+    "rootDir": "../..",
+    "baseUrl": ".",
+    "paths": {
+      "@ailearn/shared": ["../../packages/shared/src/index.ts"],
+      "@ailearn/shared/*": ["../../packages/shared/src/*.ts"]
+    }
   },
   "include": ["src/renderer/**/*.ts", "src/renderer/**/*.tsx"]
 }
