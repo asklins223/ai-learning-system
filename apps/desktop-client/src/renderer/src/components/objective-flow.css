@@ -506,3 +506,27 @@
 /* 焦点卡顶部：三段带是这张卡的第一行，先回答"走到哪"，再说"这是什么"。 */
 .hud-surface .v3-goal-focus .objective-progress { margin: 0 0 10px; }
 .hud-surface .v3-objective-intro .objective-progress { margin: 0 24px 12px; }
+
+/* ── §11 收尾：复习队列里的成句文字（2026-09-22 实机量出来的）────────────
+ *
+ * B4 的地板当时只列了理解目标链路，复习那屏没进清单。实机扫下来：
+ * 今日学习 0 段成句低于 11px（5 段全是 DESIGN.md:63 允许的元数据计数），
+ * 复习有 6 段。这里只抬**成句的**那三条——"第 N 张 / 共 25 张""排期第 N 轮"
+ * 这类计数 9px 是合同允许的，跟着一起抬会把卡面撑满，那是拿一致性换版面。
+ *
+ * 住在 hud-surface.css 的是别的会话正在改的文件，所以和 B7/B8 一样落在
+ * 这一层：同特异性、加载顺序在后（有守卫钉着）。                          */
+.hud-surface .deck-foot__hint {
+  /* 整屏唯一的操作说明，9px 灰字——和 P21 那条 7.5px 惩罚说明同一个病。 */
+  font-size: 12px;
+}
+.hud-surface .queue-reason > p {
+  font-size: 12px;
+  line-height: 1.55;
+}
+.hud-surface .queue-reason__order,
+.hud-surface .queue-reason__order button {
+  /* "后续顺序：A → B → C" 是要读的卡片标题，不是计数。 */
+  font-size: 12px;
+  line-height: 1.55;
+}

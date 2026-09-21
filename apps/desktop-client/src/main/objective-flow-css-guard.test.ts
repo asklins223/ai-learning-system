@@ -156,3 +156,22 @@ describe("详情页主行动块（P15）", () => {
     expect(Number(/font-size:\s*([0-9.]+)px/.exec(why?.[1] ?? "")?.[1])).toBeGreaterThanOrEqual(12);
   });
 });
+
+describe("复习队列的成句文字有地板（§11 收尾）", () => {
+  const css = stripComments(read("src/renderer/src/components/objective-flow.css"));
+
+  // 这一屏住在 hud-surface.css（别的会话正在改那份文件），所以地板只能落在修正层。
+  // 组件测试断言的是文字，CSS 掉了它们照样全绿——B2 那次就是这么漏过去的。
+  for (const sel of ["deck-foot__hint", "queue-reason > p", "queue-reason__order"]) {
+    it(`.${sel} 有 ≥11px 的接手规则`, () => {
+      const needle = sel.replace(/\s+/g, " ");
+      const blocks = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)].filter((rule) => {
+        const selectors = (rule[1] as string).split(",").map((s) => s.replace(/\s+/g, " ").trim());
+        return selectors.some((s) => s.endsWith(needle) || s === `.hud-surface .${needle}`);
+      });
+      expect(blocks.length, `没有规则接手 .${sel}`).toBeGreaterThan(0);
+      const size = Number(/font-size:\s*([0-9.]+)px/.exec(blocks[0]?.[2] ?? "")?.[1]);
+      expect(size, `.${sel} 的接手规则没写 font-size`).toBeGreaterThanOrEqual(11);
+    });
+  }
+});
