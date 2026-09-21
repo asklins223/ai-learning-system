@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
 import { noteBlocks, noteDocumentStates, notes } from "@ailearn/shared/db-schema/note";
 import {
@@ -159,8 +159,10 @@ export async function readNoteDocState(
 /**
  * 投影成某个版本的 `note_blocks` 行。
  *
- * 这里是"删重插"而不是逐行 diff：走到这里的都是整篇替换事件（导入/转笔记/新版本/恢复），
- * 频次低、语义就是整篇；留着按 ordinal 的 diff 反而会把上一版残留的行留在原地。
+ * 按 ordinal 对齐做增量（改变化的、补缺的、删多的），**不**删重插。两个理由：
+ *  - 卡片证据链锚在块上，行 id 一旦被换掉，指向它的证据就成了悬空引用；
+ *  - 自动保存是热路径，删重插会把之前专门修掉的写放大再引回来。
+ * 现在文档是事实源，所以这里不再需要"猜上一版残留了什么"：读出来什么，就和文档对齐什么。
  */
 export async function projectBlocksIntoVersion(
   tx: ApiTransaction,
@@ -168,10 +170,19 @@ export async function projectBlocksIntoVersion(
   versionId: string,
   blocks: Array<{ ordinal: number } & NoteDocBlock>,
 ): Promise<void> {
-  await tx.delete(noteBlocks).where(eq(noteBlocks.versionId, versionId));
-  if (blocks.length === 0) return;
-  await tx.insert(noteBlocks).values(
-    blocks.map((block) => ({
+  const existing = await tx.query.noteBlocks.findMany({
+    where: and(eq(noteBlocks.versionId, versionId), eq(noteBlocks.workspaceId, workspaceId)),
+    columns: { id: true, ordinal: true, type: true, content: true, imageAssetId: true, sourceRef: true },
+  });
+  const byOrdinal = new Map(existing.map((row) => [row.ordinal, row]));
+  const kept = new Set<number>();
+
+  const toInsert: Array<typeof noteBlocks.$inferInsert> = [];
+  const toUpdate: Array<typeof noteBlocks.$inferInsert & { id: string }> = [];
+
+  for (const block of blocks) {
+    kept.add(block.ordinal);
+    const values = {
       versionId,
       workspaceId,
       ordinal: block.ordinal,
@@ -179,6 +190,33 @@ export async function projectBlocksIntoVersion(
       content: block.content,
       imageAssetId: block.imageAssetId ?? null,
       sourceRef: block.sourceRef ?? null,
-    })),
-  );
+    };
+    const row = byOrdinal.get(block.ordinal);
+    if (!row) {
+      toInsert.push(values);
+    } else if (
+      row.type !== block.type
+      || row.content !== block.content
+      || (row.imageAssetId ?? null) !== (block.imageAssetId ?? null)
+      || JSON.stringify(row.sourceRef ?? null) !== JSON.stringify(block.sourceRef ?? null)
+    ) {
+      toUpdate.push({ id: row.id, ...values });
+    }
+  }
+
+  const stale = existing.filter((row) => !kept.has(row.ordinal)).map((row) => row.id);
+  if (stale.length > 0) {
+    await tx.delete(noteBlocks).where(inArray(noteBlocks.id, stale));
+  }
+  if (toInsert.length > 0) {
+    await tx.insert(noteBlocks).values(toInsert);
+  }
+  for (const update of toUpdate) {
+    await tx.update(noteBlocks).set({
+      type: update.type,
+      content: update.content,
+      imageAssetId: update.imageAssetId,
+      sourceRef: update.sourceRef,
+    }).where(eq(noteBlocks.id, update.id));
+  }
 }

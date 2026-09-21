@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
 import { closeDatabase, withWorkspaceTransaction } from "../db/client.ts";
-import { createNote, restoreNoteVersion } from "../modules/note/service.ts";
+import { createNote, restoreNoteVersion, updateNote } from "../modules/note/service.ts";
 import { applyNoteDocUpdate, loadNoteDoc } from "../modules/note/document-state.ts";
 import { importMarkdownNotes, prepareMarkdownImport } from "../modules/import/markdown-import-service.ts";
 import {
@@ -169,6 +169,39 @@ test("写一次即成为事实源：快照落盘、投影回 note_blocks、revis
   assert.equal(reloaded.backfilled, false, "已有快照却仍从关系表补齐=两套事实源");
   assert.equal(projectNoteBlocks(reloaded.doc).length, next.length + 1);
   reloaded.doc.destroy();
+});
+
+test("自动保存不再另起一套正文：写完行之后文档必须与投影一致", async () => {
+  // 这条守的是本轮之前的状态：`updateVersionInPlace` 按行 UPDATE、绕开 Y.Doc。于是自动
+  // 保存写完的那一刻快照还是旧内容，下一次按文档读（协同落盘、doc-state 取起点）就把
+  // 刚保存的正文顶回去，而且不报错。
+  const current = await blocksOfCurrentVersion();
+  const submitted = current.map((row, index) => ({
+    type: row.type as "paragraph" | "heading" | "code",
+    content: index === 0 ? `${row.content}（自动保存改过）` : row.content,
+  }));
+  assert.equal(submitted.length, current.length, "块数没变才走得到自动保存那条逐块改写的路");
+
+  await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
+    updateNote(tx, noteId, workspaceId, userId, {
+      blocks: submitted,
+      baseVersionId: versionId,
+      isAutosave: true,
+    }),
+  );
+
+  const { doc, backfilled } = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
+    loadNoteDoc(tx, { workspaceId, noteId }),
+  );
+  const fromDoc = projectNoteBlocks(doc).map((block) => block.content);
+  doc.destroy();
+  assert.equal(backfilled, false, "自动保存必须写快照，不该退回从行补齐");
+  assert.deepEqual(fromDoc, submitted.map((block) => block.content), "文档没跟上自动保存（两套正文）");
+  assert.deepEqual(
+    (await blocksOfCurrentVersion()).map((row) => row.content),
+    submitted.map((block) => block.content),
+    "投影与文档分叉",
+  );
 });
 
 test("恢复历史版本走同一入口：内容回到旧版且投影与文档一致", async () => {

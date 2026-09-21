@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, inArray, isNull, isNotNull, or, sql } from "drizzle-orm";
 import { applyNoteDocUpdate } from "./document-state.ts";
-import { writeNoteBlocks, type NoteDocBlock } from "./doc.ts";
+import { projectNoteBlocks, syncNoteBlocksForEditor, writeNoteBlocks, type NoteDocBlock } from "./doc.ts";
 import { createHash } from "node:crypto";
 import { type ApiTransaction } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks, noteImageAssets } from "@ailearn/shared/db-schema/note";
@@ -378,105 +378,34 @@ async function canUpdateVersionInPlace(
 async function updateVersionInPlace(
   tx: ApiTransaction,
   versionId: string,
+  noteId: string,
   workspaceId: string,
   contentJson: { blocks: Array<{ type: NoteBlock["type"]; content: string }> },
   contentHash: string,
   blocks: Array<{ type: NoteBlock["type"]; content: string }>,
 ): Promise<Array<NoteBlock & { imageAssetId: string | null; sourceRef?: unknown }>> {
-  // PERF: diff-based in-place update. Previously this path DELETE-all'd and
-  // re-INSERT-all'd note_blocks on every 2.5s autosave, causing constant write
-  // amplification / index churn / table bloat on large notes. Now we read the
-  // existing rows once and only UPDATE changed rows, INSERT new ordinals, and
-  // DELETE removed ordinals. An autosave where nothing changed becomes a single
-  // read + the note_versions row update instead of DELETE-all + INSERT-all.
-  const existingBlocks = await tx.query.noteBlocks.findMany({
-    where: eq(noteBlocks.versionId, versionId),
-    orderBy: (b, { asc }) => [asc(b.ordinal)],
-  });
-
   const blocksWithAssets = await resolveImageAssetIds(tx, workspaceId, blocks);
-  const existingByOrdinal = new Map(existingBlocks.map((b) => [b.ordinal, b]));
-
-  const submitted = blocksWithAssets.map((b, idx) => {
-    const existing = existingByOrdinal.get(idx);
-    return {
-      versionId,
-      workspaceId,
-      ordinal: idx,
-      type: b.type,
-      content: b.content,
-      imageAssetId: b.imageAssetId,
-      // Preserve provenance on in-place edits instead of dropping sourceRef.
-      sourceRef: existing?.sourceRef ?? null,
-    };
-  });
-
-  const submittedByIdentity = new Map(submitted.map((b) => [b.ordinal, b]));
-  const toInsert: typeof submitted = [];
-  const toUpdate: Array<{ id: string; patch: (typeof submitted)[number] }> = [];
-  const toDelete: string[] = [];
-
-  for (const sub of submitted) {
-    const existing = existingByOrdinal.get(sub.ordinal);
-    if (!existing) {
-      toInsert.push(sub);
-    } else if (
-      existing.type !== sub.type ||
-      existing.content !== sub.content ||
-      existing.imageAssetId !== sub.imageAssetId
-    ) {
-      toUpdate.push({ id: existing.id, patch: sub });
-    }
-  }
-  for (const existing of existingBlocks) {
-    if (!submittedByIdentity.has(existing.ordinal)) {
-      toDelete.push(existing.id);
-    }
-  }
-
-  if (toDelete.length > 0) {
-    await tx.delete(noteBlocks).where(inArray(noteBlocks.id, toDelete));
-  }
-  if (toInsert.length > 0) {
-    await tx.insert(noteBlocks).values(toInsert);
-  }
-  if (toUpdate.length > 0) {
-    // PERF: batch all changed blocks into a single multi-row UPDATE instead of
-    // issuing one serialized UPDATE per row on the 2.5s autosave hot path.
-    // The FROM (unnest(...)) form keeps PostgreSQL's query planner on one scan
-    // and avoids N serial DB round-trips. `ordinal`/`versionId`/`sourceRef` are
-    // unchanged (they equal the existing row values in `patch`), so they are
-    // deliberately not rewritten.
-    // ⚠️ `AS ord(...)` 只能是**裸列名列表**，绝不能写成带类型的列定义列表
-    // （`AS ord(id uuid, type text, ...)`）。PostgreSQL 不允许「多参数 unnest()
-    // + 列定义列表」，会直接抛
-    //   `UNNEST() with multiple arguments cannot have a column definition list`
-    // （PG 16.15 实测同样如此）。此前那版带类型的写法让**每一次改动既有块的
-    // 自动保存**都变成 500 —— 而这条路只在“顺序号已存在的块内容变了”时才走到，
-    // 因此表现为“平时能存、一改旧段落就挂”。
-    // 列类型由下面 ARRAY[...] 里的元素 cast 决定（uuid[]/text[]/text[]/uuid[]），
-    // 不依赖这里的标注；`ord.id`/`ord.image_asset_id` 实测解析为 uuid。
-    const ids = sql.join(toUpdate.map((u) => sql`${u.id}::uuid`), sql`, `);
-    const types = sql.join(toUpdate.map((u) => sql`${u.patch.type}::text`), sql`, `);
-    const contents = sql.join(toUpdate.map((u) => sql`${u.patch.content}::text`), sql`, `);
-    const imageIds = sql.join(toUpdate.map((u) => sql`${u.patch.imageAssetId}::uuid`), sql`, `);
-    await tx.execute(sql`
-      UPDATE note_blocks
-      SET type = u.type,
-          content = u.content,
-          image_asset_id = u.image_asset_id
-      FROM (
-        SELECT ord.id, ord.type, ord.content, ord.image_asset_id
-        FROM unnest(
-          ARRAY[${ids}],
-          ARRAY[${types}],
-          ARRAY[${contents}],
-          ARRAY[${imageIds}]
-        ) AS ord(id, type, content, image_asset_id)
-      ) AS u
-      WHERE note_blocks.id = u.id
-    `);
-  }
+  // 自动保存走文档，关系表因此只有投影这一个生产者。留一条"按行改"的旁路就等于同一篇
+  // 笔记有两套正文：这条按行写、协同那条按 Y.Doc 写，谁后写谁覆盖——那正是本轮要消灭的
+  // "静默销毁用户内容"。
+  //
+  // 用 `syncNoteBlocksForEditor` 而不是 `writeNoteBlocks`：自动保存提交的仍是"我看到的
+  // 整篇"，但块数没变时它必须一个数组操作都不做（否则两条并发的自动保存会各自把改过的
+  // 块 delete+insert 一遍，谁也取消不了谁，块数就涨）。
+  // `sourceRef` / `imageAssetId` 这里不传，因此保留文档里已有的值：来源转笔记记下的证据链
+  // 不该被一次普通保存抹掉。
+  const { doc } = await applyNoteDocUpdate(
+    tx,
+    { workspaceId, noteId },
+    versionId,
+    (live) => {
+      syncNoteBlocksForEditor(live, blocksWithAssets.map((block) => ({
+        type: block.type,
+        content: block.content,
+        imageAssetId: block.imageAssetId ?? null,
+      })));
+    },
+  );
 
   // 更新版本内容（含 updatedAt 追踪原地修改时间）
   await tx
@@ -484,12 +413,7 @@ async function updateVersionInPlace(
     .set({ contentJson, contentHash, updatedAt: new Date() })
     .where(eq(noteVersions.id, versionId));
 
-  // Return the submitted blocks (preserving row metadata where the row already
-  // existed) so the caller can build the response without re-reading note_blocks.
-  return submitted.map((sub) => {
-    const existing = existingByOrdinal.get(sub.ordinal);
-    return existing ? { ...existing, ...sub } : sub;
-  }) as Array<NoteBlock & { imageAssetId: string | null; sourceRef?: unknown }>;
+  return projectNoteBlocks(doc) as Array<NoteBlock & { imageAssetId: string | null; sourceRef?: unknown }>;
 }
 
 type NoteSearchDocument = {
@@ -1025,7 +949,7 @@ export async function updateNote(
         // 2. 自动保存模式：尝试原地更新当前版本
         const canInPlace = await canUpdateVersionInPlace(tx, note.currentVersionId);
         if (canInPlace) {
-          const inPlaceBlocks = await updateVersionInPlace(tx, note.currentVersionId, workspaceId, contentJson, contentHash, sanitizedBlocks);
+          const inPlaceBlocks = await updateVersionInPlace(tx, note.currentVersionId, noteId, workspaceId, contentJson, contentHash, sanitizedBlocks);
           await tx
             .update(notes)
             .set({

@@ -110,6 +110,12 @@ function createMockExecutor(config: MockConfig = {}): any {
       noteBlocks: {
         findMany: async () => config.noteBlocksFindMany ?? [],
       },
+      // 正文的事实源已经是 Y.Doc（批次 4.1/4.3），自动保存也要先读快照再补齐。
+      // 这里一律报"没有快照"，让 loadNoteDoc 走上方的 noteBlocks 补齐路：这些用例
+      // 测的是 updateNote 的分支与回执，快照本身由 note-document-state-postgres 集测覆盖。
+      noteDocumentStates: {
+        findFirst: async () => undefined,
+      },
     },
     transaction: async (fn: (tx: any) => Promise<any>) => {
       if (config.searchUpsertError) {

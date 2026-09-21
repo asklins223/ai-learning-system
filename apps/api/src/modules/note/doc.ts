@@ -104,12 +104,24 @@ function sameBlock(left: NoteDocBlock, right: NoteDocBlock): boolean {
 
 function writeBlock(target: Y.Map<unknown>, block: NoteDocBlock): void {
   target.set("type", block.type);
-  const text = new Y.Text(block.content);
-  target.set("content", text);
-  if (block.sourceRef) target.set("sourceRef", { ...block.sourceRef });
-  else target.delete("sourceRef");
-  if (block.imageAssetId) target.set("imageAssetId", block.imageAssetId);
-  else target.delete("imageAssetId");
+  // 新条目才建 Y.Text；已经挂在文档上的一律就地改。换掉这个对象等于把块的身份也换掉，
+  // 并发时两边的 delete+insert 谁也取消不了谁，合并结果就成了两份内容。
+  // `target.doc` 为空表示这是一个还没插进数组的新建条目——读它会触发 yjs 的
+  // "Add Yjs type to a document before reading data"（实测一次导入刷出上百条）。
+  const existing = target.doc ? target.get("content") : undefined;
+  if (existing instanceof Y.Text) patchBlockText(existing, block.content);
+  else target.set("content", new Y.Text(block.content));
+  // `undefined` = 这次提交没带这个字段，别动它。自动保存提交的只有 type/content，
+  // 若把"没给"当成"要清空"，每存一次就会把来源转笔记那条路记下的证据链抹掉一次。
+  // 要真的清掉请显式传 `null`。
+  if (block.sourceRef !== undefined) {
+    if (block.sourceRef) target.set("sourceRef", { ...block.sourceRef });
+    else target.delete("sourceRef");
+  }
+  if (block.imageAssetId !== undefined) {
+    if (block.imageAssetId) target.set("imageAssetId", block.imageAssetId);
+    else target.delete("imageAssetId");
+  }
 }
 
 function insertBlocks(doc: Y.Doc, at: number, blocks: NoteDocBlock[]): void {
@@ -158,6 +170,30 @@ export function writeNoteBlocks(doc: Y.Doc, blocks: NoteDocBlock[]): void {
         if (asset) item.set("imageAssetId", asset); else item.delete("imageAssetId");
       }
     }
+  });
+}
+
+/**
+ * 交互编辑（自动保存）专用的写入：块数没变就**一次数组操作都不做**。
+ *
+ * 与 `writeNoteBlocks` 的分工是刻意的：后者按"整篇是我要提交的那份"来对齐，内容变了
+ * 的块会走数组 delete+insert——两条并发提交里谁也没取消谁，块数就涨（文件头那条
+ * 特征刻画用例量的就是这个）。而自动保存每 2.5 秒提交一次"我这一版看到的整篇"，
+ * 绝大多数时候只有少数块变了、块数根本没变：这时唯一安全的形状是逐个块在同一个
+ * `Y.Text` 上做字符级 diff。真增删了块才退回 `writeNoteBlocks`——插入的块本来就是新
+ * 条目，并发插入两份是正确结果，不是增殖。
+ */
+export function syncNoteBlocksForEditor(doc: Y.Doc, blocks: NoteDocBlock[]): void {
+  const array = doc.getArray<Y.Map<unknown>>("blocks");
+  if (array.length !== blocks.length) {
+    writeNoteBlocks(doc, blocks);
+    return;
+  }
+  doc.transact(() => {
+    blocks.forEach((block, index) => {
+      const item = array.get(index);
+      if (item) writeBlock(item, block);
+    });
   });
 }
 
