@@ -163,6 +163,12 @@ export async function readNoteDocState(
  *  - 卡片证据链锚在块上，行 id 一旦被换掉，指向它的证据就成了悬空引用；
  *  - 自动保存是热路径，删重插会把之前专门修掉的写放大再引回来。
  * 现在文档是事实源，所以这里不再需要"猜上一版残留了什么"：读出来什么，就和文档对齐什么。
+ *
+ * ⚠️ 被删掉的 ordinal 行会留下**悬空的块引用**：卡片证据链把 `block_id` 存成没有外键的
+ * uuid（`card_generation_v2` 里那条是 nullable），所以删行不会报错，只会让那张卡片的锚
+ * 指到一个不存在的块。改成增量之前这里更糟——整篇删重插会给**每一个**块换 id。彻底收口
+ * 需要一次有意识的决定（按 ordinal+hash 重新锚定，还是给证据链加真实外键并级联标记），
+ * 不属于这一批；这里至少保证"改一段不会把全篇的锚都换掉"。
  */
 export async function projectBlocksIntoVersion(
   tx: ApiTransaction,
