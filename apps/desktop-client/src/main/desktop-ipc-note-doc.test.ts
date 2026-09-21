@@ -127,7 +127,9 @@ async function setup(session: {
 
   const gateway = {
     getDeploymentConfig: () => undefined,
-    getSession: vi.fn().mockResolvedValue({
+    // 每次调用重新拼一份：`mockResolvedValue` 的对象是在这里就定死的，用例中途改了
+    // `session.role` 也读不到，那条"角色变了要重连"的用例会假绿。
+    getSession: vi.fn(async () => ({
       version: 1,
       status: "authenticated",
       user: { userId: "11111111-1111-4111-8111-111111111111", email: "me@example.com" },
@@ -144,7 +146,7 @@ async function setup(session: {
       capabilities: null,
       workspaceEpoch: WORKSPACE_EPOCH,
       credentialPersistence: "memory",
-    }),
+    })),
     watchNoteDocument,
     uploadNoteDocUpdate,
     syncNoteDocBlocks: syncViaGateway,
@@ -392,6 +394,30 @@ describe("笔记协同的 IPC 通道", () => {
       subscriptionId: secondId,
     });
     expect(streamHandle.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("角色变了要退掉旧连接：新的读写答复只能从重连那一刻拿到", async () => {
+    const fakeSession: { workspaceType: "personal" | "collaborative"; role: "owner" | "member" } = { workspaceType: "collaborative", role: "member" };
+    const { event, streamHandle, watchNoteDocument } = await setup(fakeSession);
+    await handler(DESKTOP_IPC_CHANNELS.subscriptionsSubscribe)(event, {
+      meta,
+      topic: { kind: "noteDoc", noteId: NOTE_ID },
+    });
+    await settle();
+    expect(watchNoteDocument).toHaveBeenCalledTimes(1);
+
+    // 把人提升成 owner。服务端只在鉴权那一刻给一次 `Authenticated(...)`，旧连接上
+    // 那份"只读"答复不会自己变——不退掉重连，他手上的界面就永远停在写不进去。
+    fakeSession.role = "owner";
+    await handler(DESKTOP_IPC_CHANNELS.authGetState)(event, { meta });
+    expect(streamHandle.stop).toHaveBeenCalledTimes(1);
+
+    await handler(DESKTOP_IPC_CHANNELS.subscriptionsSubscribe)(event, {
+      meta,
+      topic: { kind: "noteDoc", noteId: NOTE_ID },
+    });
+    await settle();
+    expect(watchNoteDocument).toHaveBeenCalledTimes(2);
   });
 
   it("超限的提交不进 gateway：空块数组与超块数都在入口被拒", async () => {

@@ -1417,8 +1417,10 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
       || activeWorkspaceRole !== session.workspace.role;
     activeWorkspaceKind = session.workspace.workspaceType;
     activeWorkspaceRole = session.workspace.role;
-    // 换空间或角色变了（member↔owner）：门控判据变了，旧连接不作数。界面上还有
-    // 打开着的笔记时会重新订阅，届时按新判据决定建不建。
+    // 换空间要退掉所有连接：留着一条属于上一个空间的连接，就是"切了空间还在收别人的正文"。
+    // 角色变了也退：写入出口的判据现在取自服务端那条 `Authenticated(...)`，而它只在鉴权时
+    // 给一次——不重连的话，被提升成 owner 的那个人手上还是"只读"，反过来则是拿一个已经不
+    // 成立的写权限继续提交。界面上还有打开着的笔记时会重新订阅，届时按服务端的新答复走。
     if (kindChanged) stopNoteDocStreams();
   };
 
