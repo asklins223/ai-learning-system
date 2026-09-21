@@ -27,3 +27,17 @@
  * 四个字被削掉下沿。行高要盖住 CJK 衬线的实际字形高度——1.32 实测仍差 2px
  * （57 vs 55），给到 1.45。 */
 .hud-surface .learning-run-result-summary__seal { line-height: 1.45; }
+
+/* P3（DESIGN.md:152）：跳过与「暂时不会」不配印章，改成一行安静的话。它占在印章
+ * 的槽位上，所以绿栏不会因为少了一个节点而塌下去，但字号与字重都明确低一档。 */
+.hud-surface .learning-run-result-summary__quiet {
+  margin-top: 22px;
+  color: rgba(255, 248, 232, 0.72);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+/* P1：这次真说清的条数排在理解账本之前——它是这次作答的成品，账本只是它够不够格
+ * 写进长期记录。两者此前共用同一个「已经证明」的说法，用户分不清。 */
+.hud-surface .learning-run-result-evidence [data-role="proved-this-time"] b { color: var(--hud-green); }

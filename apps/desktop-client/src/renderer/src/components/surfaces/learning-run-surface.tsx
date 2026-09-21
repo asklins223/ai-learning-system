@@ -163,6 +163,43 @@ const verdictLabels: Record<string, string> = {
   not_assessable: "无法判定",
 };
 
+/**
+ * 跳过与「暂时不会」不配印章（DESIGN.md:152「跳过或声明暂时不会时不显示印章，
+ * 不做庆祝」）。此前这两个 outcome 照样吃一颗 42px 大印章，和「已理解」同字号
+ * 同位置同颜色——用户分不清自己到底做成了什么。
+ */
+const SEALLESS_OUTCOMES: ReadonlySet<LearningRunOutcome> = new Set(["skipped", "declared_unable"]);
+
+/**
+ * 这次真说清了些什么——只从逐条判定里数，不看 demonstratedFacets。后者是理解
+ * 账本（练习永远为空），拿它当「这次做得怎么样」就是把答对了显示成零
+ * （31 号文档 P1 的 UI 那一半）。
+ *
+ * 两个数分开是有意的：**条数**数判定行（四步全说清就是 4 条，那是这次的成品），
+ * **facet 名**去重（四行都是「回忆」时不许写成「回忆、回忆、回忆、回忆」）。
+ */
+function thisTimeVerdicts(result: LearningRunResultV2 | undefined): {
+  readonly coveredCount: number;
+  readonly coveredFacets: string[];
+} {
+  const covered = (result?.assessment?.rubricResults ?? []).filter((item) => item.verdict === "covered");
+  return {
+    coveredCount: covered.length,
+    coveredFacets: [...new Set(covered.map((item) => item.facet))],
+  };
+}
+
+/**
+ * 「算进理解」那一行要说清**为什么是空**，而不是留给用户一句「还没有形成可公开的
+ * 已证明部分」——那行字和上面四条「回忆 · 说清了」并排时，读起来就是产品在自己
+ * 打自己脸（31 号文档 P1/P6）。练习本就不写理解账本，这是合同，直接讲出来。
+ */
+function provenLedgerText(result: LearningRunResultV2): string {
+  if (result.demonstratedFacets.length) return facetText(result.demonstratedFacets, "");
+  if (result.outcome === "practice_completed") return "这次是练习，所以不写进理解账本。";
+  return "这次没有能写进理解账本的新证据。";
+}
+
 const scheduleReasonLabels: Record<string, string> = {
   not_authorized: "当前证据等级不足以改变复习安排",
   facet_only: "本次只产生了 facet 级证据",
@@ -1921,6 +1958,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   // 按钮（复盘 #11 的原始形态）。
   const moreActions = actionLinks.filter((action) =>
     action.kind !== "request_hint" && !quickActionKeys.has(actionKey(action)));
+  const thisTime = thisTimeVerdicts(result ?? undefined);
 
   return (
     <>
@@ -1929,11 +1967,20 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
         <section className="learning-run-result-board" data-outcome={result ? result.outcome : "no_result"} data-acknowledgement={resultAcknowledgementActive ? "active" : "idle"}>
           <aside className="learning-run-result-summary" data-tone={demonstratedResult ? "confirmed" : "neutral"}>
             <span className="learning-run-result-summary__kicker">本次练习</span>
-            <strong className="learning-run-result-summary__seal">{result ? outcomeSeal[result.outcome] : "未形成结果"}</strong>
+            {result && !SEALLESS_OUTCOMES.has(result.outcome) ? (
+              <strong className="learning-run-result-summary__seal">{outcomeSeal[result.outcome]}</strong>
+            ) : (
+              <strong className="learning-run-result-summary__quiet">{
+                result?.outcome === "declared_unable" ? "这次说了暂时不会" : "这次先放着"
+              }</strong>
+            )}
             <p>{snapshot.target.publicSummary}</p>
             <dl>
+              {thisTime.coveredCount ? (
+                <div><dt>这次说清</dt><dd>{thisTime.coveredCount} 条</dd></div>
+              ) : null}
               <div><dt>用时</dt><dd>{formatClock(clock.seconds)}</dd></div>
-              <div><dt>已证明</dt><dd>{result ? `${result.demonstratedFacets.length} 项` : "—"}</dd></div>
+              <div><dt>算进理解</dt><dd>{result ? `${result.demonstratedFacets.length} 项` : "—"}</dd></div>
               <div><dt>仍有缺口</dt><dd>{result ? `${result.gapFacets.length} 项` : "—"}</dd></div>
             </dl>
           </aside>
@@ -1946,9 +1993,15 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
             </header>
             {result ? (
               <div className="learning-run-result-evidence">
+                {thisTime.coveredFacets.length ? (
+                  <div data-role="proved-this-time">
+                    <b>这次说清了</b>
+                    <p>{facetText(thisTime.coveredFacets, "")}</p>
+                  </div>
+                ) : null}
                 <div>
-                  <b>已经证明</b>
-                  <p>{facetText(result.demonstratedFacets, "这次还没有形成可公开的已证明部分。")}</p>
+                  <b>算进理解</b>
+                  <p>{provenLedgerText(result)}</p>
                 </div>
                 <div>
                   <b>还需补上</b>

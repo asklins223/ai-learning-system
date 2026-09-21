@@ -291,7 +291,7 @@
 | 批次 | 内容 | 验收口径（可判定，不靠眼缘） |
 |---|---|---|
 | **B0** | 结算页溢出 + 出口槽 + 印章裁切（P5/P27） | ✅ 已上线，见 §14。**口径改过**：原写「report 不再 `overflow-y:auto`」是错的——纸面高度固定时总得有一列可滚，病在出口落在那一列里。改成三条可判定的：主按钮下沿离纸面下沿 ≥8px、出口不在任何 `scrollHeight>clientHeight` 的祖先内、`__seal` `scrollHeight <= clientHeight` |
-| **B1** | 结算页自相矛盾（P1/P6/P30） | 同一次 `covered` 判定下，「还需补上」里不出现该 facet；`已证明 N 项` 与 rubric `covered` 行数一致；`接下来` 便签内含 ≥1 个可点动作；`skipped`/`declared_unable` 时 DOM 里**没有** `__seal` 节点 |
+| **B1** | 结算页自相矛盾（P1/P6/P30） | ✅ 已上线（除「接下来」便签里的真按钮，见下），见 §14。口径：同一次 `covered` 判定下「还需补上」不出现该 facet；「这次说清 N 条」数判定行；`skipped`/`declared_unable` 时 DOM 里**没有** `__seal` 节点。**「接下来」便签的可点动作没做**——它需要在结算页起一次新 Run，而 start 命令只在目标详情的 `primaryAction` 里，属于新功能不是修复，单独留出来 |
 | **B2** | `data-outcome` 真的驱动视觉 + 一次性压印（P2/P32） | 三种 outcome（demonstrated / partial / not_assessable）截图像素差异 ≥ 背景色与印章区两处；`[data-outcome]` 在 CSS 里 ≥ 3 条规则；动效只改 `transform/opacity`，`data-motion-mode="off"` 时 `getAnimations().length === 0` |
 | **B3** | 「下次到期 刚刚」（P4） | 造一条 `dueAt` 为明天 / 5 天后 / 下月的评估，页面分别显示 `明天 / 5 天后 / M月D日`；`formatRelative` 不再被未来时间调用（新增单测断言负 minutes） |
 | **B4** | 字号地板（P7/P13/P21/P33） | 列表 / 详情 / 结算三屏 `<11px` 文本段占比 = 0；提示惩罚说明 ≥12px；720×405 视口下 `.button` ≥ 11px、`.meta` ≥ 9px、`.run-confirmation p` ≥ 9px |
@@ -359,3 +359,24 @@ node scripts/tmp-objflow-s4-clean.mjs        # 动作区逐按钮遮挡（elemen
 新增结构回归 `learning-run-surface.result.test.tsx`（3 例，含 12 条 rubric 的长判定场景）。**做过变异检验**：把出口挪回 report 内部后，两条结构断言转红（`expected true to be false` / 子节点数组少一项），第三条「两个出口都还在」保持绿——它钉的是另一件事。几何类指标 jsdom 量不了，由 `scripts/tmp-objflow-v-b0.mjs` 在实机上出上面那张表。
 
 **顺带修掉的一个自埋坑**：`objective-flow.css` 第一版顺手重写了 `.learning-run-result-board` 的 `grid-template-columns`，会盖掉 `hud-surface.css:5348` 在 `@media (max-width:760px)` 里的另一档列宽。已删掉那行——后置层只加行、不动列。
+
+### B1 结算页反馈兑现 — 已完成（2026-09-21，「接下来」的可点动作除外）
+
+**根因不在 UI。** 服务端 `apps/api/src/modules/learning-runs/run-processing-tick.ts:675` 在练习结算时**无条件**写 `gapFacets: [input.intent]`，完全不看逐条判定；而同文件 `:1108`（结构化那条）早就是 `assessment.verdict === "covered" ? [] : [task.intent]`。所以这是一处漏改，不是设计。修法：抽出 `run-result-facets.ts` 的 `uncoveredFacets(rubricResults)`（按真实 verdict 取、去重），两条分支都受用一个口径。`demonstratedFacets` 仍留空——练习不买掌握证据，那是合同边界。
+
+UI 侧三处：① 新增「这次说清了」行与「这次说清 N 条」计数，**只从 rubric 数**，与理解账本分开；② 「已经证明」改名「算进理解」，空态按 outcome 说清为什么是空（练习就说「这次是练习，所以不写进理解账本。」），不再留一句「还没有形成可公开的已证明部分」和四行「说清了」并排；③ `skipped` / `declared_unable` 不再渲染 `__seal`，槽位换成一行 13px 的 `__quiet`（DESIGN.md:152）。
+
+**实机端到端**（`tmp-objflow-v-b1.mjs`，GRPO 那张卡，把四步排对后提交，确定性判分不烧额度）：
+
+| | 改前 | 改后 |
+|---|---|---|
+| rubric | 回忆 · 说清了 | 回忆 · 说清了（同） |
+| 计数 | 已证明 **0 项** / 仍有缺口 **1 项** | 这次说清 **1 条** / 算进理解 0 项 / 仍有缺口 **0 项** |
+| 还需补上 | **「回忆」** ← 与上面四行矛盾 | 「这次没有留下待补的理解缺口。」 |
+| 已经证明 | 「这次还没有形成可公开的已证明部分。」 | 「这次是练习，所以不写进理解账本。」 |
+
+测试：`run-result-facets.test.ts` 4 例（全 covered → `[]` 这一条就是旧代码伪造缺口的那处）、`learning-run-surface.result.test.tsx` 增至 8 例。**印章那条做过变异检验**：把 `!SEALLESS_OUTCOMES.has(...)` 去掉后恰好两条 `it.each` 转红、其余保持绿。
+
+**没做的那一条**：「接下来」便签里的可点动作。它要在结算页直接起一次新 Run，而 start 命令只存在于目标详情的 `primaryAction` 里——这是新功能，不是修复，留给 B11。
+
+**环境**：并发的 dev 实例把 vite 弄掉两次，最后那个占着 9222 与 Electron 单实例锁的死窗口让新 `npm run dev` 一起来就自杀。现在跑的是我自己的实例：`npx electron-vite dev -w --remoteDebuggingPort 9231 -- --user-data-dir=/tmp/objflow-udd`，探针用 `OBJFLOW_CDP=http://127.0.0.1:9231` 指过去。它是全新数据目录，所以脚本里带了一段登录与掉线重连。

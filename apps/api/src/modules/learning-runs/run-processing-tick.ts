@@ -24,6 +24,7 @@
 import { and, eq, inArray, sql, desc } from "drizzle-orm";
 import type { StructuredTaskKind } from "./run-structured.ts";
 import { isDeterministicStructuredPayload } from "./run-structured.ts";
+import { uncoveredFacets } from "./run-result-facets.ts";
 import { db, resolveApiStatementTimeoutMs, withWorkspaceTransaction } from "../../db/client.ts";
 import {
   canonicalLearningEventOutbox,
@@ -672,7 +673,12 @@ async function finishCriticAssessmentWrite(
       const result: LearningRunResultV1 = {
         outcome: "practice_completed",
         demonstratedFacets: [],
-        gapFacets: [input.intent as never],
+        // 缺口按真实判定来。此前这里无条件写 [input.intent]，于是四条 rubric 全
+        // covered 的作答也会结算成「还需补上：回忆」——结算页同屏摆着四行
+        // 「说清了」和一句「你欠着回忆」，用户读到的是自相矛盾（31 号文档 P1）。
+        // 结构化那条分支（:1108）早就是按 verdict 来的，这里是漏改的那一条。
+        // demonstratedFacets 仍留空：练习不买掌握证据，这是合同边界，不是 bug。
+        gapFacets: uncoveredFacets(rubricResults) as never,
         scheduleImpact: {
           kind: "none",
           reasonCode: trustClass === "diagnostic_only" ? "diagnostic_only" : "practice_only",

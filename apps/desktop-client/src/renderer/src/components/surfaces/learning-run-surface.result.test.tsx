@@ -54,7 +54,10 @@ const completedSnapshot = () => learningRunPublicSnapshotV2Schema.parse({
   publishedTargetEligibility: "eligible",
 });
 
-const resultWithRubric = (rubricLength: number) => learningRunResultV2Schema.parse({
+const resultWithRubric = (
+  rubricLength: number,
+  overrides: Record<string, unknown> = {},
+) => learningRunResultV2Schema.parse({
   version: 2,
   runId: RUN_ID,
   snapshotId: SNAPSHOT_ID,
@@ -75,10 +78,31 @@ const resultWithRubric = (rubricLength: number) => learningRunResultV2Schema.par
       userFacingReason: `第 ${index + 1} 条说清了。`,
     })),
   },
+  ...overrides,
 });
 
-function stubGateway(rubricLength: number) {
+/** 一次「全说清但只算练习」的结算——31 号文档 P1 的原始形态。 */
+const allCoveredPractice = () => resultWithRubric(4, {
+  outcome: "practice_completed",
+  demonstratedFacets: [],
+  gapFacets: [],
+  scheduleImpact: { kind: "none", reasonCode: "practice_only" },
+  assessment: {
+    source: "assessment_critic",
+    status: "completed",
+    trustClass: "practice_only",
+    rubricResults: ["提", "拔", "握", "压"].map((step, index) => ({
+      rubricItemId: `rubric-${index + 1}`,
+      facet: "recall",
+      verdict: "covered",
+      userFacingReason: `${step} 那一步说清了。`,
+    })),
+  },
+});
+
+function stubGateway(resultPayload: unknown, rubricLength = 12) {
   const ok = <T,>(data: T) => ({ ok: true as const, workspaceEpoch: 1, data });
+  const result = resultPayload === undefined ? resultWithRubric(rubricLength) : resultPayload;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (window as any).ailearn = {
     auth: {
@@ -98,7 +122,7 @@ function stubGateway(rubricLength: number) {
         returnTargetV2: returnTarget,
         status: "learning_result",
         httpStatus: 200,
-        result: resultWithRubric(rubricLength),
+        result,
       }))),
       getReturnContract: vi.fn(async () => ok(null)),
       revealTarget: vi.fn(async () => ok({})),
@@ -119,9 +143,9 @@ function stubGateway(rubricLength: number) {
   };
 }
 
-function renderResult(rubricLength = 12) {
+function renderResult(rubricLength = 12, resultPayload?: unknown) {
   vi.spyOn(document, "hasFocus").mockReturnValue(true);
-  stubGateway(rubricLength);
+  stubGateway(resultPayload, rubricLength);
   useRoomStore.setState({ activeRunId: RUN_ID, activeObjectiveId: OBJECTIVE_ID });
   render(<LearningRunSurface onExit={() => undefined} />);
 }
@@ -167,6 +191,57 @@ describe("LearningRunSurface · 结算页结构", () => {
     const buttons = [...document.querySelectorAll<HTMLButtonElement>(".learning-run-result-actions button")];
     expect(buttons.map((b) => b.textContent)).toEqual(["返回书房", "查看理解目标"]);
     expect(buttons[0]?.className).toContain("primary");
-    expect(screen.queryByText("已跳过")).toBeNull();
+  });
+
+  // ---- B1：结算页的反馈必须兑现（31 号文档 P1 / P3 / P6）----
+
+  it("四条判定全说清时，「这次说清了」列出回忆，且不再报任何缺口", async () => {
+    renderResult(12, allCoveredPractice());
+    await waitFor(() => expect(document.querySelector("[data-role='proved-this-time']")).not.toBeNull());
+
+    expect(document.querySelector("[data-role='proved-this-time']")?.textContent).toContain("回忆");
+    const rows = [...document.querySelectorAll(".learning-run-result-evidence > div")]
+      .map((d) => d.textContent ?? "");
+    // 「还需补上」里不许出现这次已经说清的 facet——旧行为是同屏四行「说清了」
+    // 加一句「还需补上：回忆」。
+    const gapRow = rows.find((text) => text.startsWith("还需补上"));
+    expect(gapRow).toBe("还需补上这次没有留下待补的理解缺口。");
+    expect(document.querySelector(".learning-run-result-summary dl")?.textContent)
+      .toContain("这次说清4 条");
+  });
+
+  it("练习结算的解释说清「为什么不写进理解账本」，不再用一句自我否定占位", async () => {
+    renderResult(12, allCoveredPractice());
+    await waitFor(() => expect(document.querySelector("[data-role='proved-this-time']")).not.toBeNull());
+
+    const ledger = [...document.querySelectorAll(".learning-run-result-evidence > div")]
+      .find((d) => d.textContent?.startsWith("算进理解"));
+    expect(ledger?.textContent).toContain("这次是练习，所以不写进理解账本。");
+    expect(ledger?.textContent).not.toContain("还没有形成");
+  });
+
+  it.each([
+    ["skipped", "这次先放着"],
+    ["declared_unable", "这次说了暂时不会"],
+  ])("%s 不配印章（DESIGN.md:152），槽位上只留一行安静的话", async (outcome, quietCopy) => {
+    renderResult(12, resultWithRubric(0, {
+      outcome,
+      demonstratedFacets: [],
+      gapFacets: [],
+      scheduleImpact: { kind: "none", reasonCode: outcome === "skipped" ? "skipped" : "record_only" },
+      assessment: undefined,
+    }));
+    await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
+
+    expect(document.querySelector(".learning-run-result-summary__seal")).toBeNull();
+    expect(document.querySelector(".learning-run-result-summary__quiet")?.textContent).toBe(quietCopy);
+  });
+
+  it("真正成立的结果仍然有印章——上面那条不是把印章整个删掉", async () => {
+    renderResult();
+    await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
+
+    expect(document.querySelector(".learning-run-result-summary__seal")?.textContent).toBe("已理解");
+    expect(document.querySelector(".learning-run-result-summary__quiet")).toBeNull();
   });
 });
