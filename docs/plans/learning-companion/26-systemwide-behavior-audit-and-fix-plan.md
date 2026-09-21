@@ -721,6 +721,20 @@ revision CAS 前后端、人格注入 prompt——均确认真实工作。人格
   跨小时幂等回归测试尚不存在，修复时应补。**新增硬前提（登记时不存在）**：在途
   未跟踪 migration 0183 已 DROP learning_cards 表而 0171 函数 :81 仍 EXISTS 查询
   它——见 C-3 二次复核标注，C-2/C-3/C-6 的函数重写必须一并处理。
+- **修复 09-21【已落地，迁移 0251】**：主方案按原样实施——`NOT BETWEEN 1 AND 6
+  THEN CONTINUE`。**要求的跨小时幂等回归测试已补**：
+  `apps/api/src/integration-tests/companion-daily-summary-tick-window-postgres.integration.ts`
+  用 26 个整点偏移时区在运行时挑"落在放宽段 2–6"与"落在窗口外"各一个，
+  断言窗口外零入队、放宽段首次入队且重复 tick 仍只一条；
+  变异验证过（把条件改回 `<> 1`，放宽段那条立刻红）。
+  补充方案（dead 重入队）**有意不做**：日记正文改成模型写之后，
+  `consent_required` 与 `diary_output_invalid` 都是确定性失败并已判 dead，
+  按 status 重投会让这两种情况每小时再烧一次调用。残余边界因此在 0251 文件头注明：
+  当天 job 已 dead ⇒ 这天没有日记，次日恢复。
+  **另修一处本条未登记的同类缺陷**：判据里的 `local_date::date AT TIME ZONE tz`
+  得到的不是"该地那一刻"而是被会话时区平移过的值，窗口整体偏移一个时区差
+  （实测标 09-20 的判据盖住 09-20 16:34–09-21 14:11 本地钟点），
+  正确写法 `::date::timestamp AT TIME ZONE tz`，生成器与函数同步。
 
 ### C-3【P2】多用户工作区计数串味
 
@@ -746,6 +760,15 @@ revision CAS 前后端、人格注入 prompt——均确认真实工作。人格
   必须删除或改指 learning_cards_v2（workspace 粒度，与处理器计数口径对齐）。若
   未来真要按用户归属卡片，join 路径存在（card_generation_runs_v2.user_id），但需
   多表 join，维持 workspace 粒度 + 文档注明仍是合理取舍。
+- **修复 09-21【已落地，生成器侧；口径比复核结论更进一步】**：日记正文改成模型写之后，
+  这两处不再只是"要不要给他生成"的判据，而是**会进 prompt 被她说给用户听**，
+  越权归因的代价从"多一条小结"变成"她讲错你的这一天"，所以按复核预留的 join 路径收紧了：
+  `sources` 补 `created_by = user`（该列 NOT NULL，零成本）；
+  `learning_cards_v2` 走 `note_version_id → note_versions.created_by = user`
+  —— 比 `card_generation_runs_v2.user_id` 少一跳，且语义正是"这张卡出自谁写的哪一版笔记"。
+  调度函数 `0243/0251` 里的 EXISTS 判据**仍是 workspace 粒度**（有意保留）：
+  它只回答"这个人昨天在这个空间有没有动静"，多算不会说错话，
+  收紧反而会让协作空间里安静的人不再收到日记。两处口径不同是有意的，记在这里免得被"对齐"掉。
 - **三轮验证 08-24【回归已激活，实库证实】**：开发库 `drizzle.__drizzle_migrations`
   已含 0183（共 185 条已应用），`to_regclass('public.learning_cards')` 返回 NULL——
   表已删。线上函数体（pg_get_functiondef 实读）仍含 `SELECT 1 FROM learning_cards`

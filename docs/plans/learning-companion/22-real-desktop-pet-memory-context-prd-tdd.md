@@ -2,10 +2,26 @@
 
 > 状态：**Implemented（已实施，含实机修复补丁 + 代码审查修复 + 端到端行为修复与三轮遗留修复）**
 > 日期：2026-08-16
-> 文档版本：v1.6
+> 文档版本：v1.8
 > 关联：[21-real-desktop-pet-memory-context-design.md](./21-real-desktop-pet-memory-context-design.md)
 >
 > 修订记录：
+> - v1.8（2026-09-21 第二轮反馈）：日记从"一段纯文本"改成**块序列**，
+>   她可以把当天笔记里的图与原文**真的嵌进日记**（迁移 0252）。
+>   同一轮改掉两点：① 篇幅档位从"几句"换成"几段"——上一轮按句收（安静 5 句），
+>   用户回来说"太短了，而且只有一段，这不是日记的格式"；
+>   ② 素材里补上**她一个人的时段**（第一次/最后一次来找她 + 最长空档），
+>   prompt 里明确"关于他的事只许写素材里有的，关于你自己的事可以按人设写"，
+>   日记不再只写学习。图与引用的渲染复用对话记录那两个组件，不抄第二套。
+>   嵌入是**能力不是配额**（用户原话："想写就写，不想写就不写"）。
+> - v1.7（2026-09-21）：桌宠日记从"确定性统计模板"改成**她自己按人格写的第一人称日记**
+>   （用户裁定："这跟系统统计数据有什么区别？"）。改动集中在 §15.3/§15.4/§15.5/§15.6/§15.7
+>   与 §17 那条被推翻的决定。顺带修掉两个从 `0171` 就在的旧缺陷：
+>   (a) 本地日窗口整体平移一个时区差，"昨天的日记"讲的是今天（`date AT TIME ZONE`
+>   的类型陷阱，迁移 0251 + 生成器同修，有实库断言）；
+>   (b) 调度只认本地 01:00 那一小时，错过即永久缺一天（放宽到 1–6 点，
+>   幂等键与唯一索引各自兜住重复）。
+>   新增迁移 0250（`failure_reason` 列 + 删除从未被渲染过的 `highlights` 列）。
 > - v1.6（2026-08-23）：实施核查回写——(a) §3.1 模块划分与实际布局对齐
 >   （API 侧文件实际位于 modules/companion-conversation/，proactive 两件在 API 进程内、
 >   其余为 worker handlers；前端无 features/companion-memory/ 目录，实际为 app router
@@ -1707,17 +1723,24 @@ GET    /companion/memory?cursor=&limit=   // 分页游标
 
 ### 15.1 产品需求
 
-- 每天生成一篇“桌宠日记”，像桌宠写的笔记一样总结用户昨天做了什么。
-- **生成方式：系统定时任务，每日 01:00 自动生成前一天总结，用户不能手动生成。**
+- 每天生成一篇“桌宠日记”，**由她自己按 `pet_profiles` 设定的人格写第一人称日记**
+  （v1.7：原文是"像桌宠写的笔记一样总结用户昨天做了什么"，实机产出被用户裁定为
+  "这跟系统统计数据有什么区别"——总结的口吻、报表的内容，两者都不是日记）。
+- **生成方式：系统定时任务，每日 01:00–06:59（本地）自动生成前一天日记，用户不能手动生成。**
+  窗口 0251 放宽，错过一小时不再永久缺一天。
 - 数据来源：
-  1. 今日变化（现有 `/today` 页数据）：笔记、学习卡、来源资料、后台任务、LearningRun；
-  2. 桌宠对话：当天 companion messages 数量与片段；
+  1. 当天**具体发生过什么**（v1.7）：新建/改动的笔记标题、收录的资料标题、
+     `learning_tasks.target_summary`（学了什么）、当天真实对话、她自己说出口的
+     念头与提醒、当天记下的事；
+  2. 数量只做内部记账（`facts`，供连续学习天数计算），**不进 prompt、不进页面**；
+     学习时长以"半小时上下/一个来小时"这种**感觉**给她，不给数字。
   3. 使用痕迹：当天 `assistant_page_contexts` 页面活动。
 - 新增独立页面 `/companion/daily`，页面只读展示，不触发生成。
 - 入口：
   - 主页侧边栏“我的”分组新增“桌宠日记”；
   - 今日学习页（`/today`）新增快捷卡片，点击跳转。
-- 每日总结由定时任务写入候选记忆，进入桌宠记忆管理流程。
+- 每日总结由定时任务写入候选记忆，进入桌宠记忆管理流程
+  （v1.7：存 ≤30 字事实 digest，不存日记正文，理由见 §15.5）。
 
 ### 15.2 页面与 UI
 
@@ -1725,25 +1748,28 @@ GET    /companion/memory?cursor=&limit=   // 分页游标
 /companion/daily
 ├─ 伴星的今日笔记卡
 │   ├─ 日期（默认展示最近一次已生成的日记，支持翻看历史日期）
-│   ├─ 桌宠头像/标签
+│   ├─ 正文块序列（按她给的顺序排：段落 / 图 / 原文引用 交错，不是全堆在末尾）
 │   ├─ 生成时间
-│   └─ 摘要正文（桌宠笔记风格）
-├─ 今日事实统计
-│   ├─ 新建笔记 / 笔记变化 / 学习卡 / 收录资料
-│   ├─ 后台任务 / 微旅程 / 桌宠对话 / 活跃页面
-├─ 对话拾遗
-│   └─ 当天与桌宠的对话片段（你说 / 伴星说）
-└─ 快捷链接
-    ├─ 管理桌宠记忆
-    ├─ 查看今日变化
-    └─ 打开完整对话
+│   └─ 快捷链接：查看关联记忆（该日日记派生的那条；没有就不显示）
+└─ 日期导航（前一天 / 后一天 / 日条）
 ```
+
+> v1.7 删掉了原设计里的「今日事实统计」与「对话拾遗」两块。前者是用户这次不满的
+> 直接对象（"这跟系统统计数据有什么区别"）；后者（`highlights` 列）从未被渲染过，
+> 列已随 0250 删除。
+>
+> v1.8（0252）正文从"一段纯文本"改成块序列，图与引用**真的嵌进来**。
+> 渲染器直接复用对话记录那两处（`CompanionRecordImage` / `CompanionQuoteBlock`），
+> 所以长原文的量高折叠、图片取回失败时的重试，这一页不重复实现第二套。
 
 页面状态：
 - `loading`：正在读取；
 - `generated`：正常展示；
-- `not_generated`：数据库无该日期行，且当前还未到该日期的 01:00，或该日期用户无活动，显示“桌宠还在等凌晨 1 点写日记”；
-- `failed`：数据库存在 `status=failed` 的行（最终失败落行），显示“昨晚生成失败，系统稍后会自动重试”，**不提供手动生成按钮**。
+- `not_generated`：显示"这一天还没有日记"；
+- `failed`：显示**「这一天她没能写下来」**，并按 `failure_reason` 给一句实话
+  （没开外发 / 她试了几次没写成 / 交回来的还在报数）。
+  旧文案"昨晚生成失败，系统稍后会自动重试"已删——读取不触发重生成，那是假承诺；
+  三种成因里也只有 `model_unavailable` 真会重试。**不提供手动生成按钮**（§16.6）。
 
 - 侧边栏：`我的` 分组新增 `桌宠日记`，`href=/companion/daily`。
 - 今日学习页：在“今日变化”概览与“今日账本”之间新增快捷卡片：
@@ -1759,7 +1785,7 @@ GET /companion/daily?date=YYYY-MM-DD
 
 - **只读接口，不生成总结**；
 - `date` 为前端本地日期，缺省返回最近可用的昨天总结；
-- 返回：
+- 返回（v1.7：`facts` 与 `conversationHighlights` 不再上线，见 §15.6）：
 
 ```json
 {
@@ -1767,25 +1793,8 @@ GET /companion/daily?date=YYYY-MM-DD
   "date": "2026-08-15",
   "status": "generated",
   "generatedAt": "2026-08-16T01:02:11.000Z",
-  "summary": "昨天你留下了 12 条学习痕迹……",
-  "facts": {
-    "notesCreated": 2,
-    "notesUpdated": 2,
-    "cardsCreated": 3,
-    "sourcesCreated": 1,
-    "jobsCreated": 2,
-    "jobsCompleted": 1,
-    "learningRunsCreated": 1,
-    "learningRunsCompleted": 1,
-    "pageContexts": 5,
-    "conversationMessages": 8,
-    "userMessages": 4,
-    "assistantMessages": 4
-  },
-  "conversationHighlights": [
-    { "role": "user", "text": "今天继续学光合作用" },
-    { "role": "assistant", "text": "好呀，我们先把上次的卡复习一下。" }
-  ],
+  "failureReason": null,
+  "summary": "下午你第三次问我那道题的时候，我其实有点慌……",
   "memory": {
     "memoryItemId": "uuid",
     "candidate": true
@@ -1794,6 +1803,10 @@ GET /companion/daily?date=YYYY-MM-DD
 ```
 
 - `status = generated | not_generated | failed`；
+- `failureReason = consent_required | model_unavailable | diary_output_invalid | null`
+  （v1.7 新增，0250）：正文改成由她写之后，"没有日记"有三种成因且只有一种该重试，
+  界面按这个给实话——`consent_required` 指向「允许发送到外部模型服务」，
+  不再统一显示"生成失败"；
 - `not_generated` 由“无该日期行”推导；`failed` 由表中 status 字段返回；
 - 查询未来日期（大于账号时区今天）返回 `not_generated`，不报错；
 - `status != generated` 时 `memory` 字段为 null；
@@ -1830,25 +1843,38 @@ GET /companion/daily?date=YYYY-MM-DD
 - 活动判定使用一条 UNION 计数 SQL，命中即入队，避免逐表逐用户串行扫描；
 - 为每个符合条件用户创建/入队 `companion_daily_summary` 任务，幂等 key = `daily-summary:<workspaceId>:<userId>:<date>`。
 
-#### 15.4.3 任务执行
+#### 15.4.3 任务执行（v1.7 重写，v1.8 改成块）
 
 1. 读取任务；
-2. 按 15.6 查询前一天 facts 与 highlights；
-3. 生成摘要文本（确定性模板优先，LLM 润色可选）：
-   - 摘要长度 ≤ 500 字；
-   - 过滤控制字符，保持纯文本；
-   - 不引用已删除/敏感记忆；
-4. 事务写入：
-   - `companion_daily_summaries`；
-   - `assistant_memory_items` 候选记忆（`sourceEventId=daily-summary:<date>`）；
+2. 一个事务里取三样东西：12 个计数（仍写 `facts`，见 §15.6）、当天**具体素材**
+   （含可嵌入的图与原文清单、她一个人的空档时段）、`pet_profiles` 人格（含 `familiarity`）；
+3. 由她按人格写第一人称日记（治理链路同摘要器：`resolveAIGovernanceContext` →
+   `resolveProviderForTask(companion_agent)` → `createGovernedProvider`，
+   **必须 `withThinkingDisabled`**，否则非流式调用会稳定返回空正文）：
+   - 输出是 `{"blocks":[…],"digest":"…"}`，块只有 `text` / `image` / `quote` 三种；
+   - **她只给编号**（`图1` / `引1`），url 与原文由服务端从素材表换成真货；
+     编号不存在或重复用 → 丢掉那一块，正文照留，并 warn 出来；
+   - 服务端核对两条：正文不许报数（数字+量词），段数不许超人格档位
+     （安静 2 / 适度 3 / 活跃 4 段）；超长重采样一次，第二次收在**段边界**上；
+     报数两次则判失败；
+   - 报数只核她写的正文：图注与引用原文里出现数字是真的。
+4. 事务写入（提交前 `lockJobLease` 重校验租约——LLM 调用发生在事务之外）：
+   - `companion_daily_summaries`（`blocks` 是展示面，`summary` 是它的纯文本投影）；
+   - `assistant_memory_items` 候选记忆（`sourceEventId=daily-summary:<date>`，存 digest 不存正文，见 §15.5）；
 5. 标记任务 `succeeded`。
 
-#### 15.4.4 失败与重试
+#### 15.4.4 失败与重试（v1.7 更正）
 
-- 失败不阻塞其他用户任务；
-- 自动重试最多 3 次，间隔 10 分钟；
-- 仍失败则写 `companion_daily_summaries(status='failed')`，页面据此显示失败态；
-- 下一小时调度器可再次补跑失败任务（幂等覆盖，成功后把 status 更新为 generated）；
+- 失败也写一行 `status='failed'` 带 `failure_reason`，**且带真实 `facts`**
+  （旧实现写 `'{}'::jsonb`，一个失败日会静默打断 §11 念头的连续学习天数计算）；
+- 三种成因的分诊：`consent_required`（无同意/策略拒绝/provider 未配置）与
+  `diary_output_invalid` 是**确定性失败**，判 dead 不重投（后者照
+  `MemoryExtractOutputError` 的先例：静默返回的失败在监控里长得像健康）；
+  `model_unavailable` 走正常重试，之后成功会 upsert 成 generated 并清空 `failure_reason`；
+- 调度窗口 0251 放宽到本地 1–6 点，宕机后首个可达 tick 补上；
+  **残余边界**：当天 job 已存在且已 dead 时，幂等键仍阻止重新入队，
+  这天就没有日记（不加 `DO UPDATE ... WHERE status='failed'` 是有意的——
+  那会让两种确定性失败每小时再烧一次调用）；
 - 不提供用户手动触发生成。
 
 ### 15.5 记忆写入
@@ -1864,17 +1890,61 @@ userStated = false
 
 - 同一天同一用户只保留一条；
 - 用户确认后成为 active，进入后续向量检索；
-- 删除/清空该记忆不影响 `companion_daily_summaries` 页面展示。
+- 删除/清空该记忆不影响 `companion_daily_summaries` 页面展示；
+- **v1.7 决定：存 digest 不存正文。**候选记忆一旦被确认就每轮注入对话，
+  把主观创作存成记忆等于让她下一轮把自己的情绪当成"回忆到的事实"引用——
+  这正是 §29 里 `isVolatileStatisticMemory` 要拦的那一类事故。
+  digest 是模型额外输出的一句 ≤30 字事实备忘（也不许带数字），
+  digest 为空或带计数口气时不写这条记忆（此时 `memory=null`，页面的「查看关联记忆」自己消失）。
 
 ### 15.6 数据查询
 
+**A. 12 个计数（写 `facts`，v1.7 起不再返回给页面）**
+
 - 笔记：`notes`（`deleted_at IS NULL`）前一天 created/updated 计数；
-- 学习卡：`learning_cards` 前一天 created 计数；
-- 资料：`sources` 前一天 created 计数；
+- 学习卡：`learning_cards_v2` 前一天 created，且经 `note_version_id → note_versions.created_by`
+  归到本人名下（v1.7 收紧：以前只按 workspace 过滤，把别人的出卡算到他头上）；
+- 资料：`sources` 前一天 created，**补 `created_by` 过滤**（该列 NOT NULL，同上）；
 - 任务：`jobs` 前一天 scheduled/finished 计数；
 - LearningRun：`learning_runs` 前一天 created + `phase='completed'` 前一天 updated；
 - 使用痕迹：`assistant_page_contexts` 前一天 distinct page_kind；
-- 对话：`companion_messages` 前一天计数 + 最近 8 条文本片段。
+- 对话：`companion_messages` 前一天计数（全量 / user / assistant）。
+
+> 这一组必须继续写：`companion-thought.ts` 读 `facts->>'learningRunsCreated'` 与
+> `'learningRunsCompleted'` 算连续学习天数，删了它们主动念头会静默归零。
+
+**B. 写正文用的素材（v1.7 新增，`collectDiaryMaterial`）**
+
+用户 2026-09-21 的裁决是"这跟系统统计数据有什么区别"，所以喂给模型的是**事**不是**数**：
+当天新建/改动的笔记标题、收录的资料标题、`learning_runs` 关联
+`learning_tasks.target_summary`（**不能用 `learning_runs.goal`**，那是枚举
+`stabilize|clarify|…`，喂进去她会说"你正在学习 stabilize"）、学习时长的**模糊感觉**
+（半小时/一个来小时，不给数字）、到访页面类型（复用 `PAGE_KIND_LABELS`，跳过 `other/home`）、
+当天真实对话（每个角色各留最近 12 条再还原时间正序）、`companion_reminders` 已触发的、
+`assistant_thoughts` 已送达的、当天新写的记忆（**排除本篇日记自己派生的那条**），
+以及前几天日记的开头（掐掉"每天同一句式"）。整块按 3200 字预算从当天早上的部分丢起。
+
+**v1.8 加了两组素材**，对应那两条意见：
+
+- **她一个人的时段**：当天第一次与最后一次来找她的钟点，以及中间最长的空档
+  （≥2 小时才给）。没有这组，她只能写"陪了你多久"；有了它， prompt 里那条
+  「关于你自己的事可以按你的人设写」才有依据可落——**关于他的事仍只许写素材里有的**。
+- **可嵌进去的东西**：当天碰过的笔记里的图（`note_image_assets`，按 `created_at`
+  数出"第几张"，上限 6）与原文片段（`note_blocks` 当前版本的 `quote`/`paragraph`，
+  12–400 字，上限 4）。清单以 `图1 = 《标题》· 第 1 张，1536×1024` 的形状给她。
+  上限是**天花板不是配额**：实测她会在没有可嵌东西的那天一个都不用，也在有的那天
+  主动摆一张图加一段原文进去（2026-09-18 真跑，块序 `text/image/quote/text/text`）。
+
+**C. `highlights` 列已删（0250）**：它存的是"当天最后 8 条对话"的截断副本，
+历史上从未被任何界面渲染过，写正文用的素材改成生成时现取，原始对话本来就在
+`companion_messages` 里，不需要再存一份。
+
+**D. 本地日窗口的写法（v1.7 修）**：必须是 `${date}::date::timestamp AT TIME ZONE tz`。
+写成 `${date}::date AT TIME ZONE tz` 时 Postgres 先按会话时区把 date 升成
+timestamptz、再折算成该时区的**无时区 timestamp**，与 timestamptz 列比较时又被按会话
+时区读回 UTC —— 整个窗口平移一个时区差。实测标着 09-20 的窗口原本盖住
+09-20 16:34–09-21 14:11 本地钟点，即"昨天的日记讲的是今天"。这条从 0171 起就在，
+调度器 `0243` 的 7 个 EXISTS 判据同病，`0251` 一并修掉。
 
 ### 15.7 数据模型
 
@@ -1886,9 +1956,11 @@ CREATE TABLE IF NOT EXISTS companion_daily_summaries (
   date text NOT NULL,              -- 用户本地日期 YYYY-MM-DD
   timezone text NOT NULL,
   facts jsonb NOT NULL,
-  highlights jsonb NOT NULL DEFAULT '[]',
-  summary text NOT NULL DEFAULT '',
+  blocks jsonb NOT NULL DEFAULT '[]',   -- v1.8（0252）：正文块序列，展示面
+  summary text NOT NULL DEFAULT '',     -- 正文的纯文本投影（历史行只有它）
   status text NOT NULL DEFAULT 'generated', -- generated | failed
+  failure_reason text,        -- v1.7（0250）：consent_required | model_unavailable
+                              --                  | diary_output_invalid，generated 行必为 NULL
   revision integer NOT NULL DEFAULT 1,
   generated_at timestamptz NOT NULL DEFAULT now(),
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -1896,6 +1968,11 @@ CREATE TABLE IF NOT EXISTS companion_daily_summaries (
   UNIQUE (workspace_id, user_id, date)
 );
 ```
+
+> v1.7（0250）：`highlights` 列已删除，理由见 §15.6 C。
+> v1.8（0252）：`blocks` 是展示面。历史行 `blocks='[]'`，由只读路由投影成单个
+> `text` 块（内容取 `summary`），所以接口里的 `blocks` 永远形状一致，
+> 渲染层不需要"旧日子没有块"的分支——旧日子照常显示，也不重写（用户裁定）。
 
 - 按 workspace + user RLS；
 - `date` 必须与 `timezone` 匹配，由服务端写入；
@@ -2012,7 +2089,12 @@ GET    /companion/daily?date=YYYY-MM-DD
 - ✅ 向量维度：固定 `vector(1024)`，与 `note_evidence_embeddings` 一致；
 - ✅ 人格预设的具体文案 seed：固化在 `packages/shared/src/pet-persona-presets.ts`，5 套预设 + `PET_PERSONA_PRESET_VERSION = 1`；
 - ✅ 摘要模型调用预算：使用 companion provider，`maxTokens: 1000`、`temperature: 0.2`；
-- ✅ 桌宠日记 LLM 润色是否首期启用：首期使用确定性模板（`buildSummaryText`），LLM 润色默认不启用。
+- ~~桌宠日记 LLM 润色是否首期启用：首期使用确定性模板（`buildSummaryText`），LLM 润色默认不启用。~~
+  **本条已于 2026-09-21 推翻（v1.7）**：用户看了产出后裁定"这跟系统统计数据有什么区别"，
+  日记正文改由她按 `pet_profiles` 人格写第一人称，`buildSummaryText` 已删除。
+  当时的"默认不启用"留下一个反直觉后果：这一页看起来像在做产品，实际在做报表。
+  新前置：非流式调用必须 `withThinkingDisabled`，正文预算 `maxTokens: 800`
+  （实测按人格给 quiet 只留 240 时，思考 token 吃满预算 → 稳定空正文）。
 
 ## 18. 实机验证与修复补丁（v0.3 补充）
 
