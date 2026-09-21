@@ -56,6 +56,8 @@ let memberToken = "";
 let strangerToken = "";
 let noteId = "";
 let versionId = "";
+/** 同一个作者在同空间的「仅自己可见」那一篇（批次 4.5 的按篇门控用它测）。 */
+let privateNoteId = "";
 /** 每次连接都要显式销毁；漏掉会把文档留在内存里，让后面的连接数断言失真。 */
 const liveProviders: HocuspocusProvider[] = [];
 
@@ -229,6 +231,18 @@ before(async () => {
   if (!created) throw new Error("createNote 返回 null：笔记没有当前版本");
   noteId = created.note.id;
   versionId = created.version.id;
+  // 本文件整份都在测"实时连接"，而那扇门批次 4.5 之后只对「已共享给空间」的笔记开。
+  // 新建默认是"仅自己可见"，所以这一句是把夹具放到被测那条路上——等价于用户在界面上
+  // 点了一下「共享给空间」。私有那一篇另有专门用例，不在这里顺手混进来。
+  await sql`UPDATE notes SET share_scope = 'shared' WHERE id = ${noteId}`;
+  const ownPrivate = await withWorkspaceTransaction({ workspaceId: wsCollab, userId: userOwner }, (tx) =>
+    createNote(tx, wsCollab, userOwner, {
+      title: `只有我自己看得见的草稿 ${tag}`,
+      blocks: [{ type: "paragraph", content: "不该被广播的一段正文" }],
+    }),
+  );
+  if (!ownPrivate) throw new Error("夹具没能建出那篇私有的笔记");
+  privateNoteId = ownPrivate.note.id;
 });
 
 after(async () => {
@@ -538,4 +552,36 @@ test("关停：debounce 窗口里的最后一次编辑必须落盘", async () =>
   assert.ok((await projectedRows()).includes(last), "关停了但 note_blocks 没跟上");
   assert.equal(collaborationLoad().documents, 0);
   destroyProviders();
+});
+
+test("「仅自己可见」的那篇不建实时连接，但作者照样能取编辑起点", async () => {
+  // 决定 7b：门控关的是**传输**，不是写入内核。两边各钉一条：
+  // 只测"连不上"会放过"把写入也一起挡了"这种更糟的实现。
+  const refused = connect(ownerToken, documentNameForNote(privateNoteId));
+  await once(refused.provider, "authenticationFailed", "私有笔记被拒");
+  assert.equal(refused.provider.isAuthenticated, false);
+
+  // 正向对照 A：同一个 token、同一篇已共享的笔记必须连得上——否则上一条的"被拒"
+  // 可能只是 token 或夹具坏了。
+  const allowed = connect(ownerToken);
+  await allowed.synced;
+  assert.equal(allowed.provider.isAuthenticated, true);
+
+  // 正向对照 B：那篇私有的笔记**仍然可以编辑**——起点口给它返回正文。
+  const startingPoint = await app.inject({
+    method: "GET",
+    url: `/v2/notes/${privateNoteId}/doc-state`,
+    headers: { authorization: `Bearer ${ownerToken}` },
+  });
+  assert.equal(startingPoint.statusCode, 200, `私有笔记的编辑起点被误挡了：${startingPoint.body}`);
+  assert.ok(JSON.parse(startingPoint.body).update.length > 0);
+  assert.equal(JSON.parse(startingPoint.body).shareScope, "private", "起点没带归属，客户端就没法按篇决定建不建连");
+
+  // 顺带钉住"归属改了，实时连接就跟着开"：共享之后同一篇必须连得上。
+  await sql`UPDATE notes SET share_scope = 'shared' WHERE id = ${privateNoteId}`;
+  const afterShare = connect(ownerToken, documentNameForNote(privateNoteId));
+  await afterShare.synced;
+  assert.equal(afterShare.provider.isAuthenticated, true, "共享之后仍然连不上——按篇判据读的不是这一列");
+  destroyProviders();
+  await waitFor(() => collaborationLoad().documents === 0, "文档卸载");
 });

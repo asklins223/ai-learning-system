@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { SpaceSharingNotice } from "../space-sharing-notice";
+import { SpaceShareButton, noteShareScopeLabel } from "../space-share-control";
+import type { NoteShareScopeV1 } from "@ailearn/shared/note-share-contracts";
 import type { DesktopNoteListItem, DesktopNoteListPage, DesktopSourceDetail } from "@ailearn/shared/desktop-surface-contracts";
 import type { NoteDetailV1 } from "@ailearn/shared/note-projection-contracts";
 import { useRoomStore } from "../../app/room-store";
@@ -89,6 +91,8 @@ export function NoteLibrarySurface() {
   const setReturnTarget = useRoomStore((state) => state.setReturnTarget);
   /** The note the reader was last in, which is what "继续写作" means. */
   const recentNoteId = useRoomStore((state) => state.recentNoteId);
+  /** 空间归属：个人空间里整个"共享给空间"的入口不出现。 */
+  const spaceIdentity = useRoomStore((state) => state.spaceIdentity);
   const [view, setView] = useState<LibraryView>(persistedLibraryUi.view);
   const [tab, setTab] = useState<TimeTab>(persistedLibraryUi.tab);
   const [draft, setDraft] = useState("");
@@ -337,7 +341,7 @@ export function NoteLibrarySurface() {
     }
   }, [epochRef, trash, trashPaging]);
 
-  /** Renaming a note is a title-only save against its current version. */
+  /** 改名只改标题：走正文那同一个增量口，`blocks` 缺省 = 正文一个字都不动。 */
   const renameNote = async (note: DesktopNoteListItem) => {
     if (!saveAllowed) {
       setRenaming(null);
@@ -370,7 +374,29 @@ export function NoteLibrarySurface() {
     } finally {
       setBusyId(null);
     }
-  };
+  }
+
+  /**
+   * 「共享给空间」/「取消共享」。判据是作者，服务端那一处已经实现，所以这里不提前
+   * 判一次——按钮的禁用只是让结果早点可见，不是权限（决定于批次 2 的同一套做法）。
+   */
+  const setShareScope = async (note: DesktopNoteListItem, shareScope: NoteShareScopeV1) => {
+    setBusyId(note.id);
+    setRowFailure(null);
+    try {
+      unwrapGatewayResult(await window.ailearn.note.setShareScope({
+        meta: createRequestMeta(epochRef.current),
+        commandId: createCommandId("note-share"),
+        noteId: note.id,
+        shareScope,
+      }));
+      await reload();
+    } catch (error) {
+      setRowFailure(`归属没改成：${gatewayErrorMessage(error)}`);
+    } finally {
+      setBusyId(null);
+    }
+  };;
 
   const removeNote = async (note: DesktopNoteListItem) => {
     setBusyId(note.id);
@@ -505,6 +531,13 @@ export function NoteLibrarySurface() {
         >
           重命名
         </button>
+        <SpaceShareButton
+          shareScope={note.shareScope}
+          canShare={note.canShare}
+          isPersonal={spaceIdentity?.isPersonal ?? true}
+          busy={busyId === note.id}
+          onShare={(next) => void setShareScope(note, next)}
+        />
         <button
           type="button"
           className="text-action text-action--danger"
@@ -523,9 +556,12 @@ export function NoteLibrarySurface() {
     if (renaming?.noteId === note.id) return "回车保存，Esc 取消";
     if (confirmingId === note.id) return "删除后可在回收站恢复。";
     return [
+      // 归属写在每一行上：这一列决定别人看不看得到，靠点开才知道就太晚了。
+      // 个人空间里没有人可共享，那一行就不出现（同 SpaceShareButton 的理由）。
+      spaceIdentity?.isPersonal ? "" : noteShareScopeLabel(note.shareScope),
       `${formatRelative(note.updatedAt)}更新`,
       note.currentVersionId ? "已有版本" : "等待首版",
-    ].join(" · ");
+    ].filter((part) => part !== "").join(" · ");
   };
 
   return (

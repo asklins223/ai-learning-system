@@ -42,7 +42,7 @@ export async function sourceRoutes(app: FastifyInstance) {
     const opts = parseQuery(app, sourceListQuerySchema, req.query);
     return withWorkspaceTransaction(
       { workspaceId: req.session.workspaceId, userId: req.session.userId },
-      (transaction) => listSources(transaction, req.session.workspaceId, opts),
+      (transaction) => listSources(transaction, req.session.workspaceId, { ...opts, userId: req.session.userId }),
     );
   });
 
@@ -139,7 +139,7 @@ export async function sourceRoutes(app: FastifyInstance) {
     if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
     const result = await withWorkspaceTransaction(
       { workspaceId: req.session.workspaceId, userId: req.session.userId },
-      (transaction) => listNotesBySource(transaction, req.params.id, req.session.workspaceId),
+      (transaction) => listNotesBySource(transaction, req.params.id, req.session.workspaceId, req.session.userId),
     );
     if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     return { items: result.items, total: result.total };

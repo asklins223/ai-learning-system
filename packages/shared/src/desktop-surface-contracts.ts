@@ -161,6 +161,10 @@ export const desktopNoteListItemSchema = z.object({
    * 不带结构化的 url/alt。
    */
   firstImageBlock: z.string().max(4000).nullable(),
+  /** `private` = 「仅自己可见」，`shared` = 「已共享给空间」。 */
+  shareScope: z.enum(["private", "shared"]).default("private"),
+  /** 只有作者能点那个动作；不是作者时入口要禁用并说明原因，而不是点下去吃一个 404。 */
+  canShare: z.boolean().default(false),
 }).passthrough();
 export type DesktopNoteListItem = z.infer<typeof desktopNoteListItemSchema>;
 

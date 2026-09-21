@@ -90,13 +90,17 @@ export const noteCollaboration = new Hocuspocus<NoteDocContext>({
 
     const note = await db.query.notes.findFirst({
       where: eq(notes.id, noteId),
-      columns: { id: true, workspaceId: true, currentVersionId: true, deletedAt: true },
+      columns: { id: true, workspaceId: true, currentVersionId: true, deletedAt: true, shareScope: true },
     });
     if (!note || note.workspaceId !== session.workspaceId || note.deletedAt !== null) {
       // 空间不符一律按"不存在"处理：跨空间探测不该从错误信息里得到答案。
       throw new Error("note_not_found");
     }
     if (!note.currentVersionId) throw new Error("note_has_no_version");
+    // 批次 4.5：实时连接只服务「已共享给空间」的笔记。仅自己可见的那篇不广播，
+    // 但**照样能编辑**（写入内核不看这一位，走 HTTP 上送那条同一个口）——门控关的是
+    // 传输，不是写入。理由与拒绝的措辞都跟"没权限"同一类，不给探测留缝。
+    if (note.shareScope !== "shared") throw new Error("not_shareable");
 
     const readOnly = !isWorkspaceOwner(session);
     // 只读要写进 connectionConfig，不是自己挡消息：服务端会据此回一条

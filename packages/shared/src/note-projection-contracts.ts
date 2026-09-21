@@ -45,6 +45,11 @@ export const notePermissionProjectionV1Schema = z.strictObject({
   canRead: z.literal(true),
   canEdit: z.boolean(),
   canSave: z.boolean(),
+  /**
+   * 能不能改这篇的归属（「共享给空间」/「取消共享」）。判据是**作者**，不是空间角色，
+   * 所以它和 canEdit 可以取不同的值；服务端 `setNoteShareScope` 用的是同一个判据。
+   */
+  canShare: z.boolean(),
 });
 export type NotePermissionProjectionV1 = z.infer<typeof notePermissionProjectionV1Schema>;
 
@@ -57,6 +62,8 @@ export const noteDetailV1Schema = z
     titleSource: z.enum(["manual", "auto"]),
     sourceId: uuidSchema.nullable(),
     currentVersionId: uuidSchema,
+    /** `private` = 界面上的「仅自己可见」，`shared` = 「已共享给空间」。 */
+    shareScope: z.enum(["private", "shared"]),
     currentVersion: noteVersionProjectionV1Schema,
     permissions: notePermissionProjectionV1Schema,
     // The current version ID is the OCC/read revision for the frozen Note

@@ -446,6 +446,7 @@ export async function listNotes(
         currentVersionId: notes.currentVersionId,
         workspaceId: notes.workspaceId,
         createdBy: notes.createdBy,
+        shareScope: notes.shareScope,
         cursorTimestamp: sql<string>`to_char(${notes.updatedAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
       })
       .from(notes)
@@ -478,10 +479,15 @@ export async function listNotes(
   const coverByVersion = await firstImageBlockByVersion(executor, workspaceId, versionIds);
 
   return {
+    // 列表行自己带归属与"你能不能改归属"：库页的每一行都要显示「仅自己可见 /
+    // 已共享给空间」并在不能改时说清原因，让界面再发一次详情请求只为拿两个布尔值
+    // 是纯粹的浪费，也让那条判据在界面上有第二个来源。
     items: pageRows.map((r) => ({
       id: r.id,
       title: r.title,
       titleSource: r.titleSource,
+      shareScope: r.shareScope,
+      canShare: r.createdBy === opts.userId,
       firstImageBlock: r.currentVersionId ? coverByVersion.get(r.currentVersionId) ?? null : null,
       currentVersionId: r.currentVersionId,
       createdAt: r.createdAt,

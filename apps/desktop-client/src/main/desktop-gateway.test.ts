@@ -261,7 +261,9 @@ const NOTE_DETAIL = noteDetailV1Schema.parse({
     updatedAt: "2026-08-23T00:00:00.000Z",
     blocks: [{ ordinal: 0, type: "paragraph", content: "正文" }],
   },
-  permissions: { canRead: true, canEdit: false, canSave: false },
+  // 归属两态是详情的一部分：列表与详情都要说得出"别人看不看得到这篇"。
+  shareScope: "private",
+  permissions: { canRead: true, canEdit: false, canSave: false, canShare: true },
   revision: "00000000-0000-4000-8000-000000000012",
   snapshotAt: "2026-08-23T00:00:00.000Z",
 });
@@ -1971,7 +1973,7 @@ describe("DesktopGateway · 笔记正文的离线提交（批次 4.4）", () => 
     return contents;
   }
 
-  function harness(options: { offline?: boolean; failStatus?: number } = {}) {
+  function harness(options: { offline?: boolean; failStatus?: number; shareScope?: "private" | "shared" } = {}) {
     const base = baseUpdate();
     const uploaded: string[] = [];
     let docStateReads = 0;
@@ -1988,6 +1990,8 @@ describe("DesktopGateway · 笔记正文的离线提交（批次 4.4）", () => 
           revision: 3,
           backfilled: false,
           savedAt: "2026-09-21T00:00:00.000Z",
+          // 起点带归属：客户端"要不要为这篇建长连接"以服务端为准，不看界面的说法。
+          shareScope: options.shareScope ?? ("shared" as const),
         }), { status: 200 });
       }
       if (url.endsWith(docUpdateUrl)) {
@@ -2075,6 +2079,54 @@ describe("DesktopGateway · 笔记正文的离线提交（批次 4.4）", () => 
     expect(contentsAfter(next.base, next.uploaded[0]!)).toEqual(["标题", "这个空间的这句"]);
     // 旧的那台机器上：一次都没交出去，也没有在丢弃后被重新拾起。
     expect(uploaded).toEqual([]);
+  });
+
+  /** watchNoteDocument 要一个已鉴权的会话：给它一个内存里的凭据存储。 */
+  function signedInStore() {
+    return {
+      available: true,
+      hasStored: () => true,
+      load: async () => "stored-token",
+      save: async () => undefined,
+      clear: async () => undefined,
+    };
+  };
+
+  function watchProbe() {
+    let transportCalls = 0;
+    const gateway = new DesktopGateway(environment(), {
+      credentials: signedInStore() as never,
+      noteDocTransport: () => {
+        transportCalls += 1;
+        return {
+          applyBlocks: () => null,
+          view: () => ({ blocks: [], title: "", titleSource: "auto" }),
+          seed: () => undefined,
+          setPresence: () => undefined,
+          close: () => undefined,
+        };
+      },
+    });
+    return { gateway, transportCalls: () => transportCalls };
+  }
+
+  it("「仅自己可见」的那篇不建实时连接，但写入照旧", async () => {
+    // 决定 7b 改到按篇判之后，门控关的是**传输**不是写入：私有笔记一样要能编辑，
+    // 只是不广播。两个半边各钉一条，少任何一条都会留下一个"看起来对"的半成品。
+    harness({ shareScope: "private" }); // 装 fetch 假实现：这篇是「仅自己可见」
+    const { gateway, transportCalls } = watchProbe();
+    await expect(gateway.watchNoteDocument(NOTE_ID, async () => undefined)).resolves.toBeNull();
+    expect(transportCalls()).toBe(0);
+  });
+
+  it("已共享的那篇照常建连（上一条不是因为坏掉才返回 null）", async () => {
+    harness(); // 这篇的 doc-state 报 shared
+    const { gateway, transportCalls } = watchProbe();
+    await gateway.connect();
+    const handle = await gateway.watchNoteDocument(NOTE_ID, async () => undefined);
+    expect(handle).not.toBeNull();
+    expect(transportCalls()).toBe(1);
+    handle?.stop();
   });
 
   it("只改标题的提交不动正文", async () => {

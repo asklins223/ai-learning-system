@@ -260,6 +260,8 @@ const desktopApi: AILearnDesktopApiM2 = {
       syncBlocks: (input) => invoke(DESKTOP_IPC_CHANNELS.noteDocSyncBlocks, input),
       presence: (input) => invoke(DESKTOP_IPC_CHANNELS.noteDocPresence, input),
     },
+    // 「共享给空间」/「取消共享」：归属是作者的一个动作，不是编辑权限的一部分。
+    setShareScope: (input) => invoke(DESKTOP_IPC_CHANNELS.noteSetShare, input),
     versions: (input) => invoke(DESKTOP_IPC_CHANNELS.noteVersions, input),
     restoreVersion: (input) => invoke(DESKTOP_IPC_CHANNELS.noteVersionRestore, input),
     // 编辑器里的图写进对象存储。渲染层不持有令牌也够不到 API 源，只交出字节，

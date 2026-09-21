@@ -9,6 +9,8 @@ export type NoteReadProjectionSource = {
     titleSource: string;
     sourceId: string | null;
     currentVersionId: string | null;
+    shareScope: string;
+    createdBy: string;
   };
   version: {
     id: string;
@@ -33,6 +35,8 @@ export type NoteReadProjectionSource = {
 export function projectNoteDetailV1(
   source: NoteReadProjectionSource,
   role: "owner" | "member",
+  /** 查看者：归属动作的判据是"这篇是不是你写的"，不是你在空间里的角色。 */
+  viewerId: string,
   snapshotAt = new Date(),
 ): NoteDetailV1 {
   const currentVersionId = source.note.currentVersionId;
@@ -45,6 +49,7 @@ export function projectNoteDetailV1(
     title: source.note.title,
     titleSource: source.note.titleSource,
     sourceId: source.note.sourceId,
+    shareScope: source.note.shareScope === "shared" ? "shared" : "private",
     currentVersionId,
     currentVersion: {
       versionId: source.version.id,
@@ -63,6 +68,7 @@ export function projectNoteDetailV1(
       canRead: true,
       canEdit: role === "owner",
       canSave: role === "owner",
+      canShare: source.note.createdBy === viewerId,
     },
     revision: currentVersionId,
     snapshotAt: snapshotAt.toISOString(),

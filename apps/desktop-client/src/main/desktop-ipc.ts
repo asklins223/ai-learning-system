@@ -227,6 +227,7 @@ import {
 } from "@ailearn/shared/companion-journey-contracts";
 import { noteDetailV1Schema } from "@ailearn/shared/note-projection-contracts";
 import { noteSaveReceiptV1Schema } from "@ailearn/shared/note-save-contracts";
+import { noteShareScopeReceiptV1Schema, noteShareScopeValuesV1, type NoteShareScopeReceiptV1 } from "@ailearn/shared/note-share-contracts";
 import {
   cardActivationReceiptDesktopV1Schema,
   cardGenerationCandidateListV1Schema,
@@ -537,6 +538,12 @@ const noteDocSyncBlocksInputSchema = z.strictObject({
 }).refine((value) => value.blocks !== undefined || value.title !== undefined, {
   // 什么都不带的提交是一次没有意义的往返（还要取一次编辑起点），直接拒。
   message: "note_doc_submit_empty",
+});
+const noteSetShareInputSchema = z.strictObject({
+  ...m1InputBase,
+  commandId: commandIdSchema,
+  noteId: uuidSchema,
+  shareScope: z.enum(noteShareScopeValuesV1),
 });
 const noteDocPresenceInputSchema = z.strictObject({
   ...m1InputBase,
@@ -1291,6 +1298,9 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
       if (streamWorkspaceEpoch !== activeWorkspaceEpoch) return;
       emit("noteDoc", { kind: "note_doc_event", noteId, event }, activeWorkspaceEpoch);
     })).then((handle) => {
+      // 服务端说这篇不该有实时连接（仅自己可见）时拿到的是 null：不建连，
+      // 但写入照常——`syncNoteDocBlocks` 没连接就走 HTTP 那同一个增量口。
+      if (!handle) return;
       // 建连期间可能已经退订、切了空间或改了角色——那条连接不属于这里了。
       if (!hasNoteDocSubscription(noteId) || !noteDocStreamAllowed() || streamWorkspaceEpoch !== activeWorkspaceEpoch) {
         handle.stop();
@@ -2447,6 +2457,14 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     );
     return { via: receipt.via, revision: receipt.revision, savedAt: receipt.savedAt };
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, noteDocWriteResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.noteSetShare, noteSetShareInputSchema, options, async (_event, _window, input): Promise<NoteShareScopeReceiptV1> => {
+    requireM2Route(contract, "note.detail");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    // 这里不判"是不是作者"：判据只在服务端那一处。界面上的禁用只是让点下去之前就知道
+    // 结果，不是权限。
+    return await gateway.setNoteShareScope(input.noteId, input.shareScope, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, noteShareScopeReceiptV1Schema);
 
   installHandler(DESKTOP_IPC_CHANNELS.noteDocPresence, noteDocPresenceInputSchema, options, (_event, _window, input) => {
     assertEpoch(input.meta, activeWorkspaceEpoch);

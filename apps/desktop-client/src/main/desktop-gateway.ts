@@ -255,6 +255,7 @@ import {
 
 import { noteDetailV1Schema, type NoteDetailV1 } from "@ailearn/shared/note-projection-contracts";
 import { noteSaveReceiptV1Schema, type NoteSaveReceiptV1 } from "@ailearn/shared/note-save-contracts";
+import { noteShareScopeReceiptV1Schema, type NoteShareScopeV1, type NoteShareScopeReceiptV1 } from "@ailearn/shared/note-share-contracts";
 import {
   desktopSourceListPageSchema,
   desktopSourceDetailSchema,
@@ -3803,8 +3804,10 @@ export class DesktopGateway {
    * 三条约束在这里收口：
    *  - **URL 只由配置派生**（`noteDocStreamUrl`），界面传不进目标地址；
    *  - token 只在这条进程里，渲染进程看到的永远是 base64 帧；
-   *  - 该不该建这条连接**不由本方法决定**：门控（personal 不建、只读成员不建）在
-   *    `desktop-ipc.ts` 的订阅路径上判，因为那里才有当前空间的类型与角色。
+   *  - 门控分两层，各有各的位置：空间那一层（personal 不建、只读成员不建）在
+   *    `desktop-ipc.ts` 的订阅路径上判，因为那里才有当前空间的类型与角色；**篇**这一层
+   *    （「仅自己可见」的不建）在这里判，判据取服务端给的归属，不取界面传进来的说法。
+   *    返回 `null` 就是"这篇不该有实时连接"，调用方要能接住它——写入不受影响。
    *
    * 返回的 handle 是长生命周期对象：`stop()` 之后任何回调都不再触发（provider 已销毁），
    * 所以调用方不必自己防"关完之后迟到的帧"。
@@ -3813,12 +3816,16 @@ export class DesktopGateway {
     noteId: string,
     onEvent: (event: { noteId: string } & NoteDocStreamEventV1) => void | Promise<void>,
     requestId?: string,
-  ): Promise<NoteDocWatchHandle> {
+  ): Promise<NoteDocWatchHandle | null> {
     await this.ensureConnected(requestId);
     const configuration = this.configuration;
     if (!configuration) throw new DesktopGatewayFailure("configuration_error", "user_action");
     if (!this.token) throw new DesktopGatewayFailure("auth_required", "user_action");
     const safeNoteId = this.safeUuid(noteId);
+    // 「仅自己可见」的那篇不建实时连接。顺便这一步也把编辑起点取到手了，
+    // 所以它不是"为判一位而多发一次请求"——离线那条路本来就靠这次打底。
+    const startingPoint = await this.getNoteDocState(safeNoteId, requestId);
+    if (startingPoint.shareScope !== "shared") return null;
     let url: string;
     try {
       url = noteDocStreamUrl(configuration.config.apiOrigin);
@@ -3873,7 +3880,12 @@ export class DesktopGateway {
       session.revision = parsed.data.revision;
       session.savedAt = parsed.data.savedAt;
     }
-    return { ...session.state.view(), revision: parsed.data.revision, backfilled: parsed.data.backfilled };
+    return {
+      ...session.state.view(),
+      revision: parsed.data.revision,
+      backfilled: parsed.data.backfilled,
+      shareScope: parsed.data.shareScope,
+    };
   }
 
   /**
@@ -3982,6 +3994,29 @@ export class DesktopGateway {
     };
     this.noteDocLocalSessions.set(noteId, created);
     return created;
+  }
+
+  /**
+   * 「共享给空间」/「取消共享」。幂等：设成当前值时服务端报 `changed:false` 且不写行，
+   * 所以界面点重了不会多出一次"改动"。
+   */
+  async setNoteShareScope(
+    noteId: string,
+    shareScope: NoteShareScopeV1,
+    requestId?: string,
+  ): Promise<NoteShareScopeReceiptV1> {
+    await this.ensureConnected(requestId);
+    const safeNoteId = this.safeUuid(noteId);
+    const result = await this.request(
+      `/v2/notes/${safeNoteId}/share-scope`,
+      { method: "PATCH", body: JSON.stringify({ shareScope }) },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = noteShareScopeReceiptV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
   }
 
   /**

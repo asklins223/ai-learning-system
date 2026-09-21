@@ -14,6 +14,8 @@ import type { DesktopNoteVersionItem, DesktopSourceDetail } from "@ailearn/share
 import type { LearningObjectiveSurfaceV3 } from "@ailearn/shared/learning-objective-surface-contracts";
 import type { NoteBlockProjectionV1, NoteDetailV1 } from "@ailearn/shared/note-projection-contracts";
 import { useRoomStore } from "../../app/room-store";
+import { SpaceShareButton, noteShareScopeLabel } from "../space-share-control";
+import type { NoteShareScopeV1 } from "@ailearn/shared/note-share-contracts";
 import {
   createCommandId,
   createRequestMeta,
@@ -285,6 +287,7 @@ export function NotebookSurface() {
     via: "stream" | "uploaded" | "unchanged" | "queued";
   } | null>(null);
   const [saveFailure, setSaveFailure] = useState<string | null>(null);
+  const [sharing, setSharing] = useState(false);
   const [startingGeneration, setStartingGeneration] = useState(false);
   const [generationFailure, setGenerationFailure] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -584,6 +587,27 @@ export function NotebookSurface() {
     getContent: () => draftRef.current.content,
     disabled: !editable || !note?.permissions.canSave,
   });
+
+  /** 改归属：走 IPC 那一条，服务端那一处判作者。 */
+  const setShareScope = async (shareScope: NoteShareScopeV1) => {
+    const api = desktopApi();
+    const current = data?.note ?? null;
+    if (!api || !current) return;
+    setSharing(true);
+    try {
+      unwrapGatewayResult(await api.note.setShareScope({
+        meta: createRequestMeta(epochRef.current),
+        commandId: createCommandId("note-share"),
+        noteId: current.noteId,
+        shareScope,
+      }));
+      await reload();
+    } catch (error) {
+      setSaveFailure(gatewayErrorMessage(error));
+    } finally {
+      setSharing(false);
+    }
+  };
 
   const api = desktopApi();
   const routes = api?.contract.enabledRoutes ?? [];
@@ -1231,7 +1255,23 @@ export function NotebookSurface() {
           {noteDocLive.presenceCount + 1} 人在看
         </span>
       ) : null}
-          <span className="small">标题和正文每次改动都会存成一个版本</span>
+      {spaceIdentity && !spaceIdentity.isPersonal ? (
+        <span className="tag" title={note.permissions.canShare ? "这篇的归属由你决定" : "只有写下这篇的人能改它共享给谁"}>
+          {noteShareScopeLabel(note.shareScope)}
+        </span>
+      ) : null}
+      {/* 那句"每次改动都会存成一个版本"已经不成立：自动保存并入正文，只有
+          「提交并确认」才存成一个可回去的版本。继续写着就是给读者一个假的心智模型。 */}
+      <span className="small">改动会实时并入这一篇；点「提交并确认」才存成一个可回去的版本</span>
+      {spaceIdentity && !spaceIdentity.isPersonal ? (
+        <SpaceShareButton
+          shareScope={note.shareScope}
+          canShare={note.permissions.canShare}
+          isPersonal={spaceIdentity.isPersonal}
+          busy={sharing}
+          onShare={(next) => void setShareScope(next)}
+        />
+      ) : null}
         </div>
         <div className="meta">
           <span>{note.permissions.canSave ? "自动保存开启" : "当前身份不能保存"}</span>

@@ -296,7 +296,9 @@ export async function applyNoteDocUpdate(
 export async function readNoteDocState(
   tx: ApiTransaction,
   scope: NoteDocReadScope,
-): Promise<{ update: Uint8Array; revision: number; backfilled: boolean; savedAt: string } | null> {
+): Promise<
+    { update: Uint8Array; revision: number; backfilled: boolean; savedAt: string; shareScope: "private" | "shared" } | null
+  > {
   const note = await tx.query.notes.findFirst({
     where: and(
       eq(notes.id, scope.noteId),
@@ -318,7 +320,15 @@ export async function readNoteDocState(
       });
   const update = snapshotOf(doc);
   doc.destroy();
-  return { update, revision: Number(stored?.revision ?? 0), backfilled, savedAt: note.updatedAt.toISOString() };
+  return {
+    update,
+    revision: Number(stored?.revision ?? 0),
+    backfilled,
+    savedAt: note.updatedAt.toISOString(),
+    // 归属随起点一起回来：客户端"要不要为这篇建长连接"的判据因此来自服务端，
+    // 不是界面传进来的说法。
+    shareScope: note.shareScope === "shared" ? "shared" as const : "private" as const,
+  };
 }
 
 /**

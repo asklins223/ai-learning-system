@@ -22,7 +22,9 @@ const MODULE_CONTRACTS: ModuleContract[] = [
   // services 9 → 10：批次 4.5 加了 `setNoteShareScope`（「共享给空间」那个显式动作）。
   // 它同样以 `executor: ApiTransaction` 开头，所以下面那条"每个导出函数都必须显式收
   // 事务执行器"的断言仍然成立——这里只是把数量对上，不是放宽判据。
-  { name: "note", handlers: 11, services: 10, handlerWithoutInlineTransaction: 1 },
+  // handlers 11 → 12：批次 4.5 的 `PATCH /v2/notes/:id/share-scope`（「共享给空间」）。
+  // 它同样自己开 `withWorkspaceTransaction` 并带上 (workspaceId, userId)，所以另外两条断言一起过。
+  { name: "note", handlers: 12, services: 10, handlerWithoutInlineTransaction: 1 },
   // 删掉无人调用的 POST /sources/statuses 后：7 路由 / 7 服务。
   { name: "source", handlers: 7, services: 7 },
   // v0.6 新增 /search/drift 与 /search/auto-fix 后：4 路由 / 4 服务

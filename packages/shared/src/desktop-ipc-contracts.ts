@@ -118,6 +118,7 @@ import type { MainPageContextInputV2 } from "./companion-bridge-contracts.ts";
 import { authSurfaceManifestV1Schema } from "./auth-surface-manifest.ts";
 import { noteDetailV1Schema } from "./note-projection-contracts.ts";
 import { noteSaveReceiptV1Schema, noteSaveRequestV1Schema } from "./note-save-contracts.ts";
+import { noteShareScopeReceiptV1Schema, type NoteShareScopeV1 } from "./note-share-contracts.ts";
 import {
   cardActivationReceiptDesktopV1Schema,
   cardGenerationCandidateListV1Schema,
@@ -316,6 +317,7 @@ export const DESKTOP_IPC_CHANNELS = {
   noteDocState: "ailearn.v1.note.doc.state",
   noteDocSyncBlocks: "ailearn.v1.note.doc.syncBlocks",
   noteDocPresence: "ailearn.v1.note.doc.presence",
+  noteSetShare: "ailearn.v1.note.set-share",
   noteCardGenerationStart: "ailearn.v1.note.cardGeneration.start",
   noteCardGenerationGetRun: "ailearn.v1.note.cardGeneration.getRun",
   noteCardGenerationGetCandidates: "ailearn.v1.note.cardGeneration.getCandidates",
@@ -1406,6 +1408,11 @@ export const noteDocServerStateV1Schema = z.strictObject({
   backfilled: z.boolean(),
   /** 服务端此刻的 `notes.updated_at`。无增量的提交也拿它当回执时间。 */
   savedAt: isoTimestampSchema,
+  /**
+   * 归属。客户端"这篇要不要建长连接"以它为准——判据来自服务端，不接受界面传说法。
+   * 写入内核**不**看它：`private` 的笔记照样能编辑，只是不实时广播（决定 7b）。
+   */
+  shareScope: z.enum(["private", "shared"]),
 });
 export type NoteDocServerStateV1 = z.infer<typeof noteDocServerStateV1Schema>;
 
@@ -1417,6 +1424,8 @@ export const noteDocStateResultV1Schema = z.strictObject({
   revision: nonNegativeIntSchema,
   /** true = 这篇建得比 0244 早，服务端给的是从行里补齐后重新编码的一份。 */
   backfilled: z.boolean(),
+  /** 归属：`private` 的那篇主进程不会为它建长连接（写入照旧）。 */
+  shareScope: z.enum(["private", "shared"]),
 });
 export type NoteDocStateResultV1 = z.infer<typeof noteDocStateResultV1Schema>;
 
@@ -2010,6 +2019,16 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
         state: string;
       }): Promise<GatewayResultV1<z.infer<typeof noteDocPresenceResultV1Schema>>>;
     };
+    /**
+     * 「共享给空间」/「取消共享」（批次 4.5）。判据是**作者**而不是空间角色，
+     * 服务端那一处已经实现；这里只把它送过去，不在客户端复述判据。
+     */
+    setShareScope(input: {
+      meta: RequestMetaV1;
+      commandId: string;
+      noteId: Uuid;
+      shareScope: NoteShareScopeV1;
+    }): Promise<GatewayResultV1<z.infer<typeof noteShareScopeReceiptV1Schema>>>;
     versions(input: {
       meta: RequestMetaV1;
       noteId: Uuid;

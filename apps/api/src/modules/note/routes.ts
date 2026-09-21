@@ -3,6 +3,7 @@ import { z } from "zod";
 import { noteCreateSchema, noteDocUpdateRequestV1Schema, NOTE_DOC_UPDATE_MAX_BYTES } from "./schema.ts";
 import {
   createNote,
+  setNoteShareScope,
   getNoteWithVersion,
   listNotes,
   checkpointNote,
@@ -24,6 +25,7 @@ import { projectNoteDetailV1, projectNoteSaveReceiptV1 } from "./note-projection
 import { applyUploadedDocUpdate } from "./collaboration.ts";
 import { readNoteDocState } from "./document-state.ts";
 import { noteSaveRequestV1Schema } from "@ailearn/shared/note-save-contracts";
+import { noteShareScopeRequestV1Schema } from "@ailearn/shared/note-share-contracts";
 
 export async function noteRoutes(app: FastifyInstance) {
   app.addHook("preHandler", requireSession);
@@ -63,7 +65,7 @@ export async function noteRoutes(app: FastifyInstance) {
     );
     if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     const role = isWorkspaceOwner(req.session) ? "owner" : "member";
-    const projection = projectNoteDetailV1(result, role);
+    const projection = projectNoteDetailV1(result, role, req.session.userId);
     reply.header("Cache-Control", "private, no-store");
     reply.header("ETag", `"${projection.revision}"`);
     return projection;
@@ -90,6 +92,7 @@ export async function noteRoutes(app: FastifyInstance) {
       update: Buffer.from(state.update).toString("base64"),
       revision: state.revision,
       savedAt: state.savedAt,
+      shareScope: state.shareScope,
       // true = 这篇还没有快照（建得比 0244 早），返回的是从行里补齐后重新编码的一份。
       backfilled: state.backfilled,
     };
@@ -135,6 +138,36 @@ export async function noteRoutes(app: FastifyInstance) {
       }
       throw err;
     }
+  });
+
+  // PATCH /v2/notes/:id/share-scope —「共享给空间」/「取消共享」那一个显式动作（批次 4.5）。
+  //
+  // 有意**不加** `requireOwner`：这一列说的是"我的东西要不要拿出去"，判据是作者，
+  // 写成角色判据的话，哪天成员也能写笔记，边界就又变成"靠调用方记得传对"。
+  // 不是作者时服务层返回 null，这里落 404——"存在但不归你改"这个信息本身不该漏出去。
+  app.patch<{ Params: { id: string } }>("/v2/notes/:id/share-scope", async (req, reply) => {
+    const params = uuidParamSchema.safeParse(req.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
+    const body = parseBody(app, noteShareScopeRequestV1Schema, req.body);
+    const result = await withWorkspaceTransaction(
+      { workspaceId: req.session.workspaceId, userId: req.session.userId },
+      (transaction) => setNoteShareScope(
+        transaction,
+        params.data.id,
+        req.session.workspaceId,
+        req.session.userId,
+        body.shareScope,
+      ),
+    );
+    if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
+    reply.header("Cache-Control", "private, no-store");
+    return {
+      noteId: params.data.id,
+      shareScope: result.note.shareScope,
+      // 幂等：重复设成同一个值不写行，回执如实说没变。界面据此决定要不要重读列表。
+      changed: result.changed,
+      updatedAt: result.note.updatedAt.toISOString(),
+    };
   });
 
   // POST /v2/notes/:id/doc-update — 正文增量的 HTTP 上送口（批次 4.3）。

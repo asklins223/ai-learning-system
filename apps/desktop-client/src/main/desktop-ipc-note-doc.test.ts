@@ -83,6 +83,9 @@ async function setup(session: { workspaceType: "personal" | "collaborative"; rol
     titleSource: "auto",
     revision: 3,
     backfilled: false,
+    // 归属来自服务端：`private` 的那篇主进程不会为它建长连接（写入照旧）。
+    // 默认给 shared，让"该建连的场景"继续测到建连；不放心的地方另有专门用例。
+    shareScope: "shared" as const,
   }));
   const syncViaGateway = vi.fn(async () => ({ via: "uploaded" as const, revision: 11, savedAt: "2026-09-21T00:00:00.000Z" }));
   const send = vi.fn();

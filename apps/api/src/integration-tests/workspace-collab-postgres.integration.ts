@@ -573,3 +573,91 @@ test("跨空间读不到别人的到期排程（tenant_guard），并且正向�
   });
   assert.equal(own, 1, `陌生空间自己的排程读不到了（${own}）——策略或 session 变量没生效，上一条的 0 是假绿`);
 });
+
+// ─── 6. 笔记归属：默认仅自己可见，共享是一次显式动作（批次 4.5）───────────────
+
+/** 每条断言都配一个正向对照：只报"读不到"的话，判据把所有人全挡住时同样是绿的。 */
+test("新建的笔记默认「仅自己可见」，同空间成员读不到也不在列表里", async () => {
+  const created = await appInject("POST", "/notes", ownerToken, {
+    blocks: [{ type: "paragraph", content: `只有作者看得见 ${tag}` }],
+  });
+  assert.equal(created.statusCode, 200, `owner 建笔记必须成功：${created.body}`);
+  const noteId = created.json().note.id as string;
+
+  const detail = await appInject("GET", `/v2/notes/${noteId}`, ownerToken);
+  assert.equal(detail.statusCode, 200);
+  assert.equal(detail.json().shareScope, "private", "新建的笔记必须是「仅自己可见」");
+  assert.equal(detail.json().permissions.canShare, true, "作者本人必须能决定共享");
+
+  const memberList = await appInject("GET", "/notes", memberToken);
+  assert.equal(memberList.statusCode, 200);
+  const ids = (memberList.json().items as Array<{ id: string }>).map((item) => item.id);
+  assert.ok(!ids.includes(noteId), "作者没共享的笔记不该出现在成员的列表里");
+
+  const memberRead = await appInject("GET", `/v2/notes/${noteId}`, memberToken);
+  assert.equal(memberRead.statusCode, 404, `成员读作者的私有笔记必须 404：${memberRead.body}`);
+
+  // 正向对照：同一篇共享之后，成员两条路都要变成"看得见"。
+  const shared = await appInject("PATCH", `/v2/notes/${noteId}/share-scope`, ownerToken, { shareScope: "shared" });
+  assert.equal(shared.statusCode, 200, `作者共享自己的笔记必须成功：${shared.body}`);
+  assert.equal(shared.json().changed, true);
+  const afterRead = await appInject("GET", `/v2/notes/${noteId}`, memberToken);
+  assert.equal(afterRead.statusCode, 200, "共享之后成员读不到——判据接错了读取路径");
+  const afterList = await appInject("GET", "/notes", memberToken);
+  const afterIds = (afterList.json().items as Array<{ id: string }>).map((item) => item.id);
+  assert.ok(afterIds.includes(noteId), "共享之后成员的列表里仍然没有它");
+
+  // 撤回：作者的另一个权利，也是"这一列可以双向改"这件事唯一的证据。
+  const unshared = await appInject("PATCH", `/v2/notes/${noteId}/share-scope`, ownerToken, { shareScope: "private" });
+  assert.equal(unshared.statusCode, 200);
+  assert.equal(unshared.json().shareScope, "private");
+  assert.equal((await appInject("GET", `/v2/notes/${noteId}`, memberToken)).statusCode, 404, "撤回之后成员还读得到");
+  assert.equal((await appInject("GET", `/v2/notes/${noteId}`, ownerToken)).statusCode, 200, "撤回之后作者自己也读不到了");
+});
+
+test("不是作者的人改不了归属，而且改不到（404 而不是 403）", async () => {
+  const foreign = await appInject("PATCH", `/v2/notes/${sharedNoteId}/share-scope`, memberToken, { shareScope: "private" });
+  // 用 404 而不是 403：这一列说的是"我的东西要不要拿出去"，别人的东西对它没有立场，
+  // 而"这篇存在但不归你改"这个信息本身不该从状态码里漏出去。
+  assert.equal(foreign.statusCode, 404, `非作者改归属必须 404：${foreign.body}`);
+  const stillShared = await appInject("GET", `/v2/notes/${sharedNoteId}`, memberToken);
+  assert.equal(stillShared.statusCode, 200, "夹具那篇本该是已共享的");
+  assert.equal(stillShared.json().shareScope, "shared", "非作者的调用不该已经改掉了归属");
+});
+
+test("设成当前值不写行：幂等，也不推更新时间", async () => {
+  const first = await appInject("PATCH", `/v2/notes/${sharedNoteId}/share-scope`, ownerToken, { shareScope: "shared" });
+  assert.equal(first.statusCode, 200);
+  assert.equal(first.json().changed, false, "已经是 shared 了还说 changed:true");
+  const stored = await sql`SELECT updated_at FROM notes WHERE id = ${sharedNoteId}`;
+  const before = (stored[0].updated_at as Date).toISOString();
+  // 不要用 `new Date(String(date))` 比较：那是秒级精度，同一年内的两次写入根本分不出高低。
+  const again = await appInject("PATCH", `/v2/notes/${sharedNoteId}/share-scope`, ownerToken, { shareScope: "shared" });
+  assert.equal(again.json().updatedAt, before, "无变化的归属调用重写了行（updated_at 被推走）");
+});
+
+test("判据的两份写法在同一份数据上给同一个结果集", async () => {
+  // `visibleNotesCondition`（drizzle）与 `noteVisibleSqlText`（伴星那两处手写 SQL）
+  // 是同一句话的两种写法——本仓少有的重复。比字符串证明不了它们在真实行上同结果，
+  // 所以这里两边都跑一遍，比返回的 noteId 集合。
+  const { visibleNotesCondition, noteVisibleSqlText } = await import("../modules/note/visibility.ts");
+  void visibleNotesCondition; // 只取模块，drizzle 那半边由列表接口代表
+  const viaHttp = await appInject("GET", "/notes?limit=100", memberToken);
+  const fromApp = (viaHttp.json().items as Array<{ id: string }>).map((item) => item.id).sort();
+
+  const rows = await sql`
+    SELECT id FROM notes
+    WHERE workspace_id = ${wsCollab} AND deleted_at IS NULL
+      AND ${sql.unsafe(noteVisibleSqlText("notes", `'${userMember}'::uuid`))}
+  `;
+  const fromRaw = rows.map((row) => String(row.id)).sort();
+  assert.deepEqual(fromRaw, fromApp, "两份写法结果不同——以后改一处就会静默分叉");
+  // 正向对照：作者自己那一份两边都更全，否则上一条可能只是"两边都空"。
+  const ownerRaw = await sql`
+    SELECT id FROM notes
+    WHERE workspace_id = ${wsCollab} AND deleted_at IS NULL
+      AND ${sql.unsafe(noteVisibleSqlText("notes", `'${userOwner}'::uuid`))}
+  `;
+  assert.ok(ownerRaw.length >= fromRaw.length, "作者在同一个夹具下读到的反而更少");
+  assert.ok(ownerRaw.length > 0, "夹具里作者一篇都没有，上面两条都是假绿");
+});
