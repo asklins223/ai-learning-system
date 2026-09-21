@@ -153,3 +153,17 @@ test("错误分类：未标注的普通错误保持可重试（不误伤瞬态�
   assert.equal(isNonRetryableErrorLike(new Error("socket hang up")), false);
   assert.equal(isNonRetryableErrorLike("ECONNRESET"), false);
 });
+
+test("有界修复必须取真正的计划目标，不许再 `as never` 塞替身（读源码守卫）", async () => {
+  // 上一条用例测的是 helper 自己；这条守的是**调用点**：修复路径一旦回到现场拼对象，
+  // TypeScript 帮不上忙（`as never` 就是用来绕过它的），2026-09-21 那次真跑正是这么死的。
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("./card-generation-v2-handler.ts", import.meta.url), "utf8");
+  const start = source.indexOf("async function boundedRepairCandidate");
+  assert.ok(start > 0, "找不到 boundedRepairCandidate，这条守卫要跟着改名一起改");
+  const region = source.slice(start, source.indexOf("const newRevisionId", start));
+  assert.match(region, /planObjective:\s*plannedObjectiveForCandidateV2\(\s*input\.plan/,
+    "修复路径没有从计划里取目标");
+  assert.doesNotMatch(region, /as never/,
+    "修复路径又用 `as never` 绕过 provider 入参类型——那会让 strategy 变成 undefined");
+});

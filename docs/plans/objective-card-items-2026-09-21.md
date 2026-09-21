@@ -1118,3 +1118,56 @@ DETAIL: Key (id)=(336e0654-…) is still referenced from table "learning_cards_v
 也就是说：**笔记派生出的卡还活着时，"彻底删除"不是被拒绝，而是崩**。用户看到的是一句
 "服务器内部错误"，拿不到"这篇笔记还有 N 张卡在复习队列里"这个真实原因。按本仓库的口径
 这该是一个带原因码的 409。不在我的域里，没动。
+
+## 31. 第一批 D6 真跑：配额 3/3 兑现、史上第一张配对题；顺手挖出一个会烧掉整批的修复缺陷
+
+api 恢复后（见 §30 之前那条 exports 纠正）拿夹具笔记跑了一次真生成，run `dbf061fb`。
+
+### 阶梯：这次是完整走出来的
+
+第一次尝试（12:05 起）：`planned=8`，`authored` 依次 `0 → 2 → 3 → 4 → 5 → 6 → 7 → 8`（33.5s→77.6s）。
+第二次尝试（重投后）：`planned=6`，`authored` `0 → 1 → 2 → 3 → 4 → 5 → 6`。
+两轮的中间值都在 HTTP 轮询里被采到，§18 第 1 条判据这次是真的满足了（不是手造租约，是真管道）。
+
+### D6 对账：点名 3 张，兑现 3 张，形状全对
+
+| 目标 | 形态 | 点名 | 实交 | 判定 |
+|---|---|---|---|---|
+| obj-atom-1 | definition | single_choice | single_choice | 兑现 |
+| obj-atom-2 | comparison | **matching** | matching | 兑现 |
+| obj-atom-3 | causal_model | true_false | true_false | 兑现 |
+| obj-atom-4 | application_rule | - | - | 未点名 |
+| obj-atom-5 | boundary | - | - | 未点名 |
+| obj-atom-6 | procedure | - | ordering | 未点名（作者自愿交） |
+
+三点值得记：⌈6/2⌉=3 与实际点名数一致；`practice_quota_short` **没有**落（因为没有缺额，
+这正是"只在缺的时候喊"的设计）；那张没被点名的 procedure 卡自己交了 ordering，
+而结算没有拿它去抵别人的账（§26 定的规则在真数据上生效了）。
+
+**配对题从 0 变成 1。** 内容不是摆设：`提取练习→产生可迁移的提取路径`、
+`重新阅读→产生熟悉感`、`掌握错觉→衡量识别流畅度`，三对各带 evidenceRefIds。
+这印证了 §28 的投影结论——过去 matching 为 0 是"从来没被要求过"，不是模型造不出来。
+
+### 挖出来的缺陷：有界修复会把整批已付费的调用作废
+
+第一次尝试跑到 pedagogy 判 `repair` 之后**抛 TypeError 死掉**：
+
+```
+TypeError: Cannot read properties of undefined (reading 'label')
+    at buildAuthorSystemPrompt (prompts.ts:581)
+    at CardAuthoringProvider.authorCandidate (providers.ts:836)
+    at boundedRepairCandidate (card-generation-v2-handler.ts:3039)
+```
+
+根因是修复路径现场拼了个只有 `objectiveLocalId/objectiveStatement/knowledgeForm` 三字段的
+**计划目标替身**，再用 `as never` 绕过 provider 的入参类型。而 `authorCandidate` 第一行就是
+`const strategy = input.planObjective.strategy` → undefined → 提示构建查表落空。
+代价是：一张卡要修复，整条 run 的 8 张已写候选 + 全部已付费调用一起作废、job 重投再付一遍。
+
+修法是取回真正的计划目标（`plannedObjectiveForCandidateV2`，shared 里的纯函数，按
+`planObjectiveLocalId` 在预算内的那批目标里找；找不到就明确抛，不给替身），并把 `as never` 去掉
+——留着它，下次同样的错类型系统还是不会拦。两道守卫都做过变异验证：
+把调用点改回替身，读源码那条用例立刻红。
+
+**还没被真跑验到的部分**：修复路径本身。这次是第二次尝试 pedagogy 没再判 repair，
+所以"修好之后修复真能跑通"仍然只是类型与单测层面的结论，得等下一次真出现 `repair` 判定的批次。

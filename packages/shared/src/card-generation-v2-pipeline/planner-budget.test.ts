@@ -20,11 +20,12 @@ import { test } from "node:test";
 import {
   executePlanner,
   budgetedPlanObjectives,
+  plannedObjectiveForCandidateV2,
   DeterministicAuthoringProvider,
   MICRO_NOTE_MAX_CARDS,
   type SourceBlockInput,
 } from "./index.ts";
-import { cardPlanV2Schema } from "../card-generation-v2-contracts.ts";
+import { cardPlanV2Schema, CardStrategyValuesV2 as cardStrategyValues } from "../card-generation-v2-contracts.ts";
 import type { ExtractedKnowledgeAtom } from "./planner-service.ts";
 
 function blocks(content: string): SourceBlockInput[] {
@@ -199,5 +200,28 @@ test("§8.5：不超预算时行为不变（截断不误伤）", async () => {
     plan.atomDecisions.filter((d) => d.decision === "omit_over_budget").length,
     0,
     "未超预算时不应产生 omit_over_budget",
+  );
+});
+
+/**
+ * 有界修复必须拿**真正的计划目标**当 author 入参（2026-09-21 真跑第一次尝试的死因：
+ * 修复路径现场拼了个三字段替身再 `as never`，`planObjective.strategy` 是 undefined，
+ * 提示构建读 `spec.label` 直接 TypeError，整批已付费调用作废）。
+ */
+test("修复路径取回的计划目标带 strategy 与 practiceForm；对不上就喊，不静默给替身", async () => {
+  const { plan } = await planFor(3) as never as { plan: Parameters<typeof plannedObjectiveForCandidateV2>[0] };
+  const objectives = budgetedPlanObjectives(plan as never);
+  assert.ok(objectives.length >= 1, "夹具计划没有目标，这条用例无从判断");
+
+  const first = objectives[0]!;
+  const found = plannedObjectiveForCandidateV2(plan as never, first.objectiveLocalId);
+  assert.equal(found.objectiveLocalId, first.objectiveLocalId);
+  // 这两件事正是替身缺的：strategy 决定题面写法，practiceForm 决定配额点名。
+  assert.ok(cardStrategyValues.includes(found.strategy), `strategy 不在枚举里：${String(found.strategy)}`);
+  assert.ok("practiceForm" in found, "计划目标里没有 practiceForm 键，配额会无声消失");
+
+  assert.throws(
+    () => plannedObjectiveForCandidateV2(plan as never, "obj-不在这份计划里"),
+    /obj-不在这份计划里/,
   );
 });

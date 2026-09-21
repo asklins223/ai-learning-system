@@ -52,6 +52,7 @@ import {
   executeAuthor,
   authorCandidateForObjective,
   budgetedPlanObjectives,
+  plannedObjectiveForCandidateV2,
   summarizePracticeQuotaV2,
   DeterministicAuthoringProvider,
   type AuthoringProvider,
@@ -3025,11 +3026,9 @@ async function boundedRepairCandidate(
 ): Promise<LearningCardCandidateRevisionV2> {
   throwIfPipelineAborted(input.signal);
   const authorInput = {
-    planObjective: {
-      objectiveLocalId: input.candidate.planObjectiveLocalId,
-      objectiveStatement: input.candidate.objective.objectiveStatement,
-      knowledgeForm: input.candidate.objective.knowledgeForm,
-    } as never,
+    // 真正的计划目标，不是现场拼的替身：author provider 从里面取 strategy 与
+    // practiceForm，替身会让提示构建在 `spec.label` 上炸（见 helper 注释）。
+    planObjective: plannedObjectiveForCandidateV2(input.plan, input.candidate.planObjectiveLocalId),
     sourceContent: input.sourceContent,
     semanticSpecHash: input.semanticSpecHash,
     planHash: input.plan.planHash,

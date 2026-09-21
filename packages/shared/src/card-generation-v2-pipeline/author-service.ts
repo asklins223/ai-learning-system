@@ -156,6 +156,26 @@ export function budgetedPlanObjectives(plan: CardPlanV2): PlannedObjectiveV2[] {
 }
 
 /**
+ * 取回某个候选所属的**计划目标**——有界修复（重写这张卡）时要拿它当 author 的入参。
+ *
+ * 以前修复路径是现场拼一个只有三个字段的目标、再 `as never` 塞进 provider，于是
+ * `planObjective.strategy` 是 undefined，author 提示在 `spec.label` 上直接 TypeError
+ * （2026-09-21 真跑第一次尝试就死在这里：pedagogy 判 `repair` → 修复 → 崩 → job 重投，
+ * 一整批已付费的调用作废）。计划目标是 provider 合同的一部分，不该由调用方即兴造。
+ */
+export function plannedObjectiveForCandidateV2(
+  plan: CardPlanV2,
+  planObjectiveLocalId: string,
+): PlannedObjectiveV2 {
+  const found = budgetedPlanObjectives(plan)
+    .find((objective) => objective.objectiveLocalId === planObjectiveLocalId);
+  if (!found) {
+    throw new Error(`V2 candidate points at a plan objective outside this plan: ${planObjectiveLocalId}`);
+  }
+  return found;
+}
+
+/**
  * 为**单个** PlannedObjective 生成候选 revision（§11.5 的单候选形式）。
  *
  * 2026-09-17（极限延迟改造）：拆出本函数是为了让调用方能做**按候选流水线**——
