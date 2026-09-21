@@ -1112,12 +1112,32 @@ export function NotebookSurface() {
     </>
   );
 
+  /**
+   * 归属那一位状态 + 那一个动作。编辑态与阅读态共用同一段：只读成员永远进不了
+   * 编辑态，而"这篇是只给自己看还是已经拿出去"正是他最该看见的一条信息。
+   */
+  const shareStateControls = !note || !spaceIdentity || spaceIdentity.isPersonal ? null : (
+    <>
+      <span className="tag" title={note.permissions.canShare ? "这篇的归属由你决定" : "只有写下这篇的人能改它共享给谁"}>
+        {noteShareScopeLabel(note.shareScope)}
+      </span>
+      <SpaceShareButton
+        shareScope={note.shareScope}
+        canShare={note.permissions.canShare}
+        isPersonal={spaceIdentity.isPersonal}
+        busy={sharing}
+        onShare={(next) => void setShareScope(next)}
+      />
+    </>
+  );
+
   const readPageBody = note ? (
     <>
       <div className="version-ribbon">
         <span>阅读</span>
         <span>版本 v{note.currentVersion.versionNo}</span>
         <span>来源片段 {segments.length}</span>
+        {shareStateControls}
       </div>
       <h2 className="title">{note.title || "未命名笔记"}</h2>
       <div className="meta">
@@ -1255,23 +1275,10 @@ export function NotebookSurface() {
           {noteDocLive.presenceCount + 1} 人在看
         </span>
       ) : null}
-      {spaceIdentity && !spaceIdentity.isPersonal ? (
-        <span className="tag" title={note.permissions.canShare ? "这篇的归属由你决定" : "只有写下这篇的人能改它共享给谁"}>
-          {noteShareScopeLabel(note.shareScope)}
-        </span>
-      ) : null}
+      {shareStateControls}
       {/* 那句"每次改动都会存成一个版本"已经不成立：自动保存并入正文，只有
           「提交并确认」才存成一个可回去的版本。继续写着就是给读者一个假的心智模型。 */}
       <span className="small">改动会实时并入这一篇；点「提交并确认」才存成一个可回去的版本</span>
-      {spaceIdentity && !spaceIdentity.isPersonal ? (
-        <SpaceShareButton
-          shareScope={note.shareScope}
-          canShare={note.permissions.canShare}
-          isPersonal={spaceIdentity.isPersonal}
-          busy={sharing}
-          onShare={(next) => void setShareScope(next)}
-        />
-      ) : null}
         </div>
         <div className="meta">
           <span>{note.permissions.canSave ? "自动保存开启" : "当前身份不能保存"}</span>
