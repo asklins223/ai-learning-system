@@ -182,3 +182,74 @@ api 1411（1410 pass / 0 fail）、worker 690/690。
 **未做**：这一行的真机复测。CDP `:9222` 此刻拒绝连接（桌面端被重起且未带调试端口），
 所以"审核页真的显示出这行"目前只有 jsdom 证据，不算验证完成。端口恢复后测 run `406b213c`
 （它那 2 张过门禁的卡带 `ordering` 练习件）。
+
+## 12. #2「进度不逐格走」的真因，比我先前写的更硬
+
+先前记的是"候选在 author 结束时一次性批量 INSERT，所以没有中间态"。核对代码后这条**只对一半**：
+
+- `insertAuthoredCandidatesBatched` 在 `card-generation-v2-handler.ts:1481` 被调用，
+  而它接收的 `tx` 就是 `withWorkerWorkspaceTransaction` 那**一个事务**（1104 行起）——
+  整个四阶段 LLM 管道从头到尾都在这个事务里。
+- 于是**即使改成逐候选 INSERT，HTTP 轮询也看不见**：那些行还没提交，
+  `readGenerationProgressV2` 走的是另一个连接/事务，读不到未提交数据。
+  "分批写"最多让最后一次提交里行数不同，对界面无意义。
+
+而 1108-1112 的注释明确写着这里**故意不拆事务**：run 行的 `FOR UPDATE` 覆盖整条管道，
+是为了防同 run 双 job 并发跑完 LLM（双份计费 / 双写终态，W2 的本意）。
+所以这不是一个"把 INSERT 挪个位置"就能解决的样式问题，而是：
+
+**进度要能逐格走，就必须有一个独立于该事务、且被允许在管道中途写入的通道。**
+可选形状（都还没做，需先定方向）：
+1. 管道中途用**短事务**只写一张进度旁表（run 行锁不动，进度另行提交）；读侧改读旁表；
+2. 或阶段边界把 `run.status` 提前提交（queued→planning→authoring→checking），
+   进度数字仍最后给 —— 界面至少能显示"到第几步"，而不是假称"几张已写好"；
+3. 或者接受现实：把进度文案改成不承诺逐张（现在是 `{plannedCards/authored/gatePassed/gateFailed}`），
+   不要给出看起来会逐格涨的数字。
+
+我倾向 2 + 3 组合：不为了一个进度条去拆那把防双付的锁。
+
+## 13. v24 供给侧实测（run `eae682d2`，4778 字笔记）
+
+先说代价：这一批被并行改动打断两次（worker 05:34、05:36 连着重启，每次杀掉在跑的 job、
+事务回滚），我把孤儿作业手动回队后才跑完。三次重启不是我改的 v24 造成的。
+
+结果：**3 张候选 / 2 张过门禁 / 2 张带练习件**，种类 `ordering ×2`，
+`single_choice 0`、`true_false 0`、`matching 0`。整轮 **author schema 违规 0 次**。
+
+关键判别（区分"模型写的"还是"我派生的"）：练习件 unitId 是 `opt-1..opt-n`，
+而 canonicalAnswer 的步骤是 `step-1..step-n`。我的 `derivePracticeItemFromCanonicalAnswer`
+原样沿用 `step-N`，所以这两条**是模型自己产出的** —— v24 的必填可空确实起效了：
+模型开始回答这个字段，并且带着 `evidenceRefIds`。
+
+剩下的缺口比原先判断的窄，但性质变了：不是"没供给"，而是**形状偏置** ——
+模型在有自由时一律挑最省事的 `ordering`（把步骤按原序重述），回避设计干扰项。
+因此 #25 的下一步不是再逼它填字段（已经填了），而是按知识形态限定该出哪种：
+`fact`/`definition`/`boundary` 这类没有内在次序的知识，才应该要求 `single_choice`/`true_false`；
+`procedure`/`sequence` 用 `ordering` 本来就是对的。这个可以在 planner 分配阶段按
+knowledgeForm 给约束，确定性可测。
+
+（另：run 终态仍是 `needs_attention` + `quality_gate_failed`，3 张里 1 张被 grounding 拒。）
+
+## 14. 更正 §13 的结论（我自己差点把样本读成能力缺陷）
+
+§13 写"模型有形状偏置、一律挑最省事的 ordering"。查知识形态后这句**不成立**：
+
+| strategy | knowledgeForm | canonicalAnswer | practiceItem |
+|---|---|---|---|
+| sequence | sequence | ordered_steps | ordering |
+| sequence | procedure | ordered_steps | ordering |
+| cloze | fact | bullets | （无） |
+
+两张有练习件的卡，知识形态正是"有内在次序"的两类，`ordering` 是**正确答案**，不是偷懒。
+我按 unitId 命名（`opt-N` vs `step-N`）判明它们出自模型之手，这点仍成立。
+
+所以这次真跑实际回答了的只有：v24 的必填可空让模型**开始回答这个字段**（2/3，且带
+`evidenceRefIds`，整轮 0 schema 违规）。
+**没回答的**仍是 #25 的原问题：`fact`/`definition`/`boundary` 这类无次序知识，模型会不会
+自己写出 `single_choice`/`true_false`——本批只有 1 张 fact 卡，它没写，样本量 1，
+不足以判定能力，也不足以判定"需要再改提示"。
+
+下一步不花配额能做的：给 author 增加一条按 knowledgeForm 限定形状的规则（v25），
+并在分配阶段就按形态决定"这张该出哪种"。要不要为验证它再花一次真跑，由用户定；
+若要跑，应当挑**事实/定义类知识为主**的材料，才能把 fact→选择题这条路径真正压出来
+（这次挑的 IndexTTS 笔记是流程型材料，天然出不了这个信号）。
