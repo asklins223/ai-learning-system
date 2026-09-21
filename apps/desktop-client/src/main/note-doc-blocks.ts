@@ -97,7 +97,13 @@ function patchBlockText(text: Y.Text, next: string): void {
 }
 
 function writeBlock(target: Y.Map<unknown>, block: NoteDocBlock): void {
-  target.set("type", block.type);
+  // 每个字段都先比再写：`Y.Map.set` 对相同值也会记一次操作，于是"内容没变的自动保存"
+  // 每次都会产出一条非空增量 —— 客户端就白跑一趟上送。
+  if (target.doc && target.get("type") === block.type) {
+    // 类型没变，什么都不做。
+  } else {
+    target.set("type", block.type);
+  }
   // `target.doc` 为空 = 还没插进数组的新建条目，读它会触发 yjs 的 premature-access 警告。
   const existing = target.doc ? target.get("content") : undefined;
   if (existing instanceof Y.Text) patchBlockText(existing, block.content);

@@ -103,7 +103,9 @@ function sameBlock(left: NoteDocBlock, right: NoteDocBlock): boolean {
 }
 
 function writeBlock(target: Y.Map<unknown>, block: NoteDocBlock): void {
-  target.set("type", block.type);
+  // 每个字段都先比再写：`Y.Map.set` 对相同值也会记一次操作，于是"内容没变的自动保存"
+  // 每次都会产出一条非空增量 —— 白跑一趟上送，还把 revision 往上推。
+  if (!(target.doc && target.get("type") === block.type)) target.set("type", block.type);
   // 新条目才建 Y.Text；已经挂在文档上的一律就地改。换掉这个对象等于把块的身份也换掉，
   // 并发时两边的 delete+insert 谁也取消不了谁，合并结果就成了两份内容。
   // `target.doc` 为空表示这是一个还没插进数组的新建条目——读它会触发 yjs 的
