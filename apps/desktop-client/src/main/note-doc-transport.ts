@@ -131,9 +131,16 @@ export function createHocuspocusNoteDocTransport(): NoteDocTransport {
       token,
       websocketProvider: websocket,
     });
-    // 来源标签必须在 provider 建好之后登记。判错的后果不对称：把远端写进来的更新当成
-    // 本机的，就会被原样发回去（回声）。
+    // 来源标签必须在收发之前登记。判错的后果不对称：把远端写进来的更新当成本机的，
+    // 就会被原样发回去（回声）。
     state.attachRemoteOrigin(provider);
+    // **这两行不能省。** provider 只有在"自己造 socket"时才 `manageSocket=true`
+    // （见 dist 里 `setConfiguration`），这里传的是外部的，于是它既不 `attach()`
+    // （不把监听挂到 socket 上）也不 `connect()`（不发起握手）——症状不是报错，而是
+    // "连接看起来建好了，永远没有内容"，一个字节都没收发过。服务端那侧的集测用的是
+    // 服务端自己的连接，所以桌面这一侧从 4.3 建立到补这条为止一直没红过。
+    provider.attach();
+    websocket.connect();
 
     let closed = false;
     const emit = (event: NoteDocTransportEvent): void => {
