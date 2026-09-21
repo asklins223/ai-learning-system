@@ -91,6 +91,18 @@ const a = await window(Number(process.env.PORT_A ?? 9311), "owner@ailearn.local"
 const b = await window(Number(process.env.PORT_B ?? 9312), "owner@ailearn.local", "ailearn_owner");
 console.log("两边都在编辑态:", a.editState, b.editState);
 
+// 同一对窗口顺手量在场那一排（批次 4.4 的 presence）：印章数 = 1 个自己 + 对端，
+// 名字是对端自己广播的，不是查名册查出来的。
+const presence = async (label: string, page: Awaited<ReturnType<typeof window>>) => {
+  const seen = await page.page.evaluate(() => ({
+    stamps: [...document.querySelectorAll(".notebook-presence__peer")].map((n) => `${n.textContent}‹${n.getAttribute("aria-label")}›`),
+    count: [...document.querySelectorAll(".tag")].map((n) => n.textContent.trim()).find((t) => t.includes("人在看")) ?? null,
+  }));
+  console.log(`在场 ${label}:`, JSON.stringify(seen));
+};
+await presence("B 侧:", b);
+await presence("A 侧:", a);
+
 await a.type(MARK_A);
 await wait(8000);
 const afterA = await owner.read();
