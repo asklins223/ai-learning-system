@@ -6,7 +6,7 @@
  */
 
 import { sql } from "drizzle-orm";
-import { noteVisibleSqlText } from "../note/visibility.ts";
+import { noteVisibleSqlText, visibleCardsCondition } from "../note/visibility.ts";
 import type { ApiTransaction } from "../../db/client.ts";
 
 export interface MemoryStarMapNode {
@@ -84,6 +84,9 @@ export async function getMemoryStarMap(
           WHEN 'card' THEN (
             SELECT c.public_summary FROM learning_cards_v2 c
             WHERE c.card_id = l.entity_id AND c.workspace_id = m.workspace_id AND c.lifecycle = 'active'
+              -- 摘要就是当年从笔记正文里抽的那一句。作者撤回共享之后，这张卡的摘要
+              -- 也不该继续挂在别人的记忆图上——和上面 note 那一支同一个口径。
+              AND ${visibleCardsCondition(scope.userId, sql.raw("c.note_version_id"))}
             LIMIT 1
           )
           WHEN 'key_point' THEN (
@@ -119,6 +122,7 @@ export async function getMemoryStarMap(
             SELECT jsonb_build_object('kind', 'objective', 'objectiveId', c.objective_id)
             FROM learning_cards_v2 c
             WHERE c.card_id = l.entity_id AND c.workspace_id = m.workspace_id AND c.lifecycle = 'active'
+              AND ${visibleCardsCondition(scope.userId, sql.raw("c.note_version_id"))}
             LIMIT 1
           )
           WHEN 'key_point' THEN CASE WHEN EXISTS (

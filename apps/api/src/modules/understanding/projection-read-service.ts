@@ -21,7 +21,7 @@ import {
   learningObjectiveRevisionsV2,
 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { notes, noteVersions, sources } from "@ailearn/shared/db-schema/note";
-import { visibleNotesCondition } from "../note/visibility.ts";
+import { visibleCardsCondition, visibleNotesCondition } from "../note/visibility.ts";
 import {
   understandingProjectionCheckpoints,
   understandingRoutePlans,
@@ -364,7 +364,10 @@ export async function loadUnderstandingProjection(
     .where(and(
       eq(learningCardsV2.workspaceId, scope.workspaceId),
       eq(learningCardsV2.lifecycle, "active"),
+      // 节点标题就是卡的 `public_summary`（从笔记正文抽出来的一句），所以这里必须
+      // 跟着来源笔记判——星图上多出一个别人私有笔记的摘要，等于边界白画。
       cardFilterCondition,
+      visibleCardsCondition(scope.userId, learningCardsV2.noteVersionId),
     ))
     .$dynamic();
   // 一律加确定排序使输出稳定；全图模式再加 limit。

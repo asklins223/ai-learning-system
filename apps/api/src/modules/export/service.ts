@@ -1,7 +1,7 @@
 import { and, asc, count, desc, eq, gt, inArray, isNull, lt, or } from "drizzle-orm";
 import { withWorkspaceTransaction, type ApiTransaction } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks, sources, sourceSegments } from "@ailearn/shared/db-schema/note";
-import { visibleNotesCondition } from "../note/visibility.ts";
+import { visibleCardsCondition, visibleNotesCondition } from "../note/visibility.ts";
 import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
 import { aiArtifacts } from "@ailearn/shared/db-schema/ai";
 import { workspaces, workspaceMembers, users, onboardingStates } from "@ailearn/shared/db-schema/identity";
@@ -561,10 +561,14 @@ export async function exportWorkspace(workspaceId: string, userId: string) {
         cursorFrom: (last) => ({ id: last.id }),
       }),
       // Plan 23 CS-07：learning_cards_v2
+      // 整行出去 = `front`（正文摘录）和 `public_summary` 都在包里，所以这张表必须
+      // 跟着来源笔记判：上面 `notes` 已经按人筛了，卡不筛等于从卡片那一侧把同一篇
+      // 私有笔记的正文再抄一份进导出包。
       loadInBatches({
         load: (c: PlainIdCursor | null) =>
           tx.select().from(learningCardsV2).where(and(
             eq(learningCardsV2.workspaceId, workspaceId),
+            visibleCardsCondition(userId, learningCardsV2.noteVersionId),
             c ? lt(learningCardsV2.id, c.id) : undefined,
           )).orderBy(desc(learningCardsV2.id)).limit(EXPORT_BATCH),
         cursorFrom: (last) => ({ id: last.id }),

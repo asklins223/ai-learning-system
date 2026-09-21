@@ -32,6 +32,7 @@ import {
   evidenceSnapshotsV2,
 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { noteVersions, noteBlocks } from "@ailearn/shared/db-schema/note";
+import { visibleCardsCondition } from "../note/visibility.ts";
 import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
 import { frontLeaksAnswerVerbatimV2 } from "@ailearn/shared/card-generation-v2-pipeline";
 import { cardStrategyV2Schema } from "@ailearn/shared/card-generation-v2-contracts";
@@ -85,7 +86,7 @@ export async function revealCardV2(
     }
 
     const { card, publication, revision, objective } = await loadCardClosure(
-      tx, ctx.workspaceId, body.cardId,
+      tx, ctx.workspaceId, ctx.userId, body.cardId,
     );
 
     // §17.6：用户看到的 front 必须与待 reveal 的 exact publication 一致
@@ -177,7 +178,7 @@ export async function archiveCardV2(
     }
 
     const { card, publication, revision, objective } = await loadCardClosure(
-      tx, ctx.workspaceId, body.cardId,
+      tx, ctx.workspaceId, ctx.userId, body.cardId,
     );
 
     if (publication.publicationRevision !== body.expectedPublicationRevision
@@ -322,7 +323,7 @@ export async function updateCardPresentationV2(
 }> {
   return withWorkspaceTransaction(ctx, async (tx) => {
     const { card, publication, revision, objective } = await loadCardClosure(
-      tx, ctx.workspaceId, cardId,
+      tx, ctx.workspaceId, ctx.userId, cardId,
     );
     if (publication.publicationRevision !== expectedPublicationRevision
         || publication.publicPayloadHash !== expectedPublicPayloadHash) {
@@ -562,6 +563,8 @@ export async function createCardRegenerationRunV2(
         eq(learningCardsV2.cardId, cardId),
         eq(learningCardsV2.workspaceId, ctx.workspaceId),
         eq(learningCardsV2.lifecycle, "active"),
+        // 「仅自己可见」的笔记生成的卡不是一条空间资料，别人不能拿它起重生成。
+        visibleCardsCondition(ctx.userId, learningCardsV2.noteVersionId),
       ))
       .limit(1);
     if (cards.length === 0) {
@@ -597,7 +600,11 @@ export async function readPublicCardV2(
 ): Promise<PublicLearningCardV2 | null> {
   return withWorkspaceTransaction(ctx, async (tx) => {
     const cards = await tx.select().from(learningCardsV2)
-      .where(and(eq(learningCardsV2.cardId, cardId), eq(learningCardsV2.workspaceId, ctx.workspaceId)))
+      .where(and(
+        eq(learningCardsV2.cardId, cardId),
+        eq(learningCardsV2.workspaceId, ctx.workspaceId),
+        visibleCardsCondition(ctx.userId, learningCardsV2.noteVersionId),
+      ))
       .limit(1);
     if (cards.length === 0) return null;
     const card = cards[0];
@@ -685,6 +692,7 @@ export async function listActiveCardsV2(
       .where(and(
         eq(learningCardsV2.workspaceId, ctx.workspaceId),
         eq(learningCardsV2.lifecycle, "active"),
+        visibleCardsCondition(ctx.userId, learningCardsV2.noteVersionId),
       ))
       .orderBy(desc(learningCardsV2.createdAt))
       .limit(limit + 1)
@@ -804,10 +812,17 @@ type CardClosure = {
 async function loadCardClosure(
   tx: ApiTransaction,
   workspaceId: string,
+  viewerId: string,
   cardId: string,
 ): Promise<CardClosure> {
   const cards = await tx.select().from(learningCardsV2)
-    .where(and(eq(learningCardsV2.cardId, cardId), eq(learningCardsV2.workspaceId, workspaceId)))
+    .where(and(
+      eq(learningCardsV2.cardId, cardId),
+      eq(learningCardsV2.workspaceId, workspaceId),
+      // 按查看者判，不按"这张卡是谁生成的"判：卡的正文来自那篇笔记，笔记对谁可见
+      // 卡才对谁可见（批次 4.5）。
+      visibleCardsCondition(viewerId, learningCardsV2.noteVersionId),
+    ))
     .limit(1);
   if (cards.length === 0) {
     throw new CardGenerationV2ServiceError("card_not_found", 404, "卡片不存在");
@@ -853,6 +868,7 @@ async function loadCardClosure(
 async function loadRevisionAndPublicationByObjective(
   tx: ApiTransaction,
   workspaceId: string,
+  viewerId: string,
   objectiveId: string,
 ): Promise<{
   publication: typeof learningCardPublicationRevisionsV2.$inferSelect;
@@ -860,7 +876,13 @@ async function loadRevisionAndPublicationByObjective(
   card: typeof learningCardsV2.$inferSelect;
 }> {
   const cards = await tx.select().from(learningCardsV2)
-    .where(and(eq(learningCardsV2.objectiveId, objectiveId), eq(learningCardsV2.workspaceId, workspaceId)))
+    .where(and(
+      eq(learningCardsV2.objectiveId, objectiveId),
+      eq(learningCardsV2.workspaceId, workspaceId),
+      // 这是"答案"那一步：前面列表挡住而这里不挡的话，直接请求 reveal 仍然能把
+      // 别人私有笔记的正文和答案取走。
+      visibleCardsCondition(viewerId, learningCardsV2.noteVersionId),
+    ))
     .limit(1);
   const pubRows = cards.length > 0
     ? await tx.select().from(learningCardPublicationRevisionsV2)
@@ -892,7 +914,7 @@ async function buildCardReveal(
   exposedAt: Date,
 ): Promise<LearningCardRevealV2> {
   const { publication, revision } = await loadRevisionAndPublicationByObjective(
-    tx, ctx.workspaceId, objectiveId,
+    tx, ctx.workspaceId, ctx.userId, objectiveId,
   );
   const reveal: LearningCardRevealV2 = {
     version: 2,

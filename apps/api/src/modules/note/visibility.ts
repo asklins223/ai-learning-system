@@ -1,5 +1,5 @@
-import { eq, or, type SQL } from "drizzle-orm";
-import { notes } from "@ailearn/shared/db-schema/note";
+import { eq, exists, isNull, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
+import { notes, noteVersions } from "@ailearn/shared/db-schema/note";
 
 /**
  * 笔记归属的唯一判据（批次 4.5）。
@@ -72,4 +72,34 @@ export function noteVisibleForSearchIndexSql(): string {
       AND visible_note.deleted_at IS NULL
       AND ${noteVisibleSqlText("visible_note", "v.viewer")}
   ))`;
+}
+
+/**
+ * 卡片的可见性跟着它的**来源笔记**走（批次 4.5）。
+ *
+ * 一条学习卡是从某篇笔记的某个版本抽出来的正文摘录。空间规则说"只共享学习资料"，
+ * 所以一篇没拿出去的笔记，从它生成的卡也没理由被全空间看见——否则"仅自己可见"
+ * 只是把笔记本体藏起来，正文照样从卡片那一侧漏出去。
+ *
+ * 没有来源笔记的卡（手动建立的目标卡等，`note_version_id IS NULL`）不受这条约束：
+ * 它没有可追溯的私有来源。
+ *
+ * 判据仍然只写一次：这里是把上面那句 `visibleNotesCondition` 原样嵌进相关子查询，
+ * 所以"笔记可见性规则"改了这里自动跟上，不存在第二套会互相矛盾的口径。
+ *
+ * 参数是**列**而不是表名：调用方各自持有的那张卡的引用不一样（有的按 `cardId` 查，
+ * 有的按 `objectiveId` 查），而 `learning_cards_v2` 属于卡片那一层的 schema，
+ * 判据文件不该反过来依赖它。
+ */
+export function visibleCardsCondition(
+  userId: string,
+  cardNoteVersionId: SQLWrapper,
+): SQL {
+  return or(
+    isNull(cardNoteVersionId),
+    exists(
+      sql`(SELECT 1 FROM ${noteVersions} JOIN ${notes} ON ${notes.id} = ${noteVersions.noteId}
+           WHERE ${noteVersions.id} = ${cardNoteVersionId} AND ${visibleNotesCondition(userId)})`,
+    ),
+  ) as SQL;
 }

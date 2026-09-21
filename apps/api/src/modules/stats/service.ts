@@ -3,7 +3,7 @@ import { withWorkspaceTransaction } from "../../db/client.ts";
 import { learningCardsV2, learningObjectiveEvidenceBindingsV2, learningObjectiveRevisionsV2, learningObjectivesV2 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
 import { notes } from "@ailearn/shared/db-schema/note";
-import { visibleNotesCondition } from "../note/visibility.ts";
+import { visibleCardsCondition, visibleNotesCondition } from "../note/visibility.ts";
 import { ReviewStatus } from "@ailearn/shared";
 
 export interface StatsOverview {
@@ -62,13 +62,17 @@ export async function getStatsOverview(workspaceId: string, userId: string): Pro
     tx
       .select({ count: count() })
       .from(learningCardsV2)
-      .where(eq(learningCardsV2.workspaceId, workspaceId)),
+      .where(and(
+        eq(learningCardsV2.workspaceId, workspaceId),
+        visibleCardsCondition(userId, learningCardsV2.noteVersionId),
+      )),
     tx
       .select({ count: count() })
       .from(learningCardsV2)
       .where(and(
         eq(learningCardsV2.workspaceId, workspaceId),
         eq(learningCardsV2.lifecycle, "active"),
+        visibleCardsCondition(userId, learningCardsV2.noteVersionId),
       )),
   ]);
   const noteCount = Number(noteRows[0]?.count ?? 0);

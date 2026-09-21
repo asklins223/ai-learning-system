@@ -16,6 +16,8 @@ import { closeDatabase, withWorkspaceTransaction } from "../db/client.ts";
 import { cardGenerationRunsV2 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { createNote } from "../modules/note/service.ts";
 import { getLatestGenerationRunForNoteV2 } from "../modules/card-generation-v2/generation-run-service.ts";
+import { listActiveCardsV2, readPublicCardV2 } from "../modules/card-generation-v2/card-service.ts";
+import { addV2ObjectiveToWorkspace } from "./helpers/v2-card-fixture.ts";
 import { CardGenerationV2ServiceError } from "../modules/card-generation-v2/helpers.ts";
 
 const CONN = process.env.DATABASE_URL_API ?? process.env.DATABASE_URL;
@@ -58,8 +60,24 @@ before(async () => {
 });
 
 after(async () => {
-  await sql`DELETE FROM card_generation_runs_v2 WHERE workspace_id = ${workspaceId}`;
-  await sql`DELETE FROM notes WHERE workspace_id = ${workspaceId}`;
+  // 卡那几张表按外键顺序删（`learning_cards_v2.note_version_id` 是 RESTRICT，
+  // 笔记必须最后删）。漏一张就是一个不报错的残留——这正是 `mem-http-*` 那批
+  // 脏数据的产生机制。
+  //
+  // 发布修订那张表是 append-only（受控旁路见迁移 0180）：不在事务里放行
+  // `app.allow_history_mutation`，清理会直接 RAISE 而不是静默失败。
+  await sql.begin(async (tx) => {
+    await tx`SELECT set_config('app.allow_history_mutation', 'on', true)`;
+    await tx`DELETE FROM learning_card_publication_revisions_v2 WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_cards_v2 WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_objective_revisions_v2 WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM learning_objectives_v2 WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM note_blocks WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM note_document_states WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM note_versions WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM card_generation_runs_v2 WHERE workspace_id = ${workspaceId}`;
+    await tx`DELETE FROM notes WHERE workspace_id = ${workspaceId}`;
+  });
   await sql`UPDATE users SET personal_workspace_id = NULL WHERE id IN (${author}, ${other})`;
   await sql`DELETE FROM workspace_members WHERE workspace_id = ${workspaceId}`;
   await sql`DELETE FROM workspaces WHERE id = ${workspaceId}`;
@@ -152,4 +170,117 @@ test("别人的在制批次不该挡住我发起生成", async () => {
     second === "note_generation_in_flight" || second === "idempotency_conflict" || second === "",
     `自己第二次发起的预期之外结果：${second}`,
   );
+});
+
+// ─── 卡片的可见性跟着来源笔记（批次 4.5）───────────────────────────────
+
+const cardListFor = (userId: string) =>
+  listActiveCardsV2({ workspaceId, userId }, { limit: 100 });
+
+test("私有笔记生成的卡不进别人的列表、详情与星图", async () => {
+  // `addV2ObjectiveToWorkspace` 走的是原生 INSERT，所以这篇笔记拿的是列默认值
+  // `private`——正好就是"新建、没有点过共享"的那个状态。
+  const seeded = await addV2ObjectiveToWorkspace(sql, workspaceId, author, {
+    publicSummary: `只有作者看得见的摘要 ${tag}`,
+  });
+
+  const mine = await cardListFor(author);
+  assert.ok(
+    mine.items.some((card) => card.cardId === seeded.cardId),
+    "作者看不见自己那篇的卡（判据写反了，或者整条查询坏了）",
+  );
+
+  const theirs = await cardListFor(other);
+  assert.equal(
+    theirs.items.find((card) => card.cardId === seeded.cardId),
+    undefined,
+    "别人读到了「仅自己可见」笔记的卡——正文摘要从卡片那一侧漏出去",
+  );
+  assert.equal(
+    await readPublicCardV2({ workspaceId, userId: other }, seeded.cardId),
+    null,
+    "列表挡住了但详情按 cardId 直读还能拿到",
+  );
+
+  // 正向对照：共享之后同一张卡必须出现在对方列表里。少了这一条，上面的"看不见"
+  // 可能只是判据把两张卡都挡掉了。
+  await sql`UPDATE notes SET share_scope = 'shared' WHERE id = ${seeded.noteId}`;
+  assert.ok(
+    (await cardListFor(other)).items.some((card) => card.cardId === seeded.cardId),
+    "共享之后这张卡仍然看不见（判据根本没跟着 share_scope 走）",
+  );
+  assert.notEqual(
+    await readPublicCardV2({ workspaceId, userId: other }, seeded.cardId),
+    null,
+    "共享之后详情仍然读不到",
+  );
+
+  // 撤回：作者随时能收回去，收回去之后对方又读不到（可逆性是那条规则的一半）。
+  await sql`UPDATE notes SET share_scope = 'private' WHERE id = ${seeded.noteId}`;
+  assert.equal(
+    (await cardListFor(other)).items.find((card) => card.cardId === seeded.cardId),
+    undefined,
+    "撤回共享之后这张卡还留在别人的列表里",
+  );
+  assert.ok(
+    (await cardListFor(author)).items.some((card) => card.cardId === seeded.cardId),
+    "撤回把作者自己也挡掉了（作者判据没进谓词）",
+  );
+});
+
+test("没有来源笔记的卡不受这条边界约束", async () => {
+  // 手动建立的目标卡 `note_version_id IS NULL`：没有可追溯的私有来源，所以不该被
+  // 一起藏起来。这一条同时也是"判据是不是把整张表都挡掉了"的第二组对照。
+  const seeded = await addV2ObjectiveToWorkspace(sql, workspaceId, author, {
+    publicSummary: `与笔记无关的一张卡 ${tag}`,
+  });
+  await sql`UPDATE learning_cards_v2 SET note_version_id = NULL WHERE card_id = ${seeded.cardId}`;
+
+  assert.ok(
+    (await cardListFor(other)).items.some((card) => card.cardId === seeded.cardId),
+    "没有来源笔记的卡也被挡掉了（IS NULL 那一支没写对）",
+  );
+  assert.notEqual(
+    await readPublicCardV2({ workspaceId, userId: other }, seeded.cardId),
+    null,
+  );
+});
+
+test("重新生成别人的私有笔记卡：按不存在处理，而不是 403", async () => {
+  const seeded = await addV2ObjectiveToWorkspace(sql, workspaceId, author);
+  const { createCardRegenerationRunV2 } = await import("../modules/card-generation-v2/card-service.ts");
+  let code = "";
+  try {
+    await createCardRegenerationRunV2(
+      { workspaceId, userId: other },
+      seeded.cardId,
+      undefined,
+      "remember",
+      "balanced",
+      { kind: "adaptive" },
+      `regen-${tag}`,
+      `regen-${tag}`,
+    );
+  } catch (error) {
+    code = error instanceof CardGenerationV2ServiceError ? error.code : `other:${String(error).slice(0, 80)}`;
+  }
+  assert.equal(code, "card_not_found", `别人能从私有笔记的卡发起重生成（${code}）`);
+
+  // 正向对照：作者本人走同一条路拿到的不是"卡片不存在"。
+  let mine = "";
+  try {
+    await createCardRegenerationRunV2(
+      { workspaceId, userId: author },
+      seeded.cardId,
+      undefined,
+      "remember",
+      "balanced",
+      { kind: "adaptive" },
+      `regen-author-${tag}`,
+      `regen-author-${tag}`,
+    );
+  } catch (error) {
+    mine = error instanceof CardGenerationV2ServiceError ? error.code : "";
+  }
+  assert.notEqual(mine, "card_not_found", "作者自己也拿不到这张卡（判据太严）");
 });
