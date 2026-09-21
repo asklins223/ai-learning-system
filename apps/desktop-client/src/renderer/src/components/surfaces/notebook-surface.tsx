@@ -268,9 +268,15 @@ export function NotebookSurface() {
   const activeNoteRef = useRoomStore((state) => state.activeNoteRef);
   // 协同流只在协作空间里存在（personal 按门控不建长连接），所以订阅与否看它。
   const spaceIdentity = useRoomStore((state) => state.spaceIdentity);
-  // 我在这一篇里是谁，要广播给同处这篇的人。只取显示名，不取邮箱：成员列表里别人
-  // 本来看不到你的邮箱，协同状态不该另开一条路把它散出去。
-  const presenceName = useRoomStore((state) => state.accountIdentity?.displayName ?? null);
+  // 我在这一篇里是谁，要广播给同处这篇的人。显示名缺省时落回邮箱 @ 前那一段：
+  // 实窗量过一次，演示账号没有显示名，结果别人那一排看到的全是「?」印章——一排问号
+  // 说不出任何事，等于没做这个功能。不广播完整邮箱：成员列表本来看不到别人的邮箱，
+  // 协同状态不该另开一条路把它散出去。
+  const presenceName = useRoomStore((state) => {
+    const account = state.accountIdentity;
+    if (!account) return null;
+    return account.displayName?.trim() || account.email.split("@")[0]?.trim() || null;
+  });
   const setReturnTarget = useRoomStore((state) => state.setReturnTarget);
   const editorRef = useRef<NoteMarkdownEditorHandle | null>(null);
   const editorPaneRef = useRef<HTMLDivElement>(null);
@@ -433,11 +439,26 @@ export function NotebookSurface() {
     draftSeeded && note
     && (draft.title !== note.title || (editable && !blocksMatchMarkdown(draft.content, note.currentVersion.blocks))),
   );
-  const mark = useMemo(
-    () => conceptMark(note?.currentVersion.blocks ?? [], objective?.content.conceptLabel),
-    [note, objective],
+  // 别人（同机另一个窗口、另一台机器、另一个人）改了这一篇。阅读态直接画这一帧，
+  // 并同时叫醒一次回读去取版本/权限那半边（为什么帧比回读新：见 use-note-doc-live-view
+  // 里那段 3.5 秒的实测）。编辑态不接这一帧——作者手上有还没交出去的字时，替换与否
+  // 仍由既有那条回读效应判，界面不另开一条写编辑器的路。
+  const noteDocLive = useNoteDocLiveView(
+    note?.noteId ?? null,
+    spaceIdentity !== null && !spaceIdentity.isPersonal,
+    () => {
+      void reload({ silent: true });
+    },
+    presenceName,
   );
-  const allBlocks = note?.currentVersion.blocks ?? [];
+  const liveRead = mode === "read" ? noteDocLive.remoteView : null;
+  const readSourceBlocks = liveRead?.blocks ?? note?.currentVersion.blocks ?? [];
+  const readTitle = liveRead?.title.trim() || note?.title || "";
+  const mark = useMemo(
+    () => conceptMark(readSourceBlocks, objective?.content.conceptLabel),
+    [readSourceBlocks, objective],
+  );
+  const allBlocks = readSourceBlocks;
   const readingBlocks = showAllBlocks || allBlocks.length <= READING_WINDOW
     ? allBlocks
     : allBlocks.slice(0, READING_WINDOW);
@@ -685,16 +706,6 @@ export function NotebookSurface() {
   // without a loading paper over the writer's text, and without offering a
   // second start for the same note version.
   const noteGenerationRunId = noteGeneration?.runId ?? null;
-  // 别人（同机另一个窗口、另一台机器、另一个人）改了这一篇：帧只负责"叫醒一次回读"，
-  // 要不要替换正文仍由上面那条回读效应判——作者手上有未提交的改动时不替换。
-  const noteDocLive = useNoteDocLiveView(
-    note?.noteId ?? null,
-    spaceIdentity !== null && !spaceIdentity.isPersonal,
-    () => {
-      void reload({ silent: true });
-    },
-    presenceName,
-  );
 
   useEffect(() => {
     if (!noteGenerationRunId || !window.ailearn) return undefined;
@@ -1145,7 +1156,7 @@ export function NotebookSurface() {
         <NotebookPresence peers={noteDocLive.presencePeers} selfName={presenceName} />
         {shareStateControls}
       </div>
-      <h2 className="title">{note.title || "未命名笔记"}</h2>
+      <h2 className="title">{readTitle || "未命名笔记"}</h2>
       <div className="meta">
         <span>{formatRelative(note.currentVersion.updatedAt)}</span>
         <span>{note.sourceId ? `关联来源 ${source?.source.title ?? "暂时读不到"}` : "未关联来源"}</span>
@@ -1153,7 +1164,7 @@ export function NotebookSurface() {
       </div>
       <div className="rule" />
       <div className="reading-body">
-        {note.currentVersion.blocks.length ? readingBlocks.map((block) => (
+        {readSourceBlocks.length ? readingBlocks.map((block) => (
           <ReadingBlock
             key={block.ordinal}
             block={block}

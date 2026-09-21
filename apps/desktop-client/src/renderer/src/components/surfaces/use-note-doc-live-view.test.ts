@@ -86,6 +86,52 @@ describe("笔记协同的实时视图订阅", () => {
     }));
   });
 
+  it("正文帧立刻留下那一份可画的内容，回读仍然照叫醒（帧比回读新）", async () => {
+    const onRemoteChange = vi.fn();
+    const { result } = renderHook(() => useNoteDocLiveView(NOTE_ID, true, onRemoteChange));
+    await act(async () => { vi.advanceTimersByTime(0); });
+
+    act(() => {
+      emit(frame(NOTE_ID, {
+        type: "blocks",
+        blocks: [
+          { ordinal: 0, type: "paragraph", content: "别人刚敲的那段" },
+          // 客户端版本差一档时，认不出的块类型要落回段落，不能整块不画。
+          { ordinal: 1, type: "callout", content: "这台机器还不认识的块" },
+        ],
+        title: "别人改的标题",
+        titleSource: "auto",
+      }));
+    });
+    // 帧一到就有：读的那一屏不必等回读，也不必等作者那次自动保存进 API。
+    expect(result.current.remoteView).toEqual({
+      blocks: [
+        { ordinal: 0, type: "paragraph", content: "别人刚敲的那段" },
+        { ordinal: 1, type: "paragraph", content: "这台机器还不认识的块" },
+      ],
+      title: "别人改的标题",
+      titleSource: "auto",
+    });
+    // 回读仍然是叫醒的（版本号、时间、权限只能从服务端那份记录来）。
+    expect(onRemoteChange).not.toHaveBeenCalled();
+    act(() => { vi.advanceTimersByTime(600); });
+    expect(onRemoteChange).toHaveBeenCalledTimes(1);
+  });
+
+  it("换一篇时上一帧的正文不留在那一屏上", async () => {
+    const { result, rerender } = renderHook(({ noteId }) => useNoteDocLiveView(noteId, true, () => undefined), {
+      initialProps: { noteId: NOTE_ID },
+    });
+    await act(async () => { vi.advanceTimersByTime(0); });
+    act(() => {
+      emit(frame(NOTE_ID, { type: "blocks", blocks: [{ ordinal: 0, type: "paragraph", content: "上一篇的" }], title: "上一篇", titleSource: "auto" }));
+    });
+    expect(result.current.remoteView?.title).toBe("上一篇");
+    rerender({ noteId: OTHER_ID });
+    await act(async () => { vi.advanceTimersByTime(0); });
+    expect(result.current.remoteView).toBeNull();
+  });
+
   it("正文帧只叫醒一次回读：连着的三帧合并成一次", async () => {
     const onRemoteChange = vi.fn();
     renderHook(() => useNoteDocLiveView(NOTE_ID, true, onRemoteChange));

@@ -19,10 +19,12 @@ const VERSION_ID = "22222222-4222-4222-8222-222222222222";
 type Listener = (event: { data: unknown }) => void;
 let listeners: Listener[] = [];
 let subscribe: ReturnType<typeof vi.fn>;
+let presence: ReturnType<typeof vi.fn>;
 
 function stub() {
   listeners = [];
   subscribe = vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { subscriptionId: "sub-1" } }));
+  presence = vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { shared: true } }));
   window.ailearn = {
     contract: { enabledRoutes: ["note.detail"] },
     auth: { getState: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { status: "authenticated", workspace: { workspaceId: "w-1" } } })) },
@@ -55,7 +57,7 @@ function stub() {
       doc: {
         state: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { blocks: [], title: "", titleSource: "auto", revision: 0, backfilled: false, shareScope: "shared" } })),
         syncBlocks: vi.fn(async () => { throw new Error("gateway unavailable"); }),
-        presence: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { shared: true } })),
+        presence,
       },
     },
     capabilities: {
@@ -125,6 +127,23 @@ describe("笔记页上的在场名单", () => {
     await open("edit");
     await deliverPresence([{ clientId: 7, state: { name: "小琳" } }]);
     expect(document.body.textContent ?? "").toContain("2 人在看");
+  });
+
+  it("没有显示名时报邮箱 @ 前那一段：实窗量到满屏的「?」就是这个缺省造成的", async () => {
+    stub();
+    useRoomStore.setState({
+      spaceIdentity: { name: "验收空间", role: "owner", isPersonal: false },
+      // 演示账号 owner@ailearn.local 就没有显示名——量那次对端整排都是「?」。
+      accountIdentity: { email: "owner@ailearn.local", displayName: null },
+    });
+    await open("read");
+    expect(presence).toHaveBeenLastCalledWith(expect.objectContaining({
+      state: JSON.stringify({ name: "owner" }),
+    }));
+    await deliverPresence([{ clientId: 7, state: { name: "小琳" } }]);
+    const own = document.querySelectorAll(".notebook-presence__peer")[0];
+    expect(own.getAttribute("aria-label")).toBe("owner（你）");
+    expect(own.textContent).toBe("O");
   });
 
   it("个人空间里既不订阅也不出现这一排（那里没有长连接）", async () => {
