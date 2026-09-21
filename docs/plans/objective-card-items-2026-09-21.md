@@ -1451,3 +1451,51 @@ A1 本身还没做：这条索引只是让它有可能开始写。剩下的两�
 ①入口守卫从"看 `run.status`"改成"看自己那条 outbox 租约"（否则重投对着已提交的
 `authoring` 静默空转，把 run 钉死、这篇笔记此后每次生成都吃 409，§21），
 ②逐候选提交时按目标"已有则跳过/补 revision"，而不是裸 INSERT。
+
+## 39. A1 动工前的四处实测：它不是"把 INSERT 挪早一点"，而是状态机换锁
+
+§38 那条索引是前置，不是 A1 本体。真去读实现时撞到四处事实，每一处都会决定改法，
+所以先记下来再动手——这四处任意一处没看清，都能改出一条"看起来能跑、审计链是断的"的管道。
+
+1. **候选表只有一个外键**：`run_id → card_generation_runs_v2(id)`（`pg_constraint` 实测，
+   没有指向 `card_generation_plans_v2` 的）。所以"计划还没提交就先提交候选"在库里**不会**
+   被挡——这条约束救不了错误的设计，得靠自己的顺序。
+2. **`planRevisionId` 是每次执行现造的 `randomUUID()`**（`planner-service.ts:373`），
+   而 `candidateRevisionHash` 的闭包里含 `planRevisionId` 与 `planHash`
+   （`author-service.ts:240-243`）。推论：如果重放时"复用上次已提交的候选 + 用这次新计划
+   继续跑"，那张候选携带的计划 id 在这次运行里**根本不存在**（上一版计划行随崩溃的大事务
+   回滚了），审计链当场断掉，deck gate 与终态写入（`handler:3101` 用 `final.planRevisionId`）
+   还会把两套身份混写。
+   → 因此 A1 必须**先把计划提交**（计划行 + `status='authoring'` + `current_plan_version`
+   一个短事务），重放时读回同一版计划，而不是重新 planner。
+3. **入口守卫因此必须换机制**：今天的 `run.status !== 'planning' → return`（`handler:1251`）
+   在第 2 条落地后会把重投的 job 变成静默空转（run 停在 `authoring`、笔记此后每次生成都吃
+   409，§21 的原始担忧就是这条）。判活要看**自己那条 outbox 租约**——A2 的
+   `writeCardGenerationLiveProgress` 已经是这个写法（只读核对 `status='processing' AND
+   lease_token=自己 AND 未过期`），A1 把它抬成入口门闩。
+4. **`FOR UPDATE` 现在同时干两件事**：①挡住同 run 双跑（双份计费/双写终态），②让
+   `authoring` 这类中间态"外部读不到"。A1 要保留①、放弃②，所以①必须整个交给租约：
+   认领时已经写过 `lease_expires_at`，管道里每个短事务提交前再核对一次（fence），
+   核对不过就**停下不写**（不是回滚，回滚不了别人已提交的东西）。
+   现在那条 `handler:1219-1225` 的注释写着"要拆就得重构成状态机门闩（乐观 CAS 或租约
+   token）方能豁免"——第 3、4 条就是它说的那次重构。
+
+**顺带一个白捡的收益**：`status` 一旦提前提交，A2 当时明说量不出来的"第 N 步"读数
+（`readGenerationProgressV2` 的非终态判据读的正是 `run.status`）也一并活了。
+`LIVE_PROGRESS_STATUSES` 已经含 `authoring`/`checking`，不用改读端。
+
+**分批（每批都能零 AI 调用验证）**：
+- B1 计划提前提交 + 入口门闩换成租约（守卫改判：`planning` 照常；`authoring` 且租约是我的
+  → 接着跑；终态 → 让路）。用例：同 run 换两把租约先后跑，第二次不得双写、也不得空转卡死。
+- B2 逐候选提交（作者完成后一个短事务，`ON CONFLICT` 打在 0253 那条索引上，
+  事件只在**真的插了行**时发）+ 重放按目标复用已提交候选（读回 `learningCardCandidateRevisionV2`）。
+  用例：另一条连接能在整批提交前看到第 1..i 张；重放不再调作者（用计数 provider 钉住"没再付费"）。
+- B3 门禁/终态那段留在原事务结构里，只把"读候选"从"只看本事务写的"改成"看已提交的"。
+  用例：`card-generation-v2-live-progress` 现有 8 条必须全绿，尤其 §38 提到的那条重放防护
+  ——它断言的**结果**（不新增候选、不新增事件、不动终态）在新机制下照样成立才算换对了。
+- B4 读端与界面：生成中那一屏逐张显示（api 已经能读到，缺的是界面）。
+- B5 一次真实 LLM 跑：量"第 1 张出现"的时刻与整批提交时刻之差（这才是 A1 的验收数）。
+
+一处**已知代价**要写在前头：提前提交意味着崩溃窗口里会留下 `quality_state='authored'`
+的半成品行。读端不会把它们当候选（`isCandidateReviewReadyV2` 要求 `passed`），恢复态文案
+也已经存在；但"半成品行 + 重放复用"这条路径必须被 B2 的用例覆盖，不能只靠推理。
