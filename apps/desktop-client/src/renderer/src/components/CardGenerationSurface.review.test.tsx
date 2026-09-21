@@ -21,7 +21,7 @@ const RUN_ID = "aaaaaaa1-1111-4111-8111-111111111111";
 
 type CandidateState = {
   candidateId: string;
-  practiceItem?: { kind: string; optionCount: number } | null;
+  practiceItem?: { kind: string; optionCount?: number } | null;
   statement: string;
   reviewDecision: string;
   publishState: string;
@@ -259,6 +259,27 @@ describe("CardGenerationSurface · 候选审核", () => {
     // 正确项与选项文本连字段都没下发，这里再确认一次界面没自己造出来。
     const board = JSON.stringify((window.ailearn.note.cardGeneration.getCandidates as ReturnType<typeof vi.fn>).mock.calls);
     expect(board).not.toContain("correctUnitId");
+  });
+
+  it("判断题不带计数，标签也就不读计数", async () => {
+    stubGateway([
+      {
+        candidateId: "cand-1",
+        statement: "第一张",
+        reviewDecision: "undecided",
+        publishState: "unpublished",
+        // 判断题的作答是"对/错"二选一，不来自这条数据，所以服务端**不发** optionCount。
+        practiceItem: { kind: "true_false" },
+      },
+    ]);
+    useRoomStore.setState({ activeCardGenerationRunId: RUN_ID });
+    render(<CardGenerationSurface />);
+
+    await waitFor(() => expect(screen.getByText("第一张")).toBeTruthy());
+    expect(screen.getByText("判断题 · 对不对二选一")).toBeTruthy();
+    const practiceRow = [...document.querySelectorAll("dt")]
+      .find((dt) => dt.textContent === "随卡练习")?.nextElementSibling?.textContent ?? "";
+    expect(practiceRow).toBe("判断题 · 对不对二选一");
   });
 
   it("没配练习件的卡直说没有，不假装有一道题", async () => {

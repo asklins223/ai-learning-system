@@ -231,13 +231,15 @@ export function serializeCandidatePublic(row: typeof cardGenerationCandidatesV2.
       pairs?: unknown[];
     } | null;
   }).practiceItem;
+  const practiceItemOptionCount = practiceItem?.options?.length
+    ?? practiceItem?.units?.length
+    ?? practiceItem?.pairs?.length;
   const practiceItemSummary = practiceItem
     ? {
       kind: practiceItem.kind as "single_choice" | "true_false" | "ordering" | "matching",
-      optionCount: practiceItem.options?.length
-        ?? practiceItem.units?.length
-        ?? practiceItem.pairs?.length
-        ?? 0,
+      // 判断题没有"选项集合"可数（作答是对/错二选一，不来自这条数据），所以它不带
+      // 这个字段——留个恒为 0 的数会让界面读出一个没有意义的读数。
+      ...(practiceItemOptionCount ? { optionCount: practiceItemOptionCount } : {}),
     }
     : null;
   return {

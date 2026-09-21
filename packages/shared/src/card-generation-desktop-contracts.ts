@@ -370,7 +370,8 @@ export const cardGenerationCandidateV1Schema = z.strictObject({
   practiceItem: z
     .strictObject({
       kind: z.enum(["single_choice", "true_false", "ordering", "matching"]),
-      optionCount: z.number().int().min(0).max(12),
+      // 判断题没有可数的选项集合，因此不带该字段（不是 0）。
+      optionCount: z.number().int().min(1).max(12).optional(),
     })
     .nullable()
     .optional(),

@@ -369,4 +369,50 @@ B（提交 66a0049f）已经让界面不再撒谎。A 做完后，把 B 里那�
 
 一处如实记录的粗糙：`true_false` 的 `optionCount` 是 0（摘要只数 options/units/pairs）。
 界面标签是硬编码的「判断题 · 对不对二选一」，所以显示不受影响，但这个字段对判断题没有意义——
-下次要么给它 2 的语义，要么让标签不读计数。
+下次要么给它 2 的语义，要么让标签不读计数。**已在 §20 处理：选了后者前置的那一步（不发这个键）。**
+
+## 20. 把 §19 那处粗糙改掉，顺带踩到一个会骗人的开发环境行为
+
+选了"不发这个键"而不是"给判断题 2"：2 是在替这条数据编一个它没有的选项集合，
+而且界面本来就不读它。三处一起改：
+
+- `apps/api/.../helpers.ts`：`...(practiceItemOptionCount ? { optionCount: ... } : {})`；
+- `packages/shared/src/card-generation-desktop-contracts.ts`：`optionCount` 改成 `min(1).max(12).optional()`；
+- `CardGenerationSurface.tsx`：标签的计数改为 `item.optionCount ?? "?"`（判断题那一行本来就不读计数）。
+
+测试：api 侧新增 2 条（选择题 `deepEqual {kind, optionCount:3}`；判断题 `Object.keys(summary)` 恰为
+`["kind"]`），桌面侧新增 1 条（判断题卡面的「随卡练习」行不含数字）。新测试都做过**改前红**确认：
+把投影临时退回 `optionCount ?? 0` 时，判断题那条确实 `not ok`，不是摆设。
+
+### 那个会骗人的行为（值得记住）
+
+改完之后 `GET /v2/card-generation-runs/:runId/candidates` 直接 **500**，日志只有
+`ZodError`（fastify 把 `issues` 吞了）。排查结果不是代码错：
+
+- api 容器里 `npm run dev` = `tsx watch src/server.ts`，日志显示它**只对 `./src/**` 的变更重启**
+  （`[tsx] change in ./src/modules/card-generation-v2/helpers.ts Restarting...`）；
+- 我先落的是 `helpers.ts`（06:32:07 重启，投影已经不再发 optionCount），后落的是
+  `packages/shared/.../card-generation-desktop-contracts.ts`（06:32:19，**没触发重启**）；
+- 于是**活进程拿着旧的"optionCount 必填"schema 去校验已经不发这个键的投影** → 500。
+
+`touch apps/api/src/modules/card-generation-v2/helpers.ts` 让进程重载后同一个请求 200。
+教训：**改 `packages/shared` 的合同不会让 api 容器自己重启**，验证前先碰一下 api 的 src 文件，
+否则会把"进程里是旧合同"当成"新代码写坏了"。这与 §桌面端符号链接那条记忆相反方向：
+那边是改了 shared 立刻生效，这边是改了 shared 要手动踢活进程一把。
+
+### 恢复后的真数据（run `d375f218`，重载后又打了一次）
+
+```
+['null', '{"kind": "true_false"}', 'null', '{"kind": "single_choice", "optionCount": 2}',
+ 'null', '{"kind": "single_choice", "optionCount": 3}', '{"kind": "single_choice", "optionCount": 3}',
+ '{"kind": "single_choice", "optionCount": 3}']
+```
+
+判断题只带种类；六个含答案的键（`correctUnitId` / `correctTokenIds` / `correctOptionId` /
+`expected` / `correctPairs` / `answerPairs`）在整个响应里出现 **0 次**。
+
+### 顺带记一条别人的红（不修，只报）
+
+`apps/api` typecheck 现在报两处，都在 note 链路上，不是本批改动：
+`src/__tests__/note-service-extra.test.ts(11,12)` 想要 `cleanTitleCandidate` / `deriveNoteTitle`，
+而 `modules/note/service.ts`（工作区里被在途批次 4.x 改动）已经不导出它们。

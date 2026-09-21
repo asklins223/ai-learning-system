@@ -267,6 +267,41 @@ describe("serializeCandidatePublic", () => {
     const result = serializeCandidatePublic(row as typeof cardGenerationCandidatesV2.$inferSelect);
     assert.equal(result.isReviewReady, false);
   });
+
+  it("练习件摘要只带种类与计数：选择题带可数的选项数", () => {
+    const row = {
+      ...makeBaseCandidateRow(),
+      objectiveDraft: {
+        ...makeBaseCandidateRow().objectiveDraft,
+        practiceItem: {
+          kind: "single_choice",
+          options: [
+            { unitId: "u-1", text: "正确的那个" },
+            { unitId: "u-2", text: "干扰一" },
+            { unitId: "u-3", text: "干扰二" },
+          ],
+          correctUnitId: "u-1",
+        },
+      },
+    };
+    const result = serializeCandidatePublic(row as typeof cardGenerationCandidatesV2.$inferSelect);
+    assert.deepEqual(result.practiceItem, { kind: "single_choice", optionCount: 3 });
+  });
+
+  it("判断题不带 optionCount，而不是带一个恒为 0 的读数", () => {
+    const row = {
+      ...makeBaseCandidateRow(),
+      objectiveDraft: {
+        ...makeBaseCandidateRow().objectiveDraft,
+        practiceItem: { kind: "true_false", proposition: "X 只在低温下成立", expected: false },
+      },
+    };
+    const summary = serializeCandidatePublic(row as typeof cardGenerationCandidatesV2.$inferSelect)
+      .practiceItem as Record<string, unknown>;
+    // 判分内容（expected）不下发；"能数几个选项"对判断题也没有意义，所以整个键都不出现。
+    assert.deepEqual(Object.keys(summary).sort(), ["kind"]);
+    assert.equal(summary.kind, "true_false");
+  });
 });
 
 function makeBaseCandidateRow() {

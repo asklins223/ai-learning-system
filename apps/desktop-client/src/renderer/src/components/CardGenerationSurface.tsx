@@ -110,14 +110,14 @@ function knowledgeFormLabel(value: CardGenerationCandidateV1["objective"]["knowl
  * 这里也就无从泄露——它只是让"这张卡带不带客观题"这件事变得可见。
  */
 function practiceItemLabel(
-  item: { kind: string; optionCount: number } | null | undefined,
+  item: { kind: string; optionCount?: number } | null | undefined,
 ): string {
   if (!item) return "没有，只能用自己的话答";
   switch (item.kind) {
-    case "single_choice": return `选择题 · ${item.optionCount} 个选项`;
+    case "single_choice": return `选择题 · ${item.optionCount ?? "?"} 个选项`;
     case "true_false": return "判断题 · 对不对二选一";
-    case "ordering": return `排序题 · 排 ${item.optionCount} 步`;
-    case "matching": return `配对题 · ${item.optionCount} 组`;
+    case "ordering": return `排序题 · 排 ${item.optionCount ?? "?"} 步`;
+    case "matching": return `配对题 · ${item.optionCount ?? "?"} 组`;
     default: return "有，但这次没读出来";
   }
 }
