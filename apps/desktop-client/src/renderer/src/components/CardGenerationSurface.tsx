@@ -782,7 +782,7 @@ export function CardGenerationSurface() {
             <div>
               <span className="tag green">{run ? cardGenerationStatusLabel(run.status) : "准备中"}</span>
               <h2>{noteTitle ? `把《${noteTitle}》整理成学习卡` : "把一篇笔记整理成可练习的问题"}</h2>
-              <p>{run ? `生成任务 ${run.runId.slice(0, 8)} · 后台进行中，离开本页不会中断 · 收到服务端事件会自动更新，也可以随时刷新` : "进度只跟着已经确认的阶段走。"}</p>
+              <p>{run ? `生成任务 ${run.runId.slice(0, 8)} · 后台进行中，离开本页不会中断 · 有新进展会自动更新，也可以随时刷新` : "进度只跟着已经确认的阶段走。"}</p>
             </div>
             <button type="button" className="button card-generation-board__sync" disabled={loading} onClick={() => void resync()}>
               <RefreshCw size={14} aria-hidden="true" />{loading ? "正在刷新…" : "刷新状态"}
@@ -893,7 +893,7 @@ export function CardGenerationSurface() {
                             ? (run.sourceOutdated ? "来源版本已变化" : "来源版本已封存")
                             : "正在确认要封存的来源版本"
                           : index === generationStage
-                            ? `收到服务端事件会自动更新 · 更新于 ${formatRelative(run.updatedAt)}`
+                            ? `有新进展会自动更新 · 更新于 ${formatRelative(run.updatedAt)}`
                             : "不会在本机提前推断"}</span>
                       </div>
                     </article>
