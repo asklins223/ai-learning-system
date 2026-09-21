@@ -19,7 +19,10 @@ const MODULE_CONTRACTS: ModuleContract[] = [
   // 跨空间不可见不再靠这条字符串计数保证，而由 `note-collaboration-postgres.integration.ts`
   // 的行为用例证明（别人的空间上送 → 404 且库里没动）。豁免数只准减不准加：
   // 新处理器要么自带事务，要么先补一条行为用例。
-  { name: "note", handlers: 11, services: 9, handlerWithoutInlineTransaction: 1 },
+  // services 9 → 10：批次 4.5 加了 `setNoteShareScope`（「共享给空间」那个显式动作）。
+  // 它同样以 `executor: ApiTransaction` 开头，所以下面那条"每个导出函数都必须显式收
+  // 事务执行器"的断言仍然成立——这里只是把数量对上，不是放宽判据。
+  { name: "note", handlers: 11, services: 10, handlerWithoutInlineTransaction: 1 },
   // 删掉无人调用的 POST /sources/statuses 后：7 路由 / 7 服务。
   { name: "source", handlers: 7, services: 7 },
   // v0.6 新增 /search/drift 与 /search/auto-fix 后：4 路由 / 4 服务

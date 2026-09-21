@@ -26,6 +26,7 @@
 import { and, eq, gte, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
 import { notes, sources } from "@ailearn/shared/db-schema/note";
+import { visibleNotesCondition } from "../note/visibility.ts";
 import { jobs } from "@ailearn/shared/db-schema/job";
 import { learningRuns } from "@ailearn/shared/db-schema/learning-runs";
 import {
@@ -167,6 +168,7 @@ export async function getTodayActivity(
       .from(notes)
       .where(and(
         eq(notes.workspaceId, ctx.workspaceId),
+        visibleNotesCondition(ctx.userId),
         isNull(notes.deletedAt),
         or(
           and(gte(notes.createdAt, from), lt(notes.createdAt, to)),
@@ -212,7 +214,13 @@ export async function getTodayActivity(
     tx
       .select({ id: cardGenerationRunsV2.id, status: cardGenerationRunsV2.status, createdAt: cardGenerationRunsV2.createdAt, updatedAt: cardGenerationRunsV2.updatedAt, noteTitle: notes.title })
       .from(cardGenerationRunsV2)
-      .innerJoin(notes, and(eq(cardGenerationRunsV2.workspaceId, notes.workspaceId), eq(cardGenerationRunsV2.noteId, notes.id)))
+      .innerJoin(notes, and(
+        eq(cardGenerationRunsV2.workspaceId, notes.workspaceId),
+        eq(cardGenerationRunsV2.noteId, notes.id),
+        // 批次 4.5：这一行的 run 已经是查看者自己的，但 join 出来的**笔记标题**不是——
+        // 不带上判据就会出现"我的生成记录上挂着别人仅自己可见的笔记标题"。
+        visibleNotesCondition(ctx.userId),
+      ))
       .where(and(
         eq(cardGenerationRunsV2.workspaceId, ctx.workspaceId),
         eq(cardGenerationRunsV2.userId, ctx.userId),
@@ -238,7 +246,13 @@ export async function getTodayActivity(
     tx
       .select({ id: cardGenerationRunsV2.id, status: cardGenerationRunsV2.status, updatedAt: cardGenerationRunsV2.updatedAt, noteTitle: notes.title })
       .from(cardGenerationRunsV2)
-      .innerJoin(notes, and(eq(cardGenerationRunsV2.workspaceId, notes.workspaceId), eq(cardGenerationRunsV2.noteId, notes.id)))
+      .innerJoin(notes, and(
+        eq(cardGenerationRunsV2.workspaceId, notes.workspaceId),
+        eq(cardGenerationRunsV2.noteId, notes.id),
+        // 批次 4.5：这一行的 run 已经是查看者自己的，但 join 出来的**笔记标题**不是——
+        // 不带上判据就会出现"我的生成记录上挂着别人仅自己可见的笔记标题"。
+        visibleNotesCondition(ctx.userId),
+      ))
       .where(and(
         eq(cardGenerationRunsV2.workspaceId, ctx.workspaceId),
         eq(cardGenerationRunsV2.userId, ctx.userId),

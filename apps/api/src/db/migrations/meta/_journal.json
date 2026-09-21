@@ -1720,6 +1720,27 @@
     {
       "idx": 245,
       "version": "7",
+      "tag": "0246_companion_tts_outcomes",
+      "breakpoints": true,
+      "when": 1789800000000
+    },
+    {
+      "idx": 246,
+      "version": "7",
+      "tag": "0247_companion_tts_playback_stage",
+      "breakpoints": true,
+      "when": 1789800000001
+    },
+    {
+      "idx": 247,
+      "version": "7",
+      "tag": "0248_note_share_scope",
+      "breakpoints": true,
+      "when": 1789800000002
+    },
+    {
+      "idx": 248,
+      "version": "7",
       "tag": "0249_card_generation_live_progress",
       "breakpoints": true,
       "when": 1789800000003

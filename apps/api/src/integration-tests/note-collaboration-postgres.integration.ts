@@ -256,8 +256,10 @@ after(async () => {
     SELECT count(*)::int AS n FROM workspaces WHERE id = ANY(${workspaceIds}) OR name LIKE ${`%${tag}%`}
   `;
   assert.equal(leftover[0].n, 0, `夹具残留了 ${leftover[0].n} 个空间，teardown 顺序需要修`);
-  const stuckDocs = await sql`SELECT count(*)::int AS n FROM note_document_states`;
-  assert.equal(stuckDocs[0].n, 0, `残留了 ${stuckDocs[0].n} 行文档快照`);
+  // 按**本夹具的空间**收窄：整张表空不空不由这个文件负责——每条新建笔记都会写一份
+  // 快照，并发跑的别的用例必然在这张表里有行。这里要证明的是"我这几篇删干净了"。
+  const stuckDocs = await sql`SELECT count(*)::int AS n FROM note_document_states WHERE workspace_id = ANY(${workspaceIds})`;
+  assert.equal(Number(stuckDocs[0].n), 0, `残留了 ${stuckDocs[0].n} 行文档快照`);
 
   await sql.end({ timeout: 5 }).catch(() => {});
   await closeDatabase().catch(() => {});

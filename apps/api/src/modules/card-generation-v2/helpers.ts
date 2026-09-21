@@ -13,6 +13,7 @@ import {
 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
 import { noteBlocks, notes } from "@ailearn/shared/db-schema/note";
+import { visibleNotesCondition } from "../note/visibility.ts";
 import { cardGenerationRunStatusV2Schema, cardGenerationLiveProgressV2Schema, isCandidateReviewReadyV2 } from "@ailearn/shared/card-generation-v2-contracts";
 import { projectCardGenerationRecoveryV1 } from "./desktop-projection.ts";
 import type { CardGenerationProgressV1 } from "@ailearn/shared/card-generation-desktop-contracts";
@@ -93,12 +94,15 @@ export function sanitizeEventPayloadV2(
 export async function checkSourceOutdated(
   tx: ApiTransaction,
   workspaceId: string,
+  userId: string,
   noteId: string,
   runNoteVersionId: string,
   runSourceContentHash: string,
 ): Promise<boolean> {
   const note = await tx.query.notes.findFirst({
-    where: and(eq(notes.id, noteId), eq(notes.workspaceId, workspaceId)),
+    // 批次 4.5：这篇看不到就当"没有可对照的正文"。不带判据的话，一个成员能靠
+    // "过时/不过时"这一位布尔探出别人私有笔记的编辑节奏。
+    where: and(eq(notes.id, noteId), eq(notes.workspaceId, workspaceId), visibleNotesCondition(userId)),
     columns: { currentVersionId: true },
   });
   if (!note?.currentVersionId) return false;
@@ -206,7 +210,9 @@ export async function serializeRunPublic(
   let sourceOutdated = false;
   if (tx) {
     try {
-      sourceOutdated = await checkSourceOutdated(tx, row.workspaceId, row.noteId, row.noteVersionId, row.sourceContentHash);
+      // 查看者取 run 自己的主人：这一位是"这篇相对**这次生成**过不过时"，而 run 的
+      // 读侧本来就按人列（批次 4.5 之后在制/最近一批也是按人的），所以两者是同一个人。
+      sourceOutdated = await checkSourceOutdated(tx, row.workspaceId, row.userId, row.noteId, row.noteVersionId, row.sourceContentHash);
     } catch {
       // 如果查询失败（如 mock tx 不支持某些方法），保守返回 false
       sourceOutdated = false;

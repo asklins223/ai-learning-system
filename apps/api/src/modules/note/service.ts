@@ -1,10 +1,12 @@
 import { and, asc, desc, eq, inArray, isNull, isNotNull, or, sql } from "drizzle-orm";
-import { applyNoteDocUpdate } from "./document-state.ts";
-import { projectNoteBlocks, setNoteTitle, syncNoteBlocksForEditor, writeNoteBlocks, type NoteDocBlock } from "./doc.ts";
-import { createHash } from "node:crypto";
+import { applyNoteDocUpdate, loadNoteDoc, persistNoteDoc } from "./document-state.ts";
+import { visibleNotesCondition, type NoteShareScope } from "./visibility.ts";
+import { deriveNoteTitle, projectNoteBlocks, setNoteTitle, writeNoteBlocks, type NoteDocBlock } from "./doc.ts";
 import { type ApiTransaction } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks, noteImageAssets } from "@ailearn/shared/db-schema/note";
 import { searchDocuments } from "@ailearn/shared/db-schema/search";
+import { computeContentHash } from "./content-hash.ts";
+import { upsertSearchDocument, type NoteSearchDocument } from "./search-projection.ts";
 import { logger } from "../../lib/logger.ts";
 import { DomainError } from "@ailearn/shared";
 
@@ -55,111 +57,7 @@ import { isStorageConfigured } from "../../lib/object-storage.ts";
 import { hookJourneyEntityCreated } from "../companion-journey/journey-hook.ts";
 import type { NoteCreateInput, NoteBlock } from "./schema.ts";
 
-type NoteUpdateInput = {
-  title?: string;
-  blocks?: Array<{ type: NoteBlock["type"]; content: string }>;
-  baseVersionId: string;
-  isAutosave: boolean;
-};
 
-/**
- * Compute a stable MD5 hash of note content blocks for deduplication.
- *
- * The serialization format matches PostgreSQL's `jsonb::text` output exactly:
- *   - Object keys are sorted by length, then alphabetically (JSONB internal order)
- *   - Separators are `": "` and `", "` (with spaces, matching `jsonb::text`)
- *
- * This ensures the hash is consistent with the migration 0029 backfill
- * `md5(content_json::text)`, so deduplication works across pre-migration
- * and post-migration data.
- *
- * The integration test `content-hash-consistency-postgres.integration.ts`
- * validates this alignment across ASCII, Unicode, image, and empty-block
- * content. If this function or the migration is modified, update both
- * the migration and the integration test accordingly, and consider whether
- * existing data needs re-hashing.
- */
-export function computeContentHash(contentJson: unknown): string {
-  const canonical = pgJsonbSerialize(contentJson);
-  return createHash("md5").update(canonical).digest("hex");
-}
-
-/**
- * Serialize a JavaScript value to text in PostgreSQL `jsonb::text` format.
- *
- * Key ordering: by length ascending, then by byte-wise comparison (matching
- * PostgreSQL's JSONB internal key ordering).  Separators: `": "` after keys,
- * `", "` between elements.  String values are JSON-encoded with `JSON.stringify`
- * to ensure correct escaping of special characters.
- */
-function pgJsonbSerialize(value: unknown): string {
-  if (value === null) return "null";
-  if (typeof value === "string") return JSON.stringify(value);
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) return "null";
-    // BUG-01 fix: PostgreSQL jsonb::text never uses exponential notation.
-    // JavaScript's String() uses exponential notation for |value| >= 1e21
-    // or |value| < 1e-6, which would cause md5(content_json::text) to
-    // differ from computeContentHash. Convert exponential to fixed-point.
-    // BUG-04 修复：toFixed(20) 对极大/极小数字仍会丢失精度。
-    // 对于指数格式，使用 BigInt 精确转换（当数字为整数时），
-    // 否则使用 toPrecision 并去除尾部零。非指数格式直接使用 String()。
-    const str = String(value);
-    // PERF: Fast path — the overwhelming majority of JSON numbers (integers and
-    // in-range decimals) have no exponent, so avoid the regex engine on the
-    // content-hash hot path. Only fall into the expensive BigInt/toPrecision
-    // path for exponential edge cases (|value| >= 1e21 or < 1e-6).
-    if (str.indexOf("e") === -1 && str.indexOf("E") === -1) {
-      return str;
-    }
-    if (Number.isInteger(value)) {
-      // 整数使用 BigInt 精确表示
-      try {
-        return BigInt(value).toString();
-      } catch {
-        // 超出 BigInt 安全范围时回退到 toFixed
-        const fixed = value.toFixed(20).replace(/0+$/, "").replace(/\.$/, "");
-        return fixed || "0";
-      }
-    }
-    const fixed = value.toPrecision(21).replace(/0+$/, "").replace(/\.$/, "");
-    return fixed || "0";
-  }
-  if (typeof value === "boolean") return value ? "true" : "false";
-  if (Array.isArray(value)) {
-    if (value.length === 0) return "[]";
-    // BUG-12: Each element is recursively serialized, so NaN/Infinity
-    // inside arrays becomes "null" — matching PostgreSQL's jsonb behaviour
-    // where NaN is never stored (it is silently converted to null on
-    // input). This ensures md5(content_json::text) stays consistent.
-    return "[" + value.map(pgJsonbSerialize).join(", ") + "]";
-  }
-  if (typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>)
-      .sort(([a], [b]) => {
-        if (a.length !== b.length) return a.length - b.length;
-        return a < b ? -1 : a > b ? 1 : 0;
-      });
-    if (entries.length === 0) return "{}";
-    return "{" + entries
-      .map(([k, v]) => JSON.stringify(k) + ": " + pgJsonbSerialize(v))
-      .join(", ") + "}";
-  }
-  return JSON.stringify(value);
-}
-
-/**
- * Strip image blocks that are still uploading placeholders.
- *
- * The NoteEditor inserts `![上传中…](uploading:${uuid})` as a temporary
- * placeholder while an image upload is in flight. If autosave triggers
- * before the upload completes (2.5 s interval), the placeholder would
- * be persisted as a broken image block. This function filters such
- * blocks out so they never reach the database.
- *
- * Ordinals are re-assigned by the caller after this filter, so gaps
- * are not a concern.
- */
 function stripUploadingPlaceholders<T extends { type: string; content: string }>(
   blocks: T[],
 ): T[] {
@@ -316,190 +214,6 @@ export class NoteNotDeletedError extends DomainError {
   }
 }
 
-export function cleanTitleCandidate(content: string): string {
-  return content
-    .trim()
-    .replace(/^<h\d>([\s\S]+)<\/h\d>$/i, "$1")
-    .replace(/^#{1,6}\s+/, "")
-    .replace(/^>\s?/, "")
-    .replace(/^·\s*/, "")
-    .replace(/^[-*+]\s+/, "")
-    .replace(/^\d+\.\s+/, "")
-    .replace(/`{1,3}/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-export function deriveNoteTitle(blocks: NoteBlock[] | Array<{ type: NoteBlock["type"]; content: string }>): string {
-  const heading = blocks.find((block) => block.type === "heading" && cleanTitleCandidate(block.content));
-  const fallback = heading ?? blocks.find((block) => cleanTitleCandidate(block.content));
-  const title = fallback ? cleanTitleCandidate(fallback.content) : "";
-  return title.slice(0, 60) || "无标题笔记";
-}
-
-/**
- * 检查版本是否可被原地更新（无活跃或已替代的学习卡引用）。
- *
- * 使用 SELECT ... FOR UPDATE 锁定 note_versions 行，确保检查与后续
- * updateVersionInPlace 之间不会有并发插入历史卡片引用。
- * PostgreSQL 外键插入会获取 FOR KEY SHARE 锁，与 FOR UPDATE 冲突，
- * 因此 AI worker 的卡片插入会阻塞直到本事务提交。
- *
- * 检查范围包括 active 和 superseded 状态的卡片：
- * - active：正在使用中的卡片，内容必须与版本一致
- * - superseded：已被新卡替代但仍引用该版本内容的旧卡，原地更新会破坏
- *   其内容与版本的引用语义
- * archived 卡片不再用于复习，无需保护。
- */
-async function canUpdateVersionInPlace(
-  tx: ApiTransaction,
-  versionId: string,
-): Promise<boolean> {
-  // 锁定 note_versions 行，防止并发卡片插入
-  const versionRows = await tx
-    .select({ id: noteVersions.id, sealedAt: noteVersions.sealedAt })
-    .from(noteVersions)
-    .where(eq(noteVersions.id, versionId))
-    .for("update");
-  if (versionRows.length === 0) return false;
-    // active/superseded 的 V1 卡引用该版本以决定不可原地更新；V2 卡片通过
-  // objectiveId 关联、不直接引用 note_version，此处仅保留 sealed 版本保护。
-  return !versionRows[0].sealedAt;
-}
-
-/**
- * 原地更新版本内容和 blocks。
- *
- * 这是 note_versions 不可变性的受控例外：仅在编辑会话内、且该版本尚无
- * 学习卡引用时执行。一旦生成卡片（或有其他消费者引用该版本），后续
- * 编辑必须创建新版本。长期可考虑引入独立的 note_drafts 表来彻底
- * 分离可变草稿和不可变快照（参见方案 §8）。
- */
-async function updateVersionInPlace(
-  tx: ApiTransaction,
-  versionId: string,
-  noteId: string,
-  workspaceId: string,
-  contentJson: { blocks: Array<{ type: NoteBlock["type"]; content: string }> },
-  contentHash: string,
-  blocks: Array<{ type: NoteBlock["type"]; content: string }>,
-): Promise<Array<NoteBlock & { imageAssetId: string | null; sourceRef?: unknown }>> {
-  const blocksWithAssets = await resolveImageAssetIds(tx, workspaceId, blocks);
-  // 自动保存走文档，关系表因此只有投影这一个生产者。留一条"按行改"的旁路就等于同一篇
-  // 笔记有两套正文：这条按行写、协同那条按 Y.Doc 写，谁后写谁覆盖——那正是本轮要消灭的
-  // "静默销毁用户内容"。
-  //
-  // 用 `syncNoteBlocksForEditor` 而不是 `writeNoteBlocks`：自动保存提交的仍是"我看到的
-  // 整篇"，但块数没变时它必须一个数组操作都不做（否则两条并发的自动保存会各自把改过的
-  // 块 delete+insert 一遍，谁也取消不了谁，块数就涨）。
-  // `sourceRef` / `imageAssetId` 这里不传，因此保留文档里已有的值：来源转笔记记下的证据链
-  // 不该被一次普通保存抹掉。
-  const { doc } = await applyNoteDocUpdate(
-    tx,
-    { workspaceId, noteId },
-    versionId,
-    (live) => {
-      syncNoteBlocksForEditor(live, blocksWithAssets.map((block) => ({
-        type: block.type,
-        content: block.content,
-        imageAssetId: block.imageAssetId ?? null,
-      })));
-    },
-  );
-
-  // 更新版本内容（含 updatedAt 追踪原地修改时间）
-  await tx
-    .update(noteVersions)
-    .set({ contentJson, contentHash, updatedAt: new Date() })
-    .where(eq(noteVersions.id, versionId));
-
-  return projectNoteBlocks(doc) as Array<NoteBlock & { imageAssetId: string | null; sourceRef?: unknown }>;
-}
-
-/**
- * 新建一个版本时把正文交给文档，再由文档投影成这个版本的行。
- *
- * 直接插行是本轮在修的那类缺陷的另一个现场：文档快照会停在保存之前，下一次按文档读
- * （协同落盘、`doc-state` 取编辑起点）就把这次保存的内容顶回去，而且不报错。标题也一样
- * ——它同时存在于 `notes.title` 与文档的 `meta.title`，只写行的话快照里留着旧标题。
- */
-async function writeVersionThroughDoc(
-  tx: ApiTransaction,
-  workspaceId: string,
-  noteId: string,
-  versionId: string,
-  blocks: Array<{ type: NoteBlock["type"]; content: string }>,
-  title: { title: string; titleSource: string },
-): Promise<NoteDocBlock[]> {
-  const withAssets = blocks.length
-    ? await resolveImageAssetIds(tx, workspaceId, blocks)
-    : [];
-  const { blocks: projected, doc } = await applyNoteDocUpdate(
-    tx,
-    { workspaceId, noteId },
-    versionId,
-    (live) => {
-      syncNoteBlocksForEditor(live, withAssets.map((block) => ({
-        type: block.type,
-        content: block.content,
-        imageAssetId: block.imageAssetId ?? null,
-      })));
-      setNoteTitle(live, title.title, title.titleSource);
-    },
-  );
-  doc.destroy();
-  return projected;
-}
-
-type NoteSearchDocument = {
-  workspaceId: string;
-  objectType: "note" | "card" | "evidence";
-  objectId: string;
-  title: string | null;
-  body: string | null;
-};
-
-/**
- * 搜索投影写入（savepoint 隔离）。
- *
- * ARCH-01 设计权衡说明：
- * 搜索投影写入失败时不中断主事务（savepoint 回滚仅影响投影部分），
- * 这意味着搜索索引可能短暂与业务数据不一致。
- * 补偿机制：
- * 1. 投影失败时记录 error 日志，提示运维运行 reindex
- * 2. /search/drift 端点可检测不一致（ghosts / missing / staleTitles / staleBodies）
- * 3. /search/reindex 端点可全量重建工作区搜索索引
- * 此设计避免了搜索索引故障阻塞核心业务写入，代价是需要运维定期检查 drift。
- */
-async function upsertSearchDocument(
-  executor: ApiTransaction,
-  document: NoteSearchDocument,
-): Promise<boolean> {
-  try {
-    await executor.transaction(async (savepoint) => {
-      await savepoint
-        .insert(searchDocuments)
-        .values({ ...document, metadata: {}, indexedAt: new Date() })
-        .onConflictDoUpdate({
-          target: [searchDocuments.workspaceId, searchDocuments.objectType, searchDocuments.objectId],
-          set: {
-            title: document.title,
-            body: document.body,
-            metadata: {},
-            indexedAt: new Date(),
-          },
-        });
-    });
-    return true;
-  } catch (err) {
-    logger.error(
-      { err, ...document },
-      "search index upsert failed — index may be stale, run reindex to compensate",
-    );
-    return false;
-  }
-}
-
 async function deleteSearchDocuments(
   executor: ApiTransaction,
   workspaceId: string,
@@ -566,6 +280,10 @@ async function createNoteTx(
       title,
       titleSource: titleWasProvided ? "manual" : "auto",
       createdBy: userId,
+      // 批次 4.5：从这里建的笔记一律是「仅自己可见」。共享是一个需要单独点的动作，
+      // 所以它不应该是任何创建路径的副产物。导入与来源转笔记不走这里——那两条路
+      // 在入口上已经明示"放进共享空间即可外发"，它们建的是 `shared`。
+      shareScope: "private",
     })
     .returning();
 
@@ -598,7 +316,7 @@ async function createNoteTx(
     // 之后所有读取都走快照而不是从关系表猜。
     await applyNoteDocUpdate(
       tx,
-      { workspaceId, noteId: row.id },
+      { workspaceId, noteId: row.id, userId },
       version.id,
       (noteDoc) => writeNoteBlocks(noteDoc, initialBlocks),
       initialBlocks,
@@ -629,7 +347,7 @@ export async function createNote(
   const note = await createNoteTx(executor, workspaceId, userId, title, titleWasProvided, sanitizedBlocks);
 
   // 同步搜索索引（note_version 创建时）
-  const result = await getNoteWithVersion(executor, note.id, workspaceId);
+  const result = await getNoteWithVersion(executor, note.id, workspaceId, userId);
   if (result) {
     const body = (result.blocks as NoteBlock[])
       .filter((b) => b.type !== "image")
@@ -679,18 +397,20 @@ async function firstImageBlockByVersion(
 export async function listNotes(
   executor: ApiTransaction,
   workspaceId: string,
-  opts?: { cursor?: string; limit?: number; trashed?: boolean },
+  opts: { userId: string; cursor?: string; limit?: number; trashed?: boolean },
 ) {
-  const limit = Math.max(1, Math.min(100, opts?.limit ?? 100));
+  const limit = Math.max(1, Math.min(100, opts.limit ?? 100));
   // CONC-03: trashed=true 时查询已软删除的笔记，默认查询未删除的
+  // 批次 4.5: 「仅自己可见」的笔记不在别人的列表里——包括空间 owner。
   const conditions = [
     eq(notes.workspaceId, workspaceId),
-    opts?.trashed ? isNotNull(notes.deletedAt) : isNull(notes.deletedAt),
+    visibleNotesCondition(opts.userId),
+    opts.trashed ? isNotNull(notes.deletedAt) : isNull(notes.deletedAt),
   ];
 
   // R-019: 使用 cursor 分页，基于 (updatedAt, id) 复合排序
   // cursor 是 base64 编码的 "updatedAt:id"
-  if (opts?.cursor) {
+  if (opts.cursor) {
     const decoded = decodeCursor(opts.cursor);
     if (decoded) {
       const cursorTs = decoded.timestamp;
@@ -710,7 +430,8 @@ export async function listNotes(
   // trade-off of cursor pagination and acceptable for note lists.
   const countConditions = and(
     eq(notes.workspaceId, workspaceId),
-    opts?.trashed ? isNotNull(notes.deletedAt) : isNull(notes.deletedAt),
+    visibleNotesCondition(opts.userId),
+    opts.trashed ? isNotNull(notes.deletedAt) : isNull(notes.deletedAt),
   );
 
   const [rows, countRows] = await Promise.all([
@@ -775,10 +496,17 @@ export async function getNoteWithVersion(
   executor: ApiTransaction,
   noteId: string,
   workspaceId: string,
+  userId: string,
 ) {
   // CONC-03: 不返回已软删除的笔记
+  // 批次 4.5: 读点与写点是同一条判据。这里漏掉就等于"列表里看不见、知道 uuid 就能读"。
   const note = await executor.query.notes.findFirst({
-    where: and(eq(notes.id, noteId), eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)),
+    where: and(
+      eq(notes.id, noteId),
+      eq(notes.workspaceId, workspaceId),
+      visibleNotesCondition(userId),
+      isNull(notes.deletedAt),
+    ),
   });
   if (!note) return null;
 
@@ -802,368 +530,172 @@ export async function getNoteWithVersion(
   };
 }
 
-export async function updateNote(
+/**
+ * 「提交并确认」= 把文档此刻的内容定成一个新版本（批次 4.4 的最后一环）。
+ *
+ * 它**不收正文**。这正是这一批要关的那个洞的正门：原来的 `PATCH /v2/notes/:id`
+ * 同时收整篇正文和一个版本指针当 OCC 令牌，两扇窗口（或两个人）拿着同一个令牌时
+ * 两边都能通过检查，后写的那一次把前一次的正文原地覆盖掉，而且没有版本可恢复。
+ * 现在正文只从文档来（全仓库只有 `persistNoteDoc` 那一个落盘口），这里只决定
+ * "要不要把此刻定成一版"——覆盖不再可能，因为内容不是谁提交上来的，是文档本身。
+ *
+ * 三种情形：
+ *  - 正文与某个已有版本一致、标题也没改 → 不建版本，把指针对准它
+ *    （连按两次「提交并确认」不会多出两个一模一样的版本）；
+ *  - 改了标题 → 标题写进文档的 `meta`（那里才是事实源，落盘口会投影回 `notes.title`），
+ *    并新建一版；
+ *  - 正文变了 → 新建一版。
+ *
+ * `baseVersionId` 留着，但语义变了：它是"我屏幕上看到的当前版是不是这一版"的确认，
+ * 不再兼作正文的并发令牌。正文的并发由 CRDT 合并负责，不需要令牌。
+ */
+export async function checkpointNote(
   executor: ApiTransaction,
   noteId: string,
   workspaceId: string,
   userId: string,
-  input: NoteUpdateInput,
+  input: { title?: string; baseVersionId: string },
 ) {
-  // P1-4: 业务写入和搜索投影共享 handler 事务；投影自身以 savepoint 隔离失败。
-  // QUAL-03 修复：移除 IIFE 模式，executor 即事务执行器，无需额外包装
   const tx = executor;
-    // R-008: 使用 FOR UPDATE 锁定 note 行，防止并发版本号冲突
-    // CONC-03: 只锁定未软删除的笔记
-    const noteRows = await tx
-      .select()
-      .from(notes)
-      .where(and(eq(notes.id, noteId), eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)))
-      .for("update");
-    const note = noteRows[0];
-    if (!note) return null;
+  const scope = { workspaceId, noteId, userId };
+  const noteRows = await tx
+    .select()
+    .from(notes)
+    .where(and(
+      eq(notes.id, noteId),
+      eq(notes.workspaceId, workspaceId),
+      visibleNotesCondition(userId),
+      isNull(notes.deletedAt),
+    ))
+    .for("update");
+  const note = noteRows[0];
+  if (!note) return null;
+  if (input.baseVersionId !== note.currentVersionId) {
+    throw new RevisionConflictError(note.currentVersionId);
+  }
+  if (!note.currentVersionId) return null;
 
-    // R-008: 乐观并发控制 — 标题或正文更新时 baseVersionId 必须匹配。
-    if (input.baseVersionId !== note.currentVersionId) {
-      throw new RevisionConflictError(note.currentVersionId);
-    }
+  const requestedTitle = typeof input.title === "string"
+    ? input.title.trim().slice(0, 200) || "无标题笔记"
+    : null;
 
-    const requestedManualTitle = typeof input.title === "string"
-      ? input.title.trim().slice(0, 200) || "无标题笔记"
+  const { doc } = await loadNoteDoc(tx, scope);
+  try {
+    if (requestedTitle !== null) setNoteTitle(doc, requestedTitle, "manual");
+    const projected = projectNoteBlocks(doc);
+    const plain = projected.map(({ ordinal: _ordinal, ...block }) => block);
+    const contentJson = { blocks: plain.map((block) => ({ type: block.type, content: block.content })) };
+    const contentHash = computeContentHash(contentJson);
+
+    const titleSource = requestedTitle !== null ? "manual" : note.titleSource;
+    const title = titleSource === "manual"
+      ? (requestedTitle ?? note.title)
+      : deriveNoteTitle(plain);
+    const current = await tx.query.noteVersions.findFirst({
+      where: eq(noteVersions.id, note.currentVersionId),
+    });
+    // 内容去重：先按索引找同哈希的候选，再比一次规范化 JSON——极低概率的碰撞
+    // 不能把两次不同的保存并成一个版本。
+    const hashCandidate = current && current.contentHash === contentHash
+      ? current
+      : await tx.query.noteVersions.findFirst({
+          where: and(eq(noteVersions.noteId, noteId), eq(noteVersions.contentHash, contentHash)),
+        });
+    const existing = hashCandidate?.contentJson
+      && computeContentHash(hashCandidate.contentJson) === contentHash
+      ? hashCandidate
       : null;
-    const effectiveTitleSource = requestedManualTitle !== null ? "manual" : note.titleSource;
-    const effectiveTitle = requestedManualTitle ?? note.title;
-    const manualTitleChanged =
-      requestedManualTitle !== null &&
-      (requestedManualTitle !== note.title || note.titleSource !== "manual");
 
-    if (manualTitleChanged) {
+    // 正文与某个已有版本一致就复用那一版（连按两次「提交并确认」不会多出两个一样的
+    // 版本）；否则新建一版。标题不需要单独成版——它在文档的 meta 里，落盘口会投影
+    // 回 `notes.title`，而 `content_json` 只装正文。
+    const targetVersion = existing ?? await (async () => {
+      const [latest] = await tx
+        .select({ versionNo: noteVersions.versionNo })
+        .from(noteVersions)
+        .where(eq(noteVersions.noteId, noteId))
+        .orderBy(desc(noteVersions.versionNo))
+        .limit(1);
+      const [created] = await tx
+        .insert(noteVersions)
+        .values({
+          noteId,
+          workspaceId,
+          versionNo: (latest?.versionNo ?? 0) + 1,
+          contentJson,
+          contentHash,
+          createdBy: userId,
+        })
+        .returning();
+      return created;
+    })();
+
+    await persistNoteDoc(tx, scope, doc, targetVersion.id);
+    if (targetVersion.id !== note.currentVersionId) {
       await tx
         .update(notes)
-        .set({ title: requestedManualTitle, titleSource: "manual", updatedAt: new Date() })
+        .set({ currentVersionId: targetVersion.id })
         .where(eq(notes.id, noteId));
     }
 
-    // PERF: Build the response from data already in scope from the write branch
-    // instead of re-reading note/version/blocks after every content write
-    // (incl. the 2.5s autosave tick). Fields left null are re-read at the end —
-    // only for paths that genuinely lacked the data (e.g. title-only / no-op).
-    let resultNote: typeof note | null = null;
-    let resultVersion: typeof noteVersions.$inferSelect | null = null;
-    let resultBlocks: NoteBlock[] | null = null;
-
-    // 标题单独修改时，精确克隆当前正文为一个新版本。currentVersionId 同时
-    // 是客户端 OCC 令牌；如果只改 notes.title，多标签页会持有同一令牌并
-    // 标题更新同样推进版本，避免多标签页使用同一 OCC 令牌时静默覆盖。
-    if (
-      !Array.isArray(input.blocks) &&
-      manualTitleChanged &&
-      note.currentVersionId
-    ) {
-      const currentVersion = await tx.query.noteVersions.findFirst({
-        where: eq(noteVersions.id, note.currentVersionId),
-      });
-      if (currentVersion) {
-        const currentBlocks = await tx.query.noteBlocks.findMany({
-          where: eq(noteBlocks.versionId, note.currentVersionId),
-          orderBy: (b, { asc: asc1 }) => [asc1(b.ordinal)],
-        });
-        const latest = await tx.query.noteVersions.findFirst({
-          where: eq(noteVersions.noteId, noteId),
-          orderBy: (v, { desc: desc1 }) => [desc1(v.versionNo)],
-        });
-        const nextVersionNo = (latest?.versionNo ?? 0) + 1;
-        const [newVersion] = await tx
-          .insert(noteVersions)
-          .values({
-            noteId,
-            workspaceId,
-            versionNo: nextVersionNo,
-            contentJson: currentVersion.contentJson,
-            contentHash: currentVersion.contentHash,
-            createdBy: userId,
-          })
-          .returning();
-
-        // 只改标题也要让文档跟着走。正文与上一版相同，所以这里是逐块对齐、不动数组；
-        // 但标题必须写进文档的 meta——只写 `notes.title` 的话快照里留着旧标题，下一次
-        // 按文档读（协同落盘、doc-state 取起点）就把这次改名顶回去。
-        await writeVersionThroughDoc(
-          tx,
-          workspaceId,
-          noteId,
-          newVersion.id,
-          currentBlocks.map((block) => ({
-            type: block.type as NoteBlock["type"],
-            content: block.content,
-          })),
-          { title: requestedManualTitle as string, titleSource: "manual" },
-        );
-
-        await tx
-          .update(notes)
-          .set({
-            currentVersionId: newVersion.id,
-            title: requestedManualTitle,
-            titleSource: "manual",
-            updatedAt: new Date(),
-          })
-          .where(eq(notes.id, noteId));
-
-        resultNote = {
-          ...note,
-          currentVersionId: newVersion.id,
-          title: requestedManualTitle as string,
-          titleSource: "manual",
-          updatedAt: new Date(),
-        };
-        resultVersion = newVersion;
-        resultBlocks = currentBlocks.map((block) => ({
-          ...block,
-          versionId: newVersion.id,
-        })) as NoteBlock[];
-      }
-    }
-
-    if (Array.isArray(input.blocks)) {
-      // 过滤掉上传中的图片占位符，避免残缺的 image block 被持久化
-      const sanitizedBlocks = stripUploadingPlaceholders(input.blocks);
-      const autoTitle = deriveNoteTitle(sanitizedBlocks);
-      const contentJson = { blocks: sanitizedBlocks };
-      const contentHash = computeContentHash(contentJson);
-
-      // 1. 内容去重：如果内容与某个已有版本完全一致，直接指向该版本
-      //    先按 content_hash 索引快速查找候选，再用 canonical JSON 深度比对
-      //    确认内容真正一致，防御极低概率的哈希碰撞。
-      const hashMatch = await tx.query.noteVersions.findFirst({
-        where: and(
-          eq(noteVersions.noteId, noteId),
-          eq(noteVersions.contentHash, contentHash),
-        ),
-      });
-      // 二次验证：哈希匹配后确认 contentJson 实际内容一致
-      // （contentJson 为 NOT NULL 列，防御性检查 undefined 仅供 mock 兼容）
-      // 手动标题修改也必须推进 currentVersionId：它既是版本指针，也是
-      // 编辑器的 OCC 令牌。否则同内容的标题更新会绕过去重分支静默互相覆盖。
-      const existingVersion =
-        !manualTitleChanged && hashMatch && hashMatch.contentJson &&
-        computeContentHash(hashMatch.contentJson) === contentHash
-          ? hashMatch
-          : null;
-
-      if (existingVersion) {
-        // 内容匹配已有版本，不创建新版本，仅更新 currentVersionId
-        const dedupTitle = effectiveTitleSource === "manual" ? effectiveTitle : autoTitle;
-        const titleChanged = dedupTitle !== note.title || effectiveTitleSource !== note.titleSource;
-        // 仅在 currentVersionId 或标题实际变化时才写入，避免冗余 UPDATE
-        if (existingVersion.id !== note.currentVersionId || titleChanged) {
-          await tx
-            .update(notes)
-            .set({
-              currentVersionId: existingVersion.id,
-              title: dedupTitle,
-              titleSource: effectiveTitleSource,
-              updatedAt: new Date(),
-            })
-            .where(eq(notes.id, noteId));
-        }
-        resultNote = {
-          ...note,
-          currentVersionId: existingVersion.id,
-          title: dedupTitle,
-          titleSource: effectiveTitleSource,
-          ...(existingVersion.id !== note.currentVersionId || titleChanged
-            ? { updatedAt: new Date() }
-            : {}),
-        };
-        resultVersion = existingVersion;
-        resultBlocks = sanitizedBlocks.map((b, i) => ({
-          ...b,
-          ordinal: i,
-          imageAssetId: null,
-        })) as NoteBlock[];
-      } else if (input.isAutosave && note.currentVersionId && !manualTitleChanged) {
-        // 2. 自动保存模式：尝试原地更新当前版本
-        const canInPlace = await canUpdateVersionInPlace(tx, note.currentVersionId);
-        if (canInPlace) {
-          const inPlaceBlocks = await updateVersionInPlace(tx, note.currentVersionId, noteId, workspaceId, contentJson, contentHash, sanitizedBlocks);
-          await tx
-            .update(notes)
-            .set({
-              title: effectiveTitleSource === "manual" ? effectiveTitle : autoTitle,
-              titleSource: effectiveTitleSource,
-              updatedAt: new Date(),
-            })
-            .where(eq(notes.id, noteId));
-          resultNote = {
-            ...note,
-            title: effectiveTitleSource === "manual" ? effectiveTitle : autoTitle,
-            titleSource: effectiveTitleSource,
-            updatedAt: new Date(),
-          };
-          // currentVersionId is unchanged by an in-place update; the version row
-          // itself is not in scope here (only id/sealedAt were locked), so it is
-          // re-read below — note/blocks no longer are.
-          resultBlocks = inPlaceBlocks as NoteBlock[];
-        } else {
-          // 无法原地更新（版本被 sealed 或缺失），降级为创建新版本。
-          // note_version 不再直接引用卡片，仅 sealed 保护触发此分支。
-          const latest = await tx.query.noteVersions.findFirst({
-            where: eq(noteVersions.noteId, noteId),
-            orderBy: (v, { desc: desc1 }) => [desc1(v.versionNo)],
-          });
-          const nextVersionNo = (latest?.versionNo ?? 0) + 1;
-          const [newVersion] = await tx
-            .insert(noteVersions)
-            .values({
-              noteId,
-              workspaceId,
-              versionNo: nextVersionNo,
-              contentJson,
-              contentHash,
-              createdBy: userId,
-            })
-            .returning();
-
-          const blocksWithAssets = await writeVersionThroughDoc(
-            tx,
-            workspaceId,
-            noteId,
-            newVersion.id,
-            sanitizedBlocks,
-            {
-              title: effectiveTitleSource === "manual" ? effectiveTitle : autoTitle,
-              titleSource: effectiveTitleSource,
-            },
-          );
-
-          await tx
-            .update(notes)
-            .set({
-              currentVersionId: newVersion.id,
-              title: effectiveTitleSource === "manual" ? effectiveTitle : autoTitle,
-              titleSource: effectiveTitleSource,
-              updatedAt: new Date(),
-            })
-            .where(eq(notes.id, noteId));
-          resultNote = {
-            ...note,
-            currentVersionId: newVersion.id,
-            title: effectiveTitleSource === "manual" ? effectiveTitle : autoTitle,
-            titleSource: effectiveTitleSource,
-            updatedAt: new Date(),
-          };
-          resultVersion = newVersion;
-          resultBlocks = blocksWithAssets.map((b, idx) => ({
-            ...b,
-            ordinal: idx,
-          })) as NoteBlock[];
-        }
-      } else {
-        // 3. 显式保存或无法原地更新：创建新版本
-        //
-        // AI-perf #14（2026-09-15 审计）：此前用 `findFirst` 且**无列投影**，为了拿
-        // 一个 versionNo 会把最新版本的整份 `content_json`（整篇文档的 blocks）
-        // 读回应用层——每次显式保存都白搬一次全文。改为只投影 versionNo + LIMIT 1。
-        const [latest] = await tx
-          .select({ versionNo: noteVersions.versionNo })
-          .from(noteVersions)
-          .where(eq(noteVersions.noteId, noteId))
-          .orderBy(desc(noteVersions.versionNo))
-          .limit(1);
-        const nextVersionNo = (latest?.versionNo ?? 0) + 1;
-        const [newVersion] = await tx
-          .insert(noteVersions)
-          .values({
-            noteId,
-            workspaceId,
-            versionNo: nextVersionNo,
-            contentJson,
-            contentHash,
-            createdBy: userId,
-          })
-          .returning();
-
-        const blocksWithAssets = await writeVersionThroughDoc(
-          tx,
-          workspaceId,
-          noteId,
-          newVersion.id,
-          sanitizedBlocks,
-          {
-            title: effectiveTitleSource === "manual" ? effectiveTitle : autoTitle,
-            titleSource: effectiveTitleSource,
-          },
-        );
-
-        await tx
-          .update(notes)
-          .set({
-            currentVersionId: newVersion.id,
-            title: effectiveTitleSource === "manual" ? effectiveTitle : autoTitle,
-            titleSource: effectiveTitleSource,
-            updatedAt: new Date(),
-          })
-          .where(eq(notes.id, noteId));
-        resultNote = {
-          ...note,
-          currentVersionId: newVersion.id,
-          title: effectiveTitleSource === "manual" ? effectiveTitle : autoTitle,
-          titleSource: effectiveTitleSource,
-          updatedAt: new Date(),
-        };
-        resultVersion = newVersion;
-        resultBlocks = blocksWithAssets.map((b, idx) => ({
-          ...b,
-          ordinal: idx,
-        })) as NoteBlock[];
-      }
-    }
-
-    // F-005: tx read inside transaction — only re-read the fields the write
-    // branch did not already have in scope (PERF: avoids 3 redundant round-trips
-    // on every content write, incl. the 2.5s autosave tick).
-    if (!resultNote || !resultVersion || !resultBlocks) {
-      const uNote = resultNote ?? await tx.query.notes.findFirst({
-        where: and(eq(notes.id, noteId), eq(notes.workspaceId, workspaceId)),
-      });
-      if (!uNote || !uNote.currentVersionId) return null;
-      const uVer = resultVersion ?? await tx.query.noteVersions.findFirst({
-        where: eq(noteVersions.id, uNote.currentVersionId),
-      });
-      if (!uVer) return null;
-      const uBlocks = resultBlocks ?? (await tx.query.noteBlocks.findMany({
-        where: eq(noteBlocks.versionId, uNote.currentVersionId),
-        orderBy: (b, { asc: a1 }) => [a1(b.ordinal)],
-      })) as NoteBlock[];
-      resultNote = uNote;
-      resultVersion = uVer;
-      resultBlocks = uBlocks;
-    }
-    const result = { note: resultNote, version: resultVersion, blocks: resultBlocks as NoteBlock[] };
-
-  // R-017: 即使只改标题也更新搜索投影（标题投影不会持续过期）。
-  if (result) {
-    const body = Array.isArray(input.blocks)
-      ? (result.blocks as NoteBlock[])
-          .filter((b) => b.type !== "image")
-          .map((b) => b.content)
-          .join("\n")
-      : null;
-    // 只改标题时，body 从已有版本获取（同样过滤 image block）
-    const effectiveBody = body ?? (result.blocks as NoteBlock[])
-      .filter((b) => b.type !== "image")
-      .map((b) => b.content)
-      .join("\n");
-    await upsertSearchDocument(executor, {
-      workspaceId,
-      objectType: "note",
-      objectId: noteId,
-      title: result.note.title,
-      body: effectiveBody,
-    });
+    const blocks = await tx.query.noteBlocks.findMany({
+      where: eq(noteBlocks.versionId, targetVersion.id),
+      orderBy: (b, { asc }) => [asc(b.ordinal)],
+    }) as NoteBlock[];
+    return {
+      note: { ...note, currentVersionId: targetVersion.id, title, titleSource },
+      version: targetVersion,
+      blocks,
+    };
+  } finally {
+    doc.destroy();
   }
+}
 
-  return result;
+/**
+ * 「共享给空间」/「取消共享」——那一个显式动作（批次 4.5）。
+ *
+ * 判据是**作者**，不是空间 owner：这一列说的是"我的东西要不要拿出去"，所以能不能
+ * 改它跟角色无关，只跟"这篇是不是我写的"有关。今天协作空间里只有 owner 能建笔记，
+ * 于是这条判据实际上只落在 owner 身上；但判据不能写成 `role === "owner"`，那样
+ * 一旦哪天成员也能写笔记，边界就又靠调用方记得传对了。
+ *
+ * 撤回（`shared → private`）不会让已经按它生成过的卡片失效：证据链存的是生成当时
+ * 抄下来的正文摘录。撤回改变的是**之后**别人还能不能读到这篇。
+ */
+export async function setNoteShareScope(
+  executor: ApiTransaction,
+  noteId: string,
+  workspaceId: string,
+  userId: string,
+  shareScope: NoteShareScope,
+): Promise<{ note: typeof notes.$inferSelect; changed: boolean } | null> {
+  const tx = executor;
+  const noteRows = await tx
+    .select()
+    .from(notes)
+    .where(and(
+      eq(notes.id, noteId),
+      eq(notes.workspaceId, workspaceId),
+      isNull(notes.deletedAt),
+    ))
+    .for("update");
+  const note = noteRows[0];
+  if (!note) return null;
+  // 不是作者：给 404 而不是 403——"这篇存在但不归你改"这个信息本身就不该漏出去。
+  if (note.createdBy !== userId) return null;
+  if (note.shareScope === shareScope) return { note, changed: false };
+
+  const [updated] = await tx
+    .update(notes)
+    .set({ shareScope, updatedAt: new Date() })
+    .where(eq(notes.id, noteId))
+    .returning();
+
+  // 搜索索引里没有"可见性"这一列（一张空间级的索引表），所以共享状态变化不需要重算
+  // 索引；查询侧现场 join `notes` 判可见性。反过来说，正因为索引是共享的，
+  // **查询侧那道 join 不能省**——省了就是"私有笔记的正文出现在别人的搜索结果里"。
+  return { note: updated, changed: true };
 }
 
 /**
@@ -1180,13 +712,19 @@ export async function deleteNote(
   executor: ApiTransaction,
   noteId: string,
   workspaceId: string,
+  userId: string,
 ) {
   // CONC-01: FOR UPDATE 锁定 note 行，防止与 updateNote / restoreNoteVersion 并发丢数据
   // CONC-03: 只处理未软删除的笔记
   const noteRows = await executor
     .select()
     .from(notes)
-    .where(and(eq(notes.id, noteId), eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)))
+    .where(and(
+      eq(notes.id, noteId),
+      eq(notes.workspaceId, workspaceId),
+      visibleNotesCondition(userId),
+      isNull(notes.deletedAt),
+    ))
     .for("update");
   const note = noteRows[0];
   if (!note) return null;
@@ -1218,6 +756,7 @@ export async function restoreDeletedNote(
   executor: ApiTransaction,
   noteId: string,
   workspaceId: string,
+  userId: string,
 ) {
   // QUAL-03 修复：移除 IIFE 模式，executor 即事务执行器，无需额外包装
   const tx = executor;
@@ -1225,7 +764,11 @@ export async function restoreDeletedNote(
     const noteRows = await tx
       .select()
       .from(notes)
-      .where(and(eq(notes.id, noteId), eq(notes.workspaceId, workspaceId)))
+      .where(and(
+        eq(notes.id, noteId),
+        eq(notes.workspaceId, workspaceId),
+        visibleNotesCondition(userId),
+      ))
       .for("update");
     const note = noteRows[0];
     if (!note) return null;
@@ -1301,14 +844,20 @@ export async function physicalDeleteNote(
   executor: ApiTransaction,
   noteId: string,
   workspaceId: string,
-  options?: { force?: boolean },
+  options?: { force?: boolean; userId?: string },
 ) {
   // 确认笔记存在（包括已软删除的），并加 FOR UPDATE 锁定行
   // 防止与 restoreDeletedNote 并发：restore 的 FOR UPDATE 会阻塞到此事务提交
   const noteRows = await executor
     .select({ id: notes.id, deletedAt: notes.deletedAt })
     .from(notes)
-    .where(and(eq(notes.id, noteId), eq(notes.workspaceId, workspaceId)))
+    .where(and(
+      eq(notes.id, noteId),
+      eq(notes.workspaceId, workspaceId),
+      // 定时清理任务没有"查看者"，所以它按空间清；走路由的那次必须带 userId，否则
+      // 一个成员能把别人仅自己可见的笔记物理删掉。
+      ...(options?.userId ? [visibleNotesCondition(options.userId)] : []),
+    ))
     .for("update");
   if (!noteRows[0]) return null;
 
@@ -1474,12 +1023,19 @@ export async function listNoteVersions(
   executor: ApiTransaction,
   noteId: string,
   workspaceId: string,
+  userId: string,
   limit = 100,
   offset = 0,
 ) {
   // CONC-03: 不返回已软删除笔记的版本历史
+  // 批次 4.5: 版本历史里能看到每一版的正文，所以它与笔记本身共用同一条判据。
   const note = await executor.query.notes.findFirst({
-    where: and(eq(notes.id, noteId), eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)),
+    where: and(
+      eq(notes.id, noteId),
+      eq(notes.workspaceId, workspaceId),
+      visibleNotesCondition(userId),
+      isNull(notes.deletedAt),
+    ),
   });
   if (!note) return null;
 
@@ -1511,7 +1067,7 @@ export async function restoreNoteVersion(
   noteId: string,
   versionId: string,
   workspaceId: string,
-  _userId: string,
+  userId: string,
   baseVersionId?: string,
 ) {
   // QUAL-03 修复：移除 IIFE 模式，executor 即事务执行器，无需额外包装
@@ -1521,7 +1077,12 @@ export async function restoreNoteVersion(
     const noteRows = await tx
       .select()
       .from(notes)
-      .where(and(eq(notes.id, noteId), eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)))
+      .where(and(
+        eq(notes.id, noteId),
+        eq(notes.workspaceId, workspaceId),
+        visibleNotesCondition(userId),
+        isNull(notes.deletedAt),
+      ))
       .for("update");
     const note = noteRows[0];
     if (!note) return null;
@@ -1579,7 +1140,7 @@ export async function restoreNoteVersion(
     }));
     await applyNoteDocUpdate(
       tx,
-      { workspaceId, noteId },
+      { workspaceId, noteId, userId },
       versionId,
       (noteDoc) => writeNoteBlocks(noteDoc, restoredDocBlocks),
       restoredDocBlocks,

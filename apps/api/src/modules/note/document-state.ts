@@ -1,14 +1,20 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { visibleNotesCondition } from "./visibility.ts";
 import type { ApiTransaction } from "../../db/client.ts";
-import { noteBlocks, noteDocumentStates, notes } from "@ailearn/shared/db-schema/note";
+import { noteBlocks, noteDocumentStates, noteVersions, notes } from "@ailearn/shared/db-schema/note";
+import { computeContentHash } from "./content-hash.ts";
+import { upsertSearchDocument } from "./search-projection.ts";
 import {
+  deriveNoteTitle,
   docFromSnapshot,
   emptyNoteDoc,
   projectNoteBlocks,
+  readNoteTitle,
   setNoteTitle,
   snapshotOf,
   writeNoteBlocks,
   type NoteDocBlock,
+  type ProjectedNoteBlock,
 } from "./doc.ts";
 
 /**
@@ -25,12 +31,21 @@ import {
 
 export type NoteDocScope = { workspaceId: string; noteId: string };
 
+/** 带查看者的作用域：读正文的入口必须是它，否则"仅自己可见"在取快照这一层就漏了。 */
+export type NoteDocReadScope = NoteDocScope & { userId: string };
+
 type NoteDoc = ReturnType<typeof emptyNoteDoc>;
 
-/** 读正文文档。没有快照时从当前版本的 note_blocks 反向补齐（这就是迁移接缝）。 */
+/**
+ * 读正文文档。没有快照时从当前版本的 note_blocks 反向补齐（这就是迁移接缝）。
+ *
+ * 判据在**这里**而不是只放在路由上：有快照的那条分支原本一个 `notes` 行都不读，
+ * 于是"这篇是不是你的"完全取决于调用方有没有先查过——协同落盘口 `onStoreDocument`
+ * 就是那样一个调用方。把判据放到加载处，任何一条按 noteId 取正文的路径都过同一道门。
+ */
 export async function loadNoteDoc(
   tx: ApiTransaction,
-  scope: NoteDocScope,
+  scope: NoteDocReadScope,
 ): Promise<{ doc: NoteDoc; backfilled: boolean }> {
   // 快照查询也必须带 workspace_id。这张表的 RLS 会挡，但代码不能把隔离**寄托**在
   // 连接角色上：dev 全程用 superuser，策略对它不存在（实测就是这条断言先红的）。
@@ -48,9 +63,14 @@ export async function loadNoteDoc(
   // workspace_id：只按 noteId 查会让陌生空间的事务读出别人的正文。实测过——不带时
   // 集成用例第 4 条读到 6 行。
   const note = await tx.query.notes.findFirst({
-    where: and(eq(notes.id, scope.noteId), eq(notes.workspaceId, scope.workspaceId)),
+    where: and(
+      eq(notes.id, scope.noteId),
+      eq(notes.workspaceId, scope.workspaceId),
+      visibleNotesCondition(scope.userId),
+    ),
     columns: { currentVersionId: true, title: true, titleSource: true },
   });
+  if (!note) throw new Error("note_doc_not_visible");
   const rows = note?.currentVersionId
     ? await tx.query.noteBlocks.findMany({
         where: and(
@@ -97,14 +117,154 @@ export async function saveNoteDoc(
 }
 
 /**
- * 服务端唯一的正文写入口：加载文档 → 一次事务内改 → 落盘 → 投影成该版本的 note_blocks。
+ * 落盘一次 = 投影全套。**这是全仓库唯一一处把文档写回关系表的地方**。
+ *
+ * 要投影的东西比"正文"多，少任何一样都是一个**不报错的**错位：
+ *
+ *  1. `note_document_states` —— 文档本身；
+ *  2. `note_blocks` —— 目标版本的行（搜索索引、卡片证据链、导出、列表预览读它）；
+ *  3. **不碰** `note_versions.content_json` / `content_hash`。一个版本的快照记的是
+ *     "提交当时那一版长什么样"，从建出来就不动；只有它的 `note_blocks` 行随文档移动
+ *     （下游四个消费方读的是行）。这里去刷快照会连带弄坏另一件事：`checkpointNote`
+ *     靠"文档与最新一版的快照不同"决定要不要建新版本，刷了就永远相同，
+ *     「提交并确认」再也产不出历史；
+ *  4. `notes.title` / `title_source` —— 标题的事实源是文档的 `meta`。之前它是自动保存
+ *     那条按行写的路顺手更新的；那条路一停，不在这里补就会出现"正文已经变了、列表里
+ *     还是旧标题"；`auto` 的时候标题是正文的函数，所以每次落盘都重算一遍；
+ *  5. `notes.updated_at` —— 笔记列表按它排序，也进游标；不跟新的话"改过的笔记排在后面"；
+ *  6. 搜索投影 —— 同理，否则搜索里留着旧正文。
+ *
+ * 一条前置：调用方给的 `versionId` **必须是没被 seal 过的**。`note_blocks` 上有个
+ * `note_blocks_sealed_guard` 触发器，往被 seal 的版本里改行会直接 RAISE(55000)。
+ * 协同那一路由 `resolveFlushTarget` 负责挑一个能写的版本，其余调用方给的都是自己刚
+ * 建出来的那一版，天然没被 seal 过。
+ */
+export async function persistNoteDoc(
+  tx: ApiTransaction,
+  scope: NoteDocReadScope,
+  doc: NoteDoc,
+  versionId: string,
+): Promise<{ blocks: ProjectedNoteBlock[]; versionId: string }> {
+  const { workspaceId, noteId } = scope;
+  const projected = projectNoteBlocks(doc);
+  const plain = projected.map(({ ordinal: _ordinal, ...block }) => block);
+
+  await saveNoteDoc(tx, { workspaceId, noteId }, doc);
+  await projectBlocksIntoVersion(tx, workspaceId, versionId, projected);
+
+  const meta = readNoteTitle(doc);
+  const titleSource = meta?.titleSource === "manual" ? "manual" : "auto";
+  const title = titleSource === "manual"
+    ? (meta?.title?.trim() || "无标题笔记")
+    : deriveNoteTitle(plain);
+  await tx
+    .update(notes)
+    .set({ title, titleSource, updatedAt: new Date() })
+    .where(eq(notes.id, noteId));
+
+  await upsertSearchDocument(tx, {
+    workspaceId,
+    objectType: "note",
+    objectId: noteId,
+    title,
+    body: plain.filter((block) => block.type !== "image").map((block) => block.content).join("\n"),
+  });
+
+  return { blocks: projected, versionId };
+}
+
+/**
+ * 协同落盘该投到哪一个版本（批次 4.4）。
+ *
+ * 落盘口自己不能改指针，所以"当前版本还能不能写"这个问题在这里答一次：
+ * 没有当前版本（建得比第一个版本还早）或它已经被 seal（`note_blocks_sealed_guard`
+ * 会拒绝改它的行）时另起一版并把指针推过来。不这么做的话这篇笔记从此落不了盘——
+ * Hocuspocus 在落盘抛错时**故意**把文档留在内存里，症状是不丢内容也不报错地卡死。
+ */
+export async function resolveNoteDocFlushTarget(
+  tx: ApiTransaction,
+  scope: NoteDocReadScope,
+  doc: NoteDoc,
+): Promise<string> {
+  const { workspaceId, noteId, userId } = scope;
+  const note = await tx.query.notes.findFirst({
+    where: and(
+      eq(notes.id, noteId),
+      eq(notes.workspaceId, workspaceId),
+      visibleNotesCondition(userId),
+    ),
+    columns: { currentVersionId: true },
+  });
+  if (!note) throw new Error("note_doc_not_visible");
+  const current = note.currentVersionId
+    ? await tx.query.noteVersions.findFirst({
+        where: eq(noteVersions.id, note.currentVersionId),
+        columns: { id: true, sealedAt: true },
+      })
+    : null;
+  if (current && !current.sealedAt) return current.id;
+
+  const snapshot = versionSnapshotOf(
+    projectNoteBlocks(doc).map(({ ordinal: _ordinal, ...block }) => block),
+  );
+  return insertVersionFromSnapshot(tx, workspaceId, noteId, userId, snapshot);
+}
+
+/**
+ * 快照的正文形状：只存 `{type, content}`。
+ *
+ * `note_versions.content_json` 从建表起就是这个形状，而 `content_hash` 按它的规范
+ * 序列化算——多存一个字段等于换一套哈希，历史版本的去重与"库内外一致"那条集成用例
+ * 都会错位。`sourceRef` / `imageAssetId` 是 `note_blocks` 列上的事，不属于快照。
+ */
+function versionSnapshotOf(blocks: readonly NoteDocBlock[]) {
+  const contentJson = {
+    blocks: blocks.map((block) => ({ type: block.type, content: block.content })),
+  };
+  return { contentJson, contentHash: computeContentHash(contentJson) };
+}
+
+/** 另起一个版本并把当前指针推过来，返回新版本的 id。 */
+async function insertVersionFromSnapshot(
+  tx: ApiTransaction,
+  workspaceId: string,
+  noteId: string,
+  userId: string,
+  snapshot: ReturnType<typeof versionSnapshotOf>,
+): Promise<string> {
+  const [latest] = await tx
+    .select({ versionNo: noteVersions.versionNo })
+    .from(noteVersions)
+    .where(eq(noteVersions.noteId, noteId))
+    .orderBy(desc(noteVersions.versionNo))
+    .limit(1);
+  const [created] = await tx
+    .insert(noteVersions)
+    .values({
+      noteId,
+      workspaceId,
+      versionNo: (latest?.versionNo ?? 0) + 1,
+      contentJson: snapshot.contentJson,
+      contentHash: snapshot.contentHash,
+      createdBy: userId,
+    })
+    .returning();
+  await tx
+    .update(notes)
+    .set({ currentVersionId: created.id })
+    .where(eq(notes.id, noteId));
+  return created.id;
+}
+
+/**
+ * 服务端唯一的正文写入口：加载文档 → 一次事务内改 → 交给 `persistNoteDoc` 落盘并投影。
  *
  * `mutate` 拿到活的 Y.Doc：整篇替换用 `writeNoteBlocks`，恢复版本用
  * `restoreNoteBlocksFrom`。除这里之外不该再有第二条改正文的路。
  */
 export async function applyNoteDocUpdate(
   tx: ApiTransaction,
-  scope: NoteDocScope,
+  scope: NoteDocReadScope,
   versionId: string,
   mutate: (doc: NoteDoc) => void,
   /**
@@ -116,10 +276,11 @@ export async function applyNoteDocUpdate(
   const doc = preload ? emptyNoteDoc() : (await loadNoteDoc(tx, scope)).doc;
   if (preload) writeNoteBlocks(doc, preload);
   doc.transact(() => mutate(doc));
-  await saveNoteDoc(tx, scope, doc);
-  const projected = projectNoteBlocks(doc);
-  await projectBlocksIntoVersion(tx, scope.workspaceId, versionId, projected);
-  return { blocks: projected.map(({ ordinal: _ordinal, ...block }) => block), doc };
+  const { blocks } = await persistNoteDoc(tx, scope, doc, versionId);
+  return {
+    blocks: blocks.map(({ ordinal: _ordinal, ...block }) => block),
+    doc,
+  };
 }
 
 /**
@@ -134,11 +295,15 @@ export async function applyNoteDocUpdate(
  */
 export async function readNoteDocState(
   tx: ApiTransaction,
-  scope: NoteDocScope,
-): Promise<{ update: Uint8Array; revision: number; backfilled: boolean } | null> {
+  scope: NoteDocReadScope,
+): Promise<{ update: Uint8Array; revision: number; backfilled: boolean; savedAt: string } | null> {
   const note = await tx.query.notes.findFirst({
-    where: and(eq(notes.id, scope.noteId), eq(notes.workspaceId, scope.workspaceId)),
-    columns: { deletedAt: true },
+    where: and(
+      eq(notes.id, scope.noteId),
+      eq(notes.workspaceId, scope.workspaceId),
+      visibleNotesCondition(scope.userId),
+    ),
+    columns: { deletedAt: true, shareScope: true, updatedAt: true },
   });
   if (!note || note.deletedAt !== null) return null;
   const { doc, backfilled } = await loadNoteDoc(tx, scope);
@@ -153,7 +318,7 @@ export async function readNoteDocState(
       });
   const update = snapshotOf(doc);
   doc.destroy();
-  return { update, revision: Number(stored?.revision ?? 0), backfilled };
+  return { update, revision: Number(stored?.revision ?? 0), backfilled, savedAt: note.updatedAt.toISOString() };
 }
 
 /**

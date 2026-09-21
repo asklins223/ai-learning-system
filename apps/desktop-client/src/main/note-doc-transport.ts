@@ -51,7 +51,8 @@ export type NoteDocTransportEvent =
 
 /** 网关包一层后交给 IPC 的句柄：`stop()` 之后所有方法都是空操作。 */
 export type NoteDocWatchHandle = {
-  applyBlocks: (blocks: NoteDocBlock[], title?: { title: string; titleSource: string }) => void;
+  /** 返回本次产出的增量；`null` = 这次提交没让文档动一下（界面据此报"未改动"而不是"同步中"）。 */
+  applyBlocks: (blocks: NoteDocBlock[] | null, title?: { title: string; titleSource: string }) => string | null;
   view: () => NoteDocView;
   setPresence: (state: string) => void;
   stop: () => void;
@@ -59,7 +60,7 @@ export type NoteDocWatchHandle = {
 
 export type NoteDocTransportHandle = {
   /** 把界面的 blocks 差分并进文档；返回这次产生的 yjs 增量（什么都没变则 null）。 */
-  applyBlocks: (blocks: NoteDocBlock[], title?: { title: string; titleSource: string }) => string | null;
+  applyBlocks: (blocks: NoteDocBlock[] | null, title?: { title: string; titleSource: string }) => string | null;
   view: () => NoteDocView;
   seed: (update: string) => void;
   setPresence: (state: string) => void;

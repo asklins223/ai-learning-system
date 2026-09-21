@@ -51,8 +51,13 @@ export type NoteDocState = {
   seed: (update: string) => void;
   /** 应用一条远端增量。 */
   applyRemote: (update: string) => void;
-  /** 本机改了编辑器：把 blocks 差分并进文档，返回这次产生的增量（没变则 null）。 */
-  submitBlocks: (blocks: NoteDocBlock[], title?: { title: string; titleSource: string }) => string | null;
+  /**
+   * 本机改了编辑器：把 blocks 差分并进文档，返回这次产生的增量（没变则 null）。
+   *
+   * `blocks` 传 `null` 表示**这次只改标题，正文一个字都不动**。空数组不是"没动"，
+   * 是"作者把正文删光了"——两者必须是两种表达，否则标题一保存就把笔记清空。
+   */
+  submitBlocks: (blocks: NoteDocBlock[] | null, title?: { title: string; titleSource: string }) => string | null;
   /** 界面要看的样子：从文档投影，不是从界面状态回推。 */
   view: () => NoteDocView;
   dispose: () => void;
@@ -105,7 +110,7 @@ export function createNoteDocState(): NoteDocState {
     submitBlocks: (blocks, title) => {
       batch = [];
       doc.transact(() => {
-        syncNoteBlocksForEditor(doc, blocks);
+        if (blocks) syncNoteBlocksForEditor(doc, blocks);
         if (title) setNoteTitle(doc, title.title, title.titleSource);
       }, "local");
       return flushBatch();

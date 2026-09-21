@@ -287,3 +287,32 @@ export function readNoteTitle(doc: Y.Doc): { title: string; titleSource: string 
   if (typeof title !== "string") return null;
   return { title, titleSource: String(meta.get("titleSource") ?? "auto") };
 }
+
+
+/**
+ * 自动标题：`meta.titleSource` 是 `auto` 时，标题就是"正文里第一行能当标题的话"。
+ *
+ * 放在文档这一层而不是放在保存接口那一层，是因为正文写入改走增量之后，能重算它的时机
+ * 只剩落盘投影那一次——那时在场的是从文档投影出来的块，请求体里已经没有整篇了。
+ * 留在 service 里就会变成"两条写路各自决定标题"，而标题只有一个事实源（`meta`）。
+ */
+export function cleanTitleCandidate(content: string): string {
+  return content
+    .trim()
+    .replace(/^<h\d>([\s\S]+)<\/h\d>$/i, "$1")
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/^>\s?/, "")
+    .replace(/^·\s*/, "")
+    .replace(/^[-*+]\s+/, "")
+    .replace(/^\d+\.\s+/, "")
+    .replace(/`{1,3}/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function deriveNoteTitle(blocks: readonly { type: string; content: string }[]): string {
+  const heading = blocks.find((block) => block.type === "heading" && cleanTitleCandidate(block.content));
+  const fallback = heading ?? blocks.find((block) => cleanTitleCandidate(block.content));
+  const title = fallback ? cleanTitleCandidate(fallback.content) : "";
+  return title.slice(0, 60) || "无标题笔记";
+}

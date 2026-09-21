@@ -25,13 +25,20 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres, { type Sql } from "postgres";
 import { type ApiTransaction } from "../db/client.ts";
 import * as schema from "@ailearn/shared/db-schema";
+import * as Y from "yjs";
 import {
-  restoreNoteVersion,
-  updateNote,
   RevisionConflictError,
-  computeContentHash,
+  restoreNoteVersion,
 } from "../modules/note/service.ts";
-
+import {
+  editBlockContent,
+} from "../modules/note/doc.ts";
+import {
+  loadNoteDoc,
+  persistNoteDoc,
+  resolveNoteDocFlushTarget,
+} from "../modules/note/document-state.ts";
+import { computeContentHash } from "../modules/note/content-hash.ts";
 const databaseUrl = process.env.NOTE_VERSION_RESTORE_TEST_DATABASE_URL;
 if (!databaseUrl) {
   throw new Error(
@@ -62,6 +69,30 @@ async function withTestSql<T>(
   operation: (connection: Sql) => Promise<T>,
 ): Promise<T> {
   return operation(sql);
+}
+
+/**
+ * 走一遍与协同落盘完全相同的路：读文档 → 改 → 挑一个能写的版本 → 投影。
+ * 用例因此测的是生产那条落盘口，不是它自己现编的一套写法。
+ */
+async function flushLikeCollaboration(
+  workspaceId: string,
+  userId: string,
+  noteId: string,
+  mutate: (doc: Y.Doc) => void,
+): Promise<string> {
+  return withServiceTransaction(async (tx) => {
+    const scope = { workspaceId, noteId, userId };
+    const { doc } = await loadNoteDoc(tx, scope);
+    try {
+      doc.transact(() => mutate(doc));
+      const versionId = await resolveNoteDocFlushTarget(tx, scope, doc);
+      await persistNoteDoc(tx, scope, doc, versionId);
+      return versionId;
+    } finally {
+      doc.destroy();
+    }
+  });
 }
 
 async function withServiceTransaction<T>(
@@ -396,35 +427,38 @@ test("restore: manual title is preserved during restore", async () => {
   });
 });
 
-test("canUpdateVersionInPlace: sealed version blocks in-place update", async () => {
+/**
+ * 落盘口遇到"当前版本已被 seal"（批次 4.4 之后的等价物，替代原来的
+ * "canUpdateVersionInPlace 降级新建版本"用例）。
+ *
+ * 为什么还必须测：`note_blocks` 上的 `note_blocks_sealed_guard` 触发器对已 seal 的版本
+ * 改一行就 RAISE(55000)。落盘口不挑版本的话，症状不是报错而是**这篇笔记从此落不了盘**
+ * ——Hocuspocus 在落盘抛错时故意把文档留在内存里，内容不丢、也不通知任何人。
+ */
+test("被 seal 的当前版本：落盘另起一版，不动被引用的那一版", async () => {
   await withTestSql(async (tx) => {
     const { workspaceId, userId, noteId, v2Id } = await seedWorkspaceNoteWithTwoVersions(tx);
 
     try {
-      // Seal v2 — sealed versions block in-place update (V2: replaces old
-      // superseded learning_cards check which is no longer applicable).
       await tx`UPDATE note_versions SET sealed_at = NOW() WHERE id = ${v2Id}`;
-
-      // Attempt autosave (isAutosave=true) — should fall back to creating v3
-      // because the current version is sealed.
-      const result = await withServiceTransaction((serviceTx) =>
-        updateNote(serviceTx, noteId, workspaceId, userId, {
-          blocks: [{ type: "paragraph", content: "updated content" }],
-          baseVersionId: v2Id,
-          isAutosave: true,
-        })
-      );
-
-      assert.ok(result);
-      // Should have created a new version (v3), not updated v2 in place
-      assert.notEqual(result!.version.id, v2Id, "should create new version, not update v2 in place");
-      assert.equal(result!.version.versionNo, 3, "new version should be v3");
-
-      // Verify v2 content was NOT modified
-      const [v2Block] = await tx<{ content: string }[]>`
+      const before = await tx<{ content: string }[]>`
         SELECT content FROM note_blocks WHERE version_id = ${v2Id} ORDER BY ordinal LIMIT 1
       `;
-      assert.equal(v2Block.content, "v2 content", "v2 content should be unchanged");
+
+      const target = await flushLikeCollaboration(workspaceId, userId, noteId, (doc) => {
+        editBlockContent(doc, 0, "落在被 seal 之后的一次编辑");
+      });
+
+      assert.notEqual(target, v2Id, "当前版本被 seal 过时落盘口必须另起一版");
+      const after = await tx<{ content: string }[]>`
+        SELECT content FROM note_blocks WHERE version_id = ${v2Id} ORDER BY ordinal LIMIT 1
+      `;
+      assert.equal(after[0].content, before[0].content, "被 seal 版本的行不该被改动");
+
+      const pointer = await tx<{ current_version_id: string }[]>`
+        SELECT current_version_id FROM notes WHERE id = ${noteId}
+      `;
+      assert.equal(pointer[0].current_version_id, target, "指针要跟上落盘实际写入的那一版");
     } finally {
       await cleanupWorkspace(tx, workspaceId, userId, noteId);
     }
@@ -432,65 +466,50 @@ test("canUpdateVersionInPlace: sealed version blocks in-place update", async () 
 });
 
 /**
- * 回归（2026-09-18）：改动**既有块的自动保存**整条链路。
+ * 回归（2026-09-18）：改**已有块**这条热路整条链路。
  *
- * `updateVersionInPlace` 用一条 `UPDATE ... FROM (unnest(...))` 把同一顺序号上
- * 内容发生变化的块批量写回。这段 SQL 曾把列类型写进 unnest 的列定义列表
- * （`AS ord(id uuid, type text, ...)`），而 PostgreSQL 不接受「多参数 unnest() +
- * 列定义列表」，直接抛
- *   UNNEST() with multiple arguments cannot have a column definition list
- * → 每次「改已有段落」的自动保存都是 500（生产日志 8/9 次 PATCH 全 500）。
+ * 当年 `updateVersionInPlace` 那条 `UPDATE ... FROM (unnest(...))` 把列类型写进了
+ * unnest 的列定义列表，PostgreSQL 不接受「多参数 unnest() + 列定义列表」直接抛错，
+ * 于是"改一个已有段落"每次 500（生产日志里 8/9 的 PATCH 全 500）。上面那条 sealed
+ * 用例走的是"降级新建版本"分支，永远碰不到那段 UPDATE，所以旧写法一路漏到线上。
  *
- * 上面那条 sealed 用例走的是「降级新建版本」分支，**永远碰不到这段 UPDATE**，
- * 所以旧写法一路漏到线上。本用例专门钉住原地更新分支。
+ * 写路后来换成了"文档 → 投影"，这条用例**测的还是同一件事**：改已有块必须是就地改行，
+ * 不能炸、也不该顺手多建一个版本。版本快照则刻意**不**跟着走（它记的是提交那一刻）。
  */
-test("autosave in place: editing an existing block writes back without a new version", async () => {
+test("就地改一个已有块：改行、不建版、不动版本快照", async () => {
   await withTestSql(async (tx) => {
     const { workspaceId, userId, noteId, v2Id } = await seedWorkspaceNoteWithTwoVersions(tx);
 
     try {
-      // v2 未密封 → 允许原地更新，且顺序号 0 的块内容确实变了 → 命中批量 UPDATE。
-      const result = await withServiceTransaction((serviceTx) =>
-        updateNote(serviceTx, noteId, workspaceId, userId, {
-          blocks: [
-            { type: "paragraph", content: "autosaved edit" },
-            { type: "paragraph", content: "second block" },
-          ],
-          baseVersionId: v2Id,
-          isAutosave: true,
-        })
-      );
-
-      assert.ok(result, "in-place autosave should return a result");
-      assert.equal(result!.version.id, v2Id, "in-place autosave must not create a new version");
-      assert.equal(result!.version.versionNo, 2, "in-place autosave keeps version 2");
+      const target = await flushLikeCollaboration(workspaceId, userId, noteId, (doc) => {
+        editBlockContent(doc, 0, "autosaved edit");
+      });
+      assert.equal(target, v2Id, "改一个已有块不该建新版本");
 
       const blocks = await tx<{ ordinal: number; content: string }[]>`
         SELECT ordinal, content FROM note_blocks WHERE version_id = ${v2Id} ORDER BY ordinal
       `;
-      // postgres-js 返回的行不是普通对象，直接 deepEqual 会因为原型不同而假失败。
+      // postgres-js 返回的行不是普通对象，直接 deepEqual 会因原型不同而假失败。
       assert.deepEqual(
-        blocks.map((block) => ({ ordinal: block.ordinal, content: block.content })),
-        [
-          { ordinal: 0, content: "autosaved edit" },
-          { ordinal: 1, content: "second block" },
-        ],
-        "changed block is rewritten and the new block is inserted",
+        blocks.map((block) => ({ ordinal: Number(block.ordinal), content: block.content })),
+        [{ ordinal: 0, content: "autosaved edit" }],
+        "改过的那块要写上（这一版只有一块正文）",
       );
 
       const versionCount = await tx<{ count: number }[]>`
         SELECT count(*)::int AS count FROM note_versions WHERE note_id = ${noteId}
       `;
-      assert.equal(versionCount[0].count, 2, "in-place autosave adds no version row");
+      assert.equal(Number(versionCount[0].count), 2, "就地落盘不该多出版本行");
 
-      // 版本快照与块表必须一致：原地更新的语义是二者同步改写。
       const [versionRow] = await tx<{ content_json: { blocks: Array<{ content: string }> } }[]>`
         SELECT content_json FROM note_versions WHERE id = ${v2Id}
       `;
+      // 版本快照**不**跟着落盘走：它记的是这一版被提交当时的样子。刷了它，
+      // 「提交并确认」就再也判断不出"文档与最新一版不同"，历史停止增长。
       assert.deepEqual(
         versionRow.content_json.blocks.map((block) => block.content),
-        ["autosaved edit", "second block"],
-        "content_json follows the in-place block rewrite",
+        ["v2 content"],
+        "落盘不该改写已有版本的快照",
       );
     } finally {
       await cleanupWorkspace(tx, workspaceId, userId, noteId);

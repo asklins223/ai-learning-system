@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import postgres from "postgres";
-import { computeContentHash } from "../modules/note/service.ts";
+import { computeContentHash } from "../modules/note/content-hash.ts";
 
 const databaseUrl = process.env.CONTENT_HASH_TEST_DATABASE_URL;
 if (!databaseUrl) {

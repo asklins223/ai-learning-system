@@ -16,6 +16,8 @@ import {
 } from "@ailearn/shared/db-schema/card-generation-v2";
 
 const WORKSPACE_ID = "00000000-0000-4000-8000-000000000001";
+// 搜索的判据是查看者，所以每个调用点都要传一个（批次 4.5）。
+const VIEWER_ID = "00000000-0000-4000-8000-000000000002";
 
 describe("search service", () => {
   it("maps, highlights, links, and paginates deduplicated search rows", async () => {
@@ -63,7 +65,7 @@ describe("search service", () => {
       },
     } as any;
 
-    const result = await search(executor, WORKSPACE_ID, "Needle", {
+    const result = await search(executor, WORKSPACE_ID, "Needle", { userId: VIEWER_ID,
       type: "note",
       limit: 999,
     });
@@ -113,7 +115,7 @@ describe("search service", () => {
       },
     } as any;
 
-    const result = await search(executor, WORKSPACE_ID, "Needle");
+    const result = await search(executor, WORKSPACE_ID, "Needle", { userId: VIEWER_ID });
 
     const compiledSql = calls
       .map((statement) => new PgDialect().sqlToQuery(statement as SQL).sql)
@@ -133,7 +135,7 @@ describe("search service", () => {
       execute: async () => (++call === 1 ? [] : [{ count: "4" }]),
     } as any;
 
-    const result = await search(executor, WORKSPACE_ID, "%_\\");
+    const result = await search(executor, WORKSPACE_ID, "%_\\", { userId: VIEWER_ID });
 
     assert.deepEqual(result, { items: [], total: 4, nextCursor: null });
   });
@@ -159,7 +161,7 @@ describe("search service", () => {
       },
     } as any;
 
-    const first = await search(executor, WORKSPACE_ID, "Needle", { limit: 2 });
+    const first = await search(executor, WORKSPACE_ID, "Needle", { userId: VIEWER_ID, limit: 2 });
 
     assert.deepEqual(first.items.map((item) => item.objectId), ["n-3", "n-2"]);
     assert.ok(first.nextCursor, "还有下一页时必须给出游标");
@@ -170,7 +172,7 @@ describe("search service", () => {
       dedupKey: "note:n-2",
     });
 
-    const second = await search(executor, WORKSPACE_ID, "Needle", {
+    const second = await search(executor, WORKSPACE_ID, "Needle", { userId: VIEWER_ID,
       limit: 2,
       cursor: decodeSearchCursor(first.nextCursor!)!,
     });
@@ -199,7 +201,7 @@ describe("search service", () => {
       execute: async () => (++call === 1 ? [] : [{ count: "9" }]),
     } as any;
 
-    const result = await search(executor, WORKSPACE_ID, "Needle", { limit: 24 });
+    const result = await search(executor, WORKSPACE_ID, "Needle", { userId: VIEWER_ID, limit: 24 });
 
     assert.deepEqual(result.items, []);
     assert.equal(result.nextCursor, null);

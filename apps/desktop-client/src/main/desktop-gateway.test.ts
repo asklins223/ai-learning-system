@@ -267,7 +267,6 @@ const NOTE_SAVE_RECEIPT = noteSaveReceiptV1Schema.parse({
   versionId: "00000000-0000-4000-8000-000000000013",
   currentVersionId: "00000000-0000-4000-8000-000000000013",
   versionNo: 2,
-  isAutosave: false,
   revision: "00000000-0000-4000-8000-000000000013",
   savedAt: "2026-08-23T00:00:03.000Z",
 });
@@ -1504,7 +1503,6 @@ describe("DesktopGateway", () => {
           version: 1,
           title: "已保存标题",
           baseVersionId: NOTE_DETAIL.currentVersionId,
-          isAutosave: false,
         });
         if (patchCalls === 1) throw new TypeError("socket closed after commit");
         return new Response(JSON.stringify(NOTE_SAVE_RECEIPT), { status: 200 });
@@ -1518,7 +1516,6 @@ describe("DesktopGateway", () => {
       version: 1 as const,
       title: "已保存标题",
       baseVersionId: NOTE_DETAIL.currentVersionId,
-      isAutosave: false,
     };
     await expect(gateway.saveNote(NOTE_DETAIL.noteId, request, "command-note-save")).rejects.toMatchObject({
       code: "result_unknown",

@@ -168,18 +168,24 @@ describe("source listing", () => {
     ];
     const executor = {
       query: { sources: { findMany: async () => rows } },
-      select: () => ({
-        from: (table: unknown) => table === notes
-          ? {
-              where: () => ({
-                groupBy: async () => [{ sourceId: rows[0]!.id, count: 3 }],
-              }),
-            }
-          : { where: async () => [{ count: 7 }] },
-      }),
+      select: () => {
+        // 按来源统计那条查询现在左连三张表（卡片进度 / 目标），链路成了
+        // from → leftJoin* → where → groupBy。这里只把链路补齐，不改断言：
+        // 本文件测的是分页与批次，连接的正确性在集测那边对真库验。
+        const notesChain = {
+          leftJoin: () => notesChain,
+          where: () => ({
+            groupBy: async () => [{ sourceId: rows[0]!.id, count: 3, pendingReviewRuns: 0, activeObjectives: 0 }],
+          }),
+        };
+        return {
+          from: (table: unknown) => (table === notes ? notesChain : { where: async () => [{ count: 7 }] }),
+        };
+      },
     } as any;
 
     const result = await listSources(executor, WORKSPACE_ID, {
+      userId: USER_ID,
       status: SourceStatus.READY,
       cursor: encodeCursor("2026-07-21T00:00:00.000001Z", "00000000-0000-4000-8000-000000000011"),
       limit: 2,
@@ -203,7 +209,7 @@ describe("source listing", () => {
       }),
     } as any;
 
-    const result = await listSources(executor, WORKSPACE_ID, { cursor: "invalid", limit: 0 });
+    const result = await listSources(executor, WORKSPACE_ID, { userId: USER_ID, cursor: "invalid", limit: 0 });
 
     assert.deepEqual(result, { items: [], nextCursor: null, total: 0 });
     assert.equal(noteCountQueries, 0);
@@ -215,7 +221,7 @@ describe("source listing", () => {
     } as any;
 
     await assert.rejects(
-      listSources(executor, WORKSPACE_ID, { limit: 1 }),
+      listSources(executor, WORKSPACE_ID, { userId: USER_ID, limit: 1 }),
       /source cursor timestamp is missing/,
     );
   });
@@ -434,8 +440,25 @@ it("creates note/version/blocks and updates the search projection", async () => 
       version: { id: "version-1" },
     });
     assert.equal(inserted.some((entry) => entry.table === noteBlocks), true);
-    assert.equal(updated[0]!.table, notes);
-    assert.equal(updated[0]!.value.currentVersionId, "version-1");
+    // 按"写了什么"找，不按调用顺序下标：落盘口现在一次投全套（版本快照、标题、指针、
+    // 搜索），下标断言会把每一次正当的顺序调整都变成一次假红。
+    // 落盘**不**改写已有版本的快照：那一版记的是它被提交当时的样子（刷了它，
+    // 「提交并确认」就再也判断不出"文档与最新一版不同"，历史停止增长）。
+    // 这条同时把"谁在写版本行"钉清楚：只有建版本那一步写 content_json。
+    assert.equal(
+      updated.some((entry) => entry.table === noteVersions),
+      false,
+      "落盘口不该 UPDATE 已有版本行",
+    );
+    assert.equal(
+      inserted.some((entry) => entry.table === noteVersions && "contentHash" in entry.value),
+      true,
+      "新版本的快照要在建版那一步写进去",
+    );
+    const pointerUpdate = updated.find(
+      (entry) => entry.table === notes && "currentVersionId" in entry.value,
+    );
+    assert.equal(pointerUpdate?.value.currentVersionId, "version-1");
     assert.equal(indexed.objectType, "note");
     assert.equal(indexed.body, "Heading\nParagraph");
   });
@@ -487,12 +510,12 @@ it("creates note/version/blocks and updates the search projection", async () => 
       }),
     } as any;
     assert.deepEqual(
-      await listNotesBySource(executor, "source-1", WORKSPACE_ID),
+      await listNotesBySource(executor, "source-1", WORKSPACE_ID, USER_ID),
       { items: expected, total: 60 },
     );
 
     assert.equal(await listNotesBySource({
       query: { sources: { findFirst: async () => undefined } },
-    } as any, "missing", WORKSPACE_ID), null);
+    } as any, "missing", WORKSPACE_ID, USER_ID), null);
   });
 });

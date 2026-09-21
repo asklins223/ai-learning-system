@@ -7,6 +7,7 @@ import {
 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { notes, noteBlocks, sources, sourceSegments } from "@ailearn/shared/db-schema/note";
 import { searchDocuments } from "@ailearn/shared/db-schema/search";
+import { noteVisibleForSearchIndexSql } from "../note/visibility.ts";
 import { SourceStatus } from "@ailearn/shared";
 import { logger } from "../../lib/logger.ts";
 
@@ -89,9 +90,12 @@ async function getSearchTotal(
   workspaceId: string,
   query: string,
   type: string | null,
+  userId: string,
 ): Promise<number> {
   const normalizedQuery = normalizeSearchQuery(query);
-  const key = `${workspaceId}\u0000${normalizedQuery}\u0000${type ?? ""}`;
+  // 缓存键**必须带查看者**：同一个关键词在协作空间里对不同人的命中数本来就不同
+  // （别人仅自己可见的笔记不进结果）。不带人就等于把第一个人的数字发给全空间。
+  const key = `${workspaceId}\u0000${userId}\u0000${normalizedQuery}\u0000${type ?? ""}`;
 
   const now = Date.now();
   const cached = searchCountCache.get(key);
@@ -118,7 +122,9 @@ async function getSearchTotal(
       SELECT DISTINCT ON (object_type || ':' || object_id)
         1
       FROM search_documents AS search_document
+      CROSS JOIN (SELECT ${userId}::uuid AS viewer) v
       WHERE workspace_id = ${workspaceId}
+        AND ${sql.raw(noteVisibleForSearchIndexSql())}
         AND (
           body ILIKE '%' || ${searchEscapedQuery(query)} || '%' ESCAPE '\\'
           OR title ILIKE '%' || ${searchEscapedQuery(query)} || '%' ESCAPE '\\'
@@ -190,11 +196,11 @@ export async function search(
   executor: ApiTransaction,
   workspaceId: string,
   query: string,
-  opts?: { type?: string; limit?: number; cursor?: SearchCursor },
+  opts: { userId: string; type?: string; limit?: number; cursor?: SearchCursor },
 ): Promise<{ items: SearchResult[]; total: number; nextCursor: string | null }> {
-  const limit = Math.min(opts?.limit ?? 20, 50);
-  const cursor = opts?.cursor ?? null;
-  const type = opts?.type ?? null;
+  const limit = Math.min(opts.limit ?? 20, 50);
+  const cursor = opts.cursor ?? null;
+  const type = opts.type ?? null;
   // ILIKE treats `%` and `_` as wildcards. Escape them so the public API keeps
   // literal keyword semantics and a query such as `%` cannot scan/return every
   // document in the workspace.
@@ -230,7 +236,12 @@ export async function search(
         SELECT object_type, object_id, title, body, indexed_at, metadata,
           ${dedupKey} as dedup_key
         FROM search_documents AS search_document
+        -- 这张索引表是整个空间共用的一份数据，所以"谁能看到这篇笔记"必须在发结果
+        -- 之前 join 回去判一次。规则本体在 note/visibility.ts，这里只负责把它接进
+        -- 原生 SQL：查看者以一个 v(viewer) 列进来，片段里引用的是它而不是占位符。
+        CROSS JOIN (SELECT ${opts.userId}::uuid AS viewer) v
         WHERE workspace_id = ${workspaceId}
+          AND ${sql.raw(noteVisibleForSearchIndexSql())}
           AND (
             body ILIKE '%' || ${escapedQuery} || '%' ESCAPE '\\'
             OR title ILIKE '%' || ${escapedQuery} || '%' ESCAPE '\\'
@@ -253,7 +264,7 @@ export async function search(
       ORDER BY d.indexed_at DESC, d.dedup_key ASC
       LIMIT ${limit + 1}
     `),
-    getSearchTotal(executor, workspaceId, query, type),
+    getSearchTotal(executor, workspaceId, query, type, opts.userId),
   ]);
 
   // PERF-11: Create the highlight RegExp once, not per result row.
@@ -367,6 +378,11 @@ export async function reindexWorkspaceSearch(
 
   // Collect top-level entities in parallel, then hydrate each child table in
   // one query per entity type.
+  //
+  // 这里**故意不按查看者过滤**（批次 4.5）：`search_documents` 是全空间共用的一份数据，
+  // 建索引时按某个人可见的范围裁剪，等于把他的视角烧进共用的那份里——下一次换成 owner
+  // 触发重索引，私有笔记就谁也都搜不到了，连作者自己。所以索引收全量，
+  // "发不发给这个人"由查询侧那一次 join `notes` 判（`search()` 与 `getSearchTotal`）。
   const [noteRows, sourceRows] = await Promise.all([
     // CONC-03: 软删除的笔记不应被重新索引到搜索文档中
     executor.query.notes.findMany({
@@ -505,12 +521,15 @@ export async function reindexWorkspaceSearch(
           ))
       : [];
     const noteIds = [...new Set(originRows.map((o) => o.noteId).filter((id): id is string => Boolean(id)))];
+    // 目标(objective)的索引正文里会带上来源笔记的标题，而索引是全空间共用的一份，
+    // 所以这里只能收**人人可见**的那部分：作者私有的那篇不该出现在别人的目标命中里。
+    // 作者自己仍然搜得到那篇——它作为 note 类型照常进索引（见上面那条注释）。
     const noteTitleById = new Map(
       noteIds.length > 0
         ? (await executor
             .select({ id: notes.id, title: notes.title })
             .from(notes)
-            .where(inArray(notes.id, noteIds)))
+            .where(and(inArray(notes.id, noteIds), eq(notes.shareScope, "shared"))))
             .map((n) => [n.id, n.title])
         : [],
     );

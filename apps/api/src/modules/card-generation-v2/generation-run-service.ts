@@ -18,6 +18,7 @@ import {
   sealEvidenceSnapshotsV2,
 } from "./evidence-seal-service.ts";
 import { notes, noteVersions, noteBlocks } from "@ailearn/shared/db-schema/note";
+import { visibleNotesCondition } from "../note/visibility.ts";
 import {
   createCardGenerationRunRequestV2Schema,
   type CreateCardGenerationRunRequestV2,
@@ -158,7 +159,8 @@ export async function createGenerationRunV2(
     const noteId = version.noteId;
 
     const note = await tx.query.notes.findFirst({
-      where: and(eq(notes.id, noteId), eq(notes.workspaceId, ctx.workspaceId)),
+      // 看不见就当不存在（下面就是 note_not_found 404）：不能从别人仅自己可见的笔记起一批卡。
+      where: and(eq(notes.id, noteId), eq(notes.workspaceId, ctx.workspaceId), visibleNotesCondition(ctx.userId)),
     });
     if (!note) throw new CardGenerationV2ServiceError("note_not_found", 404, "笔记不存在");
 
@@ -699,7 +701,7 @@ export async function retryGenerationRunV2(ctx: RunContext, runId: string) {
     }
     // 来源过期守卫：run 绑定的 note 版本已不是最新 → 重跑只会对着过期内容再产出一批
     // 注定要被 source_outdated 标记的候选，用户应当先回笔记重开一次生成。
-    if (await checkSourceOutdated(tx, ctx.workspaceId, run.noteId, run.noteVersionId, run.sourceContentHash)) {
+    if (await checkSourceOutdated(tx, ctx.workspaceId, ctx.userId, run.noteId, run.noteVersionId, run.sourceContentHash)) {
       throw new CardGenerationV2ServiceError(
         "source_outdated",
         409,

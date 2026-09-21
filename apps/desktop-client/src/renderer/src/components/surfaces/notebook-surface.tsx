@@ -275,7 +275,15 @@ export function NotebookSurface() {
   const [draft, setDraft] = useState({ title: "", content: "" });
   const [saving, setSaving] = useState(false);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "committed" | "error">("idle");
-  const [receipt, setReceipt] = useState<{ savedAt: string; isAutosave: boolean } | null>(null);
+  const [receipt, setReceipt] = useState<{
+    savedAt: string;
+    isAutosave: boolean;
+    /**
+     * 这一次走的是长连接还是 HTTP。它不是装饰：流式那条只说明"本机已并进文档"，
+     * 服务端落盘还要等 Hocuspocus 的 debounce，保存行不能说成"已保存"。
+     */
+    via: "stream" | "uploaded" | "unchanged";
+  } | null>(null);
   const [saveFailure, setSaveFailure] = useState<string | null>(null);
   const [startingGeneration, setStartingGeneration] = useState(false);
   const [generationFailure, setGenerationFailure] = useState<string | null>(null);
@@ -490,21 +498,38 @@ export function NotebookSurface() {
     setSaveState("saving");
     setSaveFailure(null);
     try {
-      const response = await api.note.save({
+      // 正文与标题都交给文档增量（批次 4.4）。原来一次保存同时提交**整篇正文**和一个
+      // 版本指针：两扇窗口都还在编辑时，后提交的那一次把前一次的正文原地改掉，而且
+      // 没有版本可回去。现在交的是"我改了哪些块"，合并由 CRDT 负责——内容这条路上
+      // 不再存在"覆盖"这个动作。（谁先「提交并确认」仍然会先推进版本指针，后一次
+      // 确认拿旧令牌会被 409 挡下来，那是版本历史的顺序问题，与正文覆盖是两回事。）
+      const submitted = await api.note.doc.syncBlocks({
         meta: createRequestMeta(epochRef.current),
-        commandId: createCommandId("note-save"),
+        commandId: createCommandId("note-doc"),
         noteId: current.noteId,
-        request: {
-          version: 1,
-          title: nextTitle,
-          ...(editable ? { blocks: markdownToBlocks(nextContent) } : {}),
-          baseVersionId: current.currentVersionId,
-          isAutosave: reason === "auto",
-        },
+        ...(editable ? { blocks: markdownToBlocks(nextContent) } : {}),
+        // 屏幕上写的是什么就定成什么（与改造前一致：手动提交的标题按 manual 记）。
+        title: { title: nextTitle, titleSource: "manual" as const },
       });
-      if (response.workspaceEpoch) epochRef.current = response.workspaceEpoch;
-      const committed = unwrapGatewayResult(response);
-      setReceipt({ savedAt: committed.savedAt, isAutosave: committed.isAutosave });
+      if (submitted.workspaceEpoch) epochRef.current = submitted.workspaceEpoch;
+      const written = unwrapGatewayResult(submitted);
+      if (reason === "manual") {
+        // 「提交并确认」多走一步：把文档此刻定成一个可回去的版本。它不再带正文。
+        const response = await api.note.save({
+          meta: createRequestMeta(epochRef.current),
+          commandId: createCommandId("note-save"),
+          noteId: current.noteId,
+          request: {
+            version: 1,
+            baseVersionId: current.currentVersionId,
+          },
+        });
+        if (response.workspaceEpoch) epochRef.current = response.workspaceEpoch;
+        const committed = unwrapGatewayResult(response);
+        setReceipt({ savedAt: committed.savedAt, isAutosave: false, via: "uploaded" });
+      } else {
+        setReceipt({ savedAt: written.savedAt, isAutosave: true, via: written.via });
+      }
       setSaveState("committed");
       await reload();
     } catch (error) {
@@ -722,7 +747,11 @@ export function NotebookSurface() {
       : dirty
         ? "● 有未提交编辑"
         : saveState === "committed" && receipt
-          ? `● ${receipt.isAutosave ? "已自动保存" : "已提交并确认"} · ${formatClock(receipt.savedAt)}`
+          ? // 流式那条只能说"已写入、正在同步"：服务端落盘还要等 Hocuspocus 的空闲
+            // 刷写。把本机接受说成已保存，就是这次审查里"看起来存下来了"那一类错觉。
+            `● ${receipt.isAutosave
+              ? receipt.via === "stream" ? "已写入，正在同步" : "已自动保存"
+              : "已提交并确认"} · ${formatClock(receipt.savedAt)}`
           : "● 已经存好，和服务器上的版本一致";
 
   const openSource = () => {

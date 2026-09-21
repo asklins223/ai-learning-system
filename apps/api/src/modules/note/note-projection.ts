@@ -85,7 +85,6 @@ export type NoteSaveReceiptSource = {
 export function projectNoteSaveReceiptV1(
   source: NoteSaveReceiptSource,
   baseVersionId: string,
-  isAutosave: boolean,
 ): NoteSaveReceiptV1 {
   const currentVersionId = source.note.currentVersionId;
   if (!currentVersionId) throw new Error("note_current_version_missing");
@@ -99,7 +98,6 @@ export function projectNoteSaveReceiptV1(
     versionId: source.version.id,
     currentVersionId,
     versionNo: source.version.versionNo,
-    isAutosave,
     revision: currentVersionId,
     savedAt: source.version.updatedAt.toISOString(),
   });

@@ -3798,10 +3798,7 @@ export class DesktopGateway {
       },
     });
     return {
-      applyBlocks: (blocks, title) => {
-        if (stopped) return;
-        handle.applyBlocks(blocks, title);
-      },
+      applyBlocks: (blocks, title) => (stopped ? null : handle.applyBlocks(blocks, title)),
       view: () => (stopped ? { blocks: [], title: "", titleSource: "auto" } : handle.view()),
       setPresence: (state) => {
         if (stopped) return;
@@ -3842,10 +3839,11 @@ export class DesktopGateway {
    */
   async syncNoteDocBlocks(
     noteId: string,
-    blocks: NoteDocBlock[],
+    // `null` = 这次只改标题，正文不动。见 `note-doc-state.ts` 的 `submitBlocks`。
+    blocks: NoteDocBlock[] | null,
     title: { title: string; titleSource: string } | undefined,
     requestId?: string,
-  ): Promise<NoteDocUploadResultV1> {
+  ): Promise<NoteDocUploadResultV1 & { uploaded: boolean }> {
     const safeNoteId = this.safeUuid(noteId);
     const start = await this.request(
       `/v2/notes/${safeNoteId}/doc-state`,
@@ -3864,8 +3862,10 @@ export class DesktopGateway {
     } finally {
       state.dispose();
     }
-    if (update === null) return { revision: parsed.data.revision };
-    return this.uploadNoteDocUpdate(safeNoteId, update, requestId);
+    // 没差分出来东西就一个字节都不发。`uploaded` 是给回执用的：把"我什么都没改"
+    // 报成"已提交"，界面就会在明明没写的情况下跳一次同步中。
+    if (update === null) return { revision: parsed.data.revision, savedAt: parsed.data.savedAt, uploaded: false };
+    return { ...(await this.uploadNoteDocUpdate(safeNoteId, update, requestId)), uploaded: true };
   }
 
   /**

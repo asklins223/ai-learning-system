@@ -1,6 +1,7 @@
 import { and, asc, count, desc, eq, gt, inArray, isNull, lt, or } from "drizzle-orm";
 import { withWorkspaceTransaction, type ApiTransaction } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks, sources, sourceSegments } from "@ailearn/shared/db-schema/note";
+import { visibleNotesCondition } from "../note/visibility.ts";
 import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
 import { aiArtifacts } from "@ailearn/shared/db-schema/ai";
 import { workspaces, workspaceMembers, users, onboardingStates } from "@ailearn/shared/db-schema/identity";
@@ -93,6 +94,12 @@ const EXPORT_MAX_TOTAL_ROWS = 150_000;
  * 导出前对关键大表执行 COUNT 查询，评估导出规模。
  * 如果任何表行数超过警告阈值，记录警告日志。
  * 如果任何表行数超过最大限制，抛出错误建议使用增量导出。
+ */
+/**
+ * 体积守卫。这里的计数**故意不按查看者收窄**（批次 4.5）：它是一个"宁可提前触发上限
+ * 也别 OOM"的保险丝，超集方向错得起；真正发出去的内容在下面 `exportWorkspace` 里
+ * 按可见性逐批筛。把这里也改成按人筛，会让共享空间里一次导出的实际载荷小于估算值，
+ * 于是保险丝在它该起作用的那一侧变松。
  */
 async function checkExportSize(tx: ApiTransaction, workspaceId: string): Promise<void> {
   const [
@@ -305,7 +312,7 @@ export async function exportWorkspace(workspaceId: string, userId: string) {
       loadInBatches({
         load: (c: UpdatedIdCursor | null) =>
           tx.select().from(notes).where(and(
-            and(eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)),
+            and(eq(notes.workspaceId, workspaceId), visibleNotesCondition(userId), isNull(notes.deletedAt)),
             c
               ? or(
                   lt(notes.updatedAt, c.updatedAt),

@@ -11,8 +11,10 @@ import { createHash } from "node:crypto";
 import { eq, and, inArray, sql, isNull } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
 import { notes, noteVersions } from "@ailearn/shared/db-schema/note";
-import { computeContentHash, ensureImageAssetsForBlocks } from "../note/service.ts";
+import { visibleNotesCondition } from "../note/visibility.ts";
+import { computeContentHash } from "../note/content-hash.ts";
 import { applyNoteDocUpdate } from "../note/document-state.ts";
+import { ensureImageAssetsForBlocks } from "../note/service.ts";
 import { writeNoteBlocks } from "../note/doc.ts";
 import { preRegisterImageAssetsForImport } from "../../lib/image-asset.ts";
 import { markdownToBlocks, extractTitleFromBlocks, type ParsedBlock } from "@ailearn/shared/markdown-parser";
@@ -215,7 +217,7 @@ async function importItems(
           // 快照落盘 + 投影成这个版本的 note_blocks 都在同一个入口里完成。
           await applyNoteDocUpdate(
             itemTx as Parameters<typeof applyNoteDocUpdate>[0],
-            { workspaceId, noteId: note.id },
+            { workspaceId, noteId: note.id, userId },
             version.id,
             (doc) => {
               writeNoteBlocks(
@@ -373,7 +375,15 @@ export async function importMarkdownNotes(
   // 避免笔记被删除后用相同 importId 重新导入时误判为已存在
   const existingNotes = existingNoteIds.length > 0
     ? await tx.query.notes.findMany({
-        where: and(inArray(notes.id, existingNoteIds), isNull(notes.deletedAt)),
+        where: and(
+          inArray(notes.id, existingNoteIds),
+          // 这里原本**连 workspace_id 都没有**：拿别人的 noteId 塞进同一个 importId
+          // 就能让这次导入误判"已存在"并把对方的笔记 id 回给自己的界面。
+          // 补上归属之后，看不见的那篇会走"重新导入"分支——宁可多一篇，不可指向别人的。
+          eq(notes.workspaceId, workspaceId),
+          visibleNotesCondition(userId),
+          isNull(notes.deletedAt),
+        ),
       })
     : [];
   const noteMap = new Map(existingNotes.map((n) => [n.id, n]));

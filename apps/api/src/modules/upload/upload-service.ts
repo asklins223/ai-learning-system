@@ -18,6 +18,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { and, eq, isNotNull, isNull, or } from "drizzle-orm";
 import { db, withWorkspaceTransaction, type WorkspaceTransactionContext } from "../../db/client.ts";
 import { noteImageAssets, notes } from "@ailearn/shared/db-schema/note";
+import { visibleNotesCondition } from "../note/visibility.ts";
 import { users } from "@ailearn/shared/db-schema/identity";
 import {
   uploadObject,
@@ -148,6 +149,7 @@ export async function uploadNoteImage(
       where: and(
         eq(notes.id, noteId),
         eq(notes.workspaceId, scope.workspaceId),
+        visibleNotesCondition(scope.userId),
         isNull(notes.deletedAt),
       ),
     }),
@@ -447,8 +449,10 @@ export async function downloadUploadObject(
         // 笔记物理删除后 uploadedForNoteId 已置 NULL；软删除需显式排除
         if (!row.uploadedForNoteId) return { row, noteExists: false as const };
         const note = await tx.query.notes.findFirst({
+          // 图片属于那篇笔记：笔记看不见，图也就一起 404（下面就是这个形状）。
           where: and(
             eq(notes.id, row.uploadedForNoteId),
+            visibleNotesCondition(scope.userId),
             isNull(notes.deletedAt),
           ),
         });

@@ -12,10 +12,12 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import * as Y from "yjs";
 import postgres from "postgres";
+import { type ApiTransaction } from "../db/client.ts";
 import { closeDatabase, withWorkspaceTransaction } from "../db/client.ts";
-import { createNote, restoreNoteVersion, updateNote } from "../modules/note/service.ts";
-import { applyNoteDocUpdate, loadNoteDoc } from "../modules/note/document-state.ts";
+import { checkpointNote, createNote, restoreNoteVersion } from "../modules/note/service.ts";
+import { applyNoteDocUpdate, loadNoteDoc, persistNoteDoc, resolveNoteDocFlushTarget } from "../modules/note/document-state.ts";
 import { importMarkdownNotes, prepareMarkdownImport } from "../modules/import/markdown-import-service.ts";
 import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
 import {
@@ -24,6 +26,9 @@ import {
   restoreNoteBlocksFrom,
   snapshotOf,
   writeNoteBlocks,
+  docFromSnapshot,
+  syncNoteBlocksForEditor,
+  setNoteTitle,
   type NoteDocBlock,
 } from "../modules/note/doc.ts";
 
@@ -52,6 +57,36 @@ const original = [
   { type: "code" as const, content: `SELECT 1;\nSELECT 2; -- ${tag}` },
   { type: "paragraph" as const, content: `尾段 ${tag}` },
 ];
+
+/**
+ * 与协同落盘走完全相同的一条路：读文档 → 改 → 挑一个能写的版本 → 投影。
+ * 用例因此测的是生产那个落盘口，而不是测试自己现编的一套写法。
+ */
+async function flushNoteDocLikeCollaboration(
+  tx: ApiTransaction,
+  mutate: (doc: Y.Doc) => void,
+): Promise<string> {
+  const scope = { workspaceId, noteId, userId };
+  const { doc } = await loadNoteDoc(tx, scope);
+  try {
+    doc.transact(() => mutate(doc));
+    const flushed = await resolveNoteDocFlushTarget(tx, scope, doc);
+    await persistNoteDoc(tx, scope, doc, flushed);
+    return flushed;
+  } finally {
+    doc.destroy();
+  }
+}
+
+/** 从某个起点分叉出一份增量（模拟两扇窗口各自的那一次提交）。 */
+function diffFrom(base: Uint8Array, mutate: (doc: Y.Doc) => void): Uint8Array {
+  const fork = docFromSnapshot(base);
+  const stateVector = Y.encodeStateVector(fork);
+  fork.transact(() => mutate(fork));
+  const update = Y.encodeStateAsUpdate(fork, stateVector);
+  fork.destroy();
+  return update;
+}
 
 function contentsOf(blocks: Array<{ content: string }>): string[] {
   return blocks.map((block) => block.content);
@@ -110,8 +145,11 @@ after(async () => {
   await sql`DELETE FROM workspace_members WHERE workspace_id IN (${workspaceId}, ${otherWorkspaceId})`;
   await sql`DELETE FROM workspaces WHERE id IN (${workspaceId}, ${otherWorkspaceId})`;
   await sql`DELETE FROM users WHERE id IN (${userId}, ${otherUserId})`;
-  const leftover = await sql`SELECT count(*)::int AS n FROM note_document_states`;
-  assert.equal(leftover[0].n, 0, `夹具残留了 ${leftover[0].n} 行文档状态`);
+  // 只看**本夹具**的那几篇：整张表空不空不由这个文件负责——现在每一条新建笔记都会
+  // 写一份快照（4.1 之后 `createNoteTx` 就落快照），并发跑的别的用例必然在这张表里有行。
+  // 断言"我删干净了"才是这条的本意。
+  const leftover = await sql`SELECT count(*)::int AS n FROM note_document_states WHERE note_id = ANY(${allNoteIds})`;
+  assert.equal(Number(leftover[0].n), 0, `夹具残留了 ${leftover[0].n} 行文档状态`);
   await sql.end();
   await closeDatabase();
 });
@@ -121,7 +159,7 @@ test("补齐无损：0244 之前建的笔记仍能从行里读出原文（迁移
   // 这个状态只能由历史数据构成：删掉快照行来代表 0244 之前建的笔记。
   await sql`DELETE FROM note_document_states WHERE note_id = ${noteId}`;
   const { doc, backfilled } = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
-    loadNoteDoc(tx, { workspaceId, noteId }),
+    loadNoteDoc(tx, { workspaceId, noteId, userId }),
   );
   assert.equal(backfilled, true, "没有快照时必须从关系表补齐（新建笔记也一样，先删快照模拟历史数据）");
   assert.deepEqual(
@@ -140,7 +178,7 @@ test("写一次即成为事实源：快照落盘、投影回 note_blocks、revis
   ];
 
   await withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
-    await applyNoteDocUpdate(tx, { workspaceId, noteId }, versionId, (doc) => {
+    await applyNoteDocUpdate(tx, { workspaceId, noteId, userId }, versionId, (doc) => {
       writeNoteBlocks(doc, next);
     });
   });
@@ -153,7 +191,7 @@ test("写一次即成为事实源：快照落盘、投影回 note_blocks、revis
   // 必须在事务**提交之后**再读 revision：在同一个 withWorkspaceTransaction 里用另一个
   // 连接读，读到的是旧值（未提交），会假报"revision 没递增"。
   await withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
-    await applyNoteDocUpdate(tx, { workspaceId, noteId }, versionId, (doc) => {
+    await applyNoteDocUpdate(tx, { workspaceId, noteId, userId }, versionId, (doc) => {
       writeNoteBlocks(doc, [...next, { type: "paragraph", content: `又加一段 ${tag}` }]);
     });
   });
@@ -166,44 +204,103 @@ test("写一次即成为事实源：快照落盘、投影回 note_blocks、revis
 
   // 重开一篇文档必须读到快照而不是关系表（backfilled=false 才是"事实源已切换"的证据）。
   const reloaded = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
-    loadNoteDoc(tx, { workspaceId, noteId }),
+    loadNoteDoc(tx, { workspaceId, noteId, userId }),
   );
   assert.equal(reloaded.backfilled, false, "已有快照却仍从关系表补齐=两套事实源");
   assert.equal(projectNoteBlocks(reloaded.doc).length, next.length + 1);
   reloaded.doc.destroy();
 });
 
-test("自动保存不再另起一套正文：写完行之后文档必须与投影一致", async () => {
-  // 这条守的是本轮之前的状态：`updateVersionInPlace` 按行 UPDATE、绕开 Y.Doc。于是自动
-  // 保存写完的那一刻快照还是旧内容，下一次按文档读（协同落盘、doc-state 取起点）就把
-  // 刚保存的正文顶回去，而且不报错。
+test("增量落盘之后：行、版本快照、标题与更新时间必须一起跟上", async () => {
+  // 这条守的是自动保存改走文档增量之后的那一组投影。以前它们是 `updateNote` 按行写时
+  // 顺手做的：那条路一停，任何一样没跟上都是一个**不报错**的错位——最狠的是版本快照
+  // （恢复会退回改动之前），最显眼的是标题与列表排序。
   const current = await blocksOfCurrentVersion();
   const submitted = current.map((row, index) => ({
-    type: row.type as "paragraph" | "heading" | "code",
-    content: index === 0 ? `${row.content}（自动保存改过）` : row.content,
+    type: row.type,
+    content: index === 0 ? `${row.content}（这次是增量改的）` : row.content,
   }));
-  assert.equal(submitted.length, current.length, "块数没变才走得到自动保存那条逐块改写的路");
+  const noteRow = async (): Promise<{ updatedAt: Date; title: string }> => {
+    const rows = await sql`SELECT updated_at, title FROM notes WHERE id = ${noteId}`;
+    // 不要 `new Date(String(date))`：那是秒级精度，两次落盘在同一年内根本比不出高低。
+    return { updatedAt: rows[0].updated_at as Date, title: String(rows[0].title) };
+  };
+  const before = await noteRow();
 
   await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
-    updateNote(tx, noteId, workspaceId, userId, {
-      blocks: submitted,
-      baseVersionId: versionId,
-      isAutosave: true,
-    }),
+    flushNoteDocLikeCollaboration(tx, (doc) => syncNoteBlocksForEditor(doc, submitted)),
   );
 
   const { doc, backfilled } = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
-    loadNoteDoc(tx, { workspaceId, noteId }),
+    loadNoteDoc(tx, { workspaceId, noteId, userId }),
   );
   const fromDoc = projectNoteBlocks(doc).map((block) => block.content);
   doc.destroy();
-  assert.equal(backfilled, false, "自动保存必须写快照，不该退回从行补齐");
-  assert.deepEqual(fromDoc, submitted.map((block) => block.content), "文档没跟上自动保存（两套正文）");
+  assert.equal(backfilled, false, "已有快照却仍从关系表补齐=两套事实源");
+  assert.deepEqual(fromDoc, submitted.map((block) => block.content), "文档没跟上这次提交（两套正文）");
   assert.deepEqual(
     (await blocksOfCurrentVersion()).map((row) => row.content),
     submitted.map((block) => block.content),
     "投影与文档分叉",
   );
+
+  const after = await noteRow();
+  assert.ok(
+    after.updatedAt.getTime() > before.updatedAt.getTime(),
+    "notes.updated_at 没跟着落盘走：改过的笔记不会排到列表前面，游标也停在旧位置",
+  );
+
+  // 版本的快照**不**跟着落盘走：那是它被提交当时的样子，也是「提交并确认」判断
+  // "要不要再建一版"的依据。刷了它，历史就再也长不出来。
+  const snapshot = await sql`SELECT content_json FROM note_versions WHERE id = ${versionId}`;
+  const snapshotted = (snapshot[0].content_json as { blocks: Array<{ content: string }> }).blocks
+    .map((block) => block.content);
+  assert.notDeepEqual(
+    snapshotted,
+    submitted.map((block) => block.content),
+    "落盘改了已有版本的快照：这一版不再是它自己被提交时的样子了",
+  );
+});
+
+test("两个人各自改一块：两次增量都留下，块数不涨", async () => {
+  // 这就是审查里那个缺陷的最终形态：原来两扇窗口拿着同一个版本指针各提交一次整篇，
+  // 两边都过得检查，后写的把前写的原地覆盖掉且无从恢复。现在交的是**增量**，
+  // 判据从"谁后写"变成"文档合成了什么"——覆盖这个动作在这条路上不存在。
+  const { doc: baseDoc } = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
+    loadNoteDoc(tx, { workspaceId, noteId, userId }),
+  );
+  const base = snapshotOf(baseDoc);
+  const blockCount = projectNoteBlocks(baseDoc).length;
+  baseDoc.destroy();
+
+  const aText = `甲窗口这句 ${tag}`;
+  const bText = `乙窗口这句 ${tag}`;
+  const first = diffFrom(base, (doc) => {
+    const blocks = projectNoteBlocks(doc);
+    syncNoteBlocksForEditor(doc, blocks.map((block, index) => ({
+      type: block.type,
+      content: index === 0 ? aText : block.content,
+    })));
+  });
+  const second = diffFrom(base, (doc) => {
+    const blocks = projectNoteBlocks(doc);
+    syncNoteBlocksForEditor(doc, blocks.map((block, index) => ({
+      type: block.type,
+      content: index === 1 ? bText : block.content,
+    })));
+  });
+  assert.ok(first.byteLength > 0 && second.byteLength > 0, "分叉没产生增量，这条用例什么都没测");
+
+  for (const update of [first, second]) {
+    await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
+      flushNoteDocLikeCollaboration(tx, (doc) => Y.applyUpdate(doc, update)),
+    );
+  }
+
+  const contents = (await blocksOfCurrentVersion()).map((row) => row.content);
+  assert.ok(contents.some((content) => content.includes(aText)), "甲的改动被覆盖了");
+  assert.ok(contents.some((content) => content.includes(bText)), "乙的改动被覆盖了");
+  assert.equal(contents.length, blockCount, "块数因为两次并发提交而增殖");
 });
 
 test("来源过期守卫：版本指针没变、正文改了，也要被判成过时", async () => {
@@ -220,31 +317,31 @@ test("来源过期守卫：版本指针没变、正文改了，也要被判成�
   });
 
   const same = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
-    checkSourceOutdated(tx, workspaceId, noteId, versionIdNow, hashNow),
+    checkSourceOutdated(tx, workspaceId, userId, noteId, versionIdNow, hashNow),
   );
   assert.equal(same, false, "内容没改却说过时（正向对照，否则下面的断言毫无意义）");
 
   const changed = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
-    checkSourceOutdated(tx, workspaceId, noteId, versionIdNow, "一个来自旧正文的 hash"),
+    checkSourceOutdated(tx, workspaceId, userId, noteId, versionIdNow, "一个来自旧正文的 hash"),
   );
   assert.equal(changed, true, "版本 id 没变但正文变了，守卫必须看出来——这正是原地自动保存那条路");
 });
 
 test("恢复历史版本走同一入口：内容回到旧版且投影与文档一致", async () => {
   const before = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
-    loadNoteDoc(tx, { workspaceId, noteId }),
+    loadNoteDoc(tx, { workspaceId, noteId, userId }),
   );
   const oldSnapshot = snapshotOf(before.doc);
   before.doc.destroy();
 
   await withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
-    await applyNoteDocUpdate(tx, { workspaceId, noteId }, versionId, (doc) => {
+    await applyNoteDocUpdate(tx, { workspaceId, noteId, userId }, versionId, (doc) => {
       writeNoteBlocks(doc, [{ type: "paragraph", content: `改得面目全非 ${tag}` }]);
     });
   });
 
   await withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
-    await applyNoteDocUpdate(tx, { workspaceId, noteId }, versionId, (doc) => {
+    await applyNoteDocUpdate(tx, { workspaceId, noteId, userId }, versionId, (doc) => {
       restoreNoteBlocksFrom(doc, oldSnapshot);
     });
   });
@@ -264,17 +361,21 @@ test("恢复历史版本走同一入口：内容回到旧版且投影与文档�
  */
 test("加载器按空间收窄：陌生作用域读不到别人的正文", async () => {
   const own = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
-    loadNoteDoc(tx, { workspaceId, noteId }),
+    loadNoteDoc(tx, { workspaceId, noteId, userId }),
   );
   const ownCount = projectNoteBlocks(own.doc).length;
   own.doc.destroy();
   assert.ok(ownCount >= 5, `正向对照失败：owner 作用域只读到 ${ownCount} 块`);
 
-  const foreign = await withWorkspaceTransaction({ workspaceId: otherWorkspaceId, userId: otherUserId }, (tx) =>
-    loadNoteDoc(tx, { workspaceId: otherWorkspaceId, noteId }),
+  // 批次 4.5 之后加载器是"读不到就拒"，不是"读不到就给你一篇空的"：后者会让一次跨空间
+  // 的写入悄悄落到别人的笔记上，而页面看上去一切正常。
+  await assert.rejects(
+    () => withWorkspaceTransaction({ workspaceId: otherWorkspaceId, userId: otherUserId }, (tx) =>
+      loadNoteDoc(tx, { workspaceId: otherWorkspaceId, noteId, userId: otherUserId }),
+    ),
+    /note_doc_not_visible/,
+    "跨空间补齐读到了别人的正文",
   );
-  assert.equal(projectNoteBlocks(foreign.doc).length, 0, "跨空间补齐读到了别人的正文");
-  foreign.doc.destroy();
 });
 
 test("note_document_states 的 RLS 真的在挡（换角色才测得出来）", async () => {
@@ -340,7 +441,7 @@ test("批量 Markdown 导入：每个新建笔记都有快照，且投影与解�
       ORDER BY nb.ordinal
     `;
     const { doc } = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
-      loadNoteDoc(tx, { workspaceId, noteId: item.note.id }),
+      loadNoteDoc(tx, { workspaceId, noteId: item.note.id, userId }),
     );
     const projected = projectNoteBlocks(doc);
     doc.destroy();
@@ -392,7 +493,7 @@ test("恢复历史版本后，文档快照与新的当前版本一致", async ()
   assert.equal(String(after[0].current_version_id), olderId, "指针没切过去");
 
   const { doc } = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
-    loadNoteDoc(tx, { workspaceId, noteId }),
+    loadNoteDoc(tx, { workspaceId, noteId, userId }),
   );
   const contents = projectNoteBlocks(doc).map((block) => block.content);
   doc.destroy();
@@ -400,65 +501,93 @@ test("恢复历史版本后，文档快照与新的当前版本一致", async ()
 });
 
 /**
- * 剩下两条曾经绕开文档的写路：只改标题（克隆一个新版本）与手动保存（建新版本）。
+ * 「提交并确认」= `checkpointNote`。它现在**不收正文**，内容取自文档。
  *
- * 它们原来直接 INSERT `note_blocks`，于是文档快照停在保存之前——下一次按文档读（协同
- * 落盘、`doc-state` 取编辑起点）就把这次改动顶回去，而且不报错。这条用例就是这个缺陷
- * 的现场取证：改完必须两边一致，包括标题（它在行里是 `notes.title`，在文档里是 `meta.title`）。
+ * 这一条同时守两件事：
+ *  - 版本确实按确认建立（不是每次自动保存都建一版）；
+ *  - 建立时抄的是文档此刻，所以两个人各自改过的内容都会进那个快照——
+ *    原来那种"提交方手里的整篇才是结果"的语义已经不存在。
+ * 标题也一起看：它落在文档的 meta 与 `notes.title` 两处，只写一处就会分叉。
  */
-test("改名与手动保存建新版本：文档必须跟着走，不再有两套正文", async () => {
-  const currentVersionId = async (): Promise<string> => {
-    const rows = await sql`SELECT current_version_id FROM notes WHERE id = ${noteId}`;
-    return String(rows[0].current_version_id);
-  };
-  const rowsOf = async (vid: string): Promise<string[]> => {
-    const rows = await sql`
-      SELECT content FROM note_blocks WHERE version_id = ${vid} ORDER BY ordinal
-    `;
-    return rows.map((row) => String(row.content));
-  };
-  const docView = async (): Promise<{ contents: string[]; title: string | null }> => {
-    const { doc } = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
-      loadNoteDoc(tx, { workspaceId, noteId }),
-    );
-    const contents = projectNoteBlocks(doc).map((block) => block.content);
-    const title = readNoteTitle(doc)?.title ?? null;
-    doc.destroy();
-    return { contents, title };
-  };
+test('「提交并确认」从文档抄快照：两人都改过的内容都在那一版里', async () => {
+  const pointer = async (): Promise<string> =>
+    String((await sql`SELECT current_version_id FROM notes WHERE id = ${noteId}`)[0].current_version_id);
+  const rowsOf = async (vid: string): Promise<string[]> =>
+    (await sql`SELECT content FROM note_blocks WHERE version_id = ${vid} ORDER BY ordinal`)
+      .map((row) => String(row.content));
 
-  // ① 只改标题：正文没动，但新版本与文档的 meta 都必须拿到新标题。
-  const renamed = `文档要跟上的标题 ${tag}`;
-  const beforeRename = await currentVersionId();
-  await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
-    updateNote(tx, noteId, workspaceId, userId, {
-      title: renamed,
-      baseVersionId: beforeRename,
-      isAutosave: false,
-    }),
+  const before = await pointer();
+  const aText = `甲写的这一句 ${tag}`;
+  const bText = `乙写的这一句 ${tag}`;
+  const { doc: baseDoc } = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
+    loadNoteDoc(tx, { workspaceId, noteId, userId }),
   );
-  const clonedVersion = await currentVersionId();
-  assert.notEqual(clonedVersion, beforeRename, "改名应当克隆出新版本（否则这条没测到克隆分支）");
-  assert.deepEqual(await docView(), { contents: await rowsOf(clonedVersion), title: renamed }, "改名没进文档 meta");
+  const base = snapshotOf(baseDoc);
+  const baseCount0 = projectNoteBlocks(baseDoc).length;
+  baseDoc.destroy();
+  // 两个分叉故意做**不同形状**的动作：甲就地改第一块，乙在末尾加一块。
+  // 只测"各改一块"的话，前面几条用例里的恢复会把块数改掉，索引就不存在了
+  // （这条一开始就是这么假失败的）。
+  const editInPlace = (text: string): Uint8Array => diffFrom(base, (doc) => {
+    const blocks = projectNoteBlocks(doc);
+    syncNoteBlocksForEditor(doc, blocks.map((block, position) => ({
+      type: block.type,
+      content: position === 0 ? text : block.content,
+    })));
+  });
+  const editAppend = (text: string): Uint8Array => diffFrom(base, (doc) => {
+    const blocks = projectNoteBlocks(doc);
+    syncNoteBlocksForEditor(doc, [
+      ...blocks.map((block) => ({ type: block.type, content: block.content })),
+      { type: "paragraph", content: text },
+    ]);
+  });
+  const baseCount = baseCount0;
+  await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
+    flushNoteDocLikeCollaboration(tx, (doc) => Y.applyUpdate(doc, editInPlace(aText))));
+  await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
+    flushNoteDocLikeCollaboration(tx, (doc) => Y.applyUpdate(doc, editAppend(bText))));
 
-  // ② 手动保存（建新版本）：正文必须同时是行与文档。
-  const submitted = [
-    { type: "heading" as const, content: renamed },
-    { type: "paragraph" as const, content: `手动保存的正文 ${tag}` },
-  ];
-  const beforeSave = await currentVersionId();
-  await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
-    updateNote(tx, noteId, workspaceId, userId, {
-      blocks: submitted,
-      baseVersionId: beforeSave,
-      isAutosave: false,
-    }),
+  const renamed = `确认时改的名 ${tag}`;
+  const receipt = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
+    checkpointNote(tx, noteId, workspaceId, userId, { title: renamed, baseVersionId: before }),
   );
-  const savedVersion = await currentVersionId();
-  assert.equal((await rowsOf(savedVersion)).length, 2, "新版本的行没写出来");
+  assert.ok(receipt, "checkpoint 没有回执");
+  const saved = await pointer();
+  assert.notEqual(saved, before, "「提交并确认」应当建立一个新版本");
+
+  const contents = await rowsOf(saved);
+  assert.ok(contents.some((content) => content.includes(aText)), "确认的版本里没有甲的改动");
+  assert.ok(contents.some((content) => content.includes(bText)), "确认的版本里没有乙的改动");
+  assert.equal(contents.length, baseCount + 1, "确认的版本应当带上两人各自的改动");
+  const snapshotted = (await sql`SELECT content_json FROM note_versions WHERE id = ${saved}`)[0]
+    .content_json as { blocks: Array<{ content: string }> };
   assert.deepEqual(
-    (await docView()).contents,
-    submitted.map((block) => block.content),
-    "文档停在手动保存之前（下一次按文档读会把它顶回去）",
+    snapshotted.blocks.map((block) => block.content),
+    contents,
+    "版本快照与它自己的行不一致（恢复会给出另一份内容）",
+  );
+
+  const noteTitle = await sql`SELECT title, title_source FROM notes WHERE id = ${noteId}`;
+  assert.equal(String(noteTitle[0].title), renamed, "回执里的标题没落到 notes.title");
+  assert.equal(String(noteTitle[0].title_source), "manual");
+  const { doc: afterDoc } = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
+    loadNoteDoc(tx, { workspaceId, noteId, userId }),
+  );
+  assert.equal(readNoteTitle(afterDoc)?.title, renamed, "标题没进文档 meta（下次按文档读会顶回去）");
+  afterDoc.destroy();
+});
+
+test("只改标题不动正文：正文一个字都不许变", async () => {
+  // 界面那一侧 `blocks` 是**缺省**而不是空数组：空数组的意思是"作者把正文删光了"。
+  // 两者混成一个的话，改名就会清空整篇笔记——正是这一批要消灭的那类静默销毁。
+  const before = await blocksOfCurrentVersion();
+  await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
+    flushNoteDocLikeCollaboration(tx, (doc) => setNoteTitle(doc, "只改了名字", "manual")),
+  );
+  assert.deepEqual(
+    (await blocksOfCurrentVersion()).map((row) => row.content),
+    before.map((row) => row.content),
+    "只改标题的提交动了正文",
   );
 });

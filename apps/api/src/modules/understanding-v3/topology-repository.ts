@@ -22,6 +22,7 @@ import { and, eq, inArray, isNull, sql, desc } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
 import { logger } from "../../lib/logger.ts";
 import { notes, sources } from "@ailearn/shared/db-schema/note";
+import { visibleNotesCondition } from "../note/visibility.ts";
 import {
   learningObjectivesV2,
   learningObjectiveRevisionsV2,
@@ -160,7 +161,7 @@ export async function buildTopologySnapshotV3(
     await tx
       .select({ id: notes.id, title: notes.title, currentVersionId: notes.currentVersionId, sourceId: notes.sourceId })
       .from(notes)
-      .where(and(eq(notes.workspaceId, ctx.workspaceId), isNull(notes.deletedAt)))
+      .where(and(eq(notes.workspaceId, ctx.workspaceId), visibleNotesCondition(ctx.userId), isNull(notes.deletedAt)))
       .orderBy(notes.id)
       .limit(probeLimit),
     "notes",

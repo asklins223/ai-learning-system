@@ -37,6 +37,7 @@ import {
 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { learningRuns, canonicalLearningEventOutbox, practiceTrailEventOutbox } from "@ailearn/shared/db-schema/learning-runs";
 import { notes } from "@ailearn/shared/db-schema/note";
+import { visibleNotesCondition } from "../note/visibility.ts";
 import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
 import type {
   LearningObjectiveSurfaceV3,
@@ -214,7 +215,11 @@ async function computeFreshness(
   const noteRows = await tx
     .select({ id: notes.id, currentVersionId: notes.currentVersionId })
     .from(notes)
-    .where(and(eq(notes.workspaceId, ctx.workspaceId), inArray(notes.id, noteIds)));
+    .where(and(
+      eq(notes.workspaceId, ctx.workspaceId),
+      visibleNotesCondition(ctx.userId),
+      inArray(notes.id, noteIds),
+    ));
   const currentByNote = new Map(noteRows.map((n) => [n.id, n.currentVersionId]));
   // 修复：origin.noteVersionId 为 null 时（手动迁移/早期数据），
   // 无法做版本比较，不应误判为 source_outdated。只有当 origin 有明确
@@ -311,7 +316,11 @@ async function assembleObjectiveSurfaceV3Inner(
     const noteRows = await tx
       .select({ id: notes.id, title: notes.title, currentVersionId: notes.currentVersionId })
       .from(notes)
-      .where(and(eq(notes.workspaceId, ctx.workspaceId), inArray(notes.id, noteIds)));
+      .where(and(
+        eq(notes.workspaceId, ctx.workspaceId),
+        visibleNotesCondition(ctx.userId),
+        inArray(notes.id, noteIds),
+      ));
     const primaryOrigin = origins.find((o) => o.kind === "note" && o.supportGrade === "primary")
       ?? origins.find((o) => o.kind === "note");
     if (primaryOrigin && primaryOrigin.kind === "note") {
@@ -698,7 +707,12 @@ async function batchAssembleObjectiveSurfacesV3(
     ? await tx
         .select({ id: notes.id, title: notes.title, currentVersionId: notes.currentVersionId })
         .from(notes)
-        .where(and(eq(notes.workspaceId, ctx.workspaceId), inArray(notes.id, noteIds)))
+        // 详情页(:313)与批量页(这里)必须是同一条判据，否则"列表里没有、点进去有标题"。
+        .where(and(
+          eq(notes.workspaceId, ctx.workspaceId),
+          visibleNotesCondition(ctx.userId),
+          inArray(notes.id, noteIds),
+        ))
     : [];
   const noteById = new Map(noteRows.map((n) => [n.id, n]));
 

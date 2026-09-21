@@ -9,8 +9,12 @@ import { logger } from "../../lib/logger.ts";
 import { db, withWorkspaceTransaction } from "../../db/client.ts";
 import { decodeToken } from "../identity/service.ts";
 import { isWorkspaceOwner } from "../identity/middleware.ts";
-import { loadNoteDoc, projectBlocksIntoVersion, saveNoteDoc } from "./document-state.ts";
-import { projectNoteBlocks, snapshotOf } from "./doc.ts";
+import {
+  loadNoteDoc,
+  persistNoteDoc,
+  resolveNoteDocFlushTarget,
+} from "./document-state.ts";
+import { snapshotOf } from "./doc.ts";
 
 /**
  * 笔记协同的服务端（批次 4.2）。
@@ -114,7 +118,11 @@ export const noteCollaboration = new Hocuspocus<NoteDocContext>({
     // 把库里的状态灌进 Hocuspocus 已经建好的 doc，而不是换一个 doc 出去。
     const { doc } = await withWorkspaceTransaction(
       { workspaceId: context.workspaceId, userId: context.userId },
-      (tx) => loadNoteDoc(tx, { workspaceId: context.workspaceId, noteId: context.noteId }),
+      (tx) => loadNoteDoc(tx, {
+        workspaceId: context.workspaceId,
+        noteId: context.noteId,
+        userId: context.userId,
+      }),
     );
     Y.applyUpdate(document, Y.encodeStateAsUpdate(doc));
     doc.destroy();
@@ -123,15 +131,13 @@ export const noteCollaboration = new Hocuspocus<NoteDocContext>({
   // v4 的落盘钩子给的是 `lastContext`（最后一个活跃连接的上下文），不是 `context`。
   async onStoreDocument({ document, lastContext }) {
     const context = lastContext;
-    const scope = { workspaceId: context.workspaceId, noteId: context.noteId };
     const next = snapshotOf(document);
     await withWorkspaceTransaction(
       { workspaceId: context.workspaceId, userId: context.userId },
       async (tx) => {
         // 内容没变就一个字节都不写。Hocuspocus 的直连 disconnect 会**无条件**跑这个
-        // 钩子，离线队列重放同一条 update、或连上又断开都会进来一次；不挡的话
-        // revision 会凭空 +1，而 `note_blocks` 是"删重插"，等于每次数一下连接就重写
-        // 整篇正文的行。
+        // 钩子，离线队列重放同一条 update、或连上又断开都会进来一次；不挡这里的话
+        // revision 凭空 +1，而正文的行被重写一遍。
         const stored = await tx.query.noteDocumentStates.findFirst({
           where: and(
             eq(noteDocumentStates.noteId, context.noteId),
@@ -141,14 +147,19 @@ export const noteCollaboration = new Hocuspocus<NoteDocContext>({
         });
         if (stored && sameBytes(Uint8Array.from(stored.state), next)) return;
 
-        await saveNoteDoc(tx, scope, document, next);
-        // 当前版本可能已经被人翻走了（恢复历史版本），投影目标要按最新指针走。
-        const current = await tx.query.notes.findFirst({
-          where: eq(notes.id, context.noteId),
-          columns: { currentVersionId: true },
-        });
-        const versionId = current?.currentVersionId ?? context.versionId;
-        await projectBlocksIntoVersion(tx, context.workspaceId, versionId, projectNoteBlocks(document));
+        // 落盘与投影全套都交给 `persistNoteDoc`——它是唯一一处"文档写回关系表"的地方：
+        // 正文的行、当前版本的快照、标题、更新时间、搜索投影一次过。自动保存以前是
+        // 按行写的那条路，那条路一停，这里少投一样就是一个不报错的错位。
+        const versionId = await resolveNoteDocFlushTarget(tx, {
+          workspaceId: context.workspaceId,
+          noteId: context.noteId,
+          userId: context.userId,
+        }, document);
+        await persistNoteDoc(tx, {
+          workspaceId: context.workspaceId,
+          noteId: context.noteId,
+          userId: context.userId,
+        }, document, versionId);
       },
     );
   },
@@ -225,7 +236,11 @@ export async function applyUploadedDocUpdate(input: {
   userId: string;
   noteId: string;
   update: Uint8Array;
-}): Promise<{ status: "ok"; revision: number } | { status: "not_found" } | { status: "no_version" }> {
+}): Promise<
+  | { status: "ok"; revision: number; savedAt: string }
+  | { status: "not_found" }
+  | { status: "no_version" }
+> {
   const scope = { workspaceId: input.workspaceId, userId: input.userId };
   const note = await withWorkspaceTransaction(scope, (tx) =>
     tx.query.notes.findFirst({
@@ -257,16 +272,27 @@ export async function applyUploadedDocUpdate(input: {
     await connection.disconnect();
   }
 
-  const stored = await withWorkspaceTransaction(scope, (tx) =>
-    tx.query.noteDocumentStates.findFirst({
-      where: and(
-        eq(noteDocumentStates.noteId, input.noteId),
-        eq(noteDocumentStates.workspaceId, input.workspaceId),
-      ),
-      columns: { revision: true },
-    }),
-  );
-  return { status: "ok", revision: Number(stored?.revision ?? 0) };
+  const [stored, flushedNote] = await Promise.all([
+    withWorkspaceTransaction(scope, (tx) =>
+      tx.query.noteDocumentStates.findFirst({
+        where: and(
+          eq(noteDocumentStates.noteId, input.noteId),
+          eq(noteDocumentStates.workspaceId, input.workspaceId),
+        ),
+        columns: { revision: true },
+      })),
+    withWorkspaceTransaction(scope, (tx) =>
+      tx.query.notes.findFirst({
+        where: eq(notes.id, input.noteId),
+        columns: { updatedAt: true },
+      })),
+  ]);
+  return {
+    status: "ok",
+    revision: Number(stored?.revision ?? 0),
+    // 落盘口现在会刷新 `notes.updated_at`，所以这个时间是服务端给的，不是本机猜的。
+    savedAt: (flushedNote?.updatedAt ?? new Date()).toISOString(),
+  };
 }
 
 /**

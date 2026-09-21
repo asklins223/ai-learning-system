@@ -3,6 +3,7 @@ import { withWorkspaceTransaction } from "../../db/client.ts";
 import { learningCardsV2, learningObjectiveEvidenceBindingsV2, learningObjectiveRevisionsV2, learningObjectivesV2 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
 import { notes } from "@ailearn/shared/db-schema/note";
+import { visibleNotesCondition } from "../note/visibility.ts";
 import { ReviewStatus } from "@ailearn/shared";
 
 export interface StatsOverview {
@@ -54,7 +55,10 @@ export async function getStatsOverview(workspaceId: string, userId: string): Pro
     tx
       .select({ count: count() })
       .from(notes)
-      .where(and(eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt))),
+      // 批次 4.5：这一格从今天起说的是"我看得见的笔记有几篇"。它左边的复习数、
+      // 右边的目标到期数本来就是按人的（见本文件 QUAL-58/SEC-26 那段），
+      // 只有它是空间级的——那正是"owner 看到成员的数字"那一类错。
+      .where(and(eq(notes.workspaceId, workspaceId), visibleNotesCondition(userId), isNull(notes.deletedAt))),
     tx
       .select({ count: count() })
       .from(learningCardsV2)

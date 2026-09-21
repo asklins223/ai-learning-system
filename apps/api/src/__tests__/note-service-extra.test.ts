@@ -7,11 +7,10 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import {
-  cleanTitleCandidate,
-  deriveNoteTitle,
-  RevisionConflictError,
-} from "../modules/note/service.ts";
+import { RevisionConflictError } from "../modules/note/service.ts";
+// 标题的两个派生函数住在文档内核：自动保存提交增量之后，重算自动标题的时机只剩
+// 落盘投影那一次，而那时在场的是投影出来的块，不是请求体。
+import { cleanTitleCandidate, deriveNoteTitle } from "../modules/note/doc.ts";
 
 // ─── cleanTitleCandidate ─────────────────────────────────────────────────
 

@@ -21,6 +21,7 @@ import {
   learningObjectiveRevisionsV2,
 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { notes, noteVersions, sources } from "@ailearn/shared/db-schema/note";
+import { visibleNotesCondition } from "../note/visibility.ts";
 import {
   understandingProjectionCheckpoints,
   understandingRoutePlans,
@@ -407,7 +408,11 @@ export async function loadUnderstandingProjection(
         .select({ cardId: learningCardsV2.cardId })
         .from(learningCardsV2)
         .innerJoin(noteVersions, eq(noteVersions.id, learningCardsV2.noteVersionId))
-        .innerJoin(notes, and(eq(notes.id, noteVersions.noteId), isNull(notes.deletedAt)))
+        .innerJoin(notes, and(
+          eq(notes.id, noteVersions.noteId),
+          visibleNotesCondition(scope.userId),
+          isNull(notes.deletedAt),
+        ))
         .where(and(
           eq(learningCardsV2.workspaceId, scope.workspaceId),
           eq(notes.sourceId, params.sourceId),
@@ -588,6 +593,7 @@ export async function loadUnderstandingProjection(
     ? await tx.query.notes.findMany({
         where: and(
           eq(notes.workspaceId, scope.workspaceId),
+          visibleNotesCondition(scope.userId),
           inArray(notes.id, noteIds),
           isNull(notes.deletedAt),
         ),
@@ -829,7 +835,10 @@ export async function loadUnderstandingProjection(
   // 直接命中（304 只在无 minimumCheckpoint 且 If-None-Match 匹配时返回）。
   // ETag 基于稳定 watermark（canonical/practice 事件 id），不是每次
   // 重新签发的 checkpoint token（capturedAt 变化会使 ETag 每次不同）。
-  const etag = `"${sha256Hex(`${latestCanonical ?? ""}:${latestPractice ?? ""}:${scope.workspaceId}`).slice(0, 24)}"`;
+  // 批次 4.5：正文里现在含有"按人可见"的那部分（笔记标题与血缘节点），所以缓存键
+  // 必须带上查看者——只按 workspace 哈希的话，同空间的另一个人会直接命中这个 304，
+  // 拿到的却是别人的那份视图。
+  const etag = `"${sha256Hex(`${latestCanonical ?? ""}:${latestPractice ?? ""}:${scope.workspaceId}:${scope.userId}`).slice(0, 24)}"`;
   if (params.ifNoneMatch === etag && !params.minimumCheckpoint) {
     return { status: "not_modified", etag };
   }

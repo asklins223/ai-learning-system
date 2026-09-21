@@ -75,7 +75,7 @@ async function setup(session: { workspaceType: "personal" | "collaborative"; rol
   const watchNoteDocument = vi.fn(async (..._args: WatchCall) => streamHandle) as unknown as ReturnType<typeof vi.fn> & {
     mock: { calls: WatchCall[] };
   };
-  const uploadNoteDocUpdate = vi.fn(async () => ({ revision: 7 }));
+  const uploadNoteDocUpdate = vi.fn(async () => ({ revision: 7, savedAt: "2026-09-21T00:00:00.000Z" }));
   const getNoteDocState = vi.fn(async () => ({
     blocks: [{ ordinal: 0, type: "paragraph", content: "正文" }],
     title: "标题",
@@ -83,7 +83,7 @@ async function setup(session: { workspaceType: "personal" | "collaborative"; rol
     revision: 3,
     backfilled: false,
   }));
-  const syncViaGateway = vi.fn(async () => ({ revision: 11 }));
+  const syncViaGateway = vi.fn(async () => ({ revision: 11, savedAt: "2026-09-21T00:00:00.000Z" }));
   const send = vi.fn();
   const fakeWindow = {
     isDestroyed: () => false,

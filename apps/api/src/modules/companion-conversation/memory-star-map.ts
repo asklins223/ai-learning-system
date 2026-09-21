@@ -6,6 +6,7 @@
  */
 
 import { sql } from "drizzle-orm";
+import { noteVisibleSqlText } from "../note/visibility.ts";
 import type { ApiTransaction } from "../../db/client.ts";
 
 export interface MemoryStarMapNode {
@@ -71,6 +72,8 @@ export async function getMemoryStarMap(
           WHEN 'note' THEN (
             SELECT n.title FROM notes n
             WHERE n.id = l.entity_id AND n.workspace_id = m.workspace_id AND n.deleted_at IS NULL
+              -- 查看者就是这条记忆的主人本身，所以判据引用 m.user_id 而不是绑定参数。
+              AND ${sql.raw(noteVisibleSqlText("n", "m.user_id"))}
             LIMIT 1
           )
           WHEN 'source' THEN (
@@ -107,6 +110,7 @@ export async function getMemoryStarMap(
         CASE l.entity_type
           WHEN 'note' THEN CASE WHEN EXISTS (
             SELECT 1 FROM notes n WHERE n.id = l.entity_id AND n.workspace_id = m.workspace_id AND n.deleted_at IS NULL
+              AND ${sql.raw(noteVisibleSqlText("n", "m.user_id"))}
           ) THEN jsonb_build_object('kind', 'note', 'noteId', l.entity_id) END
           WHEN 'source' THEN CASE WHEN EXISTS (
             SELECT 1 FROM sources s WHERE s.id = l.entity_id AND s.workspace_id = m.workspace_id AND s.status <> 'archived'

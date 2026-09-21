@@ -1404,6 +1404,8 @@ export const noteDocServerStateV1Schema = z.strictObject({
   update: z.string().min(1).max(NOTE_DOC_BLOCKS_MAX_JSON_CHARS),
   revision: nonNegativeIntSchema,
   backfilled: z.boolean(),
+  /** 服务端此刻的 `notes.updated_at`。无增量的提交也拿它当回执时间。 */
+  savedAt: isoTimestampSchema,
 });
 export type NoteDocServerStateV1 = z.infer<typeof noteDocServerStateV1Schema>;
 
@@ -1421,6 +1423,8 @@ export type NoteDocStateResultV1 = z.infer<typeof noteDocStateResultV1Schema>;
 /** 一次性上送（personal 空间与离线队列重连）的回执。 */
 export const noteDocUploadResultV1Schema = z.strictObject({
   revision: nonNegativeIntSchema,
+  /** 落盘后 `notes.updated_at`：这一条是服务端给的。 */
+  savedAt: isoTimestampSchema,
 });
 export type NoteDocUploadResultV1 = z.infer<typeof noteDocUploadResultV1Schema>;
 
@@ -1432,6 +1436,14 @@ export const noteDocWriteResultV1Schema = z.strictObject({
   via: z.enum(["stream", "uploaded", "unchanged"]),
   /** 只有 uploaded 才有：服务端那份快照的 revision。 */
   revision: nonNegativeIntSchema.nullable(),
+  /**
+   * 这一次写入被接受的时刻，给保存行显示用。**来源按 `via` 不同**，这一点必须写明：
+   *  - `uploaded`：服务端落盘后的 `notes.updated_at`；
+   *  - `stream`：主进程把它并进本机文档的时刻——增量还要经 Hocuspocus 的 debounce
+   *    才落盘，那一刻服务端的时间还不存在。界面在流式路径上说的是"已写入、正在同步"
+   *    而不是"已保存"，就是为了不把本机接受说成服务端落盘。
+   */
+  savedAt: isoTimestampSchema,
 });
 export type NoteDocWriteResultV1 = z.infer<typeof noteDocWriteResultV1Schema>;
 
@@ -1983,7 +1995,11 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
         meta: RequestMetaV1;
         commandId: string;
         noteId: Uuid;
-        blocks: z.infer<typeof noteDocSubmittedBlockV1Schema>[];
+        /**
+         * 缺省 = 这次只改标题，正文一个字都不动；空数组才是"把正文删光"。
+         * 两者必须是两种表达，否则改名会清空笔记——那正是这一批要消灭的那类静默销毁。
+         */
+        blocks?: z.infer<typeof noteDocSubmittedBlockV1Schema>[];
         title?: { title: string; titleSource: "auto" | "manual" };
       }): Promise<GatewayResultV1<z.infer<typeof noteDocWriteResultV1Schema>>>;
       presence(input: {

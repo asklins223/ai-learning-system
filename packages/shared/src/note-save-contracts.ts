@@ -20,18 +20,19 @@ export const noteBlockWriteV1Schema = z.strictObject({
 });
 export type NoteBlockWriteV1 = z.infer<typeof noteBlockWriteV1Schema>;
 
-export const noteSaveRequestV1Schema = z
-  .strictObject({
-    version: z.literal(1),
-    title: z.string().max(200).optional(),
-    blocks: z.array(noteBlockWriteV1Schema).max(10_000).optional(),
-    baseVersionId: uuidSchema,
-    isAutosave: z.boolean().default(false),
-  })
-  .refine(
-    (value) => value.title !== undefined || value.blocks !== undefined,
-    "title or blocks is required",
-  );
+/**
+ * 「提交并确认」的请求体。**没有 `blocks` 字段**——这是刻意的，不是漏了。
+ *
+ * 这条路上曾经同时收整篇正文和一个版本指针当 OCC 令牌：两扇窗口拿同一个令牌时两边
+ * 都能通过检查，后写的那一次把前一次的正文原地覆盖掉，且没有版本可恢复。现在正文
+ * 只从文档来（`POST /v2/notes/:id/doc-update` / WS 增量），这里只负责把"文档此刻"
+ * 定成一个版本，所以能传的东西只剩下"要不要顺便改名"。
+ */
+export const noteSaveRequestV1Schema = z.strictObject({
+  version: z.literal(1),
+  title: z.string().max(200).optional(),
+  baseVersionId: uuidSchema,
+});
 export type NoteSaveRequestV1 = z.infer<typeof noteSaveRequestV1Schema>;
 
 export const noteSaveReceiptV1Schema = z.strictObject({
@@ -43,7 +44,6 @@ export const noteSaveReceiptV1Schema = z.strictObject({
   versionId: uuidSchema,
   currentVersionId: uuidSchema,
   versionNo: positiveIntSchema,
-  isAutosave: z.boolean(),
   revision: uuidSchema,
   savedAt: isoTimestampSchema,
 });

@@ -254,8 +254,8 @@ export async function seedV2Fixture(
     // 1. user + workspace
     await tx`INSERT INTO users (id, email, password_hash, role)
       VALUES (${userId}, ${`v2fix-${userId.slice(0, 8)}@example.test`}, 'h', 'owner')`;
-    await tx`INSERT INTO workspaces (id, name, owner_id, ai_consent_version, ai_consent_at, ai_consent_by)
-      VALUES (${workspaceId}, ${`ws-${workspaceId.slice(0, 8)}`}, ${userId}, 'v1', now(), ${userId})`;
+    await tx`INSERT INTO workspaces (id, name, owner_id)
+      VALUES (${workspaceId}, ${`ws-${workspaceId.slice(0, 8)}`}, ${userId})`;
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role)
       VALUES (${workspaceId}, ${userId}, 'owner')`;
 
@@ -444,8 +444,8 @@ export async function seedV2ObjectiveOnly(
 
     await tx`INSERT INTO users (id, email, password_hash, role)
       VALUES (${userId}, ${`v2fix-${userId.slice(0, 8)}@example.test`}, 'h', 'owner')`;
-    await tx`INSERT INTO workspaces (id, name, owner_id, ai_consent_version, ai_consent_at, ai_consent_by)
-      VALUES (${workspaceId}, ${`ws-${workspaceId.slice(0, 8)}`}, ${userId}, 'v1', now(), ${userId})`;
+    await tx`INSERT INTO workspaces (id, name, owner_id)
+      VALUES (${workspaceId}, ${`ws-${workspaceId.slice(0, 8)}`}, ${userId})`;
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role)
       VALUES (${workspaceId}, ${userId}, 'owner')`;
 

@@ -351,11 +351,14 @@ export function NoteLibrarySurface() {
     setBusyId(note.id);
     setRowFailure(null);
     try {
-      unwrapGatewayResult(await window.ailearn.note.save({
+      // 改名不再走 `note.save`：那条现在是"把文档此刻定成一版"，带的是版本指针而不是
+      // 内容。改名只是改文档 meta 里的标题，走同一个增量口，`blocks` 缺省 = 正文不动
+      // （缺省和"空数组"必须是两件事，否则改名会把整篇清空）。
+      unwrapGatewayResult(await window.ailearn.note.doc.syncBlocks({
         meta: createRequestMeta(epochRef.current),
         commandId: createCommandId("note-rename"),
         noteId: note.id,
-        request: { version: 1, title, baseVersionId: note.currentVersionId, isAutosave: false },
+        title: { title, titleSource: "manual" },
       }));
       setRenaming(null);
       // The list keeps the pages it has already read: the refreshed first page

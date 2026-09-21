@@ -2,7 +2,7 @@
  * note/service.ts DB 依赖函数补充测试
  *
  * 通过 mock executor 测试 createNote / listNotes / getNoteWithVersion /
- * updateNote / deleteNote / listNoteVersions 的核心业务逻辑分支，
+ * deleteNote / listNoteVersions 等仍在的核心业务逻辑分支。
  * 覆盖级联删除、搜索索引投影、乐观并发冲突等路径。
  */
 
@@ -10,18 +10,16 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   createNote,
-  listNotes,
-  getNoteWithVersion,
-  updateNote,
   deleteNote,
-  restoreDeletedNote,
+  getNoteWithVersion,
   listNoteVersions,
-  RevisionConflictError,
-  computeContentHash,
+  listNotes,
+  restoreDeletedNote,
   restoreNoteVersion,
+  RevisionConflictError,
 } from "../modules/note/service.ts";
-
-// ─── Mock helpers ───────────────────────────────────────────────────────
+import { computeContentHash } from "../modules/note/content-hash.ts";
+// ─
 
 /**
  * 创建一个 chainable thenable 对象。
@@ -112,7 +110,7 @@ function createMockExecutor(config: MockConfig = {}): any {
       },
       // 正文的事实源已经是 Y.Doc（批次 4.1/4.3），自动保存也要先读快照再补齐。
       // 这里一律报"没有快照"，让 loadNoteDoc 走上方的 noteBlocks 补齐路：这些用例
-      // 测的是 updateNote 的分支与回执，快照本身由 note-document-state-postgres 集测覆盖。
+      // 回执由 note-document-state-postgres 集测对真库验。
       noteDocumentStates: {
         findFirst: async () => undefined,
       },
@@ -248,7 +246,7 @@ describe("note/service getNoteWithVersion", () => {
       notesFindFirst: undefined,
     });
 
-    const result = await getNoteWithVersion(mock, NOTE_ID, WS_ID);
+    const result = await getNoteWithVersion(mock, NOTE_ID, WS_ID, USER_ID);
     assert.equal(result, null);
   });
 
@@ -257,7 +255,7 @@ describe("note/service getNoteWithVersion", () => {
       notesFindFirst: { id: NOTE_ID, currentVersionId: null, workspaceId: WS_ID },
     });
 
-    const result = await getNoteWithVersion(mock, NOTE_ID, WS_ID);
+    const result = await getNoteWithVersion(mock, NOTE_ID, WS_ID, USER_ID);
     assert.equal(result, null);
   });
 
@@ -267,7 +265,7 @@ describe("note/service getNoteWithVersion", () => {
       noteVersionsFindFirst: undefined,
     });
 
-    const result = await getNoteWithVersion(mock, NOTE_ID, WS_ID);
+    const result = await getNoteWithVersion(mock, NOTE_ID, WS_ID, USER_ID);
     assert.equal(result, null);
   });
 
@@ -282,7 +280,7 @@ describe("note/service getNoteWithVersion", () => {
       noteBlocksFindMany: blocks,
     });
 
-    const result = await getNoteWithVersion(mock, NOTE_ID, WS_ID);
+    const result = await getNoteWithVersion(mock, NOTE_ID, WS_ID, USER_ID);
     assert.ok(result);
     assert.equal(result!.note.id, NOTE_ID);
     assert.equal(result!.version.id, VERSION_ID);
@@ -303,7 +301,7 @@ describe("note/service listNotes", () => {
       selectResult: [notes, [{ count: 2 }]],
     });
 
-    const result = await listNotes(mock, WS_ID, { limit: 10 });
+    const result = await listNotes(mock, WS_ID, { userId: USER_ID, limit: 10 });
 
     assert.equal(result.items.length, 2);
     assert.equal(result.total, 2);
@@ -331,7 +329,7 @@ describe("note/service listNotes", () => {
       ],
     });
 
-    const result = await listNotes(mock, WS_ID, { limit: 10 });
+    const result = await listNotes(mock, WS_ID, { userId: USER_ID, limit: 10 });
 
     assert.equal(result.items[0]?.firstImageBlock, "![装置](/api/uploads/a.png)");
     assert.equal(result.items[1]?.firstImageBlock, null, "没有图片块的要显式回 null");
@@ -354,7 +352,7 @@ describe("note/service listNotes", () => {
       selectResult: [notes, [{ count: 10 }]],
     });
 
-    const result = await listNotes(mock, WS_ID, { limit: 3 });
+    const result = await listNotes(mock, WS_ID, { userId: USER_ID, limit: 3 });
 
     assert.equal(result.items.length, 3);
     assert.equal(result.total, 10);
@@ -378,7 +376,7 @@ describe("note/service listNotes", () => {
       selectResult: [notes, [{ count: 10 }]],
     });
 
-    const result = await listNotes(mock, WS_ID, { limit: 3 });
+    const result = await listNotes(mock, WS_ID, { userId: USER_ID, limit: 3 });
 
     assert.equal(result.items.length, 3);
     assert.equal(result.total, 10);
@@ -391,11 +389,11 @@ describe("note/service listNotes", () => {
     });
 
     // limit=0 → clamp 到 1
-    const r1 = await listNotes(mock, WS_ID, { limit: 0 });
+    const r1 = await listNotes(mock, WS_ID, { userId: USER_ID, limit: 0 });
     assert.equal(r1.items.length, 0);
 
     // limit=200 → clamp 到 100
-    const r2 = await listNotes(mock, WS_ID, { limit: 200 });
+    const r2 = await listNotes(mock, WS_ID, { userId: USER_ID, limit: 200 });
     assert.equal(r2.items.length, 0);
   });
 
@@ -404,155 +402,11 @@ describe("note/service listNotes", () => {
       selectResult: [[], [{ count: 0 }]],
     });
 
-    const result = await listNotes(mock, WS_ID);
+    const result = await listNotes(mock, WS_ID, { userId: USER_ID });
     assert.equal(result.items.length, 0);
     assert.equal(result.total, 0);
   });
 });
-
-// ─── updateNote ────────────────────────────────────────────────────────
-
-describe("note/service updateNote", () => {
-  it("笔记不存在时返回 null", async () => {
-    const mock = createMockExecutor({
-      selectResult: [[]], // FOR UPDATE returns empty
-    });
-
-    const result = await updateNote(mock, NOTE_ID, WS_ID, USER_ID, {
-      title: "新标题",
-      baseVersionId: VERSION_ID,
-      isAutosave: false,
-    });
-
-    assert.equal(result, null);
-  });
-
-  it("baseVersionId 不匹配时抛 RevisionConflictError", async () => {
-    const mock = createMockExecutor({
-      selectResult: [[{
-        id: NOTE_ID,
-        currentVersionId: "different-version",
-        title: "旧标题",
-        titleSource: "manual",
-        workspaceId: WS_ID,
-      }]],
-    });
-
-    await assert.rejects(
-      () => updateNote(mock, NOTE_ID, WS_ID, USER_ID, {
-        title: "新标题",
-        baseVersionId: VERSION_ID,
-        isAutosave: false,
-      }),
-      (err: unknown) => err instanceof RevisionConflictError,
-    );
-  });
-
-  it("只更新标题（不更新 blocks）", async () => {
-    const nextVersionId = "00000000-0000-0000-0000-000000000007";
-    const currentVersion = {
-      id: VERSION_ID,
-      noteId: NOTE_ID,
-      versionNo: 1,
-      contentJson: {
-        blocks: [{ type: "paragraph", content: "内容" }],
-        importId: "import-1",
-      },
-      contentHash: "original-content-hash",
-    };
-    const mock = createMockExecutor({
-      selectResult: [[{
-        id: NOTE_ID,
-        currentVersionId: VERSION_ID,
-        title: "旧标题",
-        titleSource: "auto",
-        workspaceId: WS_ID,
-      }]],
-      notesFindFirst: { id: NOTE_ID, currentVersionId: nextVersionId, title: "新标题", titleSource: "manual", workspaceId: WS_ID },
-      noteVersionsFindFirstQueue: [
-        currentVersion,
-        currentVersion,
-        { ...currentVersion, id: nextVersionId, versionNo: 2 },
-      ],
-      noteBlocksFindMany: [{
-        type: "paragraph",
-        content: "内容",
-        ordinal: 0,
-        sourceRef: { sourceId: "source-1", segmentId: "segment-1" },
-      }],
-      insertReturning: [[{ id: nextVersionId, noteId: NOTE_ID, versionNo: 2 }]],
-    });
-
-    const result = await updateNote(mock, NOTE_ID, WS_ID, USER_ID, {
-      title: "新标题",
-      baseVersionId: VERSION_ID,
-      isAutosave: false,
-    });
-
-    assert.ok(result);
-    assert.equal(result!.note.title, "新标题");
-    assert.equal(result!.version.id, nextVersionId);
-    const versionInsert = mock._insertCalls.find(
-      (call: { data: unknown }) =>
-        !Array.isArray(call.data) &&
-        typeof call.data === "object" &&
-        call.data !== null &&
-        "contentHash" in call.data,
-    );
-    assert.deepEqual(versionInsert?.data.contentJson, currentVersion.contentJson);
-    assert.equal(versionInsert?.data.contentHash, currentVersion.contentHash);
-    // 证据链不丢这件事，现在要看的是**返回的块**，不是"有没有一次数组 INSERT"。
-    // 行由文档投影而来（批次 4.1/4.3），而这个假 `noteBlocks.findMany` 不看 where
-    // 条件、把上一版的行当成新版的行返回，于是投影正确地判断"无需重写"、一次 INSERT
-    // 都不发——按 INSERT 断言就等于在测夹具的瞎。真正"新版本初始为空、必须写入整篇"
-    // 由 note-document-state-postgres 集测在真库上覆盖。
-    assert.deepEqual(
-      (result!.blocks as Array<{ sourceRef?: unknown }>)[0]?.sourceRef,
-      { sourceId: "source-1", segmentId: "segment-1" },
-      "只改标题就把块级来源引用丢了",
-    );
-  });
-
-  it("更新 blocks 时创建新版本", async () => {
-    const newBlocks: NoteBlock[] = [
-      { ordinal: 0, type: "heading", content: "新标题" },
-      { ordinal: 1, type: "paragraph", content: "新内容" },
-    ];
-    const NEW_VERSION_ID = "00000000-0000-0000-0000-000000000005";
-
-    const mock = createMockExecutor({
-      insertReturning: [
-        [{ id: NEW_VERSION_ID, versionNo: 2 }],
-      ],
-      selectResult: [[{
-        id: NOTE_ID,
-        currentVersionId: VERSION_ID,
-        title: "旧标题",
-        titleSource: "manual",
-        workspaceId: WS_ID,
-      }]],
-      noteVersionsFindFirstQueue: [
-        null, // content-hash lookup: no match
-        { id: VERSION_ID, versionNo: 1 }, // latest version (in create-new-version branch)
-        { id: NEW_VERSION_ID, versionNo: 2 }, // final read
-      ],
-      notesFindFirst: { id: NOTE_ID, currentVersionId: NEW_VERSION_ID, title: "新标题", titleSource: "manual", workspaceId: WS_ID },
-      noteBlocksFindMany: newBlocks.map((b, i) => ({ ...b, ordinal: i, versionId: NEW_VERSION_ID })),
-    });
-
-    const result = await updateNote(mock, NOTE_ID, WS_ID, USER_ID, {
-      blocks: newBlocks,
-      baseVersionId: VERSION_ID,
-      isAutosave: false,
-    });
-
-    assert.ok(result);
-    assert.equal(result!.version.id, NEW_VERSION_ID);
-  });
-
-});
-
-// ─── deleteNote ────────────────────────────────────────────────────────
 
 describe("note/service deleteNote", () => {
   it("笔记不存在时返回 null", async () => {
@@ -561,7 +415,7 @@ describe("note/service deleteNote", () => {
       selectResult: [[]],
     });
 
-    const result = await deleteNote(mock, NOTE_ID, WS_ID);
+    const result = await deleteNote(mock, NOTE_ID, WS_ID, USER_ID);
     assert.equal(result, null);
   });
 
@@ -573,7 +427,7 @@ describe("note/service deleteNote", () => {
       ],
     });
 
-    const result = await deleteNote(mock, NOTE_ID, WS_ID);
+    const result = await deleteNote(mock, NOTE_ID, WS_ID, USER_ID);
     assert.equal(result?.ok, true);
     // CONC-03: 软删除不返回 imageObjectKeys（物理删除时才清理对象存储）
     assert.equal(result && "imageObjectKeys" in result, false);
@@ -585,7 +439,7 @@ describe("note/service deleteNote", () => {
       selectResult: [[]],
     });
 
-    const result = await deleteNote(mock, NOTE_ID, WS_ID);
+    const result = await deleteNote(mock, NOTE_ID, WS_ID, USER_ID);
     assert.equal(result, null);
   });
 });
@@ -598,7 +452,7 @@ describe("note/service restoreDeletedNote (CONC-03)", () => {
       selectResult: [[]],
     });
 
-    const result = await restoreDeletedNote(mock, NOTE_ID, WS_ID);
+    const result = await restoreDeletedNote(mock, NOTE_ID, WS_ID, USER_ID);
     assert.equal(result, null);
   });
 
@@ -610,7 +464,7 @@ describe("note/service restoreDeletedNote (CONC-03)", () => {
     });
 
     await assert.rejects(
-      () => restoreDeletedNote(mock, NOTE_ID, WS_ID),
+      () => restoreDeletedNote(mock, NOTE_ID, WS_ID, USER_ID),
       (err: unknown) => err instanceof Error && err.constructor.name === "NoteNotDeletedError",
     );
   });
@@ -624,7 +478,7 @@ describe("note/service restoreDeletedNote (CONC-03)", () => {
       noteBlocksFindMany: [],
     });
 
-    const result = await restoreDeletedNote(mock, NOTE_ID, WS_ID);
+    const result = await restoreDeletedNote(mock, NOTE_ID, WS_ID, USER_ID);
     assert.ok(result);
     assert.equal(result!.note.id, NOTE_ID);
   });
@@ -706,7 +560,7 @@ describe("note/service listNoteVersions", () => {
       notesFindFirst: undefined,
     });
 
-    const result = await listNoteVersions(mock, NOTE_ID, WS_ID);
+    const result = await listNoteVersions(mock, NOTE_ID, WS_ID, USER_ID);
     assert.equal(result, null);
   });
 
@@ -720,7 +574,7 @@ describe("note/service listNoteVersions", () => {
       noteVersionsFindMany: versions,
     });
 
-    const result = await listNoteVersions(mock, NOTE_ID, WS_ID);
+    const result = await listNoteVersions(mock, NOTE_ID, WS_ID, USER_ID);
     assert.ok(result);
     assert.equal(result!.length, 2);
     assert.equal(result![0].versionNo, 2);
@@ -733,7 +587,7 @@ describe("note/service listNoteVersions", () => {
       noteVersionsFindMany: [],
     });
 
-    const result = await listNoteVersions(mock, NOTE_ID, WS_ID);
+    const result = await listNoteVersions(mock, NOTE_ID, WS_ID, USER_ID);
     assert.ok(result);
     assert.equal(result!.length, 0);
   });
@@ -762,269 +616,6 @@ describe("note/service computeContentHash", () => {
     assert.equal(hash.length, 32);
   });
 });
-
-// ─── updateNote content-hash dedup & in-place update ─────────────────────
-
-describe("note/service updateNote content-hash dedup", () => {
-  it("内容匹配已有版本时直接指向该版本，不创建新版本", async () => {
-    const existingVersion = {
-      id: "existing-v1",
-      noteId: NOTE_ID,
-      versionNo: 1,
-      contentHash: "abc123",
-      contentJson: { blocks: [{ type: "paragraph", content: "same" }] },
-    };
-    const mock = createMockExecutor({
-      selectResult: [[{
-        id: NOTE_ID,
-        currentVersionId: "old-v1",
-        title: "Test",
-        titleSource: "auto",
-        workspaceId: WS_ID,
-      }]],
-      notesFindFirst: { id: NOTE_ID, currentVersionId: "old-v1", workspaceId: WS_ID, title: "Test", titleSource: "auto" },
-      noteVersionsFindFirstQueue: [
-        existingVersion, // content-hash lookup
-        existingVersion, // final read
-      ],
-      noteBlocksFindMany: [{ type: "paragraph", content: "same", ordinal: 0 }],
-    });
-
-    const result = await updateNote(mock, NOTE_ID, WS_ID, USER_ID, {
-      blocks: [{ type: "paragraph", content: "same" }],
-      baseVersionId: "old-v1",
-      isAutosave: true,
-    });
-
-    assert.ok(result);
-    assert.equal(result!.version.id, "existing-v1");
-  });
-
-  it("哈希匹配但 contentJson 不一致（碰撞）时不复用，走原地更新或新建分支", async () => {
-    // 场景：contentHash 匹配但 contentJson 实际内容不同（极低概率碰撞）
-    // 二次验证应阻止错误复用，fallback 到 isAutosave 原地更新分支
-    const hashCollisionVersion = {
-      id: "collision-v1",
-      noteId: NOTE_ID,
-      versionNo: 1,
-      contentHash: "abc123", // 与 computeContentHash({blocks:[{type:"paragraph",content:"updated"}]}) 相同（模拟碰撞）
-      contentJson: { blocks: [{ type: "paragraph", content: "different content" }] }, // 实际内容不同
-    };
-    const mock = createMockExecutor({
-      selectResult: [
-        [{
-          id: NOTE_ID,
-          currentVersionId: VERSION_ID,
-          title: "Test",
-          titleSource: "auto",
-          workspaceId: WS_ID,
-        }],
-        // canUpdateVersionInPlace 的 SELECT ... FOR UPDATE on note_versions
-        [{ id: VERSION_ID }],
-      ],
-      notesFindFirst: { id: NOTE_ID, currentVersionId: VERSION_ID, workspaceId: WS_ID, title: "Test", titleSource: "auto" },
-      noteVersionsFindFirstQueue: [
-        hashCollisionVersion, // content-hash lookup: hash matches
-        { id: VERSION_ID, noteId: NOTE_ID, versionNo: 1 }, // final read (after in-place update)
-      ],
-      noteBlocksFindMany: [{ type: "paragraph", content: "updated", ordinal: 0 }],
-    });
-
-    const result = await updateNote(mock, NOTE_ID, WS_ID, USER_ID, {
-      blocks: [{ type: "paragraph", content: "updated" }],
-      baseVersionId: VERSION_ID,
-      isAutosave: true,
-    });
-
-    assert.ok(result);
-    // 不应复用碰撞版本，应原地更新当前版本
-    assert.equal(result!.version.id, VERSION_ID, "哈希碰撞时应 fallback 到原地更新，不复用碰撞版本");
-  });
-
-  it("内容匹配且 currentVersionId 已指向该版本时跳过冗余 UPDATE", async () => {
-    // 场景：撤销后内容回到当前版本，content_hash 匹配且 currentVersionId 已正确
-    const existingVersion = {
-      id: "current-v1",
-      noteId: NOTE_ID,
-      versionNo: 1,
-      contentHash: "abc123",
-      contentJson: { blocks: [{ type: "paragraph", content: "same" }] },
-    };
-    const mock = createMockExecutor({
-      selectResult: [[{
-        id: NOTE_ID,
-        currentVersionId: "current-v1",  // 已指向匹配版本
-        title: "same",                   // 标题也已一致
-        titleSource: "auto",
-        workspaceId: WS_ID,
-      }]],
-      notesFindFirst: { id: NOTE_ID, currentVersionId: "current-v1", workspaceId: WS_ID, title: "same", titleSource: "auto" },
-      noteVersionsFindFirstQueue: [
-        existingVersion, // content-hash lookup
-        existingVersion, // final read
-      ],
-      noteBlocksFindMany: [{ type: "paragraph", content: "same", ordinal: 0 }],
-    });
-
-    const result = await updateNote(mock, NOTE_ID, WS_ID, USER_ID, {
-      blocks: [{ type: "paragraph", content: "same" }],
-      baseVersionId: "current-v1",
-      isAutosave: true,
-    });
-
-    assert.ok(result);
-    assert.equal(result!.version.id, "current-v1");
-    assert.equal(result!.note.title, "same");
-  });
-
-  it("手动标题变化即使正文相同也创建新版本令牌", async () => {
-    const currentVersion = {
-      id: VERSION_ID,
-      noteId: NOTE_ID,
-      versionNo: 1,
-      contentHash: "same-content",
-      contentJson: { blocks: [{ type: "paragraph", content: "same" }] },
-    };
-    const nextVersionId = "00000000-0000-0000-0000-000000000006";
-    const mock = createMockExecutor({
-      selectResult: [[{
-        id: NOTE_ID,
-        currentVersionId: VERSION_ID,
-        title: "旧标题",
-        titleSource: "manual",
-        workspaceId: WS_ID,
-      }]],
-      notesFindFirst: {
-        id: NOTE_ID,
-        currentVersionId: nextVersionId,
-        workspaceId: WS_ID,
-        title: "新标题",
-        titleSource: "manual",
-      },
-      noteVersionsFindFirstQueue: [
-        currentVersion,
-        currentVersion,
-        { ...currentVersion, id: nextVersionId, versionNo: 2 },
-      ],
-      insertReturning: [[{ id: nextVersionId, noteId: NOTE_ID, versionNo: 2 }]],
-      noteBlocksFindMany: [{ type: "paragraph", content: "same", ordinal: 0 }],
-    });
-
-    const result = await updateNote(mock, NOTE_ID, WS_ID, USER_ID, {
-      title: "新标题",
-      blocks: [{ type: "paragraph", content: "same" }],
-      baseVersionId: VERSION_ID,
-      isAutosave: true,
-    });
-
-    assert.ok(result);
-    assert.equal(result!.version.id, nextVersionId);
-    assert.equal(result!.version.versionNo, 2);
-  });
-
-  it("isAutosave + 无卡片引用时原地更新当前版本", async () => {
-    const mock = createMockExecutor({
-      selectResult: [
-        [{
-          id: NOTE_ID,
-          currentVersionId: VERSION_ID,
-          title: "Test",
-          titleSource: "auto",
-          workspaceId: WS_ID,
-        }],
-        // canUpdateVersionInPlace 的 SELECT ... FOR UPDATE on note_versions
-        [{ id: VERSION_ID }],
-      ],
-      notesFindFirst: { id: NOTE_ID, currentVersionId: VERSION_ID, workspaceId: WS_ID, title: "Test", titleSource: "auto" },
-      noteVersionsFindFirstQueue: [
-        null, // content-hash lookup: no match
-        { id: VERSION_ID, noteId: NOTE_ID, versionNo: 1 }, // final read
-      ],
-      noteBlocksFindMany: [{ type: "paragraph", content: "updated", ordinal: 0 }],
-    });
-
-    const result = await updateNote(mock, NOTE_ID, WS_ID, USER_ID, {
-      blocks: [{ type: "paragraph", content: "updated" }],
-      baseVersionId: VERSION_ID,
-      isAutosave: true,
-    });
-
-    assert.ok(result);
-    assert.equal(result!.version.id, VERSION_ID);
-  });
-
-  // ── V1 卡片引用检查（已删除）─────────────────────────────────────────
-  // 删除理由：以下三个用例分别断言「有 active/superseded 卡引用时降级为创建
-  // 新版本」「有 archived 卡引用时允许原地更新」，均依赖 canUpdateVersionInPlace
-  // 检查 V1 learningCards（learningCardsFindFirst）。V2 迁移后 V1 卡表已删除，
-  // V2 卡片经 objectiveId 关联、不直接引用 note_version，该检查已退役
-  // （见 note/service.ts canUpdateVersionInPlace 的 "V1 退役" 注释），现仅保留
-  // sealed 版本保护。属只测已删 V1 行为的用例，予以删除。
-
-  it("isAutosave + 版本行不存在时（FOR UPDATE 返回空）降级为创建新版本", async () => {
-    const mock = createMockExecutor({
-      selectResult: [
-        [{
-          id: NOTE_ID,
-          currentVersionId: VERSION_ID,
-          title: "Test",
-          titleSource: "auto",
-          workspaceId: WS_ID,
-        }],
-        // canUpdateVersionInPlace 的 SELECT ... FOR UPDATE 返回空——版本已被删除
-        [],
-      ],
-      notesFindFirst: { id: NOTE_ID, currentVersionId: VERSION_ID, workspaceId: WS_ID, title: "Test", titleSource: "auto" },
-      noteVersionsFindFirstQueue: [
-        null, // content-hash lookup: no match
-        { id: VERSION_ID, versionNo: 1 }, // latest version (for fallback)
-        { id: "new-v2", noteId: NOTE_ID, versionNo: 2 }, // final read
-      ],
-      insertReturning: [[{ id: "new-v2", noteId: NOTE_ID, versionNo: 2 }]],
-      noteBlocksFindMany: [{ type: "paragraph", content: "updated", ordinal: 0 }],
-    });
-
-    const result = await updateNote(mock, NOTE_ID, WS_ID, USER_ID, {
-      blocks: [{ type: "paragraph", content: "updated" }],
-      baseVersionId: VERSION_ID,
-      isAutosave: true,
-    });
-
-    assert.ok(result);
-    assert.equal(result!.version.versionNo, 2, "版本行不存在时应降级为创建新版本");
-  });
-
-  it("显式保存（isAutosave=false）始终创建新版本", async () => {
-    const mock = createMockExecutor({
-      selectResult: [[{
-        id: NOTE_ID,
-        currentVersionId: VERSION_ID,
-        title: "Test",
-        titleSource: "auto",
-        workspaceId: WS_ID,
-      }]],
-      notesFindFirst: { id: NOTE_ID, currentVersionId: VERSION_ID, workspaceId: WS_ID, title: "Test", titleSource: "auto" },
-      noteVersionsFindFirstQueue: [
-        null, // content-hash lookup: no match
-        { id: VERSION_ID, versionNo: 1 }, // latest version
-        { id: "new-v2", noteId: NOTE_ID, versionNo: 2 }, // final read
-      ],
-      insertReturning: [[{ id: "new-v2", noteId: NOTE_ID, versionNo: 2 }]],
-      noteBlocksFindMany: [{ type: "paragraph", content: "explicit", ordinal: 0 }],
-    });
-
-    const result = await updateNote(mock, NOTE_ID, WS_ID, USER_ID, {
-      blocks: [{ type: "paragraph", content: "explicit" }],
-      baseVersionId: VERSION_ID,
-      isAutosave: false,
-    });
-
-    assert.ok(result);
-    assert.equal(result!.version.versionNo, 2);
-  });
-});
-
-// ─── restoreNoteVersion ──────────────────────────────────────────────────
 
 describe("note/service restoreNoteVersion", () => {
   it("笔记不存在时返回 null", async () => {

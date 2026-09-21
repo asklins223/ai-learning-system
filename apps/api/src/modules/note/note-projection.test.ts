@@ -56,7 +56,7 @@ test("Note save receipt exposes only committed version evidence", () => {
       versionNo: 3,
       updatedAt: new Date("2026-08-23T00:00:03.000Z"),
     },
-  }, "44444444-4444-4444-8444-444444444444", false);
+  }, VERSION_ID);
   assert.equal(receipt.status, "committed");
   assert.equal(receipt.versionId, VERSION_ID);
   assert.equal(receipt.revision, VERSION_ID);

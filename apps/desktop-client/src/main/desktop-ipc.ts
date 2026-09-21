@@ -528,8 +528,15 @@ const noteDocSyncBlocksInputSchema = z.strictObject({
   commandId: commandIdSchema,
   noteId: uuidSchema,
   // 上限与下行帧同一处定义：两边各写一个数，迟早一边放行一边拒收。
-  blocks: z.array(noteDocSubmittedBlockV1Schema).max(NOTE_DOC_BLOCKS_MAX_COUNT),
+  //
+  // **缺省 = 这次只改标题，正文一个字都不动**；空数组则是"作者把正文删光了"。
+  // 两者必须是两种表达：合并成一种的话，改名就会把整篇笔记清空——而那正是
+  // 这一批要消灭的那类"静默销毁用户内容"。
+  blocks: z.array(noteDocSubmittedBlockV1Schema).max(NOTE_DOC_BLOCKS_MAX_COUNT).optional(),
   title: z.strictObject({ title: z.string().max(200), titleSource: z.enum(["auto", "manual"]) }).optional(),
+}).refine((value) => value.blocks !== undefined || value.title !== undefined, {
+  // 什么都不带的提交是一次没有意义的往返（还要取一次编辑起点），直接拒。
+  message: "note_doc_submit_empty",
 });
 const noteDocPresenceInputSchema = z.strictObject({
   ...m1InputBase,
@@ -2414,18 +2421,28 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     assertEpoch(input.meta, activeWorkspaceEpoch);
     // 可写性这里一律不判：判据只在服务端那一处（WS 侧 `Authenticated("readonly")`、
     // HTTP 侧 `requireOwner`）。这里只决定"走哪条出口"。
+    // 走哪条出口只判一次（同一个表达式），因为两条出口的判据必须是同一句话：有活连接
+    // 就并进那份文档（服务端由 WS 落盘），没有就取起点差分后走 HTTP。
     const stream = noteDocStreams.get(input.noteId);
-    if (stream && stream.workspaceEpoch === activeWorkspaceEpoch) {
-      stream.handle.applyBlocks(input.blocks, input.title);
-      return { via: "stream", revision: null };
+    const onStream = Boolean(stream && stream.workspaceEpoch === activeWorkspaceEpoch);
+    if (onStream && stream) {
+      const update = stream.handle.applyBlocks(input.blocks ?? null, input.title);
+      // 本机没产生任何增量时不报"同步中"——那一次什么都没写，报成提交过就是在骗回执。
+      return update === null
+        ? { via: "unchanged", revision: null, savedAt: new Date().toISOString() }
+        : { via: "stream", revision: null, savedAt: new Date().toISOString() };
     }
     const receipt = await gateway.syncNoteDocBlocks(
       input.noteId,
-      input.blocks,
+      input.blocks ?? null,
       input.title,
       input.meta.requestId,
     );
-    return { via: "uploaded", revision: receipt.revision };
+    return {
+      via: receipt.uploaded ? "uploaded" : "unchanged",
+      revision: receipt.revision,
+      savedAt: receipt.savedAt,
+    };
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, noteDocWriteResultV1Schema);
 
   installHandler(DESKTOP_IPC_CHANNELS.noteDocPresence, noteDocPresenceInputSchema, options, (_event, _window, input) => {

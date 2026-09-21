@@ -132,6 +132,10 @@ before(async () => {
   });
   assert.equal(created.statusCode, 200, `owner 建笔记必须成功，实际 ${created.statusCode}: ${created.body}`);
   sharedNoteId = created.json().note.id as string;
+  // 这一行代替的是批次 4.5 那个「共享给空间」动作：新建的笔记默认「仅自己可见」，
+  // 而本文件的前提是"共享空间里的共享资料"。等共享端点落地后这里要改成调用它，
+  // 而不是长期靠一条 UPDATE 扮演用户点过一下。
+  await sql`UPDATE notes SET share_scope = 'shared' WHERE id = ${sharedNoteId}`;
 });
 
 after(async () => {
@@ -207,9 +211,8 @@ test("member 的笔记写操作一律 403，读操作放行", async () => {
 
   const save = await appInject("PATCH", `/v2/notes/${sharedNoteId}`, memberToken, {
     version: 1,
-    blocks: [{ type: "paragraph", content: "成员想改正文" }],
+    title: "成员想改名",
     baseVersionId: randomUUID(),
-    isAutosave: false,
   });
   assert.equal(save.statusCode, 403, `PATCH /v2/notes/:id 必须 403，实际 ${save.statusCode}`);
 
@@ -248,9 +251,8 @@ test("陌生空间的 token 打协作空间的笔记必须 404，不是 403", as
 
   const patch = await appInject("PATCH", `/v2/notes/${sharedNoteId}`, strangerToken, {
     version: 1,
-    blocks: [{ type: "paragraph", content: "越空间改写" }],
+    title: "越空间改写",
     baseVersionId: randomUUID(),
-    isAutosave: false,
   });
   assert.equal(patch.statusCode, 404, `跨空间写入必须 404，实际 ${patch.statusCode}`);
 
@@ -310,7 +312,9 @@ const OWNER_ONLY_ROUTES: ReadonlyArray<{
   payload?: Record<string, unknown>;
 }> = [
   { method: "POST", url: "/notes", payload: { blocks: [] } },
-  { method: "PATCH", url: `/v2/notes/${SHARED_NOTE_TOKEN}`, payload: { version: 1, blocks: [], baseVersionId: PLACEHOLDER_UUID, isAutosave: false } },
+  { method: "PATCH", url: `/v2/notes/${SHARED_NOTE_TOKEN}`, payload: { version: 1, baseVersionId: PLACEHOLDER_UUID } },
+  // 正文的增量上送口与 WS 的只读判定是同一条判据，它也必须在成员这里吃 403。
+  { method: "POST", url: `/v2/notes/${SHARED_NOTE_TOKEN}/doc-update`, payload: { update: "AA==" } },
   { method: "DELETE", url: `/notes/${PLACEHOLDER_UUID}` },
   { method: "DELETE", url: `/notes/${PLACEHOLDER_UUID}/permanent` },
   { method: "POST", url: `/notes/${PLACEHOLDER_UUID}/restore`, payload: { baseVersionId: PLACEHOLDER_UUID } },

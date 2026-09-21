@@ -67,6 +67,14 @@ export const notes = pgTable(
     titleSource: text("title_source").notNull().default("auto"), // auto | manual
     currentVersionId: uuid("current_version_id"),
     sourceId: uuid("source_id").references(() => sources.id, { onDelete: "set null" }), // nullable，指向 sources.id，手写笔记为 null
+    /**
+     * 归属：`private` = 界面上的「仅自己可见」，`shared` = 「已共享给空间」。
+     *
+     * 不能从 `workspaceId` 推出来（协作空间里同样有只给自己的笔记），也不能从
+     * `createdBy` 推出来（作者写的同样可以共享出去）。界面文案刻意不叫"个人笔记"。
+     * 判据只有一处实现：`apps/api/src/modules/note/visibility.ts`。
+     */
+    shareScope: text("share_scope").notNull().default("private"), // private | shared
     createdBy: uuid("created_by").notNull().references(() => users.id),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),

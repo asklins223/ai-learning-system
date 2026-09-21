@@ -17,6 +17,7 @@ import { learningObjectivesV2 } from "@ailearn/shared/db-schema/card-generation-
 import { learningRuns } from "@ailearn/shared/db-schema/learning-runs";
 import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
 import { notes } from "@ailearn/shared/db-schema/note";
+import { visibleNotesCondition } from "../note/visibility.ts";
 import type { LearningDashboardV2 } from "@ailearn/shared";
 import { reviewScheduleTargetsConsumableCardPredicate } from "../review/consumer-eligibility.ts";
 import {
@@ -66,7 +67,10 @@ export async function buildLearningDashboardV2(
       tx
         .select({ n: sql<number>`count(*)::int` })
         .from(notes)
-        .where(and(eq(notes.workspaceId, ctx.workspaceId), isNull(notes.deletedAt))),
+        // 批次 4.5：这一格与下面 `suggestedNote` 必须同一个判据。它们一起决定
+        // `mode`（first_use / notes_without_objectives）并进 `dashboardRevision`
+        // 的哈希——只筛一个的话，缓存键与内容会按人错位。
+        .where(and(eq(notes.workspaceId, ctx.workspaceId), visibleNotesCondition(ctx.userId), isNull(notes.deletedAt))),
       tx
         .select({ n: sql<number>`count(*)::int` })
         .from(learningObjectivesV2)
@@ -216,7 +220,7 @@ export async function buildLearningDashboardV2(
       const noteRows = await tx
         .select({ id: notes.id, currentVersionId: notes.currentVersionId, title: notes.title })
         .from(notes)
-        .where(and(eq(notes.workspaceId, ctx.workspaceId), isNull(notes.deletedAt)))
+        .where(and(eq(notes.workspaceId, ctx.workspaceId), visibleNotesCondition(ctx.userId), isNull(notes.deletedAt)))
         .orderBy(desc(notes.updatedAt))
         .limit(1);
       if (noteRows[0]) {

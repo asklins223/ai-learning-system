@@ -5,7 +5,7 @@ import {
   createNote,
   getNoteWithVersion,
   listNotes,
-  updateNote,
+  checkpointNote,
   deleteNote,
   physicalDeleteNote,
   restoreDeletedNote,
@@ -38,6 +38,7 @@ export async function noteRoutes(app: FastifyInstance) {
     const result = await withWorkspaceTransaction(
       { workspaceId: req.session.workspaceId, userId: req.session.userId },
       (transaction) => listNotes(transaction, req.session.workspaceId, {
+        userId: req.session.userId,
         cursor: q.cursor,
         limit: q.limit,
         trashed: q.trashed === "true" || q.trashed === "1",
@@ -57,6 +58,7 @@ export async function noteRoutes(app: FastifyInstance) {
         transaction,
         req.params.id,
         req.session.workspaceId,
+        req.session.userId,
       ),
     );
     if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
@@ -79,6 +81,7 @@ export async function noteRoutes(app: FastifyInstance) {
       (transaction) => readNoteDocState(transaction, {
         workspaceId: req.session.workspaceId,
         noteId: params.data.id,
+        userId: req.session.userId,
       }),
     );
     if (!state) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
@@ -86,6 +89,7 @@ export async function noteRoutes(app: FastifyInstance) {
     return {
       update: Buffer.from(state.update).toString("base64"),
       revision: state.revision,
+      savedAt: state.savedAt,
       // true = 这篇还没有快照（建得比 0244 早），返回的是从行里补齐后重新编码的一份。
       backfilled: state.backfilled,
     };
@@ -96,23 +100,23 @@ export async function noteRoutes(app: FastifyInstance) {
     if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
     const body = parseBody(app, noteSaveRequestV1Schema, req.body);
     try {
+      // 这里**不收正文**：正文只从文档来（`POST /v2/notes/:id/doc-update` 或 WS 增量）。
+      // 这一次调用只做一件事——把文档此刻定成一个可回去的版本（可选同时改标题）。
       const result = await withWorkspaceTransaction(
         { workspaceId: req.session.workspaceId, userId: req.session.userId },
-        (transaction) => updateNote(
+        (transaction) => checkpointNote(
           transaction,
           req.params.id,
           req.session.workspaceId,
           req.session.userId,
           {
             ...(body.title !== undefined ? { title: body.title } : {}),
-            ...(body.blocks !== undefined ? { blocks: body.blocks } : {}),
             baseVersionId: body.baseVersionId,
-            isAutosave: body.isAutosave,
           },
         ),
       );
       if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
-      const receipt = projectNoteSaveReceiptV1(result, body.baseVersionId, body.isAutosave);
+      const receipt = projectNoteSaveReceiptV1(result, body.baseVersionId);
       reply.header("Cache-Control", "private, no-store");
       return receipt;
     } catch (err) {
@@ -168,7 +172,7 @@ export async function noteRoutes(app: FastifyInstance) {
         return reply.code(409).send({ error: "note_has_no_version", message: "笔记没有当前版本" });
       }
       reply.header("Cache-Control", "private, no-store");
-      return { revision: outcome.revision };
+      return { revision: outcome.revision, savedAt: outcome.savedAt };
     },
   );
 
@@ -198,7 +202,7 @@ export async function noteRoutes(app: FastifyInstance) {
     if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
     const result = await withWorkspaceTransaction(
       { workspaceId: req.session.workspaceId, userId: req.session.userId },
-      (transaction) => deleteNote(transaction, req.params.id, req.session.workspaceId),
+      (transaction) => deleteNote(transaction, req.params.id, req.session.workspaceId, req.session.userId),
     );
     if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     return reply.code(204).send();
@@ -212,7 +216,9 @@ export async function noteRoutes(app: FastifyInstance) {
     if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
     const result = await withWorkspaceTransaction(
       { workspaceId: req.session.workspaceId, userId: req.session.userId },
-      (transaction) => physicalDeleteNote(transaction, req.params.id, req.session.workspaceId),
+      (transaction) => physicalDeleteNote(transaction, req.params.id, req.session.workspaceId, {
+        userId: req.session.userId,
+      }),
     );
     if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
 
@@ -242,7 +248,7 @@ export async function noteRoutes(app: FastifyInstance) {
     try {
       const result = await withWorkspaceTransaction(
         { workspaceId: req.session.workspaceId, userId: req.session.userId },
-        (transaction) => restoreDeletedNote(transaction, req.params.id, req.session.workspaceId),
+        (transaction) => restoreDeletedNote(transaction, req.params.id, req.session.workspaceId, req.session.userId),
       );
       if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
       return result;
@@ -264,7 +270,7 @@ export async function noteRoutes(app: FastifyInstance) {
     const offset = Math.max(Number(req.query.offset ?? 0) || 0, 0);
     const versions = await withWorkspaceTransaction(
       { workspaceId: req.session.workspaceId, userId: req.session.userId },
-      (transaction) => listNoteVersions(transaction, req.params.id, req.session.workspaceId, limit, offset),
+      (transaction) => listNoteVersions(transaction, req.params.id, req.session.workspaceId, req.session.userId, limit, offset),
     );
     if (!versions) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     return { items: versions };
