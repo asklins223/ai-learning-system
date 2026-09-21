@@ -2,14 +2,29 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-const MODULE_CONTRACTS = [
+type ModuleContract = {
+  name: string;
+  handlers: number;
+  services: number;
+  /** 处理器数 / 其中"不在路由体里开 workspace 事务"的条数（必须有行为用例顶替）。 */
+  handlerWithoutInlineTransaction?: number;
+};
+
+const MODULE_CONTRACTS: ModuleContract[] = [
   // Desktop NOTE-READ/NOTE-SAVE V2 is the only note route surface.
-  { name: "note", handlers: 9, services: 9 },
+  // 第 10 条是 `/v2/notes/:id/doc-update`（批次 4.3 的增量上送口）。它是本表里唯一
+  // "路由体里没有 withWorkspaceTransaction(" 的处理器：正文的写入边界在协同那一侧
+  // （`collaboration.ts` 的 applyUploadedDocUpdate 按 (workspaceId, userId) 开事务，
+  // 落盘走 onStoreDocument 自己的事务），把它们都塞进一条事务反而会把 Hocuspocus 的
+  // 活文档锁在事务里。跨空间不可见不再靠这条字符串计数保证，而由
+  // `note-collaboration-postgres.integration.ts` 的行为用例证明（别人的空间上送 → 404
+  // 且库里没动）。豁免数只准减不准加：新处理器要么自带事务，要么先补一条行为用例。
+  { name: "note", handlers: 10, services: 9, handlerWithoutInlineTransaction: 1 },
   // 删掉无人调用的 POST /sources/statuses 后：7 路由 / 7 服务。
   { name: "source", handlers: 7, services: 7 },
   // v0.6 新增 /search/drift 与 /search/auto-fix 后：4 路由 / 4 服务
   { name: "search", handlers: 4, services: 4 },
-] as const;
+];
 
 function readModuleFile(moduleName: string, fileName: "routes.ts" | "service.ts"): string {
   return readFileSync(new URL(`../modules/${moduleName}/${fileName}`, import.meta.url), "utf8");
@@ -20,14 +35,17 @@ test("protected content handlers keep one explicit workspace transaction boundar
     await t.test(contract.name, () => {
       const routes = readModuleFile(contract.name, "routes.ts");
       const handlerCount = routes.match(/\bapp\.(?:get|post|patch|delete)/g)?.length ?? 0;
+      const exempt = contract.handlerWithoutInlineTransaction ?? 0;
       const transactionCount = routes.match(/\bwithWorkspaceTransaction\(/g)?.length ?? 0;
       const sessionContextCount = routes.match(
         /\{ workspaceId: req\.session\.workspaceId, userId: req\.session\.userId \}/g,
       )?.length ?? 0;
 
       assert.equal(handlerCount, contract.handlers);
-      assert.equal(transactionCount, handlerCount);
-      assert.equal(sessionContextCount, handlerCount);
+      assert.equal(transactionCount, handlerCount - exempt);
+      // 豁免的那条同样要带上 (workspaceId, userId) 作用域——只是它交给下层去开事务，
+      // 所以这两个字段不再以那个单行字面量的形式出现。
+      assert.equal(sessionContextCount, handlerCount - exempt);
     });
   }
 });

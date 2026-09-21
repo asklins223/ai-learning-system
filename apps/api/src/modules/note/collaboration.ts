@@ -3,14 +3,14 @@ import { Hocuspocus } from "@hocuspocus/server";
 import type { FastifyInstance } from "fastify";
 import websocket from "@fastify/websocket";
 import type { WebSocket as WsSocket, RawData } from "ws";
-import { eq } from "drizzle-orm";
-import { notes } from "@ailearn/shared/db-schema/note";
+import { and, eq } from "drizzle-orm";
+import { noteDocumentStates, notes } from "@ailearn/shared/db-schema/note";
 import { logger } from "../../lib/logger.ts";
 import { db, withWorkspaceTransaction } from "../../db/client.ts";
 import { decodeToken } from "../identity/service.ts";
 import { isWorkspaceOwner } from "../identity/middleware.ts";
 import { loadNoteDoc, projectBlocksIntoVersion, saveNoteDoc } from "./document-state.ts";
-import { projectNoteBlocks } from "./doc.ts";
+import { projectNoteBlocks, snapshotOf } from "./doc.ts";
 
 /**
  * 笔记协同的服务端（批次 4.2）。
@@ -59,6 +59,12 @@ export function noteIdFromDocumentName(documentName: string): string {
 function bearerFrom(headers: Headers): string {
   const raw = headers.get("authorization") ?? "";
   return raw.startsWith("Bearer ") ? raw.slice(7).trim() : "";
+}
+
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  for (let i = 0; i < a.byteLength; i += 1) if (a[i] !== b[i]) return false;
+  return true;
 }
 
 export const noteCollaboration = new Hocuspocus<NoteDocContext>({
@@ -118,10 +124,24 @@ export const noteCollaboration = new Hocuspocus<NoteDocContext>({
   async onStoreDocument({ document, lastContext }) {
     const context = lastContext;
     const scope = { workspaceId: context.workspaceId, noteId: context.noteId };
+    const next = snapshotOf(document);
     await withWorkspaceTransaction(
       { workspaceId: context.workspaceId, userId: context.userId },
       async (tx) => {
-        await saveNoteDoc(tx, scope, document);
+        // 内容没变就一个字节都不写。Hocuspocus 的直连 disconnect 会**无条件**跑这个
+        // 钩子，离线队列重放同一条 update、或连上又断开都会进来一次；不挡的话
+        // revision 会凭空 +1，而 `note_blocks` 是"删重插"，等于每次数一下连接就重写
+        // 整篇正文的行。
+        const stored = await tx.query.noteDocumentStates.findFirst({
+          where: and(
+            eq(noteDocumentStates.noteId, context.noteId),
+            eq(noteDocumentStates.workspaceId, context.workspaceId),
+          ),
+          columns: { state: true },
+        });
+        if (stored && sameBytes(Uint8Array.from(stored.state), next)) return;
+
+        await saveNoteDoc(tx, scope, document, next);
         // 当前版本可能已经被人翻走了（恢复历史版本），投影目标要按最新指针走。
         const current = await tx.query.notes.findFirst({
           where: eq(notes.id, context.noteId),
@@ -187,6 +207,66 @@ export function handleNoteDocConnection(socket: WsSocket, request: import("node:
   );
   socket.on("error", () => client.handleClose({ code: 1011, reason: "socket_error" }));
   return client;
+}
+
+/**
+ * 上送一条 yjs 增量（批次 4.3 的 HTTP 通道，personal 空间与离线队列重连走这里）。
+ *
+ * 为什么不另写一套"读快照→改→存"：那正是这次要消灭的第二事实源。`openDirectConnection`
+ * 拿到的是**同一份内存文档**——如果这篇笔记此刻有 WS 连接在用，增量直接并进活的文档并
+ * 广播出去；如果没有，它按 `onLoadDocument` 从库里补齐后再并。两条路之后都只经过
+ * `onStoreDocument` 这一个落盘口，投影仍然是同一个函数。
+ *
+ * 幂等：重放同一条 update 时 Yjs 判定为已存在，文档没变 → 不落盘 → revision 不动。
+ * 离线队列可以放心按序重发。
+ */
+export async function applyUploadedDocUpdate(input: {
+  workspaceId: string;
+  userId: string;
+  noteId: string;
+  update: Uint8Array;
+}): Promise<{ status: "ok"; revision: number } | { status: "not_found" } | { status: "no_version" }> {
+  const scope = { workspaceId: input.workspaceId, userId: input.userId };
+  const note = await withWorkspaceTransaction(scope, (tx) =>
+    tx.query.notes.findFirst({
+      where: and(eq(notes.id, input.noteId), eq(notes.workspaceId, input.workspaceId)),
+      columns: { currentVersionId: true, deletedAt: true },
+    }),
+  );
+  if (!note || note.deletedAt !== null) return { status: "not_found" };
+  if (!note.currentVersionId) return { status: "no_version" };
+
+  const context: NoteDocContext = {
+    userId: input.userId,
+    workspaceId: input.workspaceId,
+    noteId: input.noteId,
+    versionId: note.currentVersionId,
+    // 可写性由路由上的 `requireOwner` 判（与 `onAuthenticate` 同一个谓词）；走到这里
+    // 就是可写。这里不再判第二次，否则又多一套可能互相矛盾的判据。
+    readOnly: false,
+  };
+
+  const connection = await noteCollaboration.openDirectConnection(documentNameForNote(input.noteId), context);
+  try {
+    await connection.transact((document) => {
+      Y.applyUpdate(document, input.update);
+    });
+  } finally {
+    // `disconnect` 才是"落盘"这一步：它会跑 storeDocumentHooks，并且只在没有任何
+    // WS 连接时才卸载文档，所以并进来的增量不会把在线协作者的文档踢掉。
+    await connection.disconnect();
+  }
+
+  const stored = await withWorkspaceTransaction(scope, (tx) =>
+    tx.query.noteDocumentStates.findFirst({
+      where: and(
+        eq(noteDocumentStates.noteId, input.noteId),
+        eq(noteDocumentStates.workspaceId, input.workspaceId),
+      ),
+      columns: { revision: true },
+    }),
+  );
+  return { status: "ok", revision: Number(stored?.revision ?? 0) };
 }
 
 /**

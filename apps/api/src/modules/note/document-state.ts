@@ -75,9 +75,18 @@ export async function loadNoteDoc(
   return { doc, backfilled: true };
 }
 
-/** 落盘快照。`revision` 单调 +1，客户端用它判断本机状态落后多少。 */
-export async function saveNoteDoc(tx: ApiTransaction, scope: NoteDocScope, doc: NoteDoc): Promise<void> {
-  const state = snapshotOf(doc);
+/**
+ * 落盘快照。`revision` 单调 +1，客户端用它判断本机状态落后多少。
+ *
+ * `state` 可以由调用方传进来（协同侧落盘时要先拿它跟库里那份比过一遍），避免
+ * 一次写入编两遍码。
+ */
+export async function saveNoteDoc(
+  tx: ApiTransaction,
+  scope: NoteDocScope,
+  doc: NoteDoc,
+  state: Uint8Array = snapshotOf(doc),
+): Promise<void> {
   await tx
     .insert(noteDocumentStates)
     .values({ noteId: scope.noteId, workspaceId: scope.workspaceId, state, revision: 1 })

@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { noteCreateSchema } from "./schema.ts";
+import { noteCreateSchema, noteDocUpdateRequestV1Schema, NOTE_DOC_UPDATE_MAX_BYTES } from "./schema.ts";
 import {
   createNote,
   getNoteWithVersion,
@@ -21,6 +21,7 @@ import { parseQuery, paginationQuerySchema, uuidParamSchema } from "../../lib/pa
 import { deleteObject } from "../../lib/object-storage.ts";
 import { logger } from "../../lib/logger.ts";
 import { projectNoteDetailV1, projectNoteSaveReceiptV1 } from "./note-projection.ts";
+import { applyUploadedDocUpdate } from "./collaboration.ts";
 import { noteSaveRequestV1Schema } from "@ailearn/shared/note-save-contracts";
 
 export async function noteRoutes(app: FastifyInstance) {
@@ -106,6 +107,45 @@ export async function noteRoutes(app: FastifyInstance) {
       throw err;
     }
   });
+
+  // POST /v2/notes/:id/doc-update — 正文增量的 HTTP 上送口（批次 4.3）。
+  // personal 空间与离线重连的队列都走这里，与 WS 共用同一份内存文档：增量并进
+  // 活文档（或按 onLoadDocument 从库里补齐后的文档），再经同一个 onStoreDocument
+  // 落盘并投影。这里**不**接受整篇正文——整篇写入在并发下会复制块（4.0 实测）。
+  // RBAC: 与 WS 的只读判定同一个谓词（requireOwner === !readOnly）。
+  app.post<{ Params: { id: string } }>(
+    "/v2/notes/:id/doc-update",
+    // bodyLimit 是粗筛（防止无界字符串进 JSON 解析）：合法增量的 base64 约 2.7MB，
+    // 这里留到 8MB。真正的尺寸判据是下面按**解码后字节数**的那条，它才能给出
+    // `update_too_large`——框架的 413 只会说 "Payload Too Large"，客户端无从分辨。
+    { preHandler: [requireOwner], bodyLimit: 8 * 1024 * 1024 },
+    async (req, reply) => {
+      const params = uuidParamSchema.safeParse(req.params);
+      if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
+      const body = parseBody(app, noteDocUpdateRequestV1Schema, req.body);
+      const decoded = Buffer.from(body.update, "base64");
+      if (decoded.byteLength > NOTE_DOC_UPDATE_MAX_BYTES) {
+        return reply.code(413).send({ error: "update_too_large", message: "增量过大，请拆分后重试" });
+      }
+      // `Buffer.from(_, 'base64')` 会静默吃掉非法字符，所以解码结果不能当合法性用；
+      // 编码回去比对一次才是。
+      if (decoded.toString("base64") !== body.update) {
+        return reply.code(400).send({ error: "invalid_base64", message: "update 不是规范的 base64" });
+      }
+      const outcome = await applyUploadedDocUpdate({
+        workspaceId: req.session.workspaceId,
+        userId: req.session.userId,
+        noteId: params.data.id,
+        update: new Uint8Array(decoded),
+      });
+      if (outcome.status === "not_found") return reply.code(404).send({ error: "not_found", message: "资源不存在" });
+      if (outcome.status === "no_version") {
+        return reply.code(409).send({ error: "note_has_no_version", message: "笔记没有当前版本" });
+      }
+      reply.header("Cache-Control", "private, no-store");
+      return { revision: outcome.revision };
+    },
+  );
 
   // RBAC: 笔记增删改仅 owner 可执行，member 只读
   app.post("/notes", { preHandler: [requireOwner] }, async (req) => {

@@ -50,6 +50,8 @@ const { issueSession, revokeSession } = await import("../modules/identity/servic
 let app: FastifyInstance;
 let wsUrl = "";
 let ownerToken = "";
+/** 同一个人在**自己另一个空间**里的 session：用来测"跨空间上送"。 */
+let ownerOtherToken = "";
 let memberToken = "";
 let strangerToken = "";
 let noteId = "";
@@ -126,6 +128,33 @@ function docContents(doc: Y.Doc): string[] {
   return projectNoteBlocks(doc).map((block) => block.content);
 }
 
+/** 以库里那份快照为起点的"本机文档"——真客户端离线时拿到的就是这个。 */
+async function storedDoc(): Promise<Y.Doc> {
+  const rows = await sql`SELECT state FROM note_document_states WHERE note_id = ${noteId}`;
+  assert.equal(rows.length, 1, "笔记没有快照，本机文档无从起点");
+  return docFromSnapshot(rows[0].state as Uint8Array);
+}
+
+/**
+ * 本机相对库里那份的**增量**（不是整篇）。真客户端算的就是这个：以对方的 state vector
+ * 为差集基准。用整篇来测会把"上送必须是增量"这条合同测成永远为真。
+ */
+async function incrementalUpdate(local: Y.Doc): Promise<string> {
+  const server = await storedDoc();
+  const update = Y.encodeStateAsUpdate(local, Y.encodeStateVector(server));
+  server.destroy();
+  return Buffer.from(update).toString("base64");
+}
+
+function uploadUpdate(token: string, update: string, id = noteId) {
+  return app.inject({
+    method: "POST",
+    url: `/v2/notes/${id}/doc-update`,
+    headers: { authorization: `Bearer ${token}` },
+    payload: { update },
+  });
+}
+
 before(async () => {
   await sql`
     INSERT INTO users (id, email, password_hash, role)
@@ -163,6 +192,7 @@ before(async () => {
   wsUrl = `ws://127.0.0.1:${address.port}/note-doc`;
 
   ownerToken = (await issueSession(userOwner, wsCollab)).token;
+  ownerOtherToken = (await issueSession(userOwner, wsOwnerPersonal)).token;
 
   // member 由真实 invite 流程产出，不直接 INSERT `workspace_members`。
   const invite = await createInvite(wsCollab, userOwner, { role: "member" });
@@ -204,7 +234,7 @@ before(async () => {
 after(async () => {
   destroyProviders();
   await closeNoteCollaboration().catch(() => {});
-  for (const token of [ownerToken, memberToken, strangerToken]) {
+  for (const token of [ownerToken, ownerOtherToken, memberToken, strangerToken]) {
     if (token) await revokeSession(token).catch(() => {});
   }
   await app.close().catch(() => {});
@@ -348,6 +378,113 @@ test("只读成员：知道自己只读、上送不落库，但仍能实时看�
   assert.equal((await projectedRows()).length, 3, "被拒的只读更新把服务端文档搞坏了（后续写入形状变了）");
   destroyProviders();
   await waitFor(() => collaborationLoad().documents === 0, "文档卸载");
+});
+
+test("HTTP 上送增量：一条 WS 都没建也能写（personal 与离线队列的口）", async () => {
+  // 服务端这条路上没有"空间类型"分支——personal 从不建连，collaborative 没连上时
+  // 也一样。所以"零连接"这条用例就是 personal 空间的服务端形状。
+  assert.equal(collaborationLoad().connections, 0, "前一条用例没清干净，这条的结论会失真");
+  const revisionBefore = await sql`SELECT revision FROM note_document_states WHERE note_id = ${noteId}`;
+
+  const local = await storedDoc();
+  const httpEdit = `${paraA}（HTTP 改的）`;
+  editBlockContent(local, 1, httpEdit);
+  const response = await uploadUpdate(ownerToken, await incrementalUpdate(local));
+  assert.equal(response.statusCode, 200, `上送必须成功，实际 ${response.statusCode}: ${response.body}`);
+  assert.ok(Number(response.json().revision) > 0, "响应没带 revision，客户端队列无法确认");
+
+  await waitFor(async () => (await storedBlocks())[1] === httpEdit, "HTTP 增量落进快照");
+  await waitFor(async () => (await projectedRows())[1] === httpEdit, "HTTP 增量投影进 note_blocks");
+  assert.ok(
+    Number((await sql`SELECT revision FROM note_document_states WHERE note_id = ${noteId}`)[0].revision) >
+      Number(revisionBefore[0]?.revision ?? 0),
+    "上送之后 revision 必须递增",
+  );
+  // 直连用完必须释放：留在内存里就是"没人看管的一份活文档"。
+  await waitFor(() => collaborationLoad().documents === 0, "直连文档卸载");
+  local.destroy();
+});
+
+test("同一条增量重放两次是幂等的：revision 不动、内容不变", async () => {
+  // 离线队列会按序重发，服务端必须把重复的 update 当成没发生。
+  const local = await storedDoc();
+  const replay = `${paraB}（重放用）`;
+  editBlockContent(local, 2, replay);
+  const update = await incrementalUpdate(local);
+  const response = await uploadUpdate(ownerToken, update);
+  assert.equal(response.statusCode, 200);
+  await waitFor(async () => (await storedBlocks())[2] === replay, "第一次上送落库");
+  const revisionAfterFirst = response.json().revision as number;
+
+  const second = await uploadUpdate(ownerToken, update);
+  assert.equal(second.statusCode, 200, "重放不该报错，客户端无法据此判断要不要出队");
+  assert.equal(
+    Number(second.json().revision),
+    revisionAfterFirst,
+    `重放把 revision 从 ${revisionAfterFirst} 推到了 ${second.json().revision}（内容没变却算了一次写入）`,
+  );
+  local.destroy();
+});
+
+test("HTTP 增量与 WS 活文档合并：两边都看到对方，且不复制块", async () => {
+  // 这条测的是"只有一份内存文档"。若 HTTP 那条路各自读快照→改→写回，它会用旧内容
+  // 覆盖掉 WS 上还没落盘的那次编辑——正是审查里"静默覆盖"的形状。
+  const { doc, provider, synced } = connect(ownerToken);
+  await synced;
+  const wsEdit = `${paraA}（WS 改的）`;
+  editBlockContent(doc, 1, wsEdit);
+  await waitFor(() => provider.unsyncedChanges === 0, "服务端确认收到 WS 编辑");
+
+  const local = await storedDoc();
+  const httpEdit = `${paraB}（HTTP 改的）`;
+  editBlockContent(local, 2, httpEdit);
+  const response = await uploadUpdate(ownerToken, await incrementalUpdate(local));
+  assert.equal(response.statusCode, 200, `实际 ${response.statusCode}: ${response.body}`);
+
+  await waitFor(() => docContents(doc).includes(httpEdit), "活文档收到 HTTP 上送的增量");
+  await waitFor(async () => (await projectedRows()).includes(httpEdit), "HTTP 增量落库");
+  const rows = await projectedRows();
+  assert.ok(rows.includes(wsEdit), "HTTP 那条路用旧快照覆盖了 WS 的编辑");
+  assert.equal(rows.length, 3, `块数从 3 变成 ${rows.length}（两条路合并时复制了块）`);
+  local.destroy();
+  destroyProviders();
+  await waitFor(() => collaborationLoad().documents === 0, "文档卸载");
+});
+
+test("member 走 HTTP 上送同样被拒：403，库里没有它的内容", async () => {
+  const local = await storedDoc();
+  const denied = `${paraB}（成员想经 HTTP 改的）`;
+  editBlockContent(local, 2, denied);
+  const response = await uploadUpdate(memberToken, await incrementalUpdate(local));
+  assert.equal(response.statusCode, 403, `只读判据必须同一条，实际 ${response.statusCode}: ${response.body}`);
+  assert.ok(!(await storedBlocks()).includes(denied), "HTTP 口把只读拦在了门外但内容进了库");
+  local.destroy();
+});
+
+test("同一个人从自己另一个空间上送：404，且库里一个字都没动", async () => {
+  // 这条顶替的是 `content-workspace-transaction.test.ts` 里那条字符串计数保证：
+  // 增量上送这条路不在路由体里开事务，所以"跨空间读不到"必须由真请求证明。
+  // token 在**它自己的空间**里确实是 owner，所以 404 只能来自按空间收窄的那次查找。
+  const local = await storedDoc();
+  const foreign = `${paraA}（从别的空间上送）`;
+  editBlockContent(local, 1, foreign);
+  const before = await storedBlocks();
+
+  const response = await uploadUpdate(ownerOtherToken, await incrementalUpdate(local));
+  assert.equal(response.statusCode, 404, `跨空间上送必须按"不存在"处理，实际 ${response.statusCode}: ${response.body}`);
+  assert.ok(!(await storedBlocks()).includes(foreign), "跨空间上送改了别人的正文");
+  assert.deepEqual(await storedBlocks(), before, "被拒的上送动了快照");
+  local.destroy();
+});
+
+test("非法或超限的增量：400 与 413 分得清", async () => {
+  const malformed = await uploadUpdate(ownerToken, "这不是 base64!!");
+  assert.equal(malformed.statusCode, 400, `非 base64 应回 400，实际 ${malformed.statusCode}`);
+
+  const oversize = Buffer.alloc(3 * 1024 * 1024, 7).toString("base64");
+  const tooBig = await uploadUpdate(ownerToken, oversize);
+  assert.equal(tooBig.statusCode, 413, `超尺寸应回 413，实际 ${tooBig.statusCode}: ${tooBig.body}`);
+  assert.equal(tooBig.json().error, "update_too_large");
 });
 
 test("关停：debounce 窗口里的最后一次编辑必须落盘", async () => {
