@@ -292,7 +292,7 @@
 | 批次 | 内容 | 验收口径（可判定，不靠眼缘） |
 |---|---|---|
 | **B0** | 结算页溢出 + 出口槽 + 印章裁切（P5/P27） | ✅ 已上线，见 §14。**口径改过**：原写「report 不再 `overflow-y:auto`」是错的——纸面高度固定时总得有一列可滚，病在出口落在那一列里。改成三条可判定的：主按钮下沿离纸面下沿 ≥8px、出口不在任何 `scrollHeight>clientHeight` 的祖先内、`__seal` `scrollHeight <= clientHeight` |
-| **B1** | 结算页自相矛盾（P1/P6/P30） | ✅ 已上线（除「接下来」便签里的真按钮，见下），见 §14。口径：同一次 `covered` 判定下「还需补上」不出现该 facet；「这次说清 N 条」数判定行；`skipped`/`declared_unable` 时 DOM 里**没有** `__seal` 节点。**「接下来」便签的可点动作没做**——它需要在结算页起一次新 Run，而 start 命令只在目标详情的 `primaryAction` 里，属于新功能不是修复，单独留出来 |
+| **B1** | 结算页自相矛盾（P1/P6/P30） | ✅ 已上线（含原来到处留着的「接下来」便签可点动作一项，**已实机撤回该需求**，见 §14 B11）。口径：同一次 `covered` 判定下「还需补上」不出现该 facet；「这次说清 N 条」数判定行；`skipped`/`declared_unable` 时 DOM 里**没有** `__seal` 节点 |
 | **B2** | `data-outcome` 真的驱动视觉 + 一次性压印（P2/P32） | ✅ 已上线并**实机验完**（见 §14「B2 实机三档差异」）。三档两两可见差异 **3 / 4 / 2 处**；5 种 outcome 各渲染一遍记 `data-outcome`·印章·进度带。过程中修掉一个真缺陷：**`partial` 此前哪一档都不在**，与练习几乎同色。压印只动 `transform`/`opacity`、`data-motion-mode="off"` 与 `prefers-reduced-motion` 都关、`main.tsx` 加载顺序有守卫。**上一条"两堵墙"的结论已撤回**（见 §14）。仍开着但与本批无关：`actions/v2` 撞 `learning_tasks_run_sequence_unique` 报 500 |
 | **B3** | 「下次到期 刚刚」（P4） | ✅ 已上线，见 §14。没有新增 `formatDue`——`objective-state-copy.ts:114` 的 `formatObjectiveDay` 已经是「今天/昨天/明天/N 天后/M月D日」且被列表行在用，直接复用；另在 `surface-data.test.tsx` 钉住 `formatRelative` 的「只量过去」契约 |
 | **B4** | 字号地板（P7/P13/P21/P33） | ✅ 全部完成，见 §14 与 §14 的 B4 补充。列表/详情 <11px 段数 49→**0**、53→**0**；提示惩罚说明 7.5px→**12px** 且面板搬进题面区；紧凑档 `.button` 6px→**11px**、`.meta` 5px→**9px** |
@@ -690,3 +690,15 @@ route: /learning-runs/:runId/actions/v2   statusCode: 500   ×3（17:51:16 / 17:
 2. 搬完必须重新做一次变异检验——换了文件不等于断言还活着。补了一条"一个调用点都没找到就喊"的计数器，删掉一个调用点时它确实红（`expected 2 to be greater than or equal to 3`）。
 
 回归：**62 文件 612 条测试全绿**（本批 +11：查表 4 / 画法 3 / 静态守卫 2 / 结算页 2），`tsconfig.web.json` 回到 32 条基线 `TS6307`、无新增类型错。
+
+### B11「接下来」便签里的可点动作 —— 实机走过之后撤回需求（2026-09-22）
+
+B1 收尾时我留了一句"要在结算页起一次新 Run，属于新功能不是修复"。这次真去走那一跳，结论是**这一跳已经存在，不需要再造**：
+
+结算页纸外那排出口本来就是两个——`返回书房` 与 **`查看理解目标`**（`learning-run-surface.tsx:2130-2134`）。后者走 `onExit({route: room.home, objectiveId: snapshot.target.objectiveId})` → `setActiveObjectiveId` + `invoke("open-objective")` → **详情页**，而详情页那块黄纸从 B15 起就是真的会执行的按钮，动词由服务端签发。
+
+实机（`tmp-objflow-v-b11.mjs`，`.objflow-caps/b11-result-before.png` → `b11-detail-after.png`）：点「查看理解目标」之后 `landedOnDetail=true`、落点 `tag=BUTTON`、结算页已卸载（`stillOnResult=false`）。**所以"下一步"确实是一跳之内、且用的是服务端自己的动词**，再造一个结算页内的起 Run 按钮只会多出第二条做同一件事的路。
+
+**这一跑还顺手证伪了我自己的判据**：第一版把 `!disabled` 写进 PASS 条件，结果这条 demonstrated 目标落到了 `verb=暂无可做的 / disabled=true`，被判 FAIL。查服务端才知道该目标 `state=archived`、`contentFreshness=source_outdated`、`primaryAction=none`——**按钮就该是禁用的**（B15 的口径本来就是"禁用态自带两句解释"）。判据把正确行为读成了缺陷，改成"落在服务端动词上"即可，可不可点单独作为事实报告。
+
+**同时验到 B10 那张映射表的一处边界是对的**：这条 `archived` 的目标进度带画 `—`（`bandSegment=none`），而不是因为历史上 demonstrated 过一次就画满第三段。旁边状态词写着「已归档」，负面事实由它承担、带子不猜——正是 `learning-objective-surface-contracts.ts:232-235` 要的形状。
