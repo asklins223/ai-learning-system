@@ -1266,3 +1266,25 @@ gauge    存在、未被 hidden 遮住，aria-valuenow=49
 可注入的 provider 缝"——那是设计决定，不该由补测试顺手做掉。
 
 回归：worker 715/715、typecheck 干净（另有一条红是别人在途的 `companion-daily-summary.test.ts`）。
+
+### 顺带查出来：配对题的作答界面现在**没有活样本**可点
+
+想在真界面里点一次 `MatchingEditor`，就得有一条带配对变体的学习运行。查了一圈：
+
+- 已激活的卡里带练习件的只有 4 张（2 张 ordering、2 张 single_choice），**没有 matching**；
+- 唯一一张 `canonicalAnswer.kind = mapping`（本应派生出配对题）的激活卡，
+  实际给出的变体是 `single_choice` + 语音——因为它自己带了一个作者写的 `single_choice` 练习件，
+  而规划器按设计**让显式练习件优先于从答案反推的备位结构题**。
+
+所以点不到不是缺陷，是这条优先规则的结果。要验那条 UI 路径只能激活 D6 那批里的配对卡
+（那篇笔记在回收站里），这是会往你卡堆里加卡的动作，我没自己做。
+
+**但这条优先规则有个值得你想一下的后果**：一张卡的答案本身就是"两组东西的对应关系"
+（mapping）时，作者另写的一道选择题会**盖掉**从答案派生的配对题——而配对题恰好是那种答案
+最自然的练法。要不要在"答案形状与练习件形状不冲突时并列给出两个变体"，是产品决定，
+不是 bug，我停在这里。
+
+探测期间我建了一条真实学习运行（`14e7009a`），已按服务端签发的允许集合用 `skip_run`
+收掉（`phase: skipped`），没留在队列里。顺带记一次工具用错：`skip_run` 的
+`confirmationRequired` 是**签发侧**的字段，请求里带上它会 400；本地 `safeParse` 一跑
+就看清了（`Unrecognized key(s): confirmationRequired`）——又一次印证"别猜 schema"。
