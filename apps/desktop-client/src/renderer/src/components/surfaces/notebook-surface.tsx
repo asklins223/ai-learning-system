@@ -45,6 +45,7 @@ import {
 import { useSourceImage } from "./source-image";
 import { ImageGalleryLightbox, useImageLightbox, ZoomableReadingImage, type GalleryImage } from "./image-viewer";
 import { NoteMarkdownEditor, type NoteMarkdownEditorHandle } from "./note-markdown-editor";
+import { useNoteDocLiveView } from "./use-note-doc-live-view";
 import { NoteImageUploads, useNoteImageUploads } from "./note-image-uploads";
 
 /**
@@ -262,6 +263,8 @@ export function NotebookSurface() {
   const invoke = useRoomStore((state) => state.invoke);
   const setActiveCardGenerationRunId = useRoomStore((state) => state.setActiveCardGenerationRunId);
   const activeNoteRef = useRoomStore((state) => state.activeNoteRef);
+  // 协同流只在协作空间里存在（personal 按门控不建长连接），所以订阅与否看它。
+  const spaceIdentity = useRoomStore((state) => state.spaceIdentity);
   const setReturnTarget = useRoomStore((state) => state.setReturnTarget);
   const editorRef = useRef<NoteMarkdownEditorHandle | null>(null);
   const editorPaneRef = useRef<HTMLDivElement>(null);
@@ -629,6 +632,16 @@ export function NotebookSurface() {
   // without a loading paper over the writer's text, and without offering a
   // second start for the same note version.
   const noteGenerationRunId = noteGeneration?.runId ?? null;
+  // 别人（同机另一个窗口、另一台机器、另一个人）改了这一篇：帧只负责"叫醒一次回读"，
+  // 要不要替换正文仍由上面那条回读效应判——作者手上有未提交的改动时不替换。
+  const noteDocLive = useNoteDocLiveView(
+    note?.noteId ?? null,
+    spaceIdentity !== null && !spaceIdentity.isPersonal,
+    () => {
+      void reload({ silent: true });
+    },
+  );
+
   useEffect(() => {
     if (!noteGenerationRunId || !window.ailearn) return undefined;
     let disposed = false;
@@ -1182,6 +1195,11 @@ export function NotebookSurface() {
       <div className="editor-head">
         <div>
           <span className="tag red">{dirty || saveState === "error" ? "草稿" : "已同步"}</span>
+      {noteDocLive.presenceCount > 0 ? (
+        <span className="tag" title="这几个人也开着这一篇">
+          {noteDocLive.presenceCount + 1} 人在看
+        </span>
+      ) : null}
           <span className="small">标题和正文每次改动都会存成一个版本</span>
         </div>
         <div className="meta">
