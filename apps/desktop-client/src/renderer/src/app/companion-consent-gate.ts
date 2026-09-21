@@ -21,7 +21,7 @@ export const SETTINGS_ATTENTION_AI_CONSENT = "ai-consent";
  * 语气跟着人设走：先给一句"还差一步"，再说清按哪里；不甩错误码。
  */
 export const COMPANION_CONSENT_REQUIRED_LINE =
-  "还差一步：先签署工作区的 AI 使用同意，我才被允许帮你思考。设置页已经打开，按一下「签署」，我们接着来。";
+  "还差一步：先签署你自己的 AI 使用同意，我才被允许帮你思考。设置页已经打开，按一下「签署」，我们接着来。";
 
 /** worker 在 run 失败时写下的错误码（companion-dialogue.ts 的 markCompanionRunFailed 字面量）。 */
 export const COMPANION_RUN_ERROR_AI_CONSENT_REQUIRED = "AI_CONSENT_REQUIRED";

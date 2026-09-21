@@ -301,7 +301,7 @@ export function ReviewSurface() {
     : failure?.source === "queue" && !queue?.items.length
       ? { kind: "error" as const, message: "无法读取真实复习队列", detail: failure.message }
       : queue && queue.items.length === 0
-        ? { kind: "empty" as const, message: "今天没有到期项", detail: "服务端没有返回可开始或待确认的到期复习。" }
+        ? { kind: "empty" as const, message: "今天没有到期项", detail: "现在没有可以开始的到期复习。" }
         : null;
 
   /**
@@ -742,7 +742,7 @@ export function ReviewSurface() {
       await loadQueue({ targetIndex: seatRef.current });
     } catch (error) {
       if (error instanceof RendererGatewayError && (error.code === "conflict" || error.code === "not_found")) {
-        setDeferredNotice("这张卡的状态刚发生过变化，队列已按服务端现状刷新。");
+        setDeferredNotice("这张卡的状态刚变过，队列已经按最新情况刷新。");
         await loadQueue({ targetIndex: seatRef.current }).catch((refreshError) => {
           setFailure({ message: gatewayErrorMessage(refreshError), source: "queue" });
         });
@@ -779,8 +779,8 @@ export function ReviewSurface() {
     const surface = objectives[item.objectiveId];
     if (!surface) {
       return unreadableObjectiveIds.has(item.objectiveId)
-        ? "来自服务端确认的到期复习 · 目标标签不可读"
-        : "这张卡来自服务端确认的到期复习";
+        ? "已排到的到期复习 · 目标标签暂时读不到"
+        : "这张卡是排到时间的到期复习";
     }
     if (surface.sources.primaryNote) return `来自笔记《${surface.sources.primaryNote.title}》`;
     if (surface.content.sourceLabel) return `来自来源「${surface.content.sourceLabel}」`;
@@ -822,7 +822,7 @@ export function ReviewSurface() {
    * "今天没有到期项": the deck beside it already names which state happened.
    */
   const slipState = loading
-    ? "正在读取服务端确认的到期顺序。"
+    ? "正在读取排好的到期顺序。"
     : failure?.source === "queue"
       ? "这一页没有读到真实的到期队列，因此不给理由。"
       : queue && queue.items.length > 0
@@ -1060,7 +1060,7 @@ export function ReviewSurface() {
                 </p>
               ) : (
                 <p className="small">
-                  {queue?.nextCursor ? "后续到期项还没有读取。" : "这是已载入队列的最后一张。"}
+                  {queue?.nextCursor ? "后续到期项还没有读取。" : "这一批就读到这里，后面还有没读到的会继续取。"}
                 </p>
               )}
               {/* 已载入多少、覆盖多少目标是**队列**级的事实：和后续顺序归在
@@ -1101,9 +1101,9 @@ export function ReviewSurface() {
               {failure.source === "pagination"
                 ? "继续读取失败，已载入的卡片仍然保留。"
                 : failure.source === "start"
-                  ? "开始结果未确认；再次开始会复用同一请求。"
+                  ? "还没收到「已经开始」的回音；再点一次不会重复开始。"
                   : failure.source === "defer"
-                    ? "延后没有送达服务端，这张卡仍在队列里。"
+                    ? "延后没送出去，这张卡还在队列里。"
                     : "队列刷新失败，当前卡片仍然保留。"}
               {failure.source === "pagination" ? (
                 <button type="button" onClick={() => void loadMore()} disabled={loadingMore}>重试读取</button>

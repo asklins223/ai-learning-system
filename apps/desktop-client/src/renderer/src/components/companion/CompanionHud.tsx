@@ -31,6 +31,10 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { CompanionAccountPatch, CompanionAccountStateV1 } from "@ailearn/shared/companion-shell-contracts";
+import {
+  WINDOW_LIVE2D_MODEL_REGISTRY,
+  type WindowLive2DModelId,
+} from "./window-live2d-contract";
 import type { CompanionAgentPermissionLevel } from "@ailearn/shared/companion-agent-contracts";
 import type { DesktopRouteV1 } from "@ailearn/shared/desktop-ipc-contracts";
 import type { CompanionMessageV1 } from "@ailearn/shared/companion-conversation-contracts";
@@ -53,7 +57,10 @@ import {
   type CompanionRevealDriver,
 } from "../../app/companion-reveal-driver";
 import { subscribeHomeV2VoiceLevel } from "../../app/companion-voice-level";
-import type { CompanionRunTrace } from "../../app/companion-agent-nodes";
+import type {
+  CompanionAgentNodeState,
+  CompanionRunTrace,
+} from "../../app/companion-agent-nodes";
 import {
   CompanionAgentRail,
   type CompanionAgentRailProgress,
@@ -113,6 +120,9 @@ export interface CompanionHudSettings {
   readonly accountState: CompanionAccountStateV1 | null;
   readonly accountSaving: boolean;
   readonly accountFailure: string | null;
+  /** 伴星形态（模型注册表 id）与切换回调：快捷设置里的「形态」行。 */
+  readonly companionModelId: WindowLive2DModelId;
+  readonly onCompanionModelChange: (modelId: WindowLive2DModelId) => void;
   readonly onScale: (value: number) => void;
   readonly onTogglePageMuted: () => void;
   readonly onToggleFocus: () => void;
@@ -129,11 +139,11 @@ export interface CompanionHudProps {
   readonly settings: CompanionHudSettings;
   readonly onRunAction: (id: string) => void;
   /**
-   * 每次有一个工具节点开始执行时触发一次（方案 §5 第 9 项「看向手边」）。
-   * 会话层在 HUD 里，角色层在它的兄弟节点上，所以这条信号必须上提一层；
-   * 由 `CompanionPresence` 转成 `WindowLive2D` 的一次参数冲量。
+   * 每个工具节点**每发生一次状态迁移**触发一次（方案 §5 第 9 项「看向手边」+
+   * 2026-09-20 接入的结果表情）。会话层在 HUD 里，角色层在它的兄弟节点上，
+   * 所以这条信号必须上提一层；由 `CompanionPresence` 转成角色的一次动作/道具。
    */
-  readonly onAgentToolExecuting?: () => void;
+  readonly onAgentToolState?: (state: CompanionAgentNodeState) => void;
 }
 
 type MoreView = "menu" | "actions";
@@ -209,7 +219,7 @@ export function CompanionHud({
   actions,
   settings,
   onRunAction,
-  onAgentToolExecuting,
+  onAgentToolState,
 }: CompanionHudProps) {
   const chat = useCompanionChat();
   const [input, setInput] = useState("");
@@ -1133,37 +1143,33 @@ export function CompanionHud({
       : chat.phase === "error" ? "failed"
         : "done";
   /**
-   * `single_step`（闲聊）不出现轨道——每句话都挂一条 UI 是噪音（方案 §1）。
-   * 技能/工具节点本身就是 hybrid 的确证（hybrid 的定义就是"选了技能"），所以真实的
-   * agent 轮次在第一个 `agent.skill` / `agent.tool` 到达时就出现轨道，不必等摘要回。
+   * 只在**这一轮真的调用过工具**时挂轨道——每句话都挂一条 UI 是噪音（方案 §1）。
+   *
+   * 判据以前是"节点里有 skill，或摘要 mode=hybrid"。技能层删掉之后 hybrid 恒真，
+   * 那个字段就不再表达任何事实了；工具节点是剩下的唯一确证，而且它比 mode 更硬：
+   * 它说的是"这轮确实查/做了东西"，不是"系统打算允许她查"。
    */
-  const railVisible = chat.nodes.length > 0 && (
-    chat.nodes.some((node) => node.kind === "skill" || node.kind === "tool")
-    || activeTrace?.summary.mode === "hybrid"
-    || latestTrace?.summary.mode === "hybrid"
-  );
+  const railVisible = chat.nodes.some((node) => node.kind === "tool");
 
   /**
-   * 「看向手边」（方案 §5 第 9 项）：每个工具节点**第一次**进入执行态时，通知角色层看一眼。
-   * 按节点 `key`（工具是 `tool:${toolCallId}`）记账，所以同一调用的 requested → executing
-   * 状态迁移只触发一次，重渲、轮询回包都不会重复触发。
+   * 工具节点的每一次状态迁移各通知角色层一次（`requested → executing` 算同一步的
+   * 开始，只报一次；`succeeded / failed / waiting_confirmation` 各是它的结果）。
+   * 按节点 `key` 记账上一次已报的状态，所以重渲、轮询回包都不会重复触发。
    */
-  const announcedToolRef = useRef<Set<string>>(new Set());
+  const announcedToolRef = useRef<Map<string, CompanionAgentNodeState>>(new Map());
   useEffect(() => {
-    if (!onAgentToolExecuting) return;
+    if (!onAgentToolState) return;
     if (chat.nodes.length === 0) {
       announcedToolRef.current.clear();
       return;
     }
-    let fired = false;
     for (const node of chat.nodes) {
-      if (node.kind !== "tool" || node.state !== "running") continue;
-      if (announcedToolRef.current.has(node.key)) continue;
-      announcedToolRef.current.add(node.key);
-      fired = true;
+      if (node.kind !== "tool") continue;
+      if (announcedToolRef.current.get(node.key) === node.state) continue;
+      announcedToolRef.current.set(node.key, node.state);
+      onAgentToolState(node.state);
     }
-    if (fired) onAgentToolExecuting();
-  }, [chat.nodes, onAgentToolExecuting]);
+  }, [chat.nodes, onAgentToolState]);
 
   const toggleVoice = () => {
     if (chat.mode !== "closed") chat.setMode("closed");
@@ -1565,6 +1571,21 @@ function CompanionQuickSettings({ settings }: { readonly settings: CompanionHudS
           <button type="button" onClick={settings.onResetPosition}><RotateCcw size={13} />重置位置</button>
           <button type="button" onClick={settings.onHide}>暂时隐藏伴星</button>
         </div>
+        <div className="companion-hud__setting-row">
+          <span className="companion-hud__setting-label">形态</span>
+          <div className="companion-hud__choice" aria-label="伴星形态">
+            {(Object.keys(WINDOW_LIVE2D_MODEL_REGISTRY) as ReadonlyArray<WindowLive2DModelId>).map((id) => (
+              <button
+                key={id}
+                type="button"
+                aria-pressed={settings.companionModelId === id}
+                onClick={() => settings.onCompanionModelChange(id)}
+              >
+                {WINDOW_LIVE2D_MODEL_REGISTRY[id].displayName}
+              </button>
+            ))}
+          </div>
+        </div>
       </section>
 
       <section className="companion-hud__setting-group">
@@ -1667,6 +1688,16 @@ function CompanionQuickSettings({ settings }: { readonly settings: CompanionHudS
   );
 }
 
+/**
+ * 距底多少像素以内算「已经在最新」。
+ *
+ * 此前判据是 `< 160`，而一个展开的「执行过程」气泡正好约 120px：最新正文被输入框
+ * 压掉一整个气泡时，distance 仍落在 160 以内 → 既不算离开底部（不重贴底），
+ * 「最新」按钮也不出现（`CompanionHistoryDrawer` 靠 `!atLatest` 渲染它）。
+ * 遮挡因此完全不可见、也不可自救。收紧到几个像素，只用来吸收亚像素舍入。
+ */
+const AT_BOTTOM_SLACK_PX = 4;
+
 function CompanionHistoryDrawer({
   open,
   motionMode,
@@ -1695,6 +1726,8 @@ function CompanionHistoryDrawer({
   const backButtonRef = useRef<HTMLButtonElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  /** 内容层（滚动容器的唯一子节点）：贴底跟随要观察它的高度，见 pinToLatest 注释。 */
+  const contentRef = useRef<HTMLDivElement>(null);
   const micRef = useRef<HTMLButtonElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const stopping = chat.cancelling;
@@ -1721,6 +1754,13 @@ function CompanionHistoryDrawer({
   const [allLoading, setAllLoading] = useState(false);
   const [allError, setAllError] = useState<string | null>(null);
   const prevScrollHeightRef = useRef<number | null>(null);
+  /**
+   * 用户是否希望列表跟着最新内容走。上滚阅读时置 false，发送/打开抽屉/点「最新」时
+   * 置回 true —— 否则新消息流式增长会把人从正在读的那条上硬拽回底部。
+   */
+  const stickToBottomRef = useRef(true);
+  /** 触摸起始/上一点的 Y，用来判断手指是在「往下拖看历史」还是「往上拖看新消息」。 */
+  const touchAnchorRef = useRef<number | null>(null);
   const messagesRef = useRef(chat.messages);
   messagesRef.current = chat.messages;
 
@@ -1749,7 +1789,15 @@ function CompanionHistoryDrawer({
     list.scrollTop = list.scrollHeight - prevHeight + list.scrollTop;
   }, [chat.messages.length]);
 
+  /** 无条件贴到底部。ResizeObserver 与「打开抽屉」两处共用同一个写入口。 */
+  const pinToLatest = useCallback(() => {
+    const list = listRef.current;
+    if (list) list.scrollTop = list.scrollHeight;
+  }, []);
+
   const scrollToLatest = useCallback(() => {
+    stickToBottomRef.current = true;
+    setAtLatest(true);
     const list = listRef.current;
     if (list) list.scrollTo({ top: list.scrollHeight, behavior: "smooth" });
   }, []);
@@ -1757,12 +1805,45 @@ function CompanionHistoryDrawer({
   const handleListScroll = useCallback(() => {
     const list = listRef.current;
     if (!list) return;
-    setAtLatest(list.scrollHeight - list.scrollTop - list.clientHeight < 160);
+    const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight <= AT_BOTTOM_SLACK_PX;
+    setAtLatest(atBottom);
+    // 这里**只负责恢复**贴底意图，绝不关闭它。关闭只由用户输入判定（见 releaseStick）：
+    // 用 scroll 事件反推会被程序化滚动误伤——打开抽屉时先贴底，内容随后还在长高
+    // （图片解码、runTraces 落地），那一下 scroll 的 distance>0 就把意图关掉，
+    // 之后的贴底跟随整个失效（实测最后一条被切掉 51px / 101px）。
+    if (atBottom) stickToBottomRef.current = true;
     if (list.scrollTop <= 56 && chat.historyHasMore && !chat.historyLoadingOlder) {
       prevScrollHeightRef.current = list.scrollHeight;
       void chat.loadOlderMessages();
     }
   }, [chat]);
+
+  /** 用户主动往上翻 = 正在读历史，停止自动贴底，直到再次触底或点「最新」。 */
+  const releaseStick = useCallback(() => {
+    stickToBottomRef.current = false;
+  }, []);
+
+  /**
+   * 滚轮只在**向上**时松手。向下的滚轮到底之前 distance 一直 >0，若一并松手，
+   * 用户往下滚的过程中每次内容长高都不再跟随，反而更糟。
+   */
+  const handleListWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+    if (event.deltaY < 0) releaseStick();
+  }, [releaseStick]);
+
+  const handleListTouchMove = useCallback((event: React.TouchEvent<HTMLDivElement>) => {
+    const previousY = touchAnchorRef.current;
+    const currentY = event.touches[0]?.clientY ?? null;
+    if (currentY != null) {
+      // 手指往下移 = 内容往上走 = 回看历史。
+      if (previousY != null && currentY > previousY) releaseStick();
+      touchAnchorRef.current = currentY;
+    }
+  }, [releaseStick]);
+
+  const handleListTouchStart = useCallback((event: React.TouchEvent<HTMLDivElement>) => {
+    touchAnchorRef.current = event.touches[0]?.clientY ?? null;
+  }, []);
 
   // ── 微信式「选中即回根页面跳转」（2026-09-19 三次返工的正确模型） ──────
   // 聊天记录页只负责「找」：搜索框、日历、结果列表。用户选中搜索命中或日期后，
@@ -1773,46 +1854,69 @@ function CompanionHistoryDrawer({
   chatRef.current = chat;
   const [jumpNotice, setJumpNotice] = useState<string | null>(null);
 
-  const flashMessage = useCallback((id: string) => {
+  /** 等一帧：补页 setState 后必须等 React commit + 布局完成，refs/查询才反映新列表。 */
+  const nextFrame = useCallback(() => new Promise<void>((resolve) => {
+    window.requestAnimationFrame(() => resolve());
+  }), []);
+
+  /**
+   * 定位并闪烁。日期跳转优先滚到那天的**日期分界线**（data-day-key 锚点），
+   * 分界线在那天第一条消息的正上方——直接滚消息居中会把分界线裁出视口。
+   * 双 rAF：第一帧等 commit，第二帧等 prepend 后的布局稳定。
+   */
+  const flashMessage = useCallback((messageId: string, dayKey?: string) => {
     window.requestAnimationFrame(() => {
-      const el = listRef.current?.querySelector(`[data-message-id="${id}"]`);
-      el?.scrollIntoView({ block: "center" });
-      el?.setAttribute("data-flash", "true");
-      window.setTimeout(() => el?.removeAttribute("data-flash"), 1600);
+      window.requestAnimationFrame(() => {
+        const list = listRef.current;
+        if (!list) return;
+        const element = (dayKey ? list.querySelector(`[data-day-key="${dayKey}"]`) : null)
+          ?? list.querySelector(`[data-message-id="${messageId}"]`);
+        if (!element) return;
+        element.scrollIntoView({ block: "center" });
+        element.setAttribute("data-flash", "true");
+        window.setTimeout(() => element.removeAttribute("data-flash"), 1600);
+      });
     });
   }, []);
 
   /** 搜索命中：记录页里点一下 → 回根页面定位到那条。 */
   const jumpToMessage = useCallback((id: string) => {
+    setJumpNotice(null);
     pendingJumpRef.current = { messageId: id };
     setRecordOpen(false);
   }, []);
 
   /** 日期筛选：选一天 → 回根页面定位到那天第一条。 */
   const pickDate = useCallback((dayKey: string) => {
+    setJumpNotice(null);
     pendingJumpRef.current = { dateKey: dayKey };
     setRecordOpen(false);
     setCalendarOpen(false);
   }, []);
 
   // 聊天记录页关闭后，在根页面执行待处理的跳转（消息可能要向前补页才找得到）。
+  // pendingJumpRef **直到跳转完成才清空**：补页过程中每次 messages.length 变化
+  // 都会触发「自动定位到最新」effect，它靠这个 ref 判断要不要让路——提前清空
+  // 就会被一路滚回底部，跳转被覆盖（实测：点搜索命中后永远落在最新一条）。
+  // 抽屉中途关闭时跳转挂起，等下次打开继续。
   useEffect(() => {
-    if (recordOpen) return;
+    if (!open || !mounted || recordOpen) return;
     const pending = pendingJumpRef.current;
     if (!pending) return;
-    pendingJumpRef.current = null;
     let cancelled = false;
     void (async () => {
       if (pending.messageId) {
         let guard = 0;
-        let present = messagesRef.current.some((message) => message.id === pending.messageId);
-        while (!present && chatRef.current.historyHasMore && guard < 30) {
+        const present = () => messagesRef.current.some((message) => message.id === pending.messageId);
+        while (!present() && chatRef.current.historyHasMore && guard < 30) {
           guard += 1;
           await chatRef.current.loadOlderMessages();
-          present = messagesRef.current.some((message) => message.id === pending.messageId);
+          await nextFrame();
+          if (cancelled) return;
         }
         if (cancelled) return;
-        if (!present) { setJumpNotice("没有定位到那条消息（可能超出可加载范围）"); return; }
+        pendingJumpRef.current = null;
+        if (!present()) { setJumpNotice("没有定位到那条消息（可能超出可加载范围）"); return; }
         flashMessage(pending.messageId);
         return;
       }
@@ -1822,27 +1926,62 @@ function CompanionHistoryDrawer({
         while (guard < 40 && chatRef.current.historyHasMore && oldestDay() > pending.dateKey) {
           guard += 1;
           await chatRef.current.loadOlderMessages();
+          await nextFrame();
+          if (cancelled) return;
         }
         if (cancelled) return;
         const first = messagesRef.current.find((message) => messageDayKey(message.createdAt) === pending.dateKey);
+        pendingJumpRef.current = null;
         if (!first) { setJumpNotice(`${messageDayLabel(`${pending.dateKey}T12:00:00`)}没有聊天记录`); return; }
-        flashMessage(first.id);
+        flashMessage(first.id, pending.dateKey);
       }
     })();
     return () => { cancelled = true; };
-  }, [recordOpen, flashMessage]);
+  }, [open, mounted, recordOpen, flashMessage, nextFrame]);
 
-  // 有待处理跳转时，抑制「自动定位到最新」，避免覆盖跳转位置。打开抽屉
-  // （含切到聊天记录视图）自动定位到最新一条（要求 ③）；rAF 等一帧布局再滚。
+  // ── 贴底跟随（方案 §3.8）───────────────────────────────────────────────
+  // 此前是「一次性 rAF pin」：依赖 messages.length 变化后打一发 scrollTop=scrollHeight。
+  // 但让列表长高的三件事都发生在那一发**之后**：
+  //   ① 「执行过程」气泡由 1600ms 轮询填进 runTraces（不在旧依赖里），在最后一段的
+  //      下方挂载，scrollHeight 当场长高一整个气泡；
+  //   ② 流式草稿按 60ms tick 逐字增长（也不在旧依赖里）；
+  //   ③ composer / navChips / 错误行是 `.companion-history` 的**兄弟行**
+  //      （grid: auto minmax(0,1fr) auto auto auto），它们出现时 1fr 行的 clientHeight
+  //      变小而 scrollHeight 不变 —— 底部边缘照样切掉一截。
+  // scrollTop 不动而可视区变矮或内容变高，最新正文就只露一半。
+  //
+  // 改为观察两个几何量：内容层撑高（①②）与滚动容器自身变矮（③）。只观察容器看不到
+  // 前者，所以 DOM 上把内容单独包了一层 .companion-history__content。
+  useEffect(() => {
+    const list = listRef.current;
+    const content = contentRef.current;
+    if (!list || !content || !open || !mounted) return;
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      // 有待处理跳转时让路：补页与居中定位不能被贴底覆盖（见 pendingJumpRef 注释）。
+      if (frame || !stickToBottomRef.current || pendingJumpRef.current) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        pinToLatest();
+      });
+    });
+    observer.observe(list);
+    observer.observe(content);
+    return () => {
+      observer.disconnect();
+      if (frame) window.cancelAnimationFrame(frame);
+    };
+  }, [open, mounted, pinToLatest]);
+
+  // 打开抽屉（含切到聊天记录视图）自动定位到最新一条（要求 ③），并恢复贴底意图：
+  // 上一次阅读时「松手」的状态不该跨开关残留。
   useEffect(() => {
     if (!open || !mounted) return;
     if (pendingJumpRef.current) return;
-    const frame = window.requestAnimationFrame(() => {
-      const list = listRef.current;
-      if (list) list.scrollTop = list.scrollHeight;
-    });
+    stickToBottomRef.current = true;
+    const frame = window.requestAnimationFrame(pinToLatest);
     return () => window.cancelAnimationFrame(frame);
-  }, [open, mounted, recordOpen, chat.messages.length, chat.phase]);
+  }, [open, mounted, recordOpen, pinToLatest]);
 
   // 记录视图全量池的三态：加载中 / 失败可重试 / 未就绪。杜绝「null 永远转圈」。
   const poolStateBlock = allLoading && allMessages == null
@@ -1902,6 +2041,9 @@ function CompanionHistoryDrawer({
     const text = input.trim();
     if (!text) return;
     setInput("");
+    // 自己发言 = 明确想看她的回答：恢复贴底意图。真正的滚动交给 ResizeObserver ——
+    // 这一刻消息还没进 DOM，抢跑只会 pin 到一个旧高度上。
+    stickToBottomRef.current = true;
     const sent = await chat.send({
       text,
       ...(chat.feedSelection ? { selection: { text: chat.feedSelection } } : {}),
@@ -2042,83 +2184,94 @@ function CompanionHistoryDrawer({
           </div>
         </div>
       ) : null}
-      <div ref={listRef} className="companion-history__list" onScroll={handleListScroll}>
-        {/* ── 对话视图：日期分组时间线 ── */}
-        {!recordOpen ? (
-          <>
-            {chat.phase === "loading" ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />正在读取对话…</p> : null}
-            {chat.historyLoadingOlder ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />加载更早的消息…</p> : null}
-            {!chat.historyHasMore && chat.messages.length > 0 ? <p className="companion-history__system">没有更早的消息了</p> : null}
-            {chat.messages.map((message, index) => {
-              const previous = index > 0 ? chat.messages[index - 1] : null;
-              const showDay = !previous || messageDayKey(previous.createdAt) !== messageDayKey(message.createdAt);
-              return (
-                <Fragment key={message.id}>
-                  {showDay ? <div className="companion-history__day">{messageDayLabel(message.createdAt)}</div> : null}
-                  {renderArticle(message)}
-                </Fragment>
-              );
-            })}
-            {/*
-              进行中的一轮（2026-09-19 ③）：历史此前只渲染 `listMessages` 的快照，而
-              `companion_messages` 只在 `assistant.final` 的终态事务里才写——于是"她正在说的
-              这段话"在历史里根本不存在，用户必须等整轮结束才能看到。`draft` 早就在气泡里
-              实时显示了，这里把它按同一条消息的样子折进历史（同一份文本，不另起数据源）。
-              过程留痕按 runId 找：进行中那轮的 `assistantMessageId` 还是 null，不能用它匹配。
-            */}
-            {(() => {
-              const draft = chat.draft;
-              if (!draft || draft.text.trim().length === 0) return null;
-              const trace = chat.runTraces.find((item) => item.summary.runId === draft.runId) ?? null;
-              return (
-                <article data-role="assistant" data-live="true">
-                  <header><span>Mao</span><time>正在说…</time></header>
-                  <p>{smoothedDraftText}</p>
-                  {trace && shouldShowRunTrace(trace)
-                    ? (
-                        <CompanionRunTraceView
-                          trace={trace}
-                          proposalStates={chat.proposalStates}
-                          onDecideProposal={(proposalId, decision) => { void chat.decideProposal(proposalId, decision); }}
-                        />
-                      )
-                    : null}
-                </article>
-              );
-            })()}
-            {chat.phase === "sending" && !chat.draft ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />Mao 正在结合当前页面想一想…</p> : null}
-          </>
-        ) : (
-          /* ── 聊天记录视图：只负责「找」。选中搜索命中或日期后回到上面的对话时间线定位 ── */
-          <>
-            {chat.phase === "loading" ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />正在读取对话…</p> : null}
-            {(() => {
-              const keyword = searchInput.trim();
-              if (!keyword) {
+      <div
+        ref={listRef}
+        className="companion-history__list"
+        onScroll={handleListScroll}
+        onWheel={handleListWheel}
+        onTouchStart={handleListTouchStart}
+        onTouchMove={handleListTouchMove}
+      >
+        {/* 内容层：贴底跟随观察它的高度（见上方 pinToLatest 注释）。样式上它接管了
+            原 .companion-history__list 的 flex/gap/padding，容器只留 overflow。 */}
+        <div ref={contentRef} className="companion-history__content">
+          {/* ── 对话视图：日期分组时间线 ── */}
+          {!recordOpen ? (
+            <>
+              {chat.phase === "loading" ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />正在读取对话…</p> : null}
+              {chat.historyLoadingOlder ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />加载更早的消息…</p> : null}
+              {!chat.historyHasMore && chat.messages.length > 0 ? <p className="companion-history__system">没有更早的消息了</p> : null}
+              {chat.messages.map((message, index) => {
+                const previous = index > 0 ? chat.messages[index - 1] : null;
+                const showDay = !previous || messageDayKey(previous.createdAt) !== messageDayKey(message.createdAt);
                 return (
-                  <p className="companion-history__system">
-                    输入关键词搜索全部聊天记录；或点右上角「按日期」选一天——都会回到对话里的那个位置。
-                  </p>
+                  <Fragment key={message.id}>
+                    {showDay ? <div className="companion-history__day">{messageDayLabel(message.createdAt)}</div> : null}
+                    {renderArticle(message)}
+                  </Fragment>
                 );
-              }
-              const needle = keyword.toLowerCase();
-              const hits = (allMessages ?? []).filter((message) => companionMessageText(message).toLowerCase().includes(needle));
-              return (
-                <>
-                  {poolStateBlock}
-                  {allMessages != null && hits.length === 0 ? <p className="companion-history__system">没有找到包含「{keyword}」的消息</p> : null}
-                  {hits.map((message) => (
-                    <button key={message.id} type="button" className="companion-record__hit" onClick={() => jumpToMessage(message.id)}>
-                      <header><span>{message.role === "user" ? "你" : "Mao"}</span><time>{messageDayLabel(message.createdAt)} {messageTime(message.createdAt)}</time></header>
-                      <p>{highlightText(companionMessageText(message), keyword)}</p>
-                    </button>
-                  ))}
-                  {allMessages != null && hits.length > 0 ? <p className="companion-history__system">共 {hits.length} 条 · 点一条回到它的上下文</p> : null}
-                </>
-              );
-            })()}
-          </>
-        )}
+              })}
+              {/*
+                进行中的一轮（2026-09-19 ③）：历史此前只渲染 `listMessages` 的快照，而
+                `companion_messages` 只在 `assistant.final` 的终态事务里才写——于是"她正在说的
+                这段话"在历史里根本不存在，用户必须等整轮结束才能看到。`draft` 早就在气泡里
+                实时显示了，这里把它按同一条消息的样子折进历史（同一份文本，不另起数据源）。
+                过程留痕按 runId 找：进行中那轮的 `assistantMessageId` 还是 null，不能用它匹配。
+              */}
+              {(() => {
+                const draft = chat.draft;
+                if (!draft || draft.text.trim().length === 0) return null;
+                const trace = chat.runTraces.find((item) => item.summary.runId === draft.runId) ?? null;
+                return (
+                  <article data-role="assistant" data-live="true">
+                    <header><span>Mao</span><time>正在说…</time></header>
+                    <p>{smoothedDraftText}</p>
+                    {trace && shouldShowRunTrace(trace)
+                      ? (
+                          <CompanionRunTraceView
+                            trace={trace}
+                            proposalStates={chat.proposalStates}
+                            onDecideProposal={(proposalId, decision) => { void chat.decideProposal(proposalId, decision); }}
+                          />
+                        )
+                      : null}
+                  </article>
+                );
+              })()}
+              {chat.phase === "sending" && !chat.draft ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />Mao 正在结合当前页面想一想…</p> : null}
+            </>
+          ) : (
+            /* ── 聊天记录视图：只负责「找」。选中搜索命中或日期后回到上面的对话时间线定位 ── */
+            <>
+              {chat.phase === "loading" ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />正在读取对话…</p> : null}
+              {(() => {
+                const keyword = searchInput.trim();
+                if (!keyword) {
+                  return (
+                    <p className="companion-history__system">
+                      输入关键词搜索全部聊天记录；或点右上角「按日期」选一天——都会回到对话里的那个位置。
+                    </p>
+                  );
+                }
+                const needle = keyword.toLowerCase();
+                const hits = (allMessages ?? []).filter((message) => companionMessageText(message).toLowerCase().includes(needle));
+                return (
+                  <>
+                    {poolStateBlock}
+                    {allMessages != null && hits.length === 0 ? <p className="companion-history__system">没有找到包含「{keyword}」的消息</p> : null}
+                    {hits.map((message) => (
+                      <button key={message.id} type="button" className="companion-record__hit" onClick={() => jumpToMessage(message.id)}>
+                        <header><span>{message.role === "user" ? "你" : "Mao"}</span><time>{messageDayLabel(message.createdAt)} {messageTime(message.createdAt)}</time></header>
+                        <p>{highlightText(companionMessageText(message), keyword)}</p>
+                      </button>
+                    ))}
+                    {allMessages != null && hits.length > 0 ? <p className="companion-history__system">共 {hits.length} 条 · 点一条回到它的上下文</p> : null}
+                  </>
+                );
+              })()}
+            </>
+          )}
+        </div>
       </div>
       {/* 跳转至最新消息（微信式）：离开底部后出现，一键回底部。 */}
       {!atLatest ? (
@@ -2175,6 +2328,7 @@ function CompanionHistoryDrawer({
       </form>
       ) : null}
       {chat.navChips.length > 0 && !recordOpen ? <div className="companion-history__nav">{chat.navChips.map((chip) => <div key={chip.id}><span>{chip.summary}</span>{chip.route ? <button type="button" onClick={() => void openRoute(chip)}>前往</button> : <small>桌面端暂不支持这个跳转</small>}<button type="button" onClick={() => chat.dismissNavChip(chip.id)} aria-label="知道了"><X size={12} /></button></div>)}</div> : null}
+      {!recordOpen && jumpNotice ? <p className="companion-history__error" role="status">{jumpNotice}</p> : null}
       {!recordOpen && (navNote || chat.failure) ? <p className="companion-history__error" role="status">{navNote ?? chat.failure}</p> : null}
       </aside>
     </>,

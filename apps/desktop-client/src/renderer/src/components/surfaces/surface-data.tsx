@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { CircleAlert, FolderOpen, LoaderCircle, RefreshCw } from "lucide-react";
 import type { DesktopSourceListItem } from "@ailearn/shared/desktop-surface-contracts";
-import type { ObjectiveListItemV3 } from "@ailearn/shared/learning-objective-surface-contracts";
 import type { NoteBlockProjectionV1 } from "@ailearn/shared/note-projection-contracts";
 import { gatewayErrorMessage } from "../../app/desktop-client";
 import { readAuthenticatedSession } from "../../app/surface-session";
@@ -240,6 +239,20 @@ function isSameCalendarDay(a: Date, b: Date): boolean {
 }
 
 /**
+ * Parses an image block's stored markdown (`![alt](url)`) into its parts, so a
+ * reading surface can render the picture instead of the markup. Returns null
+ * for content that is not a well-formed single markdown image.
+ *
+ * 它和 `noteBlockText` 住在一起：两个都是"一版里存的东西怎么变成给人看的东西"，
+ * 而笔记库的封面缩略图与正文图片必须共用同一个解析规则。
+ */
+export function parseImageBlock(content: string): { readonly alt: string; readonly url: string } | null {
+  const match = /^!\[([^\]]*)\]\(([^)]+)\)$/.exec(content.trim());
+  if (!match) return null;
+  return { alt: match[1] ?? "", url: match[2] ?? "" };
+}
+
+/**
  * Note blocks arrive as HTML-ish text. Every note surface shows them as prose,
  * so the markup is flattened once here instead of in each page body.
  */
@@ -259,7 +272,11 @@ export function noteBlockText(value: string): string {
 /** The whole version as one line of prose, with runs of whitespace collapsed. */
 export function noteBodyText(blocks: readonly NoteBlockProjectionV1[]): string {
   return blocks
-    .map((block) => noteBlockText(block.content))
+    .map((block) => block.type === "image"
+      // 图片块整行存的就是 `![alt](url)`，直接 join 会把 markdown 语法漏进
+      // 摘要行。这里只留说明文字——预览要说的仍是"这一版里有什么"。
+      ? parseImageBlock(block.content)?.alt ?? ""
+      : noteBlockText(block.content))
     .join(" ")
     .replace(/\s+/g, " ")
     .trim();
@@ -307,30 +324,5 @@ export function formatSourceKindLabel(item: Pick<DesktopSourceListItem, "type">)
     case "markdown": return "Markdown";
     case "code": return "代码";
     default: return "文本";
-  }
-}
-
-export function formatObjectiveState(state: ObjectiveListItemV3["personalState"]["state"]): string {
-  switch (state) {
-    case "unvalidated": return "待验证";
-    case "learning": return "学习中";
-    case "stable": return "已稳定";
-    case "fragile": return "需要巩固";
-    case "needs_repair": return "需要修复";
-    case "due_review": return "到期复习";
-    case "scheduled": return "已排期";
-    case "outdated": return "内容过期";
-    case "archived": return "已归档";
-    case "superseded": return "已被替代";
-    default: return state;
-  }
-}
-
-export function objectiveStateTone(state: ObjectiveListItemV3["personalState"]["state"]): string {
-  switch (state) {
-    case "stable": return "green";
-    case "fragile":
-    case "needs_repair": return "red";
-    default: return "";
   }
 }

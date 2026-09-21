@@ -524,6 +524,34 @@ jobs:
           node --import tsx --test src/integration-tests/note-version-restore-postgres.integration.ts \
             2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/note-version-restore.tap"
 
+      # 双空间 · 双角色的行为契约。存在的理由：sec01-cross-workspace-isolation 与
+      # permission-guard 都是源码字符串包含断言，摘掉某个路由的 requireOwner 不会变红；
+      # 这一份走真实 invite 流程产出 member，用 HTTP 断言 403/404 与投影一致性。
+      # 必须用受限角色（ailearn_api 是 NOBYPASSRLS），超级用户会绕过 RLS。
+      - name: Verify collaborative workspace roles and cross-workspace isolation behaviour
+        working-directory: apps/api
+        env:
+          NODE_ENV: test
+          DATABASE_URL_MIGRATOR: ${{ env.DATABASE_URL_MIGRATOR }}
+          DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
+        run: |
+          set -o pipefail
+          node --import tsx --test src/integration-tests/workspace-collab-postgres.integration.ts \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/workspace-collab.tap"
+
+      # 空间隔离 schema 棘轮：把当前"带 workspace_id 但缺外键 / 缺 RLS"的表如实登记为
+      # 基线，要求实际集合与基线完全相等——新增违规变红，修好一条也必须同步删基线，
+      # 所以清单只能缩短。一次性补齐 89 个外键不现实，用棘轮换"不再恶化"。
+      - name: Verify workspace schema ratchet (FK and RLS coverage cannot regress)
+        working-directory: apps/api
+        env:
+          NODE_ENV: test
+          DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
+        run: |
+          set -o pipefail
+          node --import tsx --test src/integration-tests/schema-isolation-gate-postgres.integration.ts \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/schema-isolation-gate.tap"
+
       # Companion 首页房间档案：0185 RLS 隔离 + 真实 SQL revision CAS（含并发
       # 写入者竞争）+ PATCH /companion/room-profile 的 400/409/200 认证契约。
       # 该文件此前未接入任何 CI job，只会在缺 URL 时静默 skip。

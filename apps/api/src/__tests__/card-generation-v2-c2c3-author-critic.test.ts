@@ -54,6 +54,7 @@ function makeMockPlan(): CardPlanV2 {
         objectiveStatement: "定义：分布式共识是指多个节点对某个值达成一致的协议。",
         priority: "critical",
         knowledgeForm: "definition",
+        strategy: "recall",
         sourceAtomIds: ["atom-1"],
         reasonCodes: ["learnability-9000"],
         estimatedReviewCostSeconds: 60,
@@ -168,7 +169,55 @@ describe("C2: Author Service", () => {
     assert.notEqual(candidate.objective.publicSummary, statement.slice(0, 200));
     // 兜底闸必须拦得住退化形态：正面整句照抄答案时判定为泄漏。
     const answerText = extractAnswerText(candidate.objective.canonicalAnswer);
-    assert.equal(frontLeaksAnswerVerbatimV2(`请回答：${answerText}`, answerText), true);
+    assert.equal(
+      frontLeaksAnswerVerbatimV2(
+        `请回答：${answerText}`, answerText, candidate.presentation.strategy,
+      ),
+      true,
+    );
+  });
+
+  /**
+   * 2026-09-20 实走复盘 #10：提示要**自带在卡片上**，且不得并进判分内容的审计链。
+   * 前一条保证两张不同内容的卡拿到不同提示；后一条由 `hints` 不出现在候选对象上
+   * 来保证——candidateRevisionHash 对整个候选对象取哈希。
+   */
+  test("每张卡带自己的提示，且提示不进入候选修订哈希的输入", async () => {
+    async function authorFor(objectiveStatement: string, sourceContent: string) {
+      const plan = makeMockPlan();
+      if (plan.result.kind !== "author_candidates") throw new Error("plan must author candidates");
+      plan.result.objectives[0].objectiveStatement = objectiveStatement;
+      const result = await executeAuthor({
+        runId: "r-00000000-0000-4000-8000-000000000001",
+        workspaceId: "ws-00000000-0000-4000-8000-000000000001",
+        plan,
+        sourceContent,
+        semanticSpecHash: "f".repeat(64),
+        provider: new DeterministicAuthoringProvider(),
+      });
+      const candidate = result.candidates[0];
+      return {
+        candidate,
+        hints: result.hintsByCandidateRevisionId.get(candidate.candidateRevisionId),
+      };
+    }
+
+    const consensus = await authorFor(
+      "定义：分布式共识是指多个节点对某个值达成一致的协议。",
+      "分布式共识是指多个节点对某个值达成一致的协议。",
+    );
+    const backprop = await authorFor(
+      "定义：反向传播是损失梯度从输出层逐层回传到各层参数的算法。",
+      "反向传播是损失梯度从输出层逐层回传到各层参数的算法。",
+    );
+
+    assert.ok(consensus.hints, "作者必须同时交出提示，否则作答侧只能退回常量表");
+    assert.ok(consensus.hints.level1.length > 0 && consensus.hints.level2.length > 0);
+    assert.notEqual(consensus.hints.level2, backprop.hints?.level2,
+      "两张不同内容的卡不应看到同一句提示");
+    // 提示是候选行的兄弟列，不是候选对象的一部分。
+    assert.equal("hints" in consensus.candidate, false,
+      "hints 进了候选对象就会被算进 candidateRevisionHash");
   });
 
   test("returns empty for no_cards_recommended plan", async () => {

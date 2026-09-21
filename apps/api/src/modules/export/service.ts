@@ -237,6 +237,14 @@ async function checkExportSize(tx: ApiTransaction, workspaceId: string): Promise
   }
 }
 
+/**
+ * 导出（批次 3 归属修复）：包里只有**共享资料 + 导出者自己的行为**。
+ *
+ * 成员私有行一律不进包：别人的复习排程、别人的成员行与邮箱。学习空间共享的是
+ * 资料，行为归个人（用户对空间的原始要求：「共享学习空间只允许共享学习资料，
+ * 用户的一些行为不涵盖在里面」）。个人空间里导出者就是唯一成员，因此这条过滤
+ * 对最常见的场景没有任何可见变化。
+ */
 export async function exportWorkspace(workspaceId: string, userId: string) {
   // BUG-75 修复：使用 withWorkspaceTransaction 替代 db.transaction
   // PERF-15/43 修复：在导出前执行预计数检查，对大型工作区记录警告或拒绝导出。
@@ -255,9 +263,13 @@ export async function exportWorkspace(workspaceId: string, userId: string) {
       tx.query.workspaces.findFirst({
         where: eq(workspaces.id, workspaceId),
       }),
-      // 导出 workspace members（包含 userId 和 role，便于备份审计）
+      // 导出 workspace members（包含 userId 和 role，便于备份审计）。
+      // 批次 3：默认档只带导出者自己那一行——别人的邮箱是私有数据。
       tx.query.workspaceMembers.findMany({
-        where: eq(workspaceMembers.workspaceId, workspaceId),
+        where: and(
+          eq(workspaceMembers.workspaceId, workspaceId),
+          eq(workspaceMembers.userId, userId),
+        ),
       }),
     ]);
 
@@ -430,6 +442,8 @@ export async function exportWorkspace(workspaceId: string, userId: string) {
         load: (c: CreatedIdCursor | null) =>
           tx.select().from(reviewSchedules).where(and(
             eq(reviewSchedules.workspaceId, workspaceId),
+            // 批次 3：复习排程是个人行为，不进共享资料包。
+            eq(reviewSchedules.userId, userId),
             c
               ? or(
                   lt(reviewSchedules.createdAt, c.createdAt),
@@ -482,6 +496,8 @@ export async function exportWorkspace(workspaceId: string, userId: string) {
         load: (c: UpdatedIdCursor | null) =>
           tx.select().from(onboardingStates).where(and(
             eq(onboardingStates.workspaceId, workspaceId),
+            // 引导进度是每个人自己的行为，跟复习排程同类：不进别人的导出包。
+            eq(onboardingStates.userId, userId),
             c
               ? or(
                   lt(onboardingStates.updatedAt, c.updatedAt),
@@ -494,8 +510,9 @@ export async function exportWorkspace(workspaceId: string, userId: string) {
     ]);
 
     // PERF-15 优化：Phase 3 — 依赖 Phase 1/2 结果的查询并行执行
-    // 导出相关 users（不导出 passwordHash）
-    const userIds = [workspace?.ownerId, ...memberRows.map((m) => m.userId)].filter(Boolean) as string[];
+    // 导出相关 users（不导出 passwordHash）。批次 3：成员行已收窄成导出者自己，
+    // 所以这里也不再带别人的邮箱——共享资料包里只有"我是谁"。
+    const userIds = [userId, ...memberRows.map((m) => m.userId)].filter(Boolean) as string[];
     const [
       userRows,
       // Plan 23 CS-07
@@ -554,11 +571,8 @@ export async function exportWorkspace(workspaceId: string, userId: string) {
             name: workspace.name,
             ownerId: workspace.ownerId,
             workspaceType: workspace.workspaceType,
-            // N-011: 导出 AI 隐私治理配置
-          aiConsentVersion: workspace.aiConsentVersion,
-            aiConsentAt: workspace.aiConsentAt,
-            aiConsentBy: workspace.aiConsentBy,
-            aiDataPolicy: workspace.aiDataPolicy,
+            // AI 同意与数据外发政策曾是空间字段并随导出落盘；0237 起它是账号级
+            // 的个人数据，不再出现在任何工作区导出包里。
           }
         : null,
       // 导出 identity 数据，使备份包含完整的成员关系

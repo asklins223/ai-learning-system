@@ -4,7 +4,7 @@
  * 覆盖：
  * - 无正式作答 context + 空预算 → run.completed 提醒入队（allowed）；
  * - 存在未过期 formal_answer page context → 抑制（formal_answer_in_progress）；
- * - 24h 主动 delivery 已达 moderate 预算（3）→ 抑制（quiet_budget_exhausted）；
+ * - 24h 主动 delivery 已达 moderate 预算（3）→ 抑制（daily_budget_exhausted）；
  * - quiet 介入级别 → 恒抑制（quietDailyLimit=0）。
  */
 
@@ -131,7 +131,7 @@ async function insertHistoricalDeliveries(
   });
 }
 
-test("§10.2：24h 预算 moderate=3 已满 → 抑制（quiet_budget_exhausted）", async () => {
+test("§10.2：24h 预算 moderate=3 已满 → 抑制（daily_budget_exhausted）", async () => {
   const seeded = await seedBase();
   try {
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };

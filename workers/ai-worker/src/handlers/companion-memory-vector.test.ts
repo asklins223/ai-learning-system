@@ -285,53 +285,99 @@ test("vector 空结果且无 ready embedding 时降级 keyword（修复零召回
   assert.ok(calls.some((c) => c.includes("EXISTS")));
 });
 
-test("vector 空结果但存在 ready embedding 时保持空集（真正无相关记忆）", async () => {
-  const provider: EmbeddingProviderLike = {
-    id: "mock",
-    embeddingModelId: "mock-v1",
-    embed: async () => new Array(1024).fill(0.01),
+// ─── 并集补召回（方案 29 §9.9）：取代旧的 hasReady 探测 ───────────────────
+// 旧行为漏掉最常见的状态：用户已有若干 ready 向量、刚写的那条还在 pending，
+// 主查询非空 → 不降级 → 新记忆结构性隐身（活体：写完"图书馆三楼"下一条就记不得）。
+
+function memoryRow(id: string, content: string) {
+  return {
+    id, kind: "preference", content, importance: 0.8,
+    pinned: false, last_used_at: null, user_confirmed: true,
   };
-  const tx = {
+}
+
+/** 按查询形态分流的假事务：含 `<=>` 的是向量主查询，其余是 keyword 补召回。 */
+function routingTx(vectorRows: unknown[], keywordRows: unknown[]) {
+  const queries: string[] = [];
+  return {
+    queries,
     execute: async (query: unknown) => {
       const text = sqlTemplateText(query);
-      if (text.includes("EXISTS")) return [{ has_ready: true }];
-      return [];
+      queries.push(text);
+      return text.includes("<=>") ? vectorRows : keywordRows;
     },
   };
-  const result = await retrieveCompanionMemoriesVector(tx as never, { workspaceId: "w", userId: "u" }, "光合", provider, 8);
-  assert.equal(result.mode, "vector");
-  assert.equal(result.items.length, 0);
+}
+
+test("并集：向量命中的与缺向量的合并去重，向量侧优先", async () => {
+  const provider: EmbeddingProviderLike = {
+    id: "mock", embeddingModelId: "mock-v1", embed: async () => new Array(1024).fill(0.01),
+  };
+  const tx = routingTx(
+    [memoryRow("11111111-1111-4111-8111-111111111111", "喜欢用语音交流")],
+    [
+      memoryRow("22222222-2222-4222-8222-222222222222", "习惯在图书馆三楼复习"),
+      // 同一 id 两侧都出现：必须去重，不能往 prompt 里塞两遍。
+      memoryRow("11111111-1111-4111-8111-111111111111", "喜欢用语音交流"),
+    ],
+  );
+  const result = await retrieveCompanionMemoriesVector(
+    tx as never, { workspaceId: "w", userId: "u" }, "在哪儿复习", provider, 8,
+  );
+  assert.equal(result.mode, "vector", "向量侧有命中时模式仍是 vector");
+  assert.deepEqual(result.items.map((i) => i.content), [
+    "喜欢用语音交流", "习惯在图书馆三楼复习",
+  ], "新写的 pending 记忆必须被补召回带回来");
 });
 
-test("EXISTS 探测带 scope 过滤，与主检索一致（防跨 scope 误判 ready）", async () => {
+test("全部条目都有 ready 向量且向量无命中 → 仍是空集（并集不得引入乱召回）", async () => {
   const provider: EmbeddingProviderLike = {
-    id: "mock",
-    embeddingModelId: "mock-v1",
-    embed: async () => new Array(1024).fill(0.01),
+    id: "mock", embeddingModelId: "mock-v1", embed: async () => new Array(1024).fill(0.01),
   };
-  // 主查询空集 + EXISTS 返回 true：探测 SQL 必须含与主查询相同的 scope 条件，
-  // 否则只有其他 scope 的 ready embedding 时会误判"有 ready"而不降级 keyword。
-  const calls: string[] = [];
-  const tx = {
-    execute: async (query: unknown) => {
-      const text = sqlTemplateText(query);
-      calls.push(text);
-      if (text.includes("EXISTS")) return [{ has_ready: true }];
-      return [];
-    },
+  const tx = routingTx([], []);
+  const result = await retrieveCompanionMemoriesVector(
+    tx as never, { workspaceId: "w", userId: "u" }, "光合", provider, 8,
+  );
+  assert.equal(result.items.length, 0);
+  assert.equal(result.mode, "keyword_fallback");
+});
+
+test("补召回 SQL 必须带与主查询一致的 scope 过滤，且只取缺 ready 向量的行", async () => {
+  const provider: EmbeddingProviderLike = {
+    id: "mock", embeddingModelId: "mock-v1", embed: async () => new Array(1024).fill(0.01),
   };
+  const tx = routingTx([], []);
   await retrieveCompanionMemoriesVector(
-    tx as never,
-    { workspaceId: "w", userId: "u" },
-    "光合",
-    provider,
-    8,
-    "task",
+    tx as never, { workspaceId: "w", userId: "u" }, "光合", provider, 8, "task",
   );
-  const existsSql = calls.find((c) => c.includes("EXISTS"));
-  assert.ok(existsSql, "zero-recall window probe should be issued");
+  const supplement = tx.queries.find((q) => !q.includes("<=>"));
+  assert.ok(supplement, "必须发出补召回查询");
+  // 2026-08-22 审查那条不变量换了宿主，不能丢：补召回的 scope 条件必须与主查询同形，
+  // 否则跨 scope 的 pending 记忆会被错误召回/漏召回。
   assert.ok(
-    existsSql.includes("m.scope = 'workspace' OR m.scope = 'global' OR m.scope ="),
-    `EXISTS probe missing scope filter: ${existsSql}`,
+    supplement.includes("scope = 'workspace' OR scope = 'global' OR scope ="),
+    `补召回缺 scope 过滤: ${supplement}`,
   );
+  assert.ok(supplement.includes("NOT EXISTS"), "必须只取向量侧看不见的行");
+  assert.ok(supplement.includes("embedding_status <> 'ready'"), "pending 行要被纳入");
+  assert.ok(supplement.includes("mock-v1"), "必须按当前 embedding 模型判定可见性");
+});
+
+// ─── ILIKE 语义（2026-09-20 §9.9）───────────────────────────────────────
+// 假事务永远评估不了 SQL，所以这类 bug 只能靠"断言生成的模式形状"兜住：
+// LIKE 模式不带 % 就是**全等比较**，`'习惯在图书馆三楼复习' ILIKE '复习'` 为假——
+// keyword 检索因此长期形同虚设（memory_usage_log 290 行清一色 vector 就是证据）。
+
+test("keyword 检索：content 必须生成 %子串% 模式，kind 保持全等", async () => {
+  const tx = capturingTx([]);
+  await retrieveCompanionMemoriesKeyword(
+    tx as never, { workspaceId: "w", userId: "u" }, "我平时都在哪儿复习来着",
+  );
+  assert.equal(tx.queries.length, 1);
+  const sqlText = tx.queries[0];
+  assert.ok(/%[^%"]*%/.test(sqlText), `content 模式必须带通配符: ${sqlText}`);
+  // 两个数组字面量：content 带 %，kind 不带。
+  const literals = [...sqlText.matchAll(/\{[^}]*\}/g)].map((m) => m[0]);
+  assert.ok(literals.some((l) => l.includes("%")), "存在带 % 的内容模式");
+  assert.ok(literals.some((l) => !l.includes("%")), "存在不带 % 的 kind 模式");
 });

@@ -56,12 +56,15 @@ import {
   copyOriginsToRevision,
 } from "../learning-objectives/origin-service.ts";
 import {
+  cardHintPairV2Schema,
+  cardStrategyV2Schema,
   parseCardActivationReceiptV2,
   type ActivateCardCandidatesRequestV2,
   type CardActivationReceiptV2,
   type ActivationIntentV2,
 } from "@ailearn/shared/card-generation-v2-contracts";
 import { isCardGenerationReviewOpen } from "@ailearn/shared/card-generation-desktop-contracts";
+import { closePendingSchedules } from "./card-service.ts";
 import { extractAnswerText, frontLeaksAnswerVerbatimV2 } from "@ailearn/shared/card-generation-v2-pipeline";
 import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
 import {
@@ -486,6 +489,11 @@ export async function activateCardCandidatesV2(
       mappings.push(mapping);
     }
 
+    // 8.5 被替代批次的卡让位（2026-09-20 实走复盘 #5）：一篇笔记重新生成并
+    // 激活后，上一批里没有再次命中的卡必须退出可复习集合，否则新旧两批会一起
+    // 出现在列表与复习队列里。
+    await retireSupersededRun(tx, ctx, run.supersedesRunId, mappings);
+
     // 9. 计算 requestHash
     // 10. 生成 receiptId
     const receiptId = randomUUID();
@@ -780,6 +788,9 @@ async function createOrUpdateObjectiveAndCard(
   const leakedFront = frontLeaksAnswerVerbatimV2(
     `${presentationDraft.front.cue} ${presentationDraft.front.prompt}`,
     extractAnswerText(objectiveDraft.canonicalAnswer as never),
+    // 判定尺度按题型放宽（cloze/sequence 的题面按设计复述答案片段）。枚举外的值
+    // 落到最严尺度，不给「未知题型 = 免检」留缝。
+    cardStrategyV2Schema.safeParse(presentationDraft.strategy).data ?? "recall",
   );
   if (leakedFront) {
     throw new CardGenerationV2ServiceError(
@@ -918,6 +929,7 @@ async function createOrUpdateObjectiveAndCard(
         preferredIntents: objectiveDraft.preferredTaskIntents ?? [],
         canonicalAnswer: objectiveDraft.canonicalAnswer,
         learningSupport: objectiveDraft.learningSupport,
+        hints: readCandidateHints(candidate.hints),
         scoringRubric: objectiveDraft.rubric,
         relations: objectiveDraft.relations ?? [],
         evidenceBindings: canonicalBindings,
@@ -1321,6 +1333,7 @@ async function createOrUpdateObjectiveAndCard(
         preferredIntents: objectiveDraft.preferredTaskIntents ?? [],
         canonicalAnswer: objectiveDraft.canonicalAnswer,
         learningSupport: objectiveDraft.learningSupport,
+        hints: readCandidateHints(candidate.hints),
         scoringRubric: objectiveDraft.rubric,
         relations: objectiveDraft.relations ?? [],
         evidenceBindings: [],
@@ -1796,6 +1809,103 @@ async function createInitialValidationReminder(
     status: hasRevealExposure ? "pending" : "ready",
     qualificationNotBefore: qualificationNotBefore.toISOString(),
   });
+}
+
+/**
+ * 把候选行上的提示 jsonb 归一化成目标修订要存的形状。
+ *
+ * 只认 `{level1, level2}` 两个非空字符串；其余（空对象、历史行、模型漏交后又被
+ * 截断的脏值）一律存成空对象，由作答侧退回按卡片结构派生的提示——绝不因为提示
+ * 形状不对而阻断激活。
+ */
+function readCandidateHints(raw: unknown): Record<string, string> {
+  const parsed = cardHintPairV2Schema.safeParse(raw);
+  if (!parsed.success) return {};
+  return { level1: parsed.data.level1, level2: parsed.data.level2 };
+}
+
+// ─── 批次替代 ────────────────────────────────────────────────────────────────
+
+/**
+ * 把上一个批次的卡退出可复习集合（2026-09-20 实走复盘 #5）。
+ *
+ * 现象：同一篇笔记再生成一次，界面上没有任何东西把旧批次标成废弃，新旧两批
+ * 卡一起出现在列表与复习队列里。根因是 `supersedes_run_id` 列虽然早就存在，
+ * 生产代码却从未写入，跨 run 也没有任何 retirement——run 内的重新规划会
+ * supersede（handler 里按 `run_id` 收口），跨 run 完全不生效。
+ *
+ * 只动本次没有被再次命中的目标：语义同一的 objective 会被 `createOrUpdateObjectiveAndCard`
+ * 复用，其 cardId/objectiveId 出现在 `mappings` 里，跳过即可（那正是"这张卡还在"）。
+ * 历史与已提交的作答不删，只把 lifecycle 置为 `superseded` 并关闭排程/初次验证提醒。
+ */
+async function retireSupersededRun(
+  tx: ApiTransaction,
+  ctx: RunContext,
+  supersededRunId: string | null | undefined,
+  keptMappings: ReceiptMapping[],
+): Promise<number> {
+  if (!supersededRunId) return 0;
+
+  const kept = new Set<string>();
+  for (const mapping of keptMappings) {
+    kept.add(mapping.objectiveId);
+    kept.add(mapping.cardId);
+  }
+
+  const receipts = await tx
+    .select({ mappings: cardActivationReceiptsV2.mappings })
+    .from(cardActivationReceiptsV2)
+    .where(and(
+      eq(cardActivationReceiptsV2.workspaceId, ctx.workspaceId),
+      eq(cardActivationReceiptsV2.runId, supersededRunId),
+    ));
+  const priorMappings = receipts.flatMap((row) => (row.mappings ?? []) as ReceiptMapping[]);
+
+  let retired = 0;
+  for (const mapping of priorMappings) {
+    if (kept.has(mapping.objectiveId) || kept.has(mapping.cardId)) continue;
+    const demoted = await tx.update(learningObjectivesV2)
+      .set({
+        lifecycle: "superseded",
+        lifecycleEpoch: sql`lifecycle_epoch + 1`,
+        updatedAt: new Date(),
+      })
+      .where(and(
+        eq(learningObjectivesV2.workspaceId, ctx.workspaceId),
+        eq(learningObjectivesV2.objectiveId, mapping.objectiveId),
+        eq(learningObjectivesV2.lifecycle, "active"),
+      ))
+      .returning({ id: learningObjectivesV2.id });
+    if (demoted.length === 0) continue;
+
+    await tx.update(learningCardsV2)
+      .set({ lifecycle: "superseded", updatedAt: new Date() })
+      .where(and(
+        eq(learningCardsV2.workspaceId, ctx.workspaceId),
+        eq(learningCardsV2.cardId, mapping.cardId),
+        eq(learningCardsV2.lifecycle, "active"),
+      ));
+    await closePendingSchedules(tx, ctx.workspaceId, ctx.userId, mapping.objectiveId);
+    await tx.update(initialValidationRemindersV2)
+      .set({ status: "cancelled", updatedAt: new Date() })
+      .where(and(
+        eq(initialValidationRemindersV2.workspaceId, ctx.workspaceId),
+        eq(initialValidationRemindersV2.objectiveId, mapping.objectiveId),
+        inArray(initialValidationRemindersV2.status, ["pending", "ready"]),
+      ));
+    retired += 1;
+  }
+
+  // 旧批次的候选行落定：它们已经发布过一次，之后不可能再被激活。
+  await tx.update(cardGenerationCandidatesV2)
+    .set({ publishState: "superseded", updatedAt: new Date() })
+    .where(and(
+      eq(cardGenerationCandidatesV2.workspaceId, ctx.workspaceId),
+      eq(cardGenerationCandidatesV2.runId, supersededRunId),
+      eq(cardGenerationCandidatesV2.publishState, "activated"),
+    ));
+
+  return retired;
 }
 
 // ─── 现有生命周期操作 ─────────────────────────────────────────────────────────

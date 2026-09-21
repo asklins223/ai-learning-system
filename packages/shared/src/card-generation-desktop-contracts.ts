@@ -218,6 +218,25 @@ export function isCardGenerationReviewOpen(status: string): boolean {
   return status === "review_ready" || status === "needs_attention";
 }
 
+/**
+ * 一次生成的逐候选进度（2026-09-20 实走复盘 #2）。
+ *
+ * `run.status` 只有 14 个粗粒度档位，`authoring` 里写了 3 张还是 12 张、过了几道
+ * 质量门完全看不出来，进度条因此只能"从第 2 步跳到完成"。这几个数本来就在候选表里，
+ * 由 API 聚合后随 run 详情下发；SSE 只作为"该重读了"的信号，原始事件不过 IPC 边界。
+ */
+export const cardGenerationProgressV1Schema = z.strictObject({
+  /** 计划出几张（CardPlan 的 recommendedCardCount）；0 = 计划还没冻结。 */
+  plannedCards: nonNegativeIntSchema,
+  /** 已写出的候选数。 */
+  authored: nonNegativeIntSchema,
+  /** 当前修订已通过质量门的候选数。 */
+  gatePassed: nonNegativeIntSchema,
+  /** 当前修订未通过质量门的候选数。 */
+  gateFailed: nonNegativeIntSchema,
+});
+export type CardGenerationProgressV1 = z.infer<typeof cardGenerationProgressV1Schema>;
+
 /** Main-only view of the server serializer; hashes never cross IPC. */
 export const cardGenerationRunServerViewV2Schema = z.strictObject({
   runId: uuidSchema,
@@ -232,6 +251,8 @@ export const cardGenerationRunServerViewV2Schema = z.strictObject({
   currentPlanVersion: nonNegativeIntSchema,
   reviewDraftRevision: positiveIntSchema,
   sourceOutdated: z.boolean(),
+  /** 列表类读取不聚合进度，此时为 null（详情页才有值）。 */
+  progress: cardGenerationProgressV1Schema.nullable(),
   recovery: cardGenerationRecoveryProjectionV1Schema.nullable(),
   error: z.strictObject({
     code: z.string().min(1).max(100),
@@ -253,6 +274,7 @@ export const cardGenerationRunSnapshotV1Schema = z.strictObject({
   reviewDraftRevision: positiveIntSchema,
   sourceOutdated: z.boolean(),
   sourceRef: cardGenerationSourceRefV1Schema,
+  progress: cardGenerationProgressV1Schema.nullable(),
   recovery: cardGenerationRecoveryProjectionV1Schema.nullable(),
   createdAt: isoTimestampSchema,
   updatedAt: isoTimestampSchema,
@@ -430,6 +452,7 @@ export function projectCardGenerationRunSnapshotV1(value: CardGenerationRunServe
     reviewDraftRevision: value.reviewDraftRevision,
     sourceOutdated: value.sourceOutdated,
     sourceRef: { noteId: value.noteId, noteVersionId: value.noteVersionId },
+    progress: value.progress,
     recovery: value.recovery,
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,

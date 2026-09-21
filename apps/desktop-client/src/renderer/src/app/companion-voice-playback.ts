@@ -73,8 +73,22 @@ const listeners = new Set<(progress: CompanionSpeechProgress) => void>();
 
 /** 播放进度的广播节流：逐帧广播会带着 React 一起 60Hz 重渲气泡。 */
 const PROGRESS_INTERVAL_MS = 80;
-export const COMPANION_SPEECH_FIRST_AUDIO_DEADLINE_MS = 1_600;
-export const COMPANION_SPEECH_GAP_DEADLINE_MS = 1_200;
+/**
+ * 单段音频的等待上限（方案 29 §4.9，抱怨 #4「输出了但语音根本不读」）。
+ *
+ * 原来是 1600ms / 1200ms。这两个数字对一条**网络合成**链路太紧了：qwen-tts 与
+ * edge-tts 都要一次完整往返，实测 edge-tts 容器还带着 15 次 500 和 BrokenPipeError。
+ * 命中截止的旧行为是 `generation += 1` 把**整轮**音频作废——而文字早就流完了，
+ * 于是用户看到的是"她说了话但没声音"，且这一轮之后再也恢复不了。
+ *
+ * 放宽的代价几乎为零：语音是对已显示文字的**渐进增强**，晚 2 秒开始念远好于不念。
+ * 现在超时只跳过那一段（见 runQueuedSpeech），整轮一段都没播出来才降级。
+ */
+export const COMPANION_SPEECH_FIRST_AUDIO_DEADLINE_MS = 4_000;
+export const COMPANION_SPEECH_GAP_DEADLINE_MS = 3_000;
+/** 合成失败后的重试间隔与次数（原来是**零退避**盲重试一次，且丢掉原始异常）。 */
+const SYNTH_RETRY_DELAY_MS = 250;
+const SYNTH_MAX_ATTEMPTS = 3;
 
 function emit(progress: CompanionSpeechProgress): void {
   for (const listener of listeners) listener(progress);
@@ -294,6 +308,9 @@ async function runQueuedSpeech(args: {
   let playedCount = 0;
   let previousEnd = 0;
   let hasStartedAudio = false;
+  /** 被跳过（超时/合成失败）的段数与最后一次的原因，供收尾降级判定。 */
+  let missedSegments = 0;
+  let lastMissReason: "deadline" | "synth_failed" = "deadline";
   /**
    * 预取队列（深度 2，2026-09-19 段间衔接优化）：当前段在播时，后面两段已经在
    * 合成路上。深度 1 时段间仍会露出一个合成往返的空档（qwen/edge 都有网络
@@ -304,11 +321,21 @@ async function runQueuedSpeech(args: {
     ? args.host.synthesizeSegment(segment.ref)
     : args.host.synthesize(segment.text);
   const synthesizeWithRetry = async (segment: CompanionQueuedSpeechSegment): Promise<AudioBuffer> => {
-    try {
-      return await synthesize(segment);
-    } catch {
-      return synthesize(segment);
+    // 原来只重试一次、无退避、且 `catch {}` 把原始异常整个丢掉——上游 500 之后
+    // 立刻再打一次只会撞上同一个错误。现在带退避多试一次，并保留**最后一次的异常**
+    // 交给调用方（超时/失败的分类要靠它）。
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < SYNTH_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        return await synthesize(segment);
+      } catch (error) {
+        lastError = error;
+        if (attempt < SYNTH_MAX_ATTEMPTS - 1) {
+          await new Promise((resolve) => { setTimeout(resolve, SYNTH_RETRY_DELAY_MS * (attempt + 1)); });
+        }
+      }
     }
+    throw lastError instanceof Error ? lastError : new Error("VOICE_SEGMENT_SYNTH_FAILED");
   };
   const takePrefetched = (key: string): Promise<AudioBuffer> | null => {
     const index = prefetched.findIndex((entry) => entry.key === key);
@@ -352,24 +379,15 @@ async function runQueuedSpeech(args: {
         );
       } catch (error) {
         if (args.runGeneration !== generation) return;
-        // 两类失败分两条路（方案 §4）：合成失败（"每段最多重试一次"已在
-        // synthesizeWithRetry 里做过）→ 跳过这一段继续后面的，别把整轮判死；
-        // 只有"合成迟迟不出结果"（首段 1.6s / 段间 1.2s 截止）才把本轮平滑降级为
-        // 纯文字——那之后迟到的音频整轮作废，不再突然恢复朗读。
+        // **一段出问题只丢那一段**（方案 29 §4.9）。旧行为是首段/段间截止一到就
+        // `generation += 1` + `host.stop()`，把整轮音频连同后面已经合成好的段一起
+        // 作废——而文字早已流完，用户只看到"她说话但没声音"，且当轮不可恢复。
+        // 现在超时与合成失败同路：跳过这段继续后面。整轮一段都没播出来时，
+        // 才在收尾处降级为 text_only（见循环结束后那段）。
         const deadlineHit = error instanceof Error && error.message === "VOICE_SEGMENT_DEADLINE";
-        if (!deadlineHit) continue;
-        activePlanId = null;
-        generation += 1;
-        args.host.stop();
-        emit({
-          planId: args.planId,
-          phase: "text_only",
-          segmentIndex: playedCount,
-          segmentCount: playedCount + 1 + queue.segments.length,
-          visibleChars: previousEnd,
-          failure: "语音暂不可用，已继续显示文字",
-        });
-        return;
+        missedSegments += 1;
+        lastMissReason = deadlineHit ? "deadline" : "synth_failed";
+        continue;
       }
       if (args.runGeneration !== generation) return;
 
@@ -401,6 +419,22 @@ async function runQueuedSpeech(args: {
       playedCount += 1;
     }
     activePlanId = null;
+    // 降级只发生在"**一段都没播出来**且确实尝试过"的整轮上——这才是
+    // "她说话但没声音"的真实场景。播出了任何一段就正常收尾，个别段被跳过
+    // 不打断朗读、也不向用户报"语音不可用"。
+    if (playedCount === 0 && missedSegments > 0) {
+      emit({
+        planId: args.planId,
+        phase: "text_only",
+        segmentIndex: 0,
+        segmentCount: missedSegments,
+        visibleChars: previousEnd,
+        failure: lastMissReason === "deadline"
+          ? "语音合成超时，已继续显示文字"
+          : "语音合成失败，已继续显示文字",
+      });
+      return;
+    }
     emit({
       planId: args.planId,
       phase: "finished",

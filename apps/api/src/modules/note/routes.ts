@@ -14,7 +14,7 @@ import {
   RevisionConflictError,
   NoteNotDeletedError,
 } from "./service.ts";
-import { requireSession, requireOwner } from "../identity/middleware.ts";
+import { requireSession, requireOwner, isWorkspaceOwner } from "../identity/middleware.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
 import { parseBody } from "../../lib/validate.ts";
 import { parseQuery, paginationQuerySchema, uuidParamSchema } from "../../lib/pagination.ts";
@@ -58,7 +58,7 @@ export async function noteRoutes(app: FastifyInstance) {
       ),
     );
     if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
-    const role = req.session.membershipRole === "owner" ? "owner" : "member";
+    const role = isWorkspaceOwner(req.session) ? "owner" : "member";
     const projection = projectNoteDetailV1(result, role);
     reply.header("Cache-Control", "private, no-store");
     reply.header("ETag", `"${projection.revision}"`);

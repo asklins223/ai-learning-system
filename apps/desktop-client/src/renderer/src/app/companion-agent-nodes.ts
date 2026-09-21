@@ -1,7 +1,7 @@
 /**
  * 伴星 agent 节点流（2026-09-19）。
  *
- * 服务端早在 `assistant.status` / `agent.skill` / `agent.tool` 里把"她在做什么"发了出来
+ * 服务端早在 `assistant.status` / `agent.tool` 里把"她在做什么"发了出来
  * （见 `companion-conversation-contracts.ts` 的 stream event 联合），桌面端也早就收到了
  * 这些帧——但会话层只认 delta/final/error/turn.cancelled，其余全部丢弃，所以用户能看到的
  * 只有"她在想"一句固定文案。这个模块把那些被丢掉的帧收敛成一条**可渲染的节点列表**。
@@ -13,7 +13,8 @@
  * 2. **`agent.tool` 按 `toolCallId` 幂等**。同一个工具调用会经历
  *    `requested → executing → succeeded/failed` 多次上报，它们是**同一行**的状态迁移，
  *    不是多次操作。重追加会让轨道在一步里长出一串重复行。
- * 3. **`agent.skill` 的 selected/completed 同理**：selected 建行，completed 只改状态点。
+ * 3. **同一步的多次上报只改状态点，不追加第二行。**（曾是 `agent.skill` 的
+ *    selected/completed；技能层删除后这条只对工具成立，但幂等键的语义没变。）
  *
  * 状态映射到 UI 只保留五档（轨道只需要这五档的视觉），映射表是 `TOOL_STATE`。
  */
@@ -36,10 +37,10 @@ export type CompanionAgentNodeState =
   | "cancelled";
 
 /** 节点类型只影响图标：思考气泡 / 扳手 / 星形 / 按工具名映射。 */
-export type CompanionAgentNodeKind = "thinking" | "acting" | "skill" | "tool";
+export type CompanionAgentNodeKind = "thinking" | "acting" | "tool";
 
 export interface CompanionAgentNode {
-  /** 幂等键：工具用 `tool:${toolCallId}`，技能用 `skill:${skillId}`，状态用递增序号。 */
+  /** 幂等键：工具用 `tool:${toolCallId}`，状态用递增序号。 */
   readonly key: string;
   readonly kind: CompanionAgentNodeKind;
   /** 协议原文 `safeLabel`（状态节点是 `assistant.status.safeLabel`）。 */
@@ -85,8 +86,6 @@ export function appendCompanionAgentNode(
   switch (event.eventType) {
     case "assistant.status":
       return appendStatusNode(nodes, event.payload);
-    case "agent.skill":
-      return appendSkillNode(nodes, event.payload);
     case "agent.tool":
       return appendToolNode(nodes, event.payload);
     default:
@@ -113,23 +112,6 @@ function appendStatusNode(nodes: CompanionAgentNodes, payload: unknown): Compani
     summary: null,
     proposalId: null,
   }];
-}
-
-function appendSkillNode(nodes: CompanionAgentNodes, payload: unknown): CompanionAgentNodes {
-  const skill = (payload as { skill?: unknown })?.skill as
-    | { skillId?: unknown; name?: unknown; status?: unknown }
-    | undefined;
-  if (!skill || typeof skill.name !== "string" || skill.name.length === 0) return nodes;
-  const id = typeof skill.skillId === "string" && skill.skillId.length > 0 ? skill.skillId : skill.name;
-  const key = `skill:${id}`;
-  const state: CompanionAgentNodeState = skill.status === "completed" ? "succeeded" : "running";
-  const index = nodes.findIndex((node) => node.key === key);
-  if (index >= 0) {
-    // selected → completed：只改状态点，绝不追加第二行。
-    if (nodes[index].state === state) return nodes;
-    return nodes.map((node, at) => (at === index ? { ...node, state, label: skill.name as string } : node));
-  }
-  return [...nodes, { key, kind: "skill", label: skill.name, state, toolName: null, summary: null, proposalId: null }];
 }
 
 function appendToolNode(nodes: CompanionAgentNodes, payload: unknown): CompanionAgentNodes {

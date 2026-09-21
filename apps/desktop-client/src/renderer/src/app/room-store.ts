@@ -16,6 +16,11 @@ import {
 import { scenePhaseForIntent, type SceneMotionPhase } from "../scene/scene-motion";
 import type { HudPageId } from "../components/hud/hud-pages";
 import type { SourceStatusTab } from "../components/surfaces/source-index";
+import {
+  DEFAULT_WINDOW_LIVE2D_MODEL_ID,
+  isWindowLive2DModelId,
+  type WindowLive2DModelId,
+} from "../components/companion/window-live2d-contract";
 
 export type ThemeMode = "system" | "manual";
 export type CompanionMoment = "idle" | "lamp" | "ambient" | "confirm";
@@ -89,8 +94,14 @@ export type NoteTargetRef = {
   readonly mode?: "read" | "edit";
 };
 export type ReviewTargetRef = { readonly scheduleId: string; readonly objectiveId: string };
+/** 顶栏空间胶囊要说的三件事：在哪个空间、什么身份、是不是自己的空间。 */
+export type SpaceIdentity = {
+  readonly name: string;
+  readonly role: "owner" | "member";
+  readonly isPersonal: boolean;
+};
 export type CompanionCenterTarget = {
-  readonly tab: "memory" | "dialogue" | "activity" | "diary" | "persona";
+  readonly tab: "memory" | "dialogue" | "activity" | "diary" | "persona" | "data";
   readonly focusMemoryId?: string;
   readonly focusMessageId?: string;
 };
@@ -146,6 +157,15 @@ type RoomStore = {
    * 的空间菜单。只在 `hudPage === "space"` 时有意义，其余页面一律为 null。
    */
   hudSpaceEntry: "first" | "returning" | null;
+  /**
+   * 顶栏空间胶囊的常驻身份：当前空间名 + 我在这一空间的角色 + 是否个人空间。
+   *
+   * 值来自 `session.workspace` / `session.membership`（门禁每次读到已验证会话都
+   * 有），所以胶囊不额外发请求，也不会出现"菜单说 A、胶囊说 B"的两套真相。
+   * 审查里「切换学习空间没有持续感知」的根因就是这个值此前不存在：药丸一折叠，
+   * 屏幕上没有任何一处说明「我在哪个空间、我能不能改」。
+   */
+  spaceIdentity: SpaceIdentity | null;
   ambientRequested: boolean;
   masterMuted: boolean;
   onboardingSeen: boolean;
@@ -159,6 +179,12 @@ type RoomStore = {
   companionPlacementOwner: CompanionPlacementOwner;
   companionUserAnchor: CompanionNormalizedAnchor | null;
   companionScale: number;
+  /**
+   * 伴星形态（Live2D 模型注册表 id，2026-09-20 多形态裁决）。本机偏好：
+   * 持久化到 partialize，重启保留；非法值在 merge 时打回默认。
+   * （2026-09-20 并行会话冲突已合并：保留类型化版本，消费端无需再自行校验。）
+   */
+  companionModelId: WindowLive2DModelId;
   /**
    * 页面级存在感控制（2026-09-16 裁决 3）。三者都是**会话级**：不写入
    * partialize，重启回到默认；账号级设置由服务端保存。
@@ -241,6 +267,8 @@ type RoomStore = {
     readonly selectedIndex: number;
   } | null) => void;
   setHudPage: (page: HudPageId, spaceEntry?: "first" | "returning") => void;
+  /** 发布/清空顶栏空间胶囊的身份；由门禁在每次读到已验证会话时调用。 */
+  setSpaceIdentity: (identity: SpaceIdentity | null) => void;
   toggleAmbient: () => void;
   toggleMasterMuted: () => void;
   /** 显式设置总静音，供设置页的受控开关使用（不再靠双重否定反推）。 */
@@ -258,6 +286,7 @@ type RoomStore = {
   setCompanionHomePlacement: (zone: CompanionHomeZone, position?: CompanionPosition) => void;
   setCompanionUserPlacement: (anchor: CompanionNormalizedAnchor) => void;
   setCompanionScale: (scale: number) => void;
+  setCompanionModelId: (modelId: WindowLive2DModelId) => void;
   setCompanionSceneMuted: (sceneKey: string, muted: boolean) => void;
   setCompanionFocusUntilTaskEnd: (value: boolean) => void;
   setCompanionTemporarilyHidden: (value: boolean) => void;
@@ -298,6 +327,7 @@ export const useRoomStore = create<RoomStore>()(
       activeReviewTarget: null,
       hudPage: "home",
       hudSpaceEntry: null,
+      spaceIdentity: null,
       ambientRequested: false,
       masterMuted: false,
       onboardingSeen: false,
@@ -311,6 +341,7 @@ export const useRoomStore = create<RoomStore>()(
       companionPlacementOwner: "semantic",
       companionUserAnchor: null,
       companionScale: DEFAULT_COMPANION_SCALE,
+      companionModelId: DEFAULT_WINDOW_LIVE2D_MODEL_ID,
       mutedCompanionSceneKeys: [],
       companionFocusUntilTaskEnd: false,
       companionTemporarilyHidden: false,
@@ -477,6 +508,7 @@ export const useRoomStore = create<RoomStore>()(
         hudPage,
         hudSpaceEntry: hudPage === "space" ? hudSpaceEntry ?? null : null,
       }),
+      setSpaceIdentity: (spaceIdentity) => set({ spaceIdentity }),
       toggleAmbient: () =>
         set((state) => ({
           ambientRequested: !state.ambientRequested,
@@ -575,6 +607,7 @@ export const useRoomStore = create<RoomStore>()(
       setCompanionScale: (companionScale) => set({
         companionScale: Math.min(MAX_COMPANION_SCALE, Math.max(MIN_COMPANION_SCALE, companionScale)),
       }),
+      setCompanionModelId: (companionModelId) => set({ companionModelId }),
       setCompanionSceneMuted: (sceneKey, muted) => set((state) => ({
         mutedCompanionSceneKeys: muted
           ? (state.mutedCompanionSceneKeys.includes(sceneKey)
@@ -616,6 +649,7 @@ export const useRoomStore = create<RoomStore>()(
         masterMuted: state.masterMuted,
         onboardingSeen: state.onboardingSeen,
         companionScale: state.companionScale,
+        companionModelId: state.companionModelId,
         companionHomeZone: state.companionHomeZone,
         companionPlacementOwner: state.companionPlacementOwner,
         companionUserAnchor: state.companionUserAnchor,
@@ -638,6 +672,11 @@ export const useRoomStore = create<RoomStore>()(
           ...currentState,
           ...persisted,
           ...normalizePersistedCompanionPlacement(persisted),
+          // 伴星形态是白名单枚举：手改过 localStorage / 旧版本残留的非法值
+          // 不能把伴星打回不可用，静默回到默认形态。
+          companionModelId: isWindowLive2DModelId(persisted.companionModelId)
+            ? persisted.companionModelId
+            : DEFAULT_WINDOW_LIVE2D_MODEL_ID,
           navigationGuard: null,
           returnTarget: null,
         };

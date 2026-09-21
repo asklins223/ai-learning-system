@@ -61,8 +61,30 @@ describe("Study primary action public copy", () => {
 
     const description = studyActionDescription(action);
 
-    expect(description).toBe("恢复服务端已保存的学习进度。");
+    expect(description).toBe("上次保存的进度还在，不会从头再来。");
     expect(description).not.toContain("7a0bd3c4");
+  });
+
+  it("把「什么时候能正式算」随练习一起说清楚", () => {
+    const withCooldown = studyActionDescription({
+      kind: "practice_only",
+      objectiveId: OBJECTIVE_ID,
+      reasonCodes: ["exposed"],
+      label: "带着参考答案练一下",
+      start: {
+        version: 2,
+        originV2: { kind: "card", cardId: OBJECTIVE_ID, objectiveId: OBJECTIVE_ID },
+        goal: "stabilize",
+        requestedTimeBudgetSeconds: 180,
+        responsePreference: "adaptive",
+      },
+      formalValidationNotBefore: "2026-09-21T14:30:00.000Z",
+    });
+    expect(withCooldown).toContain("只算练习");
+    // 时间点要出现，但按本地时区渲染，所以不钉具体读数。
+    expect(withCooldown).toMatch(/\d+月\d+日/);
+    // 服务器内部术语不进文案。
+    expect(withCooldown).not.toMatch(/practice_only|qualification|objectiveId/);
   });
 
   it("names every learning-run phase the server can write", () => {
@@ -102,12 +124,14 @@ describe("Study primary action public copy", () => {
   });
 
   it("never leaks a raw phase token into the status line", () => {
-    expect(studyStatusLabel(objectiveWithRun({ runId: RUN_ID, phase: "active" }))).toBe("进行中");
-    expect(studyStatusLabel(objectiveWithRun({ runId: RUN_ID, phase: "checkpoint" }))).toBe("进行中 · 等待确认");
-    expect(studyStatusLabel(objectiveWithRun({ runId: RUN_ID, phase: "quantum_flux" }))).toBe("进行中");
+    expect(studyStatusLabel(objectiveWithRun({ runId: RUN_ID, phase: "active" }))).toBe("正在作答");
+    expect(studyStatusLabel(objectiveWithRun({ runId: RUN_ID, phase: "checkpoint" }))).toBe("正在作答 · 等待确认");
+    expect(studyStatusLabel(objectiveWithRun({ runId: RUN_ID, phase: "quantum_flux" }))).toBe("正在作答");
   });
 
-  it("falls back to the confirmed label when no run is active", () => {
-    expect(studyStatusLabel(objectiveWithRun(null))).toBe("服务端已确认");
+  it("状态词直接取服务端签发的 personalState，不在房间页另推一套", () => {
+    // 合同原话：列表、详情、RoomProjection 必须直接展示该值。此前房间页自己
+    // 推出一句「服务端已确认」，同一张卡在列表页却叫「待验证」。
+    expect(studyStatusLabel(objectiveWithRun(null))).toBe("还没正式答过");
   });
 });

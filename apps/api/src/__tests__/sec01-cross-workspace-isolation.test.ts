@@ -1,13 +1,20 @@
 /**
- * SEC-01: 跨 workspace 服务隔离静态分析测试
+ * SEC-01: 事务上下文与 worker 访问路径的静态分析测试
  *
- * 覆盖 ADR-0003 和实施计划 §6.1 的 DoD 项：
- *   1. "API 跨 workspace 读、写、关联和删除全部由应用校验与 RLS 双重拒绝"
- *   2. "所有应隔离表必须覆盖直接读取、写入、关联、级联/删除、导出和搜索投影"
- *   3. "连接池复用 1,000 次 workspace 交替请求无上下文串线"
+ * 只剩三件静态分析确实能证明的事：
+ *   1. 用 `withWorkspaceTransaction` 的服务必须传 workspaceId；有写操作的服务必须
+ *      走事务、接受 executor 参数、或委托给 createJob；
+ *   2. `assertWorkspaceTransactionContextCompatible` 拒绝嵌套上下文变更（真单测）；
+ *   3. worker 走 `ailearn_claim_jobs` / `ailearn_renew_job_lease` 受控函数而非裸 SQL。
  *
- * 本测试通过静态分析服务源码，验证所有数据访问函数都包含 workspaceId 过滤条件。
- * 这不是替代真实 PostgreSQL 集成测试，而是作为应用层防御深度的可验证证据。
+ * 原先还有三组「文件里出现过 workspaceId 字样就算隔离」的断言（含一组按
+ * `.findMany(` 计数、而导出服务根本不用 findMany 因此恒成立的），已删除——它们
+ * 无法在过滤条件被摘掉时变红。跨 workspace 的读写隔离由
+ * `integration-tests/workspace-collab-postgres.integration.ts` 用真实请求证明。
+ *
+ * 另注：DoD 里「应用校验与 RLS 双重拒绝」目前只剩一层——`0027_sec01_rls_expansion_failsafe.sql`
+ * 之后 `notes`/`sources`/`review_schedules` 等 19 张表的 RLS 处于 DISABLE，
+ * 策略在但生效不了，所以本文件的静态检查是**唯一**一层，不能当作纵深。
  */
 
 import assert from "node:assert/strict";
@@ -45,53 +52,7 @@ function readFileContent(path: string): string {
   }
 }
 
-// ─── 1. 所有包含数据库查询的服务文件必须使用 workspaceId 过滤 ──────────────
-
-describe("SEC-01: 服务层数据访问包含 workspaceId 隔离", () => {
-  const serviceFiles = collectTsFiles(MODULES_DIR).filter(
-    (f) => f.endsWith("service.ts") || f.endsWith("routes.ts"),
-  );
-
-  it("服务文件列表非空", () => {
-    assert.ok(serviceFiles.length > 0, "应找到至少一个服务文件");
-  });
-
-  it("每个包含 db.query 的服务文件都应使用 workspaceId 过滤", () => {
-    const workspaceTables = [
-      "notes",
-      "noteVersions",
-      "noteBlocks",
-      "sources",
-      "sourceSegments",
-      "learningCardsV2",
-      "learningObjectivesV2",
-      "evidenceSnapshotsV2",
-      "reviewSchedules",
-      "aiArtifacts",
-      "searchDocuments",
-      "onboardingStates",
-      "inviteCodes",
-    ];
-
-    for (const file of serviceFiles) {
-      const content = readFileContent(file);
-      if (!content.includes("db.") && !content.includes("tx.") && !content.includes("executor.")) {
-        continue; // Skip files that don't access the database
-      }
-
-      // Check if any workspace-scoped table is queried without workspaceId
-      const hasWorkspaceTable = workspaceTables.some((table) => content.includes(table));
-      if (!hasWorkspaceTable) continue;
-
-      // The file must reference workspaceId somewhere
-      assert.ok(
-        content.includes("workspaceId") || content.includes("workspace_id"),
-        `${file} 访问 workspace 表但没有使用 workspaceId 过滤`,
-      );
-    }
-  });
-});
-// ─── 2. withWorkspaceTransaction 正确使用 ─────────────────────────────────
+// ─── 1. withWorkspaceTransaction 正确使用 ─────────────────────────────────
 
 describe("SEC-01: withWorkspaceTransaction 使用模式", () => {
   const serviceFiles = collectTsFiles(MODULES_DIR).filter((f) => f.endsWith("service.ts"));
@@ -134,83 +95,9 @@ describe("SEC-01: withWorkspaceTransaction 使用模式", () => {
     }
   });
 });
-// ─── 3. 跨 workspace ID 猜测防护 ────────────────────────────────────────────
 
-describe("SEC-01: 跨 workspace ID 猜测防护", () => {
-  it("getNote 在查询中包含 workspaceId 条件", () => {
-    const content = readFileContent(join(MODULES_DIR, "note", "service.ts"));
-    // getNoteWithVersion function should filter by workspaceId
-    assert.ok(
-      content.includes("eq(notes.workspaceId, workspaceId)") ||
-        content.includes("notes.workspaceId"),
-      "note service 应在查询中包含 notes.workspaceId 过滤",
-    );
-  });
 
-  it("getCardWithDetail 在查询中包含 workspaceId 条件", () => {
-    // V1 card.service.ts 已随 learning_cards 表退役；改为校验 V2 card-generation-v2 服务
-    // 读取学习卡仍以 workspaceId 过滤。
-    const content = readFileContent(join(MODULES_DIR, "card-generation-v2", "card-service.ts"));
-    assert.ok(
-      content.includes("workspaceId") &&
-        (content.includes("learningCardsV2") || content.includes("learningObjectivesV2")),
-      "card-generation-v2 服务应在读取学习卡时使用 workspaceId 过滤",
-    );
-  });
-
-  it("getCardEvidence 校验 card 归属 workspaceId", () => {
-    // V1 evidence.service.ts 已随 evidences.keyPointId 退役；证据归属改由
-    // learningObjectiveEvidenceBindingsV2 承载，读取同样以 workspaceId 过滤。
-    const content = readFileContent(join(MODULES_DIR, "card-generation-v2", "card-service.ts"));
-    assert.ok(
-      content.includes("learningObjectiveEvidenceBindingsV2") &&
-        (content.includes("eq(") || content.includes("workspaceId")),
-      "card-generation-v2 服务证据读取应包含 workspaceId 过滤",
-    );
-  });
-
-  it("listReviews 按 workspaceId 过滤", () => {
-    const content = readFileContent(join(MODULES_DIR, "review", "service.ts"));
-    assert.ok(
-      content.includes("workspaceId"),
-      "review service 应按 workspaceId 过滤",
-    );
-  });
-
-  it("getJob 按 workspaceId 过滤", () => {
-    const content = readFileContent(join(MODULES_DIR, "job", "service.ts"));
-    assert.ok(
-      content.includes("eq(jobs.workspaceId, workspaceId)"),
-      "job service getJob 应按 workspaceId 过滤",
-    );
-  });
-});
-
-// ─── 4. 导出/搜索投影按 workspaceId 过滤 ────────────────────────────────────
-
-describe("SEC-01: 导出和搜索投影按 workspaceId 过滤", () => {
-  it("exportWorkspace 所有查询都按 workspaceId 过滤", () => {
-    const content = readFileContent(join(MODULES_DIR, "export", "service.ts"));
-    // All export queries should use workspaceId
-    const tableCount = (content.match(/\.findMany\(/g) || []).length;
-    const workspaceFilterCount = (content.match(/workspaceId/g) || []).length;
-    assert.ok(
-      workspaceFilterCount >= tableCount,
-      `导出服务有 ${tableCount} 个 findMany 查询但只有 ${workspaceFilterCount} 处 workspaceId 引用`,
-    );
-  });
-
-  it("search index 操作按 workspaceId 过滤", () => {
-    const content = readFileContent(join(MODULES_DIR, "note", "service.ts"));
-    // upsertSearchDocument and deleteSearchDocuments should include workspaceId
-    assert.ok(
-      content.includes("workspaceId") && content.includes("searchDocuments"),
-      "note service 搜索投影应包含 workspaceId",
-    );
-  });
-});
-
-// ─── 5. 连接池复用上下文不泄漏 ──────────────────────────────────────────────
+// ─── 2. 连接池复用上下文不泄漏 ──────────────────────────────────────────────
 
 describe("SEC-01: 连接池复用上下文不泄漏", () => {
   it("withWorkspaceTransaction 使用 transaction-local context (true 参数)", () => {
@@ -245,7 +132,7 @@ describe("SEC-01: 连接池复用上下文不泄漏", () => {
   });
 });
 
-// ─── 6. Worker 使用受控函数访问跨 workspace 数据 ─────────────────────────────
+// ─── 3. Worker 使用受控函数访问跨 workspace 数据 ─────────────────────────────
 
 describe("SEC-01: Worker 使用受控函数访问跨 workspace 数据", () => {
   const WORKER_DIR = join(import.meta.dirname, "..", "..", "..", "..", "workers", "ai-worker", "src");

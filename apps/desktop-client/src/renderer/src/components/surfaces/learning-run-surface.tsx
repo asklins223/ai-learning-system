@@ -66,6 +66,8 @@ import {
   type ActivityLeaseWindow,
 } from "../learning-run-activity-lease";
 import { SurfaceDataState, formatRelative } from "./surface-data";
+import { VoiceTeachbackEditor } from "./run-voice-input";
+import { microphoneAvailabilityCopy, probeMicrophone, type MicrophoneAvailability } from "../voice-capability";
 
 type ResultState =
   | { kind: "idle" }
@@ -94,6 +96,9 @@ function needsLearningRunResync(error: unknown): boolean {
   return error instanceof RendererGatewayError
     && (error.retry === "resync_first" || error.code === "conflict" || error.code === "result_unknown");
 }
+
+/** 一次作答的绝对上限：到点自动结束，不再挂着不计分也不结算（复盘 #13）。 */
+const FOCUS_SESSION_LIMIT_SECONDS = 60 * 60;
 
 const phaseLabels: Record<LearningRunPublicSnapshotV2["phase"], string> = {
   preparing: "正在准备任务",
@@ -173,6 +178,64 @@ const scheduleReasonLabels: Record<string, string> = {
 
 function interactionRef(taskId: string, part = "main"): string {
   return `desktop-player-${taskId}-${part}`;
+}
+
+/**
+ * 本地秒表（2026-09-20 实走复盘 #13）。
+ *
+ * 服务端 `activeSecondsUsed` 靠 15 秒一次的 activity lease 才更新（失焦时完全不记），
+ * 界面前只显示它，于是钟每 15 秒跳一格、看起来像卡死。这里改成本地逐秒推进：
+ * 服务端读数只在**更大时**校准本地值（绝不倒退），失焦/隐藏时与租约同规则停走，
+ * 两者不会互相甩开。到 60 分钟仍未结束就交给 `onTimeout` 自动收尾。
+ */
+function useLocalActiveClock(active: boolean, serverSeconds: number, onTimeout: () => void) {
+  const [seconds, setSeconds] = useState(serverSeconds);
+  const [ticking, setTicking] = useState(true);
+
+  useEffect(() => {
+    setSeconds((current) => (serverSeconds > current ? serverSeconds : current));
+  }, [serverSeconds]);
+
+  useEffect(() => {
+    const readVisibility = () => document.visibilityState === "visible" && document.hasFocus();
+    setTicking(readVisibility());
+    const sync = () => setTicking(readVisibility());
+    window.addEventListener("focus", sync);
+    window.addEventListener("blur", sync);
+    document.addEventListener("visibilitychange", sync);
+    return () => {
+      window.removeEventListener("focus", sync);
+      window.removeEventListener("blur", sync);
+      document.removeEventListener("visibilitychange", sync);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!active || !ticking) return;
+    const timer = window.setInterval(() => setSeconds((current) => current + 1), 1_000);
+    return () => window.clearInterval(timer);
+  }, [active, ticking]);
+
+  useEffect(() => {
+    if (active && ticking && seconds >= FOCUS_SESSION_LIMIT_SECONDS) onTimeout();
+  }, [active, ticking, seconds, onTimeout]);
+
+  return { seconds: Math.max(seconds, serverSeconds), paused: !ticking };
+}
+
+/**
+ * 等待期间回显的答案正文。
+ *
+ * 只覆盖有自然语言正文的形态；排序/连线/改错这类结构化答案的载荷是一组 id，
+ * 在这里还原不出可读原文——那就宁可不显示，也不拼一个看着像但其实不是的东西。
+ */
+function answerPreview(payload: ArtifactPayload): string | null {
+  switch (payload.kind) {
+    case "text": return payload.text.trim() || null;
+    case "voice": return payload.confirmedTranscript.trim() || null;
+    case "declared_unable": return "这一题我标记为暂时不会。";
+    default: return null;
+  }
 }
 
 function formatClock(seconds: number): string {
@@ -308,8 +371,6 @@ function actionRequestFor(action: LearningRunAllowedActionV2): DesktopLearningRu
       return { kind: action.kind, alternativeId: action.alternativeId };
     case "request_hint":
       return { kind: action.kind, level: action.level };
-    case "skip_task":
-      return { kind: action.kind, taskId: action.taskId };
     case "activate_followup":
       return { kind: action.kind, followupId: action.followupId };
     case "retry_assessment":
@@ -325,7 +386,6 @@ function actionLabel(action: LearningRunAllowedActionV2): string {
     case "resume": return "继续旅程";
     case "switch_variant": return "换一种方式";
     case "request_hint": return action.level === 1 ? "给我一点提示" : `查看第 ${action.level} 级提示`;
-    case "skip_task": return "跳过这一步";
     case "skip_run": return "稍后再做";
     case "activate_followup": return "继续补充证据";
     case "finish_current_evidence": return "结算当前证据";
@@ -544,7 +604,7 @@ function OrderingEditor({
           </span>
         </li>
       ))}
-      {ids.length === 0 ? <li className="run-empty-row">服务端没有提供可排序内容。</li> : null}
+      {ids.length === 0 ? <li className="run-empty-row">这道题没有给出可以排序的内容。</li> : null}
     </ol>
   );
 }
@@ -560,12 +620,15 @@ function InteractionEditor({
 }) {
   const interaction = task.activeVariant.interaction;
 
-  if (interaction.kind === "voice_teachback") {
+  if (interaction.kind === "voice_teachback" && value.kind === "voice") {
+    // 此前这里是一段写死的"当前设备没有可用的语音输入"死路文案：语音载荷类型、
+    // 录音器与转写通道都存在，只是这个界面从没把声音接进去。
     return (
-      <div className="run-blocker" role="status">
-        <strong>当前设备没有可用的语音输入</strong>
-        <span>请使用任务下方服务端授权的其他方式；客户端不会把文字伪装成语音证据。</span>
-      </div>
+      <VoiceTeachbackEditor
+        maxSeconds={interaction.maxSeconds}
+        value={{ confirmedTranscript: value.confirmedTranscript, voiceArtifactRef: value.voiceArtifactRef }}
+        onChange={(next) => onChange({ ...value, confirmedTranscript: next.confirmedTranscript, voiceArtifactRef: next.voiceArtifactRef })}
+      />
     );
   }
 
@@ -631,7 +694,7 @@ function InteractionEditor({
     );
   }
 
-  return <p className="run-inline-error">当前 Task 与客户端可用的交互合同不一致，已停止提交。</p>;
+  return <p className="run-inline-error">这道题要的作答方式这台电脑给不了，已经停住没有提交。</p>;
 }
 
 type LearningRunBodyProps = {
@@ -653,6 +716,28 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   const setCompanionMoment = useRoomStore((state) => state.setCompanionMoment);
   const queueHomeCompletion = useRoomStore((state) => state.queueHomeCompletion);
   const [snapshot, setSnapshot] = useState<LearningRunPublicSnapshotV2 | null>(null);
+  /**
+   * 秒表与到点自动结束（复盘 #13）。
+   *
+   * 必须留在条件 return 之前的 hook 区里；`dispatchAction` 定义在后面，用 ref 转接
+   * （渲染期赋值，定时器真正触发时必然已就绪）。
+   */
+  const autoEndedRef = useRef(false);
+  const dispatchActionRef = useRef<((action: LearningRunAllowedActionV2, bypassConfirmation?: boolean) => Promise<void>) | null>(null);
+  const autoEndRun = useCallback(() => {
+    if (autoEndedRef.current) return;
+    autoEndedRef.current = true;
+    const exit = (snapshot?.allowedActions ?? []).find(
+      (action) => action.kind === "skip_run" || action.kind === "end",
+    );
+    // 到点自动结束不等用户再确认一次：这一刻可能根本没有人看着。
+    if (exit) void dispatchActionRef.current?.(exit, true);
+  }, [snapshot?.allowedActions]);
+  const clock = useLocalActiveClock(
+    snapshot?.phase === "active",
+    snapshot?.activeSecondsUsed ?? 0,
+    autoEndRun,
+  );
   const [editor, setEditor] = useState<ArtifactPayload | null>(null);
   const [draftRevision, setDraftRevision] = useState(0);
   const [draftStatus, setDraftStatus] = useState("尚未输入");
@@ -663,7 +748,15 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   const [resultState, setResultState] = useState<ResultState>({ kind: "idle" });
   const [targetReveal, setTargetReveal] = useState<TargetRevealState>({ kind: "idle" });
   const [returnContract, setReturnContract] = useState<LearningRunReturnContractV2 | null>(null);
-  const [hint, setHint] = useState<string | null>(null);
+  /**
+   * 已放行的提示，按层级累积展示（2026-09-20 实走复盘 #11）。
+   *
+   * 此前第二级提示是一条**独立按钮**，还被塞进「更多选择」的 details 里——
+   * 用户看到的就是"提示里面又套一层提示"。现在只有一个按钮：点一次放一级，
+   * 文案跟着变，放到最后一级就禁用。downgraded 记录服务端是否因此把本卡
+   * 计分降级为练习分（回执给了就必须说）。
+   */
+  const [hints, setHints] = useState<Array<{ level: number; text: string; downgraded: boolean }>>([]);
   const [failure, setFailure] = useState<PlayerFailure | null>(null);
   const [recovery, setRecovery] = useState<PlayerRecovery | null>(null);
   const [loading, setLoading] = useState(true);
@@ -674,9 +767,40 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   const [resultPollTick, setResultPollTick] = useState(0);
   const [resultQueryBusy, setResultQueryBusy] = useState(false);
   const [resultQueryBudgetExhausted, setResultQueryBudgetExhausted] = useState(false);
+  /**
+   * 等待评估期间的两样东西（2026-09-20 实走复盘 #6）：交上去的答案本身要留在屏上，
+   * 以及"已经等了多久"。此前这段时间界面只剩一行字，提交按钮立刻变成"返回"，
+   * 用户完全无法判断是在算还是死了。
+   */
+  const [lockedAnswer, setLockedAnswer] = useState<string | null>(null);
+  const [waitingSeconds, setWaitingSeconds] = useState(0);
   const [resultQueryFailure, setResultQueryFailure] = useState<PlayerFailure | null>(null);
   const [resultAcknowledgementActive, setResultAcknowledgementActive] = useState(false);
-  const [voiceAvailable, setVoiceAvailable] = useState(false);
+  const assessmentPending = resultState.kind === "pending"
+    || snapshot?.phase === "assessing" || snapshot?.phase === "committing";
+  /**
+   * 答案锁定、进入评估之后，编辑区必须让位给等待面板（2026-09-20 实走复盘 #6）。
+   * 服务端此时已经收下这份答案，界面却还留着可编辑的框和"提交回答"：再点一次只会
+   * 撞上过期 revision 的 409，看起来就像"提交没反应"。
+   */
+  const canAnswerNow = !assessmentPending
+    && snapshot !== null
+    && snapshot.phase === "active"
+    && snapshot.activeTask !== null;
+
+  useEffect(() => {
+    if (!assessmentPending) {
+      setWaitingSeconds(0);
+      return;
+    }
+    const timer = window.setInterval(() => setWaitingSeconds((current) => current + 1), 1_000);
+    return () => window.clearInterval(timer);
+  }, [assessmentPending]);
+  /**
+   * 麦克风可用性：真探测，不再读主进程那个恒真的通道名检查（复盘 #8）。
+   * `null` = 还没探完，此时先不下结论。
+   */
+  const [microphone, setMicrophone] = useState<MicrophoneAvailability | null>(null);
   const runRequestFenceRef = useRef(createLearningRunRequestFence(runId));
   const snapshotRequestGenerationRef = useRef(0);
   const acceptedSnapshotRef = useRef<{ runId: string; runRevision: number; snapshotId: string } | null>(null);
@@ -759,22 +883,21 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
     setSubmitting(false);
     setActionBusy(false);
     setPendingAction(null);
-    setHint(null);
+    setHints([]);
     setActiveReviewTarget(null);
     setCompanionMoment("idle");
   }, [runId, setActiveReviewTarget, setCompanionMoment]);
 
   useEffect(() => {
     let active = true;
-    if (!window.ailearn) return;
-    void window.ailearn.capabilities.get({ meta: createRequestMeta(epochRef.current) })
-      .then((response) => {
-        if (response.workspaceEpoch) epochRef.current = response.workspaceEpoch;
-        const capabilities = unwrapGatewayResult(response);
-        if (active) setVoiceAvailable(capabilities.nativeCapabilities.asr === "available");
-      })
-      .catch(() => { if (active) setVoiceAvailable(false); });
-    return () => { active = false; };
+    const probe = () => { void probeMicrophone().then((result) => { if (active) setMicrophone(result); }); };
+    probe();
+    // 用户去系统设置里授权后回到窗口就该恢复，不必重开这一题。
+    window.addEventListener("focus", probe);
+    return () => {
+      active = false;
+      window.removeEventListener("focus", probe);
+    };
   }, [runId]);
 
   useEffect(() => {
@@ -869,7 +992,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
     // 保留编辑器内容，只对齐服务端草稿 revision——否则同步会清掉用户输入。
     const preserveLocalInput = previousTaskKey === taskKey && dirtyRef.current && editorRevisionRef.current > 0;
     taskKeyRef.current = taskKey;
-    setHint(null);
+    setHints([]);
     draftWriteGenerationRef.current += 1;
     setDraftWriteBusy(false);
     setDraftWriteBlocked(false);
@@ -907,10 +1030,10 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
         setDirty(true);
         setDraftStatus("已保留本地未同步输入，正在继续保存…");
       } else if (editorRevisionMatchesRequest(draftEditorRevision, editorRevisionRef.current)) {
-        setDraftStatus("已恢复服务端草稿");
+        setDraftStatus("已找回你没写完的草稿");
         if (draft.payload) setEditor(editorFromDraft(draft.payload));
       } else {
-        setDraftStatus("已读取服务端草稿；当前新输入仍待保存");
+        setDraftStatus("已取回草稿；你刚写的还没存上");
       }
     } else if (preserveLocalInput) {
       setDraftRevision(0);
@@ -931,7 +1054,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
       if (kind !== "draft") setResultPollTick((value) => value + 1);
       setRecovery(null);
       focusKeyRef.current = null;
-      if (!dirtyRef.current) setDraftStatus(kind === "draft" ? "已同步服务端草稿" : "已同步服务端学习状态");
+      if (!dirtyRef.current) setDraftStatus(kind === "draft" ? "草稿已存好" : "进度已存好");
     } catch (error) {
       setFailure({ message: gatewayErrorMessage(error), retryable: error instanceof RendererGatewayError && error.retry !== "never" });
     } finally {
@@ -1141,7 +1264,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
           setDraftWriteBlocked(true);
           setRecovery("draft");
           setFailure({ message: gatewayErrorMessage(error), retryable: false });
-          setDraftStatus("草稿结果未确认，请先同步当前状态");
+          setDraftStatus("草稿没存上，先重新读一次再继续");
         } else {
           setDraftWriteBlocked(true);
           setDraftStatus(gatewayErrorMessage(error));
@@ -1265,7 +1388,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
     setEditor(next);
     setDirty(true);
     setDraftWriteBlocked(false);
-    setDraftStatus(recovery === "draft" ? "先同步服务端草稿，再继续编辑" : "有未保存修改");
+    setDraftStatus(recovery === "draft" ? "先把草稿存上，再继续写" : "有未保存修改");
   };
 
   const submit = async (payload: ArtifactPayload) => {
@@ -1312,6 +1435,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
         };
       }
       setDirty(false);
+      setLockedAnswer(answerPreview(payload));
       setDraftStatus("回答已锁定，正在评估");
       setRecovery(null);
       resultAcknowledgementEligibleRef.current = true;
@@ -1324,7 +1448,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
       const shouldResync = needsLearningRunResync(error);
       if (shouldResync) {
         setRecovery("submit");
-        setDraftStatus("上一提交结果未确认，请先同步当前状态");
+        setDraftStatus("上一次提交没回音，先重新读一次再操作");
       }
       setFailure({ message: gatewayErrorMessage(error), retryable: !shouldResync && error instanceof RendererGatewayError && error.retry !== "never" });
     } finally {
@@ -1379,10 +1503,19 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
       }
       setFailure(null);
       setRecovery(null);
-      if (value.actionResult.kind === "hint_revealed") setHint(value.actionResult.text);
+      if (value.actionResult.kind === "hint_revealed") {
+        const revealed = value.actionResult;
+        setHints((current) => [
+          ...current.filter((entry) => entry.level !== revealed.level),
+          {
+            level: revealed.level,
+            text: revealed.text,
+            downgraded: revealed.resultingTrustCeiling === "practice_only",
+          },
+        ].sort((left, right) => left.level - right.level));
+      }
       if (action.kind === "end" || action.kind === "skip_run") setResultPollTick((value) => value + 1);
       const changedTask = action.kind === "switch_variant"
-        || action.kind === "skip_task"
         || action.kind === "activate_followup";
       await loadSnapshot(changedTask);
     } catch (error) {
@@ -1390,7 +1523,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
       const shouldResync = needsLearningRunResync(error);
       if (shouldResync) {
         setRecovery("action");
-        setDraftStatus("上一动作结果未确认，请先同步当前状态");
+        setDraftStatus("上一步没回音，先重新读一次再操作");
       }
       setFailure({ message: gatewayErrorMessage(error), retryable: !shouldResync && error instanceof RendererGatewayError && error.retry !== "never" });
     } finally {
@@ -1400,6 +1533,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
       }
     }
   };
+  dispatchActionRef.current = dispatchAction;
 
   const closeConfirmation = () => {
     const returnFocus = confirmationReturnFocusRef.current;
@@ -1454,11 +1588,21 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
     return () => window.cancelAnimationFrame(frame);
   }, [pendingAction]);
 
-  const alternativeActions = useMemo(() => snapshot?.allowedActions.filter((action) => {
-    if (action.kind !== "switch_variant") return false;
-    const alternative = snapshot.activeTask?.availableAlternatives.find((candidate) => candidate.alternativeId === action.alternativeId);
-    return voiceAvailable || alternative?.family !== "voice";
-  }) ?? [], [snapshot?.activeTask?.availableAlternatives, snapshot?.allowedActions, voiceAvailable]);
+  /**
+   * 语音替代项在麦克风不可用时**保留但禁用**，并把原因写在旁边（复盘 #8）：
+   * 直接把它藏起来，用户只会以为"根本没有换一种方式这回事"。
+   */
+  const microphoneUnavailable = microphone !== null && microphone.state !== "ready";
+  const microphoneReason = microphoneUnavailable ? microphoneAvailabilityCopy(microphone!) : "";
+  const blockedSwitchIds = new Set(microphoneUnavailable
+    ? (snapshot?.activeTask?.availableAlternatives ?? [])
+      .filter((alternative) => alternative.family === "voice")
+      .map((alternative) => alternative.alternativeId)
+    : []);
+  const alternativeActions = useMemo(
+    () => snapshot?.allowedActions.filter((action) => action.kind === "switch_variant") ?? [],
+    [snapshot?.allowedActions],
+  );
   const canSubmitUnable = snapshot?.activeTask !== null && snapshot?.phase === "active";
   const retryResultQuery = () => {
     setFailure(null);
@@ -1472,7 +1616,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   };
 
   if (loading && !snapshot) {
-    return <SurfaceDataState kind="loading" message="正在读取 LearningRun" detail="正在确认当前身份、工作区与这条旅程的服务端快照。" />;
+    return <SurfaceDataState kind="loading" message="正在读取 LearningRun" detail="正在读取这一轮学到哪了。" />;
   }
 
   if (failure && !snapshot) {
@@ -1526,20 +1670,37 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   const actionLinks = [
     ...alternativeActions,
     ...snapshot.allowedActions.filter((action) => ["pause", "resume", "request_hint", "activate_followup", "finish_current_evidence", "finish_without_commit", "retry_prepare", "retry_assessment", "retry_commit"].includes(action.kind)),
-    ...snapshot.allowedActions.filter((action) => ["skip_task", "skip_run", "end"].includes(action.kind)),
+    ...snapshot.allowedActions.filter((action) => ["skip_run", "end"].includes(action.kind)),
   ];
   const switchAction = actionLinks.find((action) => action.kind === "switch_variant");
   const phaseAction = actionLinks.find((action) => action.kind === "pause" || action.kind === "resume");
-  const hintAction = actionLinks
+  /**
+   * 提示阶梯：服务端按 `hintLevels` 签发 1..N 个 request_hint，界面上只有**一个**
+   * 按钮，每次放行下一层；放行到最后一层后禁用（复盘 #11）。
+   */
+  const hintLadder = actionLinks
     .filter((action): action is Extract<LearningRunAllowedActionV2, { kind: "request_hint" }> => action.kind === "request_hint")
-    .sort((left, right) => left.level - right.level)[0];
+    .sort((left, right) => left.level - right.level);
+  const nextHintAction = hintLadder.find((action) => !hints.some((entry) => entry.level === action.level));
+  const hintsExhausted = hintLadder.length > 0 && nextHintAction === undefined;
+  /**
+   * 退出动作必须摆在明面上（复盘 #12）：此前 `更多选择` 的 details 折叠了「稍后再做」，
+   * 用户在无障碍树里根本找不到它——折叠区里的东西对键盘和读屏都不存在。
+   * `end` 在其它阶段是唯一出口，同样直给。
+   */
+  const exitAction = actionLinks.find((action) => action.kind === "skip_run" || action.kind === "end");
   const quickActions: LearningRunAllowedActionV2[] = [];
   if (switchAction) quickActions.push(switchAction);
   if (phaseAction) quickActions.push(phaseAction);
-  if (hintAction) quickActions.push(hintAction);
+  if (nextHintAction) quickActions.push(nextHintAction);
+  else if (hintLadder.length > 0) quickActions.push(hintLadder[hintLadder.length - 1]!);
+  if (exitAction) quickActions.push(exitAction);
   const quickActionKeys = new Set(quickActions.map(actionKey));
-  const moreActions = actionLinks.filter((action) => !quickActionKeys.has(actionKey(action)));
-  const activeSecondsProgress = Math.min(100, (snapshot.activeSecondsUsed / snapshot.timeBudgetSeconds) * 100);
+  // request_hint 一律由那**一个**阶梯按钮代表：服务端按 hintLevels 签发了 1..N 个
+  // 动作，若只把"下一个"放进快捷区、其余留在更多菜单里，用户看到的还是两个提示
+  // 按钮（复盘 #11 的原始形态）。
+  const moreActions = actionLinks.filter((action) =>
+    action.kind !== "request_hint" && !quickActionKeys.has(actionKey(action)));
 
   return (
     <>
@@ -1551,7 +1712,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
             <strong className="learning-run-result-summary__seal">{result ? outcomeSeal[result.outcome] : "未形成结果"}</strong>
             <p>{snapshot.target.publicSummary}</p>
             <dl>
-              <div><dt>用时</dt><dd>{formatClock(snapshot.activeSecondsUsed)}</dd></div>
+              <div><dt>用时</dt><dd>{formatClock(clock.seconds)}</dd></div>
               <div><dt>已证明</dt><dd>{result ? `${result.demonstratedFacets.length} 项` : "—"}</dd></div>
               <div><dt>仍有缺口</dt><dd>{result ? `${result.gapFacets.length} 项` : "—"}</dd></div>
             </dl>
@@ -1636,7 +1797,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
                     ? "复习记录正在同步；返回后会继续刷新真实进度。"
                     : returnContract?.status === "ready"
                       ? "复习记录已经就绪，可以沿着当前路径继续。"
-                      : "返回后会按服务端给出的真实目标继续。"}
+                      : "回去之后会接着你真正要练的那一条。"}
               </p>
             </section>
             <div className="actions learning-run-result-actions">
@@ -1659,19 +1820,28 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
               <div><dt>证据范围</dt><dd>{eligibilityLabel(snapshot.publishedTargetEligibility)}</dd></div>
             </dl>
             <div className="learning-run-clock">
-              <div><span>专注时间</span><b>{formatClock(snapshot.activeSecondsUsed)}</b></div>
-              <div className="learning-run-clock__track" aria-label={`已使用 ${formatClock(snapshot.activeSecondsUsed)}`}><i style={{ width: `${activeSecondsProgress}%` }} /></div>
+              <div><span>专注时间</span><b>{formatClock(clock.seconds)}</b></div>
+              <small className="meta">{clock.paused ? "离开页面时不计时" : `已到 ${formatClock(clock.seconds)}`}</small>
             </div>
-            <div className={`learning-run-hint${hint ? " learning-run-hint--shown" : ""}`} role={hint ? "status" : undefined}>
+            <div className={`learning-run-hint${hints.length > 0 ? " learning-run-hint--shown" : ""}`} role={hints.length > 0 ? "status" : undefined}>
               <Lightbulb size={15} aria-hidden="true" />
-              <span>{hint ?? "卡住时可以先要一条提示，或换一种作答方式。"}</span>
+              {hints.length > 0 ? (
+                <ol className="learning-run-hint__levels">
+                  {hints.map((entry) => (
+                    <li key={entry.level}><span>{entry.text}</span></li>
+                  ))}
+                </ol>
+              ) : (
+                <span>卡住时可以先要一条提示，或换一种作答方式。</span>
+              )}
+              {hints.some((entry) => entry.downgraded) ? <small>看过提示之后，这张卡本轮只计练习分，不再计正式理解分。</small> : null}
             </div>
           </aside>
           <section className="learning-run-stage">
             <header className="learning-run-stage__header">
               <div>
                 <span>{activeTask ? `${facetLabels[activeTask.intent] ?? activeTask.intent} · ${interactionLabel(activeTask)}` : phaseLabels[processingPhase]}</span>
-                <small>{activeTask && snapshot.phase === "active" ? draftStatus : "服务端状态"}</small>
+                <small>{activeTask && snapshot.phase === "active" ? draftStatus : "进度"}</small>
               </div>
               <h2 ref={primaryHeadingRef} tabIndex={-1}>
                 {activeTask && snapshot.phase === "active" ? activeTask.prompt : processingHeadline}
@@ -1679,7 +1849,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
               {activeTask && snapshot.phase === "active" ? <p>{activeTask.targetSummary}</p> : null}
             </header>
             <div className="learning-run-response">
-              {activeTask && snapshot.phase === "active" ? (
+              {canAnswerNow && activeTask ? (
                 <InteractionEditor task={activeTask} value={editor ?? emptyEditor(activeTask)} onChange={updateEditor} />
             ) : unresolvedResultFailure ? (
               <div role="alert">
@@ -1687,15 +1857,29 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
                 <p className="small">{unresolvedResultFailure.message}</p>
               </div>
             ) : resultState.kind === "pending" || ["assessing", "committing"].includes(snapshot.phase) ? (
-              <div role="status" aria-live="polite">
-                <strong className="title">{processingHeadline}</strong>
-                <p className="small">你可以暂时离开；客户端只会在收到真实结果后显示复习影响。</p>
+              <div role="status" aria-live="polite" className="learning-run-assessing">
+                <strong className="title">
+                  <LoaderCircle className="run-spinner" size={15} aria-hidden="true" />
+                  {processingHeadline}
+                  <b className="learning-run-assessing__wait">已等待 {waitingSeconds}s</b>
+                </strong>
+                {lockedAnswer ? (
+                  <blockquote className="learning-run-assessing__answer">
+                    <span className="meta">你交上去的回答</span>
+                    {lockedAnswer}
+                  </blockquote>
+                ) : null}
+                <p className="small">
+                  {resultQueryBudgetExhausted
+                    ? "结果还在后台算，算好会自动回到这一页；这段时间不用再交一次，也不会被算成两次。"
+                    : "你可以暂时离开；客户端只会在收到真实结果后显示复习影响。"}
+                </p>
                 {processingFailure ? <p className="small" role="alert">{processingFailure.message}</p> : null}
               </div>
             ) : (
               <div role="status">
                 <strong className="title">{activeTask ? activeTask.prompt : phaseLabels[snapshot.phase]}</strong>
-                <p className="small">服务端正在准备下一个可执行动作。</p>
+                <p className="small">正在准备下一步。</p>
                 {failure ? <p className="small" role="alert">{failure.message}</p> : null}
               </div>
             )}
@@ -1720,19 +1904,47 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
                   {resultQueryBusy ? "正在重新检查…" : "重新检查结果"}
                 </button>
               ) : null}
-              {quickActions.map((action) => (
+              {quickActions.map((action) => {
+                const isHint = action.kind === "request_hint";
+                const blockedSwitch = action.kind === "switch_variant" && blockedSwitchIds.has(action.alternativeId);
+                const label = !isHint
+                  ? actionLabel(action)
+                  : hints.length === 0
+                    ? "给我一点提示"
+                    : hintsExhausted
+                      ? "提示已经给完"
+                      : "再看一层提示";
+                return (
+                  <button
+                    key={actionKey(action)}
+                    type="button"
+                    className="button"
+                    disabled={busy || (isHint && hintsExhausted) || blockedSwitch}
+                    title={blockedSwitch ? microphoneReason : undefined}
+                    onClick={() => void dispatchAction(action)}
+                  >
+                    {actionIcon(action)}
+                    {label}
+                  </button>
+                );
+              })}
+              {/* 复盘 #12：两个出口必须一眼看得见——「稍后再做」= 不想做，
+                  「暂时不会」= 不会做（这是一种真实作答结果，会记为需要复习）。
+                  此前它藏在「更多选择」里，和 skip_task / end 挤在同一个菜单。 */}
+              {canSubmitUnable ? (
                 <button
                   type="button"
-                  key={actionKey(action)}
                   className="button"
-                  disabled={busy}
-                  onClick={() => void dispatchAction(action)}
+                  disabled={busy || submitting}
+                  onClick={() => void submit({ kind: "declared_unable", reasonCode: "cannot_recall" })}
                 >
-                  {actionIcon(action)}
-                  {actionLabel(action)}
+                  <span>暂时不会</span>
                 </button>
-              ))}
-              {moreActions.length > 0 || canSubmitUnable ? (
+              ) : null}
+              {blockedSwitchIds.size > 0 ? (
+                <p className="learning-run-switch-note" role="status">{`现在还不能改用语音作答：${microphoneReason}`}</p>
+              ) : null}
+              {moreActions.length > 0 ? (
                 <details className="learning-run-more">
                   <summary>更多选择</summary>
                   <div className="learning-run-more__menu">
@@ -1741,15 +1953,10 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
                         {actionIcon(action)}<span>{actionLabel(action)}</span>
                       </button>
                     ))}
-                    {canSubmitUnable ? (
-                      <button type="button" disabled={busy || submitting} onClick={() => void submit({ kind: "declared_unable", reasonCode: "cannot_recall" })}>
-                        <span>暂时不会</span>
-                      </button>
-                    ) : null}
                   </div>
                 </details>
               ) : null}
-              {activeTask && snapshot.phase === "active" ? (
+              {canAnswerNow ? (
                 <button
                   type="button"
                   className="button primary"

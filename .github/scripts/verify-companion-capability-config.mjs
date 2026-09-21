@@ -48,7 +48,6 @@ const CAPABILITY_FLAGS = {
     COMPANION_SUMMARIZER_V1: { dev: true, prod: true },
     COMPANION_DAILY_SUMMARY_V1: { dev: true, prod: true },
     COMPANION_THOUGHTS_V1: { dev: true, prod: true },
-    COMPANION_THOUGHTS_LLM: { dev: false, prod: false },
   },
 };
 

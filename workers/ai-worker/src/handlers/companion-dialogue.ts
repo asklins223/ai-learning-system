@@ -32,6 +32,7 @@ import { canonicalJsonV1, sha256Utf8V1 } from "@ailearn/shared/content-hash";
 import { sql } from "drizzle-orm";
 import { logger } from "../lib/logger.ts";
 import { withWorkerWorkspaceTransaction } from "../db.ts";
+import { loadHereAndNow, renderHereAndNow } from "./companion-here-and-now.ts";
 import { createProvider, createEmbeddingProvider, withThinkingDisabled } from "../lib/ai-provider.ts";
 import {
   CompanionStreamStoppedError,
@@ -46,8 +47,10 @@ import {
   resolveProviderForTask,
 } from "../lib/governance.ts";
 import {
-  COMPANION_PERSONA_V4_PROMPT_ID,
-  COMPANION_PERSONA_V4_SHA256,
+  COMPANION_PERSONA_V5_PROMPT_ID,
+  COMPANION_PERSONA_V5_SHA256,
+  type PetPersonaPresetBoundaries,
+  type PetProfileActiveness,
 } from "@ailearn/shared";
 import { runCompanionAgentLoop } from "./companion-agent-runtime.ts";
 import { CompanionAgentBudgetExceededError } from "../lib/non-retryable-errors.ts";
@@ -119,6 +122,30 @@ const COMPANION_CANCELLED_MIN_CHARS = 12;
  *
  * 落的是**已下发的可见前缀**（`deliveredText`），也就是用户真的看到过的那段字。
  */
+/**
+ * 失败兜底话术（方案 29 §4.9：fail-open，绝不空白）。
+ *
+ * 抱怨 #4「经常性的出现输出不了东西了」的直接来源：任何一道校验判失败时，
+ * 旧实现只写一条 `error` 事件就 throw，而 `persistFailedPartial` 在"一个字都没
+ * 下发"时**直接放弃落消息**——于是界面上什么都没有，像她突然不理人。
+ *
+ * 三条轮换（按 runId 确定性取，同一轮重投不会换话，也不会连着两轮一模一样）。
+ * 口径：只承认"这句没成"并邀请重试，**不编造任何内容、不虚构已完成的事**，
+ * 也不暴露 provider / prompt / 错误码。
+ */
+const COMPANION_FAILURE_FALLBACK_LINES = [
+  "诶，这句我没组织好，你再跟我说一次？",
+  "刚刚那句话卡住了，我没听清，你再说一遍嘛。",
+  "我走神了一下下，这条没答上来，你重新问我一次？",
+] as const;
+
+/** 按 runId 确定性挑一句（同一 run 重投得到同一句，避免话术来回跳）。 */
+export function pickCompanionFailureFallbackLine(runId: string): string {
+  let hash = 0;
+  for (const ch of runId) hash = (hash * 31 + ch.charCodeAt(0)) % 1_000_003;
+  return COMPANION_FAILURE_FALLBACK_LINES[hash % COMPANION_FAILURE_FALLBACK_LINES.length];
+}
+
 export async function persistFailedPartial(args: {
   workspaceId: string;
   userId: string;
@@ -126,8 +153,12 @@ export async function persistFailedPartial(args: {
   runId: string;
   deliveredText: string;
 }): Promise<boolean> {
-  const text = args.deliveredText.trim();
-  if (text.length < COMPANION_CANCELLED_MIN_CHARS) return false;
+  // fail-open：已经说出来的半句优先保留；连半句都没有时，落一句诚实的兜底话，
+  // 而不是让用户面对空白（旧实现在这里 `return false`，界面什么都不显示）。
+  const delivered = args.deliveredText.trim();
+  const text = delivered.length >= COMPANION_CANCELLED_MIN_CHARS
+    ? delivered
+    : pickCompanionFailureFallbackLine(args.runId);
   const blocks = [{ type: "text" as const, text, emotion: resolveReplyToneEmotion(text) }];
   const contentSha256 = sha256Utf8V1(canonicalJsonV1(blocks));
   const messageId = randomUUID();
@@ -173,6 +204,23 @@ export async function persistFailedPartial(args: {
     logger.warn({ runId: args.runId, err }, "companion failed-partial retention skipped");
     return false;
   }
+}
+
+/** 活跃度三档白名单（与 `PetProfileActiveness` 同源）。 */
+const ACTIVENESS_VALUES = new Set<string>(["quiet", "moderate", "active"]);
+
+/**
+ * boundaries 是 jsonb，库里可能是 null / 数组 / 任意对象。只认"纯对象且键值合法"
+ * 的形状，其余一律当没设置——这个对象会被渲染进 system prompt，不能原样透传。
+ */
+function isPetBoundaryObject(value: unknown): value is PetPersonaPresetBoundaries {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const boolKeys = ["allowPlayful", "allowNudgeLearning", "allowVoiceTags"];
+  const known = new Set([...boolKeys, "catchphrase"]);
+  if (!Object.keys(record).every((key) => known.has(key))) return false;
+  if (!boolKeys.every((key) => record[key] === undefined || typeof record[key] === "boolean")) return false;
+  return record.catchphrase === undefined || record.catchphrase === null || typeof record.catchphrase === "string";
 }
 
 /** LearningRun 是正式学习页，缺证据时必须 fail closed。 */
@@ -257,8 +305,10 @@ export async function runCompanionDialogue(
           speaking_style: string;
           personality_tags: unknown;
           examples: unknown;
+          activeness: string | null;
+          boundaries: unknown;
         }>(sql`
-          SELECT name, speaking_style, personality_tags, examples
+          SELECT name, speaking_style, personality_tags, examples, activeness, boundaries
           FROM pet_profiles
           WHERE workspace_id = ${ctx.workspaceId} AND user_id = ${run.user_id}
           LIMIT 1
@@ -276,6 +326,14 @@ export async function runCompanionDialogue(
                     .map((e) => ({ text: String(e.text ?? "") }))
                     .filter((e) => e.text.length > 0)
                 : [],
+              // 活跃度与边界进对话链路（方案 29 §3.3，抱怨 #2）。取值按契约白名单
+              // 收窄，不认识的写 null——宁可当"没设置"也不要把她导向一个不存在的档。
+              activeness: ACTIVENESS_VALUES.has(String(petProfileRow.activeness ?? ""))
+                ? (petProfileRow.activeness as PetProfileActiveness)
+                : null,
+              boundaries: isPetBoundaryObject(petProfileRow.boundaries)
+                ? petProfileRow.boundaries
+                : null,
             }
           : null;
         const groundedTutorContext = await readGroundedTutorContext(
@@ -283,6 +341,14 @@ export async function runCompanionDialogue(
           run.page_context,
           { workspaceId: ctx.workspaceId, userId: run.user_id },
         );
+        // 环境快照跑在**同一个** RLS 读事务里：它是一组常量级聚合 SQL，另开事务
+        // 只会多一次往返，而且脱离这里的作用域边界（方案 29 §4.1）。
+        const hereAndNow = renderHereAndNow(await loadHereAndNow(tx, {
+          workspaceId: ctx.workspaceId,
+          userId: run.user_id,
+          conversationId: run.conversation_id,
+          pageContext: run.page_context,
+        }));
         return {
           runId: run.id,
           conversationId: run.conversation_id,
@@ -296,6 +362,7 @@ export async function runCompanionDialogue(
           userText,
           recentMessages,
           activeMemories,
+          hereAndNow,
           petProfile,
           nextMessageSeq: Number(conv.next_message_seq),
           nextEventSeq: Number(conv.next_event_seq),
@@ -355,6 +422,26 @@ export async function runCompanionDialogue(
     ctx.workspaceId,
     { userId: read.userId, operation: "companion_agent", jobId: ctx.id },
   );
+  /**
+   * 跨模型兜底 provider（方案 29 §9.6 / B8）。
+   *
+   * 同档思考重试治不了 provider 侧的退化：实测主模型 tokenrhythm/qwen3.8-flash
+   * 会高频返回"一词 + finish=stop"的半截话（近 3 小时 21/32 条不足 6 字，且没有
+   * maxTokens 截断日志），连着两次都退化时重跑同样会退化。所以兜底必须换**模型**，
+   * 最好连 provider 一起换。未配置 companion_fallback 时为 null，loop 跳过这一级。
+   */
+  const fallbackProvider = govCtx.companionFallbackProviderName
+    && govCtx.companionFallbackProviderConfig
+    ? createGovernedProvider(
+      createProvider(
+        govCtx.companionFallbackProviderName,
+        govCtx.companionFallbackProviderConfig,
+      ),
+      govCtx,
+      ctx.workspaceId,
+      { userId: read.userId, operation: "companion_agent_fallback", jobId: ctx.id },
+    )
+    : undefined;
 
   // ── 22 方案：Context Orchestrator 检索长期记忆（非 grounded_tutor）──
   let memoryContext: ContextAssemblyResult = {
@@ -426,11 +513,8 @@ export async function runCompanionDialogue(
     pageContext: read.pageContext,
     groundedTutorContext: read.groundedTutorContext,
     activeMemories: read.activeMemories,
+    hereAndNow: read.hereAndNow,
     petProfile: read.petProfile,
-    workspacePolicy: {
-      sendToExternal: govCtx.policy.sendToExternal,
-      piiDetection: govCtx.policy.piiDetection,
-    },
   });
 
   // ── 阶段 2a：fence claim + assistant.status（provider 调用前）─────────
@@ -528,6 +612,7 @@ export async function runCompanionDialogue(
         textSha256: sha256Utf8V1(segment.displayText),
       })),
       emotion,
+      read.petProfile?.boundaries?.allowVoiceTags !== false,
     );
     try {
       const written = await emitCompanionTtsSegments({
@@ -579,6 +664,9 @@ export async function runCompanionDialogue(
       read,
       provider,
       thinkingProvider,
+      fallbackProvider,
+      // 活跃度决定退化闸的字数线（方案 29 §9.17）：不传就等于忽略用户的设置。
+      activeness: read.petProfile?.activeness ?? null,
       baseMessages: messages,
       expiresAt,
       continuationProposalId,
@@ -870,8 +958,8 @@ export async function runCompanionDialogue(
               waiting_proposal_id = NULL,
               provider_id = ${provider.id},
               model_id = ${provider.modelId},
-              prompt_version = ${read.groundedTutorContext ? GROUNDED_TUTOR_PROMPT_ID : COMPANION_PERSONA_V4_PROMPT_ID},
-              prompt_hash = ${read.groundedTutorContext ? groundedTutorPromptSha256 : COMPANION_PERSONA_V4_SHA256},
+              prompt_version = ${read.groundedTutorContext ? GROUNDED_TUTOR_PROMPT_ID : COMPANION_PERSONA_V5_PROMPT_ID},
+              prompt_hash = ${read.groundedTutorContext ? groundedTutorPromptSha256 : COMPANION_PERSONA_V5_SHA256},
               finished_at = now()
           WHERE id = ${read.runId}
         `);

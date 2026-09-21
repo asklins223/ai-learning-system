@@ -83,6 +83,7 @@ import {
   markdownImportResultV1Schema,
   memberListResultV1Schema,
   renameWorkspaceResultV1Schema,
+  createWorkspaceResultV1Schema,
   searchDriftResultV1Schema,
   searchReindexResultV1Schema,
   type DesktopRouteKindM2,
@@ -575,6 +576,10 @@ const workspaceRenameInputSchema = z.strictObject({
   workspaceId: uuidSchema,
   name: z.string().trim().min(1).max(50),
 });
+const workspaceCreateInputSchema = z.strictObject({
+  ...m1InputBase,
+  name: z.string().trim().min(1).max(50),
+});
 const inviteCreateInputSchema = z.strictObject({
   ...m1InputBase,
   role: z.enum(["member", "owner"]),
@@ -809,7 +814,29 @@ function installHandler<TInput extends ParsedMeta, TOutput>(
   });
 }
 
+/**
+ * 空间边界守卫，**fail closed**。
+ *
+ * 原实现是 `meta.workspaceEpoch !== undefined && meta.workspaceEpoch !== active`，
+ * 于是"调用方忘了带 epoch"= 直接放行。而 `createRequestMeta()` 不传参时就不带
+ * epoch（epoch 为 0 时也会被丢掉），所以漏带是默认状态而非例外：批量 URL 采集在
+ * 循环中途切空间，剩余条目会带着**新空间**的凭据（网关只持一个 `this.token`）
+ * 静默落进新空间。缺 epoch 现在一律按边界失效处理。
+ *
+ * 只有三类通道走 `assertEpochBoundaryExempt`：握手前后（此时还没有 epoch 可带）、
+ * 本身用于改变边界的（切空间/加入/退出）、以及与工作区无关的原生与窗口面。
+ */
 function assertEpoch(meta: RequestMetaV1, activeWorkspaceEpoch: number): void {
+  if (meta.workspaceEpoch === undefined || meta.workspaceEpoch !== activeWorkspaceEpoch) {
+    throw new DesktopGatewayFailure("stale_workspace", "resync_first");
+  }
+}
+
+/**
+ * 边界豁免：仍校验"带了就必须对"，但不带不拦。新增调用点必须在这里登记理由，
+ * 否则应当走 `assertEpoch`。
+ */
+function assertEpochBoundaryExempt(meta: RequestMetaV1, activeWorkspaceEpoch: number): void {
   if (meta.workspaceEpoch !== undefined && meta.workspaceEpoch !== activeWorkspaceEpoch) {
     throw new DesktopGatewayFailure("stale_workspace", "resync_first");
   }
@@ -887,6 +914,14 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
   const companionChatStreams = new Map<string, () => void>();
   let stopCompanionAccountEvents: (() => void) | null = null;
   let stopCompanionInboxEvents: (() => void) | null = null;
+  /**
+   * 收件箱事件**合流广播**。inbox SSE 在连接时会把未 ACK 的积压**全量重放**
+   * （`after=0`，实测 26 条），逐条 emit 会让渲染层在同一瞬间发起同等次数的
+   * 投影重取——而主动念头气泡已经把投影刷新当成自己的触发源（方案 29 §9.15）。
+   * 一段突发只广播一次，带最大的那个 sequence。
+   */
+  let companionInboxBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
+  let companionInboxBroadcastSeq = 0;
   let companionInboxCursor = 0;
   let companionRuntimeFenceTimer: ReturnType<typeof setInterval> | null = null;
   let companionLifecycleGeneration = 0;
@@ -946,6 +981,9 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
   const stopCompanionLifecycle = (): void => {
     const revokeBridge = gateway.clearCompanionBridgeContext?.();
     if (revokeBridge) void revokeBridge.catch(() => undefined);
+    if (companionInboxBroadcastTimer) clearTimeout(companionInboxBroadcastTimer);
+    companionInboxBroadcastTimer = null;
+    companionInboxBroadcastSeq = 0;
     companionLifecycleGeneration += 1;
     companionLifecycleWorkspaceEpoch = 0;
     stopCompanionAccountEvents?.();
@@ -1003,7 +1041,15 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
         (delivery) => {
           if (generation !== companionLifecycleGeneration || workspaceEpoch !== activeWorkspaceEpoch) return;
           companionInboxCursor = Math.max(companionInboxCursor, delivery.inboxSequence);
-          emit("runtime", { kind: "companion_activity_changed", inboxSequence: delivery.inboxSequence }, workspaceEpoch);
+          companionInboxBroadcastSeq = Math.max(companionInboxBroadcastSeq, delivery.inboxSequence);
+          if (companionInboxBroadcastTimer) return;
+          companionInboxBroadcastTimer = setTimeout(() => {
+            companionInboxBroadcastTimer = null;
+            const inboxSequence = companionInboxBroadcastSeq;
+            companionInboxBroadcastSeq = 0;
+            if (generation !== companionLifecycleGeneration || workspaceEpoch !== activeWorkspaceEpoch) return;
+            emit("runtime", { kind: "companion_activity_changed", inboxSequence }, workspaceEpoch);
+          }, 400);
         },
       );
     } catch {
@@ -1385,7 +1431,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
   }, (output) => safeWorkspaceEpoch(output), sessionContextSchema);
 
   installHandler(DESKTOP_IPC_CHANNELS.authJoinWorkspace, authJoinWorkspaceInputSchema, options, async (_event, _window, input) => {
-    assertEpoch(input.meta, activeWorkspaceEpoch);
+    assertEpochBoundaryExempt(input.meta, activeWorkspaceEpoch);
     const session = await gateway.joinWorkspace(input.inviteToken, input.meta.requestId);
     activeWorkspaceEpoch = session.workspaceEpoch;
     rememberSession(session);
@@ -1438,7 +1484,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
   }, (output) => safeWorkspaceEpoch(output), sessionContextSchema);
 
   installHandler(DESKTOP_IPC_CHANNELS.authChangePassword, authChangePasswordInputSchema, options, async (_event, _window, input) => {
-    assertEpoch(input.meta, activeWorkspaceEpoch);
+    assertEpochBoundaryExempt(input.meta, activeWorkspaceEpoch);
     formalAssessmentGuard.failClosed("disconnected");
     const result = await gateway.changePassword(input.currentPassword, input.newPassword, input.meta.requestId);
     stopCompanionLifecycle();
@@ -1447,12 +1493,12 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
   }, undefined, changePasswordOutputSchema);
 
   installHandler(DESKTOP_IPC_CHANNELS.workspaceList, runtimeInputSchema, options, async (_event, _window, input) => {
-    assertEpoch(input.meta, activeWorkspaceEpoch);
+    assertEpochBoundaryExempt(input.meta, activeWorkspaceEpoch);
     return gateway.listWorkspaces(input.meta.requestId);
   }, undefined, workspaceListOutputSchema);
 
   installHandler(DESKTOP_IPC_CHANNELS.workspaceSwitch, workspaceSwitchInputSchema, options, async (_event, _window, input) => {
-    assertEpoch(input.meta, activeWorkspaceEpoch);
+    assertEpochBoundaryExempt(input.meta, activeWorkspaceEpoch);
     formalAssessmentGuard.failClosed("disconnected");
     stopLearningRunStreams();
     trackedLearningRunIds.clear();
@@ -1471,7 +1517,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
   }, (output) => safeWorkspaceEpoch(output), sessionContextSchema);
 
   installHandler(DESKTOP_IPC_CHANNELS.workspaceGetCurrent, runtimeInputSchema, options, async (_event, _window, input) => {
-    assertEpoch(input.meta, activeWorkspaceEpoch);
+    assertEpochBoundaryExempt(input.meta, activeWorkspaceEpoch);
     const workspace = await gateway.getCurrentWorkspace(input.meta.requestId);
     activeWorkspaceEpoch = workspace.workspaceEpoch;
     return workspace;
@@ -1540,13 +1586,13 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
   // 档案与头像（用户级，Member 也可用；服务端各自收口归属与限流）。
   installHandler(DESKTOP_IPC_CHANNELS.authProfileGet, runtimeInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "settings.section");
-    assertEpoch(input.meta, activeWorkspaceEpoch);
+    assertEpochBoundaryExempt(input.meta, activeWorkspaceEpoch);
     return gateway.getProfile(input.meta.requestId);
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, authProfileResultV1Schema);
 
   installHandler(DESKTOP_IPC_CHANNELS.authUpdateProfile, authUpdateProfileInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "settings.section");
-    assertEpoch(input.meta, activeWorkspaceEpoch);
+    assertEpochBoundaryExempt(input.meta, activeWorkspaceEpoch);
     return gateway.updateProfile(
       { displayName: input.displayName, avatarUrl: input.avatarUrl },
       input.meta.requestId,
@@ -1555,19 +1601,19 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
 
   installHandler(DESKTOP_IPC_CHANNELS.authUploadAvatar, authAvatarUploadInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "settings.section");
-    assertEpoch(input.meta, activeWorkspaceEpoch);
+    assertEpochBoundaryExempt(input.meta, activeWorkspaceEpoch);
     return gateway.uploadAvatar(input.request, input.meta.requestId);
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, avatarUploadResultV1Schema);
 
   installHandler(DESKTOP_IPC_CHANNELS.authAvatarGet, authAvatarGetInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "settings.section");
-    assertEpoch(input.meta, activeWorkspaceEpoch);
+    assertEpochBoundaryExempt(input.meta, activeWorkspaceEpoch);
     return gateway.getAvatar(input.request.objectKey, input.meta.requestId);
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, sourceImageGetResultV1Schema);
 
   // 退出协作工作区是空间边界变化：回执是重读后的会话，与 joinWorkspace 同构。
   installHandler(DESKTOP_IPC_CHANNELS.authLeaveWorkspace, authLeaveWorkspaceInputSchema, options, async (_event, _window, input) => {
-    assertEpoch(input.meta, activeWorkspaceEpoch);
+    assertEpochBoundaryExempt(input.meta, activeWorkspaceEpoch);
     const session = await gateway.leaveWorkspace(input.workspaceId, input.meta.requestId);
     activeWorkspaceEpoch = session.workspaceEpoch;
     rememberSession(session);
@@ -1581,6 +1627,14 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     assertEpoch(input.meta, activeWorkspaceEpoch);
     return gateway.renameWorkspace(input.workspaceId, input.name, input.meta.requestId);
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, renameWorkspaceResultV1Schema);
+
+  // 新建协作空间。入口在房间控制的学习空间菜单里（不是设置页），所以路由门控取
+  // room.home；创建不换空间，因此不触发令牌轮换。
+  installHandler(DESKTOP_IPC_CHANNELS.workspaceCreate, workspaceCreateInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.createWorkspace(input.name, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, createWorkspaceResultV1Schema);
 
   // Owner 的邀请发出与成员管理。写入全部由服务端 requireOwner 收口，
   // 这里不再复制一份角色判断，Member 调用只会得到 forbidden。
@@ -2317,7 +2371,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
   }, undefined, cardGenerationCloseResultV1Schema);
 
   installHandler(DESKTOP_IPC_CHANNELS.capabilitiesGet, runtimeInputSchema, options, async (_event, _window, input) => {
-    assertEpoch(input.meta, activeWorkspaceEpoch);
+    assertEpochBoundaryExempt(input.meta, activeWorkspaceEpoch);
     return gateway.getCapabilities(input.meta.requestId);
   }, (output) => safeWorkspaceEpoch(output), capabilityProjectionSchema);
 

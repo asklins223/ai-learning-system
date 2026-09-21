@@ -54,6 +54,17 @@ test("applyDeterministicToneToSegments：neutral 只净化不注入", () => {
   assert.equal(out[0].text, "今天就这样吧。");
 });
 
+test("applyDeterministicToneToSegments：injectTags=false 时只净化、不注入（「语气标签」边界）", () => {
+  const out = applyDeterministicToneToSegments(
+    [{ ordinal: 1, text: "[happy]恭喜你！这次复习通过啦。", textSha256: sha("[happy]恭喜你！这次复习通过啦。") }],
+    "happy",
+    false,
+  );
+  // 幻觉标签照样剥掉，但我们不补 [excited]——否则用户关掉开关后音频仍带标签
+  assert.equal(out[0].text, "恭喜你！这次复习通过啦。");
+  assert.equal(out[0].textSha256, sha("恭喜你！这次复习通过啦。"));
+});
+
 test("applyDeterministicToneToSegments：段内已有已知标签不叠加，幻觉标签净化", () => {
   const out = applyDeterministicToneToSegments(
     [

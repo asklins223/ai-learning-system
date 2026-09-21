@@ -156,13 +156,13 @@ test("chatCompletionStream（④-b）：发出 tools/tool_choice，并把分片 
     const body = JSON.parse(String(init?.body));
     assert.equal(body.stream, true);
     assert.equal(body.tools.length, 1);
-    assert.equal(body.tools[0].function.name, "companion_open_review");
+    assert.equal(body.tools[0].function.name, "companion_open_card");
     assert.equal(body.tool_choice, "auto");
     assert.equal("response_format" in body, false, "带工具的一步同样不强制 JSON mode");
     return sseResponse([
       sseLine(JSON.stringify({ choices: [{ delta: { content: "好，这就带你过去。" } }] })),
       sseLine(JSON.stringify({
-        choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: "companion_open_review", arguments: "{\"card" } }] } }],
+        choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: "companion_open_card", arguments: "{\"card" } }] } }],
       })),
       sseLine(JSON.stringify({
         choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "Id\": \"abc\"}" } }] }, finish_reason: "tool_calls" }],
@@ -176,7 +176,7 @@ test("chatCompletionStream（④-b）：发出 tools/tool_choice，并把分片 
       {
         responseFormat: "text",
         tools: [{
-          name: "companion_open_review",
+          name: "companion_open_card",
           description: "打开复习页面。",
           parameters: { type: "object", properties: {}, additionalProperties: false },
         }],
@@ -187,7 +187,7 @@ test("chatCompletionStream（④-b）：发出 tools/tool_choice，并把分片 
     assert.equal(result.content, "好，这就带你过去。");
     assert.deepEqual(deltas, ["好，这就带你过去。"]);
     assert.deepEqual(result.toolCalls, [
-      { id: "call_1", name: "companion_open_review", arguments: { cardId: "abc" } },
+      { id: "call_1", name: "companion_open_card", arguments: { cardId: "abc" } },
     ]);
     assert.equal(result.finishReason, "tool_calls");
   });

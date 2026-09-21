@@ -208,6 +208,7 @@ async function writeCandidateFeedback(
     : null;
   await tx.insert(cardCandidateFeedbackV2).values({
     workspaceId: ctx.workspaceId,
+    userId: ctx.userId,
     runId,
     candidateId: candidateId ?? "00000000-0000-0000-0000-000000000000",
     action: action.type,

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DesktopSourceListItem } from "@ailearn/shared/desktop-surface-contracts";
 import { useRoomStore } from "../../app/room-store";
+import { SpaceSharingNotice } from "../space-sharing-notice";
 import { createRequestMeta, gatewayErrorMessage, unwrapGatewayResult } from "../../app/desktop-client";
 import {
   MAX_CAPTURE_BYTES,
@@ -368,12 +369,17 @@ export function SourceLibrarySurface() {
                       formatSourceKindLabel(source),
                       needsOriginAddress(source) ? "缺少来源地址" : null,
                       formatRelative(source.updatedAt),
-                      source.noteCount > 0 ? `关联 ${source.noteCount} 篇笔记` : "尚未建立笔记",
                     ].filter(Boolean).join(" · ")}
                   </small>
                 </span>
                 <span className="source-state">
                   <span className={`tag ${sourceStatusTone(source.status)}`.trim()}>{formatSourceStatus(source.status)}</span>
+                  <br />
+                  {/* 「已生成笔记」是这份材料的进展，不是脚注（复盘 #18）：一眼要能
+                      区分"解析完了但还没动手"和"已经出笔记了"。 */}
+                  <span className={source.noteCount > 0 ? "tag green" : "tag"}>
+                    {source.noteCount > 0 ? `已生成 ${source.noteCount} 篇笔记` : "还没生成笔记"}
+                  </span>
                   <br />
                   <time dateTime={source.updatedAt}>{formatSourceStamp(source.updatedAt)}</time>
                 </span>
@@ -556,7 +562,7 @@ function CaptureStrip({
                 placeholder="https://"
                 onChange={(event) => setUrl(event.currentTarget.value)}
               />
-              <span className="capture-count">由服务端抓取正文并解析</span>
+              <span className="capture-count">由后台抓取正文并解析</span>
             </>
           )}
 
@@ -596,6 +602,8 @@ function CaptureStrip({
             粘贴内容<br />或拖入文件
           </div>
           <button type="button" className="button" onClick={() => setOpen(true)}>采集新来源</button>
+          {/* 放入这一步才说"共享"，而不是留在设置页里等人自己去找。 */}
+          <SpaceSharingNotice />
           {error ? <p className="capture-error" role="alert">{error}</p> : null}
         </>
       )}

@@ -20,11 +20,11 @@ import type {
   DesktopCardRejectReasonV2,
 } from "@ailearn/shared/card-generation-desktop-contracts";
 import { useRoomStore } from "../app/room-store";
+import { resetObjectiveLibraryView } from "./surfaces/objective-library-view-state";
 import { createCommandId, createRequestMeta, gatewayErrorMessage, RendererGatewayError, unwrapGatewayResult } from "../app/desktop-client";
 import {
+  cardGenerationProgressView,
   cardGenerationRecoveryReasonLabel,
-  cardGenerationShowsProgress,
-  cardGenerationStage,
   cardGenerationStageCount,
   cardGenerationStatusLabel,
   cardGenerationSyncReportText,
@@ -73,14 +73,14 @@ function useStalenessClock(active: boolean): void {
 /** A decision's own label, in the vocabulary the server keeps. */
 function candidateDecisionLabel(candidate: CardGenerationCandidateV1): string {
   if (candidate.qualityState === "failed") return "质量检查未通过";
-  if (candidate.qualityState === "checking" || candidate.qualityState === "authored") return "服务端仍在检查";
+  if (candidate.qualityState === "checking" || candidate.qualityState === "authored") return "还在检查";
   if (candidate.publishState === "activated") return "已激活";
-  if (candidate.publishState === "activation_failed") return "激活未确认";
+  if (candidate.publishState === "activation_failed") return "激活没成功";
   if (candidate.publishState === "superseded" || candidate.publishState === "expired") return "已失效";
   if (candidate.reviewDecision === "reject") return "已拒绝";
   // keep/merged used to fall through to "待审核", so a candidate the reviewer had
   // just accepted still looked undecided.
-  if (candidate.reviewDecision === "keep") return "已保留 · 待激活";
+  if (candidate.reviewDecision === "keep") return "已保留 · 在激活队列里";
   if (candidate.reviewDecision === "merged") return "已合并";
   return "待审核";
 }
@@ -135,7 +135,7 @@ function transformationLabel(value: CardGenerationCandidateV1["transformationKin
  * disagree about whether an exposure exists.
  */
 function exposureLabel(exposure: CardGenerationExposureEligibilityV1 | null, failure: string | null): string {
-  if (failure) return "服务端未确认";
+  if (failure) return "还没读到结果";
   if (!exposure) return "正在确认…";
   if (exposure.exposureStatus === "exposed") {
     return exposure.lastExposedAt
@@ -143,16 +143,18 @@ function exposureLabel(exposure: CardGenerationExposureEligibilityV1 | null, fai
       : "已查看";
   }
   if (exposure.exposureStatus === "not_exposed") return "未查看";
-  return "服务端未确认";
+  return "还没读到结果";
 }
 
 function firstValidationLabel(exposure: CardGenerationExposureEligibilityV1 | null, failure: string | null): string {
-  if (failure) return "服务端未确认";
+  if (failure) return "还没读到结果";
   if (!exposure) return "正在确认…";
   switch (exposure.initialValidationPolicyEffect) {
-    case "eligible": return "可立即验证";
-    case "wait_for_initial_validation": return "需要等待首次验证";
-    default: return "服务端未确认";
+    // 这里说代价，不说术语：审核人真正要决定的是"要不要现在看答案"，
+    // 代价是激活之后这张卡要等一天才能正式验证（复盘 #9）。
+    case "eligible": return "激活后马上能正式验证";
+    case "wait_for_initial_validation": return "答案看过了：激活后要等 24 小时才能正式验证";
+    default: return "还没读到结果";
   }
 }
 
@@ -232,7 +234,6 @@ export function CardGenerationSurface() {
   const [run, setRun] = useState<CardGenerationRunSnapshotV1 | null>(null);
   const [candidates, setCandidates] = useState<CardGenerationCandidateV1[]>([]);
   const [activeCandidateId, setActiveCandidateId] = useState<string | null>(null);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [receipt, setReceipt] = useState<CardActivationReceiptDesktopV1 | null>(null);
   const [loading, setLoading] = useState(true);
   /** The page-level read failed; an action's own failure never lands here. */
@@ -276,7 +277,10 @@ export function CardGenerationSurface() {
         const projectionResponse = await window.ailearn.room.getProjection({ meta: createRequestMeta(session.workspaceEpoch) });
         if (projectionResponse.workspaceEpoch) epochRef.current = projectionResponse.workspaceEpoch;
         const projection = unwrapGatewayResult(projectionResponse);
-        const generation = projection.activeGenerationSummary.state === "data" ? projection.activeGenerationSummary.data : null;
+        const generations = projection.activeGenerationSummary.state === "data"
+          ? projection.activeGenerationSummary.data
+          : [];
+        const generation = generations[0] ?? null;
         if (active && generation) setActiveCardGenerationRunId(generation.runId);
       } catch {
         // 没有可恢复的任务时保持空态；用户仍可从"返回笔记"重新开始。
@@ -365,7 +369,6 @@ export function CardGenerationSurface() {
     setRun(null);
     setCandidates([]);
     setActiveCandidateId(null);
-    setSelectedIds(new Set());
     setReceipt(null);
     setFailure(null);
     setActionFailure(null);
@@ -509,21 +512,16 @@ export function CardGenerationSurface() {
     }
   };
 
-  const toggleSelection = (candidate: CardGenerationCandidateV1) => {
-    if (!isActivatableCandidate(candidate)) return;
-    setSelectedIds((current) => {
-      const next = new Set(current);
-      if (next.has(candidate.candidateId)) next.delete(candidate.candidateId);
-      else next.add(candidate.candidateId);
-      return next;
-    });
-  };
-
+  /**
+   * 「保留」就是排队：激活集合 = 全部已保留且可激活的候选，不再额外勾选。
+   * 之前这里既要「保留」又要勾「加入待激活」，而计数只统计已保留的勾选，
+   * 于是先勾后不保留会静默激活 0 张（2026-09-20 实走复盘 #1）。
+   */
   const activate = async () => {
     if (!run || !window.ailearn || busyAction) return;
     const selectedCandidates = candidates.filter(
       (candidate): candidate is CardGenerationCandidateV1 & { candidateEvidenceBindingPlanHash: string } =>
-        selectedIds.has(candidate.candidateId) && isActivatableCandidate(candidate),
+        isActivatableCandidate(candidate),
     );
     if (selectedCandidates.length === 0) return;
     setBusyAction("activate");
@@ -551,7 +549,6 @@ export function CardGenerationSurface() {
       if (response.workspaceEpoch) epochRef.current = response.workspaceEpoch;
       const nextReceipt = unwrapGatewayResult(response);
       setReceipt(nextReceipt);
-      setSelectedIds(new Set());
       await load(false);
     } catch (error) {
       setActionFailure(gatewayErrorMessage(error));
@@ -601,25 +598,30 @@ export function CardGenerationSurface() {
     }
   };
 
-  const selectedCount = [...selectedIds].filter((candidateId) => candidates.some((candidate) => candidate.candidateId === candidateId && candidate.reviewDecision === "keep")).length;
+  /** 保留即排队：待激活数 = 已保留且可激活的候选数。 */
+  const activatableCount = candidates.filter(isActivatableCandidate).length;
   const undecidedCount = candidates.filter((candidate) => candidate.reviewDecision === "undecided").length;
-  const generationStage = run ? cardGenerationStage(run.status) : 0;
+  const progressView = run ? cardGenerationProgressView(run.status, run.progress) : null;
+  const generationStage = progressView?.stage ?? 0;
   const waitingForRun = !runId && !runIdHealed;
   const generationStages = [
-    ["读取笔记", "确认服务端封存的来源版本"],
+    ["读取笔记", "核对封存下来的原文版本"],
     ["形成问题", "围绕主张生成可验证候选"],
     ["对齐证据", "核对质量门与证据绑定"],
     ["等待审核", "由你决定保留、丢弃或激活"],
   ] as const;
   /**
-   * 进度头条的四个数：走到第几步、完成了几步、还剩几步、整体百分比。
-   * 百分比严格等于「已完成阶段数 ÷ 4」，所以它和四段轨道、和「已完成 N 步」
-   * 永远是同一个数 —— 页面上不会同时出现两个对不上的进度读数。
+   * 进度头条：第几步、完成几步、整体百分比。百分比 = (已完成阶段 + 当前阶段内的
+   * 细分进度) ÷ 4，细分只来自服务端聚合的候选计数（`run.progress`），客户端不猜时间。
+   * 计数文案与百分比同源，所以页面上不会出现两个互相矛盾的读数。
+   * `progressView === null` 的状态（失败/待处理/已结束等）说不出走到哪一步，
+   * 整块进度不渲染——曾经这里用「不在前三阶段就算第 3 步」兜底，于是进度条恒定 75%
+   * 且前三行一起亮「已完成」（2026-09-20 实走复盘 #2）。
    */
-  const progressStep = Math.min(generationStage + 1, cardGenerationStageCount);
-  const progressDone = Math.min(generationStage, cardGenerationStageCount - 1);
-  const progressTodo = Math.max(cardGenerationStageCount - progressStep, 0);
-  const progressPercent = Math.round((progressDone / cardGenerationStageCount) * 100);
+  const progressStep = progressView ? Math.min(progressView.stage + 1, cardGenerationStageCount) : 0;
+  const progressDone = progressView ? Math.min(progressView.stage, cardGenerationStageCount) : 0;
+  const progressTodo = progressView ? Math.max(cardGenerationStageCount - progressStep, 0) : 0;
+  const progressPercent = progressView?.percent ?? 0;
   const progressInFlight = Boolean(run && isCardGenerationInFlight(run.status));
   const page = run && isCardGenerationReviewStage(run.status) ? "candidate" : "generating";
   useHudPage(page);
@@ -659,8 +661,6 @@ export function CardGenerationSurface() {
    * 候选自己的 isReviewReady / qualityState / publishState 仍是更严的第二道门。
    */
   const reviewOpen = Boolean(run && isCardGenerationReviewOpen(run.status));
-  const activeCandidateSelectable = Boolean(activeCandidate && reviewOpen && isActivatableCandidate(activeCandidate));
-  const activeCandidateSelected = Boolean(activeCandidate && selectedIds.has(activeCandidate.candidateId));
   const activeReveal = reveal && activeCandidate && reveal.candidateId === activeCandidate.candidateId ? reveal.data : null;
   const activeCandidateKey = activeCandidate?.candidateId ?? null;
   const activeCandidateRevision = activeCandidate?.revision ?? null;
@@ -765,7 +765,7 @@ export function CardGenerationSurface() {
             <div>
               <span className="tag green">{run ? cardGenerationStatusLabel(run.status) : "准备中"}</span>
               <h2>{noteTitle ? `把《${noteTitle}》整理成学习卡` : "把一篇笔记整理成可练习的问题"}</h2>
-              <p>{run ? `生成任务 ${run.runId.slice(0, 8)} · 后台进行中，离开本页不会中断 · 收到服务端事件会自动更新，也可以随时刷新` : "系统只推进服务端已经确认的阶段。"}</p>
+              <p>{run ? `生成任务 ${run.runId.slice(0, 8)} · 后台进行中，离开本页不会中断 · 收到服务端事件会自动更新，也可以随时刷新` : "进度只跟着已经确认的阶段走。"}</p>
             </div>
             <button type="button" className="button card-generation-board__sync" disabled={loading} onClick={() => void resync()}>
               <RefreshCw size={14} aria-hidden="true" />{loading ? "正在刷新…" : "刷新状态"}
@@ -773,9 +773,9 @@ export function CardGenerationSurface() {
           </header>
 
           {/* 进度头条：一眼看清「走到第几步 / 当前在做什么 / 完成了几步 / 还剩几步」。
-              百分比就是已完成阶段数 ÷ 4，四段轨道是同一件事的另一半张脸，所以页面上
-              任何两个读数都不会互相矛盾。它只画服务端已经确认的阶段，不猜时间。 */}
-          {run && cardGenerationShowsProgress(run.status) ? (
+              百分比 = (已完成阶段 + 当前阶段内的候选进度) ÷ 4，细分只来自服务端计数，
+              不猜时间；说不出阶段的状态整块不显示，而不是亮一条走完的轨道。 */}
+          {run && progressView ? (
             <section className="card-generation-progress" aria-label="生成进度">
               <div className="card-generation-progress__summary">
                 <div className="card-generation-progress__current">
@@ -789,7 +789,8 @@ export function CardGenerationSurface() {
                     {cardGenerationStatusLabel(run.status)}
                   </strong>
                   <span className="card-generation-progress__meta">
-                    已完成 {progressDone} 步 · 待进行 {progressTodo} 步 · 最后更新 {formatRelative(run.updatedAt)}
+                    已完成 {progressDone} 步 · 待进行 {progressTodo} 步
+                    {progressView.detail ? ` · ${progressView.detail}` : ""} · 最后更新 {formatRelative(run.updatedAt)}
                   </span>
                 </div>
                 <div
@@ -799,7 +800,7 @@ export function CardGenerationSurface() {
                   aria-valuemin={0}
                   aria-valuemax={100}
                   aria-valuenow={progressPercent}
-                  aria-valuetext={`第 ${progressStep} 步，共 ${cardGenerationStageCount} 步：${cardGenerationStatusLabel(run.status)}`}
+                  aria-valuetext={`第 ${progressStep} 步，共 ${cardGenerationStageCount} 步：${cardGenerationStatusLabel(run.status)}${progressView.detail ? `，${progressView.detail}` : ""}`}
                 >
                   <strong className="card-generation-progress__percent">{progressPercent}<i>%</i></strong>
                   <span className="card-generation-progress__percent-caption">整体进度</span>
@@ -835,7 +836,7 @@ export function CardGenerationSurface() {
             </p>
           ) : null}
 
-          {loading || waitingForRun ? <div className="card-generation-hud-state" role="status"><LoaderCircle className="run-spinner" size={24} aria-hidden="true" /><strong>正在读取生成任务</strong><p>正在核对笔记版本和服务端进度。</p></div> : null}
+          {loading || waitingForRun ? <div className="card-generation-hud-state" role="status"><LoaderCircle className="run-spinner" size={24} aria-hidden="true" /><strong>正在读取生成任务</strong><p>正在核对笔记版本和生成进度。</p></div> : null}
           {!loading && !waitingForRun && failure ? <div className="card-generation-hud-state" role="alert"><CircleAlert size={24} aria-hidden="true" /><strong>无法确认这次生成</strong><p>{failure}</p><button type="button" className="button" onClick={() => void resync()}>重新同步</button></div> : null}
           {!loading && !waitingForRun && !failure && !run ? <div className="card-generation-hud-state" role="status"><Sparkles size={24} aria-hidden="true" /><strong>还没有进行中的生成任务</strong><p>回到笔记页，从已保存的整篇笔记重新开始。</p><button type="button" className="button primary" onClick={returnToNote}><ArrowLeft size={14} aria-hidden="true" />返回笔记</button></div> : null}
 
@@ -845,14 +846,14 @@ export function CardGenerationSurface() {
                 <div className="card-generation-hud-state" role="status">
                   <CircleAlert size={24} aria-hidden="true" />
                   <strong>这次生成已取消</strong>
-                  <p>没有候选被生成，服务端也不会继续推进。回到笔记页可以重新开始一次。</p>
+                  <p>没有生成出候选卡，进度也不会往前走。回到笔记页可以重新开始一次。</p>
                   <div className="actions">
                     <button type="button" className="button primary" onClick={returnToNote}>
                       <ArrowLeft size={14} aria-hidden="true" />返回笔记
                     </button>
                   </div>
                 </div>
-              ) : !run.recovery ? (
+              ) : !run.recovery && progressView ? (
                 <div className="press-track">
                   {generationStages.map(([label, detail], index) => (
                     <article className={`press-stage${index < generationStage ? " done" : ""}${index === generationStage ? " active" : ""}`} data-step={String(index + 1).padStart(2, "0")} aria-current={index === generationStage ? "step" : undefined} key={label}>
@@ -873,14 +874,27 @@ export function CardGenerationSurface() {
                     </article>
                   ))}
                 </div>
+              ) : !run.recovery ? (
+                // 既说不出走到哪一步、服务端也没签发恢复动作（例如结束后未激活）：
+                // 只能给状态与出口，不能点亮一条假装走完的轨道。
+                <div className="card-generation-hud-state" role="status">
+                  <CircleAlert size={24} aria-hidden="true" />
+                  <strong>{cardGenerationStatusLabel(run.status)}</strong>
+                  <p>这次生成停下来了，后台也没有给出可以恢复的下一步。回到笔记页可以重新开始一次。</p>
+                  <div className="actions">
+                    <button type="button" className="button primary" onClick={returnToNote}>
+                      <ArrowLeft size={14} aria-hidden="true" />返回笔记
+                    </button>
+                  </div>
+                </div>
               ) : (
                 <div className="card-generation-recovery" role="status">
                   <strong>{cardGenerationRecoveryReasonLabel(run.recovery.publicReasonCode)}</strong>
-                  <p>{run.recovery.retryability === "resync_required" ? "先重新读取服务端状态；桌面不会重放同一次失败任务。" : "下一步只使用服务端明确签发的恢复动作。"}</p>
+                  <p>{run.recovery.retryability === "resync_required" ? "先重新读一次进度；这台电脑不会把失败的那一步再跑一遍。" : "下一步只做后台明确说可以恢复的那件事。"}</p>
                   <div className="actions">{recoveryActions()}</div>
                 </div>
               )}
-              {actionFailure ? <p className="small card-generation-board__failure" role="alert">操作未确认：{actionFailure}</p> : null}
+              {actionFailure ? <p className="small card-generation-board__failure" role="alert">这一步没成功：{actionFailure}</p> : null}
               <footer className="card-generation-board__footer">
                 <span>{run.sourceOutdated ? "笔记已有新版本，本次候选不会被当作最新内容。" : `生成计划 ${run.currentPlanVersion || "—"} · 审核版本 ${run.reviewDraftRevision}`}</span>
                 <div className="actions">
@@ -908,8 +922,8 @@ export function CardGenerationSurface() {
             {!loading && !failure && run?.status === "no_cards_recommended" ? <div className="card-generation-hud-state" role="status"><Check size={24} aria-hidden="true" /><strong>这次不建议生成学习卡</strong><p>这是有效结果，不需要为了填满页面而制造低质量候选。</p><button type="button" className="button primary" onClick={returnToNote}><ArrowLeft size={14} aria-hidden="true" />返回笔记</button></div> : null}
             {/* 恢复态且一张候选都没有：这里不是死端。右侧签发的是「重新检查 + 返回笔记」，
                 所以左侧只解释发生了什么，返回入口交给右侧一次呈现（不再各画一个同名按钮）。 */}
-            {!loading && !failure && run?.recovery && !activeCandidate ? <div className="card-generation-hud-state" role="status"><CircleAlert size={24} aria-hidden="true" /><strong>{cardGenerationRecoveryReasonLabel(run.recovery.publicReasonCode)}</strong><p>服务端这次没有交付可审核候选。右侧的「重新检查」会再读一次服务端状态并告诉你它有没有变化；这张卡上的候选一旦下发，会在这里一次出现一张。</p></div> : null}
-            {!loading && !failure && !run?.recovery && !activeCandidate ? <div className="card-generation-hud-state" role="status"><CircleAlert size={24} aria-hidden="true" /><strong>没有可审核候选</strong><p>服务端尚未返回公开候选，或这次生成已结束。</p><div className="actions"><button type="button" className="button" onClick={() => void resync()}>重新检查</button><button type="button" className="button primary" onClick={returnToNote}><ArrowLeft size={14} aria-hidden="true" />返回笔记</button></div></div> : null}
+            {!loading && !failure && run?.recovery && !activeCandidate ? <div className="card-generation-hud-state" role="status"><CircleAlert size={24} aria-hidden="true" /><strong>{cardGenerationRecoveryReasonLabel(run.recovery.publicReasonCode)}</strong><p>这次没有读到可以审核的候选。右侧的「重新检查」会再读一次进度，告诉你有没有变化；候选一旦下发，会一张一张出现在这里。</p></div> : null}
+            {!loading && !failure && !run?.recovery && !activeCandidate ? <div className="card-generation-hud-state" role="status"><CircleAlert size={24} aria-hidden="true" /><strong>没有可审核候选</strong><p>还没有可展示的候选，或者这次生成已经结束。</p><div className="actions"><button type="button" className="button" onClick={() => void resync()}>重新检查</button><button type="button" className="button primary" onClick={returnToNote}><ArrowLeft size={14} aria-hidden="true" />返回笔记</button></div></div> : null}
             {/* 同步回执同样出现在审核页：这是「重新检查」唯一能说话的地方。 */}
             {!loading && !failure && syncReport ? <p className="small notebook-note candidate-review-sync" role="status" aria-live="polite">{cardGenerationSyncReportText(syncReport.status, syncReport.changed)}<span className="card-generation-board__sync-at">· {formatRelative(syncReport.at)}</span></p> : null}
             {!loading && !failure && activeCandidate ? (
@@ -962,7 +976,7 @@ export function CardGenerationSurface() {
                           ))}
                         </ul>
                       ) : <p className="small">这次候选没有附带可展示的来源片段。</p>}
-                      <p className="small">这次查看已经记为一次曝光，右侧的"首次验证"显示它对这张卡的影响。</p>
+                      <p className="small">答案已经看过。这张卡激活之后要等 24 小时才能开始正式首次验证（这段时间随时可以练，只是不计入正式状态）；右侧「首次验证」会写明它的影响。</p>
                     </section>
                   ) : null}
                   {revealFailure ? (
@@ -971,7 +985,7 @@ export function CardGenerationSurface() {
                       <button type="button" className="text-action text-action--strong" onClick={() => void revealCandidate(activeCandidate)}>重试</button>
                     </p>
                   ) : null}
-                  {actionFailure ? <p className="small notebook-note" role="alert">操作未确认：{actionFailure}</p> : null}
+                  {actionFailure ? <p className="small notebook-note" role="alert">这一步没成功：{actionFailure}</p> : null}
                 </div>
 
                 <div className="stamp-actions">
@@ -981,7 +995,7 @@ export function CardGenerationSurface() {
                       type="button"
                       className="button"
                       disabled={revealing}
-                      title="展开这张卡的答案与来源证据；服务端会记录这次曝光"
+                      title="先看过答案再决定保不保留。代价要说在前面：这张卡激活之后要等 24 小时才能做正式首次验证，期间只能练习。"
                       onClick={() => void revealCandidate(activeCandidate)}
                     >
                       <Eye size={14} aria-hidden="true" />{revealing ? "正在读取答案…" : "查看答案与证据"}
@@ -993,7 +1007,7 @@ export function CardGenerationSurface() {
                         <X size={14} aria-hidden="true" />不保留
                       </button>
                       <button type="button" className="button primary" disabled={busyAction !== null} onClick={() => void review(activeCandidate, "keep")}>
-                        <Check size={14} aria-hidden="true" />{busyAction === `${activeCandidate.candidateId}:keep` ? "正在保留…" : "保留"}
+                        <Check size={14} aria-hidden="true" />{busyAction === `${activeCandidate.candidateId}:keep` ? "正在保留…" : "保留（进入激活队列）"}
                       </button>
                     </>
                   ) : null}
@@ -1002,7 +1016,6 @@ export function CardGenerationSurface() {
                       <RotateCcw size={14} aria-hidden="true" />{busyAction === `${activeCandidate.candidateId}:undo` ? "正在撤销…" : "撤销决定"}
                     </button>
                   ) : null}
-                  {activeCandidateSelectable ? <label className="candidate-activation-choice"><input type="checkbox" checked={activeCandidateSelected} onChange={() => toggleSelection(activeCandidate)} /><span>加入待激活</span></label> : null}
                   <button type="button" className="button" disabled={activeCandidateIndex >= candidates.length - 1} onClick={() => moveCandidate(1)}>下一张</button>
                 </div>
 
@@ -1048,18 +1061,26 @@ export function CardGenerationSurface() {
                 <div><dt>预计用时</dt><dd>约 {activeCandidate.estimatedReviewSeconds} 秒</dd></div>
                 <div><dt>候选版本</dt><dd>v{activeCandidate.revision} · 计划 {activeCandidate.planVersion}</dd></div>
                 <div><dt>质量状态</dt><dd>{candidateDecisionLabel(activeCandidate)}</dd></div>
-                <div><dt>答案曝光</dt><dd>{exposureLabel(exposure, exposureFailure)}</dd></div>
+                <div><dt>看过答案</dt><dd>{exposureLabel(exposure, exposureFailure)}</dd></div>
                 <div><dt>首次验证</dt><dd>{firstValidationLabel(exposure, exposureFailure)}</dd></div>
               </dl>
             ) : <p>候选一旦可审核，会在左侧一次出现一张。</p>}
             <div className="rule" />
-            <p className="small">问题与目标始终公开；答案、评分依据与证据闭包只在你主动查看时下发，并记录为一次曝光 —— 上表的"首次验证"就是这次曝光的后果。</p>
+            <p className="small">问题和目标一直是公开的；答案、评分依据和原文片段只在你主动查看时才给，并且会记下你看过一次 —— 上表的"首次验证"就是看过一次的后果。</p>
             {receipt ? <p className="candidate-review-slip__receipt" role="status"><Check size={15} aria-hidden="true" />已确认 {receipt.mappings.length} 个目标映射</p> : null}
             <div className="candidate-review-slip__actions">
+              {reviewOpen && undecidedCount > 0 ? (
+                // 曾经这一步会静默把所有"未决"候选打成未选中并丢弃（activation-service
+                // 的 not_selected_at_activation），而界面上没有任何一句话提到这个后果。
+                <p className="small">
+                  还有 {undecidedCount} 张没有决定：点「激活」只提交已保留的 {activatableCount} 张，
+                  其余会被记为未选中并丢弃。想留哪张就先在它上面点「保留」。
+                </p>
+              ) : null}
               {run?.recovery ? recoveryActions() : null}
-              {reviewOpen && selectedCount > 0 ? (
+              {reviewOpen && activatableCount > 0 ? (
                 <button type="button" className="button primary" disabled={busyAction !== null} onClick={() => void activate()}>
-                  {busyAction === "activate" ? "正在激活…" : `激活 ${selectedCount} 个目标`}<ArrowRight size={14} aria-hidden="true" />
+                  {busyAction === "activate" ? "正在激活…" : `激活 ${activatableCount} 个目标`}<ArrowRight size={14} aria-hidden="true" />
                 </button>
               ) : null}
               {reviewOpen ? (
@@ -1067,7 +1088,18 @@ export function CardGenerationSurface() {
                   {busyAction === "close" ? "正在结束…" : "结束本次审核"}
                 </button>
               ) : null}
-              {receipt ? <button type="button" className="button green" onClick={() => invoke("open-objectives")}>查看理解目标</button> : null}
+              {/* 跳过去是来看刚激活的卡的，所以先把列表的筛选/搜索/滚动清掉：
+                  库里那个筛选活得比一次挂载长，上一次留下的「答对过」会把新激活的
+                  卡（状态是「还没正式答过」）全挡掉，页面看起来就是空的（复盘 #4）。 */}
+              {receipt ? (
+                <button
+                  type="button"
+                  className="button green"
+                  onClick={() => { resetObjectiveLibraryView(); invoke("open-objectives"); }}
+                >
+                  查看理解目标
+                </button>
+              ) : null}
               {/* 「返回笔记」在同一屏只出现一次：恢复契约已经签发过返回动作，或者左侧
                   那张纸自己带着返回入口（空态/失败态）时，这里就不再补一个同名按钮。 */}
               {showSlipReturn ? (

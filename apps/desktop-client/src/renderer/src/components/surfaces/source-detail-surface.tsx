@@ -14,6 +14,7 @@ import {
   formatRelative,
   formatSourceKindLabel,
   formatSourceStatus,
+  parseImageBlock,
   useSurfaceProjection,
 } from "./surface-data";
 import {
@@ -32,7 +33,6 @@ import {
   segmentText,
   splitHighlight,
 } from "./source-segments";
-import { parseImageBlock } from "./note-blocks";
 import { useSourceImage } from "./source-image";
 import { ZoomableReadingImage } from "./image-viewer";
 
@@ -212,7 +212,7 @@ export function SourceDetailSurface() {
       setRenaming(null);
       await reload();
     } catch (error) {
-      setNotice({ tone: "error", text: `标题未确认：${gatewayErrorMessage(error)}` });
+      setNotice({ tone: "error", text: `改标题没成功：${gatewayErrorMessage(error)}` });
     } finally {
       setBusy(null);
     }
@@ -250,7 +250,7 @@ export function SourceDetailSurface() {
       }));
       if (result.kind === "duplicate") {
         setDuplicate({ noteId: result.noteId, title: result.title });
-        setNotice({ tone: "info", text: `服务端已有一份内容相同的笔记《${result.title}》。打开它，或者再建一份副本。` });
+        setNotice({ tone: "info", text: `服务器上已经有一篇内容相同的笔记《${result.title}》。打开它，或者再建一份副本。` });
         return;
       }
       setDuplicate(null);
@@ -296,7 +296,7 @@ export function SourceDetailSurface() {
       setArchiveConfirm(false);
       invoke("open-sources");
     } catch (error) {
-      setNotice({ tone: "error", text: `归档未确认：${gatewayErrorMessage(error)}` });
+      setNotice({ tone: "error", text: `归档没成功：${gatewayErrorMessage(error)}` });
     } finally {
       setBusy(null);
     }
@@ -373,7 +373,7 @@ export function SourceDetailSurface() {
         <SurfaceDataState kind="empty" message="还没有选择来源" detail="从来源库打开一份材料后，这里会直接铺开它的正文与解析结果。" />
       ) : null}
       {activeSourceId && loading ? (
-        <SurfaceDataState kind="loading" message="正在读取来源详情" detail="正文片段与关联笔记都由服务端返回。" />
+        <SurfaceDataState kind="loading" message="正在读取来源详情" detail="正文片段和关联笔记都来自服务器。" />
       ) : null}
       {activeSourceId && !loading && failure ? (
         <SurfaceDataState kind="error" message="来源详情暂时不可用" detail={failure} onRetry={() => void reload()} />

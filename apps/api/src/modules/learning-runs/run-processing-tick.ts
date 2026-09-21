@@ -108,6 +108,27 @@ export interface ProcessingTickResult {
   failed: number;
 }
 
+/**
+ * 让轮询循环立刻再跑一次（2026-09-20 实走复盘 #6）。
+ *
+ * 打分 outbox 此前固定 10 秒一跳，用户提交后**平均要干等 5 秒**才有人开始处理，
+ * 而那段时间界面上只有一行字。提交是明确的事件，没必要让轮询节奏决定用户体感：
+ * 事务提交后喊一声，循环立刻跑下一轮；10 秒轮询退化成兜底（进程重启、漏喊、
+ * 失败退避时仍能自愈）。
+ *
+ * 注册方是 `server.ts` 的循环本体——它才知道自己的定时器在哪。未注册时调用是
+ * 空操作（测试与集成脚本自己驱动 tick，不需要这条路径）。
+ */
+let processingWaker: (() => void) | null = null;
+
+export function setLearningRunProcessingWaker(waker: (() => void) | null): void {
+  processingWaker = waker;
+}
+
+export function wakeLearningRunProcessing(): void {
+  processingWaker?.();
+}
+
 export async function runLearningRunProcessingTick(
   workerId: string,
   maxCommands: number,

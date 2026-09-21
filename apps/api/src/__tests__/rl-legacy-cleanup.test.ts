@@ -74,6 +74,7 @@ function makeListItem(overrides: Partial<ObjectiveListItemV3> = {}): ObjectiveLi
     primaryNoteTitle: surface.sources.primaryNote?.title ?? null,
     createdAt: surface.createdAt,
     personalState: { state: "unvalidated" as const, activeRunId: null },
+    progress: { practiceTrailCount: 0, lastCanonicalAt: null, reviewDueAt: null, initialValidation: null, validationNotBefore: null },
     primaryAction: surface.primaryAction,
     ...overrides,
   };
@@ -155,7 +156,7 @@ describe("RL-17: Objective surface 合同", () => {
       { kind: "create_run", objectiveId: OBJ_ID, label: "测试", start: cardStart() },
       { kind: "resume_run", runId: "55555555-5555-4555-8555-555555555555", objectiveId: OBJ_ID },
       { kind: "create_review_run", objectiveId: OBJ_ID, label: "开始复习", start: { version: 2, originV2: { kind: "review", scheduleId: SCHEDULE_ID, objectiveId: OBJ_ID, scheduleGeneration: 1 }, goal: "stabilize", requestedTimeBudgetSeconds: 180, responsePreference: "adaptive" } },
-      { kind: "practice_only", objectiveId: OBJ_ID, reasonCodes: ["exposed"], label: "开始练习", start: cardStart() },
+      { kind: "practice_only", objectiveId: OBJ_ID, reasonCodes: ["exposed"], label: "带着参考答案练一下", start: cardStart(), formalValidationNotBefore: null },
       { kind: "wait_for_initial_validation", reminderId: "77777777-7777-4777-8777-777777777777", qualificationNotBefore: "2026-08-18T00:00:00.000Z" },
       { kind: "view_successor", successorObjectiveId: "88888888-8888-4888-8888-888888888888", successorCardId: null },
       { kind: "refresh" },

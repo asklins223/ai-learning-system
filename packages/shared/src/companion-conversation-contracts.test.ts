@@ -303,14 +303,12 @@ test("SSE: union 中全部事件类型均可被接受（含 agent.skill/agent.to
     "proactive.delivery.updated": { deliveryId: UUID, status: "shown", contentClaimed: true },
     "turn.cancelled": { reason: "user" },
     error: { code: "PROVIDER_TIMEOUT", recoverable: true },
-    // Agent 方案 §6：Skill 选择与工具执行进度必须走同一 wire 合同。
-    "agent.skill": {
-      skill: { skillId: "learning-context", skillVersion: "1.0.0", name: "学习上下文", status: "selected" },
-    },
+    // 工具执行进度走 wire 合同。`agent.skill` 已随技能层删除（方案 29 §4.1）：
+    // 每轮工具面固定，"选中了哪个技能"不再是一个需要广播的事实。
     "agent.tool": {
       tool: {
         toolCallId: "call_1",
-        name: "companion_open_review",
+        name: "companion_open_page",
         toolVersion: "1.0.0",
         riskClass: "read",
         status: "succeeded",

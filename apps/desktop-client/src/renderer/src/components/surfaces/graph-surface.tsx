@@ -43,6 +43,7 @@ import {
   isObjectiveNode,
   isSourceNode,
 } from "./graph-sky";
+import { primaryActionLabel } from "./objective-state-copy";
 import {
   EMPTY_IDS,
   UnderstandingUniverse,
@@ -93,9 +94,9 @@ const FILTERS: ReadonlyArray<{
   readonly states: readonly string[] | null;
 }> = [
   { value: "all", label: "全部", states: null },
-  { value: "attention", label: "需关注", states: ["misunderstood", "due_review"] },
-  { value: "unseen", label: "待验证", states: ["unseen"] },
-  { value: "understood", label: "已理解", states: ["preliminary_understood", "reviewed"] },
+  { value: "attention", label: "要处理", states: ["misunderstood", "due_review"] },
+  { value: "unseen", label: "没碰过", states: ["unseen"] },
+  { value: "understood", label: "练过了", states: ["preliminary_understood", "reviewed"] },
 ];
 
 const NODE_TYPE_LABEL: Record<GraphNode["type"], string> = {
@@ -117,18 +118,14 @@ function nodeStateLabel(node: GraphNode): string {
   return node.state ? UNIVERSE_STATE_LABEL[node.state] ?? node.state : "知识锚点";
 }
 
+/**
+ * 抽屉里这颗恒星的下一步。文案与服务端签发的主行动共用一份
+ * （`objective-state-copy`），只在「服务端没给动作」时落回本抽屉的真实行为：
+ * 这个按钮点开的是目标详情，不是作答。
+ */
 function objectiveActionLabel(node: ObjectiveNode): string {
   const action = node.personal.primaryAction;
-  switch (action.kind) {
-    case "create_run": return action.label;
-    case "resume_run": return "继续未完成的理解练习";
-    case "create_review_run": return action.label;
-    case "practice_only": return action.label;
-    case "wait_for_initial_validation": return "等待首次验证开放";
-    case "view_successor": return "查看更新后的理解目标";
-    case "refresh": return "重新读取最新内容";
-    case "none": return "查看目标详情";
-  }
+  return action.kind === "none" ? "查看目标详情" : primaryActionLabel(action);
 }
 
 function searchableText(node: GraphNode): string {
@@ -600,7 +597,7 @@ export function GraphSurface() {
           <span className="universe-layer-readout" aria-live="polite">{telemetry}</span>
         </div>
 
-        {data?.integrity.truncated ? <div className="universe-data-note" role="status">当前星图已达到本次载入上限，其余节点仍保留在服务端</div> : null}
+        {data?.integrity.truncated ? <div className="universe-data-note" role="status">这张星图已经装到本次的上限，其余节点还在服务器上，继续读取就能看到</div> : null}
 
         <button type="button" className="universe-detail-scrim" onClick={() => setSelectedId(null)} aria-label="关闭星体详情" aria-hidden={!selectedNode} tabIndex={selectedNode ? 0 : -1} />
         <aside ref={detailPanelRef} className={`universe-detail-panel${selectedNode ? " is-open" : ""}`} role="complementary" aria-label="星体详情" aria-hidden={!selectedNode}>

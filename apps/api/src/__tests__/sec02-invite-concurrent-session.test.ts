@@ -27,6 +27,7 @@ import {
   INVITATION_TOKEN_HASH_LENGTH,
   INVITATION_TOKEN_HINT_LENGTH,
 } from "../modules/identity/invitation-token.ts";
+import { isWorkspaceOwner } from "../modules/identity/middleware.ts";
 import {
   computeStatus,
   ConsumeInviteError,
@@ -430,17 +431,30 @@ describe("SEC-02 DoD: requireOwner 权限守卫", () => {
     );
   });
 
-  it("isWorkspaceOwner 使用 OR 语义（role === owner || workspace.ownerId === userId）", () => {
-    const content = readFile(join(MODULES_DIR, "identity", "middleware.ts"));
-    assert.ok(
-      content.includes("isWorkspaceOwner"),
-      "应导出 isWorkspaceOwner 纯函数",
+  it("isWorkspaceOwner 使用 OR 语义（成员行写着 owner，或空间 ownerId 就是本人）", () => {
+    // 原来这条是读 middleware.ts 的源码、断言文本里同时出现 "owner" 与 "ownerId"。
+    // 它之所以一直绿，是因为 requireOwner 的 DB 查询里恰好写着
+    // `workspaceOwnerId: workspaces.ownerId`——把那次重复查询正确地删掉之后它就红了，
+    // 而行为一点没变。改为直接调用被测函数。
+    assert.equal(
+      isWorkspaceOwner({ userId: "u-1", membershipRole: "owner", workspaceOwnerId: "u-2" }),
+      true,
+      "成员行写着 owner 应放行",
     );
-    // Check OR semantics
-    const ownerSection = content.substring(content.indexOf("isWorkspaceOwner"));
-    assert.ok(
-      ownerSection.includes("owner") && ownerSection.includes("ownerId"),
-      "isWorkspaceOwner 应检查 role 和 ownerId",
+    assert.equal(
+      isWorkspaceOwner({ userId: "u-1", membershipRole: "member", workspaceOwnerId: "u-1" }),
+      true,
+      "空间 ownerId 就是本人应放行（个人空间，ADR-0009）",
+    );
+    assert.equal(
+      isWorkspaceOwner({ userId: "u-1", membershipRole: "member", workspaceOwnerId: "u-2" }),
+      false,
+      "两者都不是才判为只读成员",
+    );
+    assert.equal(
+      isWorkspaceOwner({ userId: "u-1", membershipRole: null, workspaceOwnerId: null }),
+      false,
+      "两个来源都取不到时必须 fail-closed",
     );
   });
 

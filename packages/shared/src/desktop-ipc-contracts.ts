@@ -201,6 +201,7 @@ export const DESKTOP_IPC_CHANNELS = {
   workspaceSwitch: "ailearn.v1.workspace.switch",
   workspaceGetCurrent: "ailearn.v1.workspace.getCurrent",
   workspaceRename: "ailearn.v1.workspace.rename",
+  workspaceCreate: "ailearn.v1.workspace.create",
   // SEC-02 / ADR-0009：Owner 的邀请发出与成员管理。
   inviteCreate: "ailearn.v1.invite.create",
   inviteList: "ailearn.v1.invite.list",
@@ -1015,16 +1016,19 @@ export const aiDataPolicyV1Schema = z.strictObject({
 });
 export type AiDataPolicyV1 = z.infer<typeof aiDataPolicyV1Schema>;
 
+/**
+ * 本人的 AI 同意与数据外发政策（迁移 0237 起为账号级）。
+ *
+ * 不再有 `workspaceId` / `consentBy` / `canManage`：同意管的是"我的内容能不能送出
+ * 去"，授权范围只能是本人，签署人恒等于本人，所以本人永远能改自己的——原先那个
+ * `canManage` 是"由 owner 替全空间签"的产物，随空间级语义一起删除。
+ */
 export const workspaceAiSettingsV1Schema = z.strictObject({
   version: z.literal(1),
-  workspaceId: uuidSchema,
   /** 部署里配置了外部模型供应商 → 未签署同意时内容不得外发。 */
   requiresConsent: z.boolean(),
   consentVersion: z.string().nullable(),
   consentAt: isoTimestampSchema.nullable(),
-  consentBy: uuidSchema.nullable(),
-  /** 当前身份是否可以修改（服务端 requireOwner）。 */
-  canManage: z.boolean(),
   dataPolicy: aiDataPolicyV1Schema,
 });
 export type WorkspaceAiSettingsV1 = z.infer<typeof workspaceAiSettingsV1Schema>;
@@ -1108,6 +1112,19 @@ export const renameWorkspaceResultV1Schema = z.strictObject({
   name: nonEmptyStringSchema,
 });
 export type RenameWorkspaceResultV1 = z.infer<typeof renameWorkspaceResultV1Schema>;
+
+/**
+ * POST /workspaces 的回执：新建一个协作空间。
+ *
+ * 这个通道是补上来的缺口——此前生产代码没有任何创建工作区的入口，"共享"只能是
+ * 把别人拉进自己的个人空间，所以 `collaborative` 类型在真实数据里一次都没出现过。
+ */
+export const createWorkspaceResultV1Schema = z.strictObject({
+  version: z.literal(1),
+  workspaceId: uuidSchema,
+  name: nonEmptyStringSchema,
+});
+export type CreateWorkspaceResultV1 = z.infer<typeof createWorkspaceResultV1Schema>;
 
 /** POST /invites：token 只在创建回执里出现一次。 */
 export const inviteCreatedV1Schema = z.strictObject({
@@ -1541,8 +1558,10 @@ export interface AILearnDesktopApiM1 {
     switch(input: { meta: RequestMetaV1; workspaceId: string }): Promise<GatewayResultV1<SessionContextV1>>;
     getCurrent(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<WorkspaceContextV1>>;
     /**
-     * 工作区级 AI 同意与数据策略。写入由服务端 `requireOwner` 收口，
-     * 因此 Member 读到的是 `canManage: false`，界面据此只读展示。
+     * AI 同意与数据策略。它们挂在**登录账号**上（`user_ai_settings` / `/me/ai-*`），
+     * 不挂在空间上：谁读都是自己的那份，谁都能改自己的那份，所以既没有
+     * `requireOwner`，也没有 `canManage`。方法名里的 `Ai` 前缀保留历史命名，
+     * 真正的空间级设置仍然只走 `settings.update` 那条能力位。
      */
     getAiSettings(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<WorkspaceAiSettingsV1>>;
     updateAiConsent(input: {
@@ -1560,6 +1579,8 @@ export interface AILearnDesktopApiM1 {
     export(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<WorkspaceExportResultV1>>;
     /** PROFILE-01：重命名自己的个人工作区。 */
     rename(input: { meta: RequestMetaV1; workspaceId: Uuid; name: string }): Promise<GatewayResultV1<RenameWorkspaceResultV1>>;
+    /** 新建协作空间：唯一能把别人正当地加进来的空间类型。 */
+    create(input: { meta: RequestMetaV1; name: string }): Promise<GatewayResultV1<CreateWorkspaceResultV1>>;
   };
   /**
    * SEC-02 / ADR-0009：Owner 的邀请发出与成员管理。服务端 requireOwner 收口，

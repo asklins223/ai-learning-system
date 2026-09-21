@@ -1625,6 +1625,90 @@
       "when": 1789793389630,
       "tag": "0231_grant_companion_thoughts_exec",
       "breakpoints": true
+    },
+    {
+      "idx": 232,
+      "version": "7",
+      "when": 1789793389631,
+      "tag": "0232_companion_orphan_run_reclaim",
+      "breakpoints": true
+    },
+    {
+      "idx": 233,
+      "version": "7",
+      "when": 1789793389632,
+      "tag": "0233_companion_drop_skill_tool_gating",
+      "breakpoints": true
+    },
+    {
+      "idx": 234,
+      "version": "7",
+      "when": 1789793389633,
+      "tag": "0234_card_hint_pair",
+      "breakpoints": true
+    },
+    {
+      "idx": 235,
+      "version": "7",
+      "when": 1789793389634,
+      "tag": "0235_companion_thought_worker_grants_repair",
+      "breakpoints": true
+    },
+    {
+      "idx": 236,
+      "version": "7",
+      "when": 1789793389635,
+      "tag": "0236_companion_thought_enqueue_gate",
+      "breakpoints": true
+    },
+    {
+      "idx": 237,
+      "version": "7",
+      "when": 1789793389636,
+      "tag": "0237_user_ai_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 238,
+      "version": "7",
+      "when": 1789793389637,
+      "tag": "0238_companion_reminders",
+      "breakpoints": true
+    },
+    {
+      "idx": 239,
+      "version": "7",
+      "when": 1789793389638,
+      "tag": "0239_companion_drop_skill_layer",
+      "breakpoints": true
+    },
+    {
+      "idx": 240,
+      "version": "7",
+      "tag": "0241_review_schedules_rls_reopen",
+      "breakpoints": true,
+      "when": 1789793389639
+    },
+    {
+      "idx": 241,
+      "version": "7",
+      "tag": "0242_card_candidate_feedback_user_attribution",
+      "breakpoints": true,
+      "when": 1789793389640
+    },
+    {
+      "idx": 242,
+      "version": "7",
+      "tag": "0243_companion_daily_summary_per_workspace",
+      "breakpoints": true,
+      "when": 1789793389641
+    },
+    {
+      "idx": 243,
+      "version": "7",
+      "tag": "0244_note_document_states",
+      "breakpoints": true,
+      "when": 1789793389642
     }
   ]
 }

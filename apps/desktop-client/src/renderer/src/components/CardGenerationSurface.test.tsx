@@ -20,6 +20,8 @@ function stubGateway(initialStatus: string, runOverride: { updatedAt?: string } 
     runStatus: initialStatus,
     // 默认"刚刚更新"；走字测试需要一个静置了一段时间的 run。
     updatedAt: runOverride.updatedAt ?? new Date().toISOString(),
+    // 服务端聚合的逐候选进度；列表类读取没有，故默认 null。
+    progress: null as { plannedCards: number; authored: number; gatePassed: number; gateFailed: number } | null,
     getCandidatesCalls: 0,
     eventHandlers: new Map<string, () => void>(),
   };
@@ -33,6 +35,7 @@ function stubGateway(initialStatus: string, runOverride: { updatedAt?: string } 
     currentPlanVersion: 1,
     reviewDraftRevision: 1,
     sourceOutdated: false,
+    progress: state.progress,
     sourceRef: { noteId: NOTE_ID, noteVersionId: VERSION_ID },
     recovery: null,
     createdAt: state.updatedAt,
@@ -70,7 +73,7 @@ function stubGateway(initialStatus: string, runOverride: { updatedAt?: string } 
         ok: true as const,
         workspaceEpoch: 1,
         data: {
-          activeGenerationSummary: { state: "data", data: { ...runSnapshot(), route: { kind: "note.cardGeneration", cardGenerationRunId: RUN_ID } } },
+          activeGenerationSummary: { state: "data", data: [{ ...runSnapshot(), route: { kind: "note.cardGeneration", cardGenerationRunId: RUN_ID } }] },
         },
       })),
     },
@@ -192,6 +195,27 @@ describe("CardGenerationSurface · 生成工作台", () => {
   });
 
   /**
+   * 2026-09-20 实走复盘 #2：`checking` 会一直停在同一个档位，用户读成"跳到完成了"。
+   * 服务端现在随 run 详情下发逐候选计数，页面用它把当前阶段内部走出一小段，
+   * 并把计数原样写在文案里，让百分比有出处。
+   */
+  it("当前阶段内部按服务端候选计数推进，并写出计数来源", async () => {
+    const { state } = stubGateway("checking");
+    state.progress = { plannedCards: 8, authored: 8, gatePassed: 2, gateFailed: 1 };
+    useRoomStore.setState({ activeCardGenerationRunId: RUN_ID });
+    const { container } = render(<CardGenerationSurface />);
+
+    await waitFor(() => expect(container.querySelector(".card-generation-progress")).not.toBeNull());
+    const progress = container.querySelector(".card-generation-progress");
+    expect(progress?.textContent).toContain("已过质量门 2 / 8");
+    expect(progress?.textContent).toContain("已完成 2 步");
+    const bar = container.querySelector('[role="progressbar"]');
+    // 无计数时 checking 恒为 50；有过 2/8 道质量门才往上走一格。
+    expect(Number(bar?.getAttribute("aria-valuenow"))).toBeGreaterThan(50);
+    expect(bar?.getAttribute("aria-valuetext")).toContain("已过质量门 2 / 8");
+  });
+
+  /**
    * 进度是事件驱动的，但「最后更新 N 分钟前」是墙上的钟在走：不推一个 tick，
    * 安静十分钟的 run 会永远停在"1 分钟前"，把诚实的服务端状态读成卡死的显示。
    */
@@ -227,16 +251,16 @@ describe("CardGenerationSurface · 生成工作台", () => {
 
     const unchanged = await waitFor(() => {
       const receipt = container.querySelector(".card-generation-board__sync-report");
-      expect(receipt?.textContent).toContain("已同步");
+      expect(receipt?.textContent).toContain("已刷新");
       return receipt;
     });
     expect(unchanged?.textContent).toContain("仍是「正在规划候选」");
-    expect(unchanged?.textContent).not.toContain("推进到");
+    expect(unchanged?.textContent).not.toContain("这次生成到了");
 
     // 服务端推进到下一步之后，同一颗按钮必须说出来，而不是保持沉默。
     state.runStatus = "checking";
     fireEvent.click(within(container).getByRole("button", { name: /刷新状态/ }));
-    await waitFor(() => expect(container.querySelector(".card-generation-board__sync-report")?.textContent).toContain("推进到「正在做质量检查」"));
+    await waitFor(() => expect(container.querySelector(".card-generation-board__sync-report")?.textContent).toContain("这次生成到了「正在做质量检查」"));
     // 进度头条跟着一起走：第 3 步、第三段进行中、百分比 50%。
     expect(container.querySelector(".card-generation-progress")?.textContent).toContain("第 3 步 / 共 4 步");
     expect(container.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe("50");
@@ -300,7 +324,7 @@ describe("CardGenerationSurface · packaged 冒烟选择器契约", () => {
     window.ailearn = {
       contract: { enabledRoutes: ["note.detail", "note.cardGeneration"] },
       auth: { getState: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { status: "authenticated" as const, workspace: { workspaceId: "w-1" } } })) },
-      room: { getProjection: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { activeGenerationSummary: { state: "data", data: { ...runSnapshot(), route: { kind: "note.cardGeneration", cardGenerationRunId: RUN_ID } } } } })) },
+      room: { getProjection: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { activeGenerationSummary: { state: "data", data: [{ ...runSnapshot(), route: { kind: "note.cardGeneration", cardGenerationRunId: RUN_ID } }] } } })) },
       note: {
         get: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { noteId: NOTE_ID, title: "提取练习笔记", sourceId: null } })),
         cardGeneration: {
@@ -339,16 +363,22 @@ describe("CardGenerationSurface · packaged 冒烟选择器契约", () => {
       expect(within(container).getByRole("button", { name: new RegExp(`^${label}`) })).toBeTruthy();
     }
 
-    // 保留之后 meta 行给出「已保留 · 待激活」，脚本用这句话判断提交成功。
+    // 未决候选的后果必须写在脸上：以前点「激活」会静默把它们打成"未选中"丢弃。
+    expect(container.querySelector(".candidate-review-slip__actions")?.textContent)
+      .toContain("还有 1 张没有决定");
+
+    // 保留之后 meta 行给出「已保留 · 在激活队列里」，脚本用这句话判断提交成功。
     fireEvent.click(within(container).getByRole("button", { name: /^保留/ }));
     await waitFor(() => expect(container.querySelector(".candidate-card__meta")?.textContent).toContain("已保留"));
+    await waitFor(() => expect(container.querySelector(".candidate-review-slip__actions")?.textContent)
+      .not.toContain("没有决定"));
 
-    // 「加入待激活」是 label + 勾选框；勾上之后出现带数量的激活按钮（脚本用 /^激活 \d+ 个目标/）。
-    const choice = container.querySelector('.candidate-activation-choice input[type="checkbox"]');
-    expect(choice).not.toBeNull();
-    expect(container.querySelector(".candidate-activation-choice")?.textContent).toContain("加入待激活");
-    fireEvent.click(choice as HTMLInputElement);
+    // 保留即排队：不再有「加入待激活」勾选框，直接出现带数量的激活按钮
+    // （2026-09-20 实走复盘 #1：既要保留又要勾选，而计数只统计已保留的勾选，
+    //  先勾后不保留会静默激活 0 张）。
+    expect(container.querySelector(".candidate-activation-choice")).toBeNull();
     const activateButton = await waitFor(() => within(container).getByRole("button", { name: /^激活 \d+ 个目标/ }));
+    expect(activateButton.textContent).toContain("激活 1 个目标");
     fireEvent.click(activateButton);
 
     // 真实回执：.candidate-review-slip__receipt 里的「已确认 N 个目标映射」。

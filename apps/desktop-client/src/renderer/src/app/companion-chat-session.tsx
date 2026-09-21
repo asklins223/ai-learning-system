@@ -194,7 +194,7 @@ export interface CompanionChatSession {
   /**
    * 本轮"她在做什么"的节点序列（2026-09-19）。
    *
-   * 来源是**服务端早就在发、桌面端此前整批丢弃**的 `assistant.status` / `agent.skill` /
+   * 来源是**服务端早就在发、桌面端此前整批丢弃**的 `assistant.status` /
    * `agent.tool` 帧（收敛逻辑见 `companion-agent-nodes.ts`）。发新消息时清空，所以它始终
    * 描述"当前这一轮"。气泡的当前节点槽位与头顶步骤轨道都读它，历史留痕读只读端点。
    */
@@ -1133,7 +1133,7 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
           // 收到本轮的帧即证明流是活的：撤掉"沉默降级"计时器。
           window.clearTimeout(idleTimer);
           idleTimer = 0;
-          // 节点帧（assistant.status / agent.skill / agent.tool）不再丢弃：折进本轮轨道。
+          // 节点帧（assistant.status / agent.tool）不再丢弃：折进本轮轨道。
           // 非节点帧会返回同一个数组引用，setState 直接 bail out，不产生额外渲染。
           setNodes((current) => appendCompanionAgentNode(current, {
             eventType: streamed.eventType,

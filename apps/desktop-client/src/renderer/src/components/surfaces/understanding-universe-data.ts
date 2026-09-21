@@ -37,14 +37,19 @@ export interface GraphEdge {
  * The one shared reading of a universe state. The canvas tooltip, the canvas
  * selection announcement and the detail panel all print from this map, so a
  * star never wears two names on the same page.
+ *
+ * 这条状态轴比服务端的 `personalState` **粗**：`objectiveUniverseState()` 把
+ * needs_repair / fragile / outdated 三态塌成 `misunderstood` 一个。所以这里的
+ * 词不能与 `objective-state-copy` 一一对应，也不能重复使用同一个词指两件事
+ * ——「待验证」此前在这两张表里各指一个状态，正是复盘 #9 里用户读不懂的根源。
  */
 export const UNIVERSE_STATE_LABEL: Record<string, string> = {
-  misunderstood: "需要修复",
-  due_review: "到期复习",
-  preliminary_understood: "学习中",
-  reviewed: "已稳定",
+  misunderstood: "答错了或生疏了",
+  due_review: "到复习时间了",
+  preliminary_understood: "练过，还不稳",
+  reviewed: "已经答对过",
   seen: "已连接",
-  unseen: "待验证",
+  unseen: "没见过",
 };
 
 export interface UnderstandingGraph {

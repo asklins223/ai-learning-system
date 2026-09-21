@@ -43,6 +43,12 @@ CREATE TABLE IF NOT EXISTS public.assistant_thoughts (
 
 ALTER TABLE public.assistant_thoughts ENABLE ROW LEVEL SECURITY;
 
+-- 先 DROP 再 CREATE（与 0170 pet_profiles 同模式）：migrate.ts 按 sha256(SQL 文件
+-- 内容) 判断是否已应用，所以**改动本文件会让它在已应用过的库上重跑**（本文件就因
+-- 把 `j.created_at` 改成 `j.scheduled_at` 而重跑过一次）。Postgres 没有
+-- `CREATE POLICY IF NOT EXISTS`，缺这一行时重跑会停在 "policy ... already exists"。
+DROP POLICY IF EXISTS assistant_thoughts_workspace_user_isolation
+  ON public.assistant_thoughts;
 CREATE POLICY assistant_thoughts_workspace_user_isolation
   ON public.assistant_thoughts FOR ALL
   USING (

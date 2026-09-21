@@ -144,6 +144,13 @@ export const desktopNoteListItemSchema = z.object({
   currentVersionId: uuid.nullable(),
   createdAt: isoTimestamp,
   updatedAt: isoTimestamp,
+  /**
+   * 正文里第一个图片块的原文（`![alt](url)`），没有图就是 null。列表页要能
+   * 一眼看出哪篇有图，而按行 `note.get` 取正文是被否决的方案（复盘 #17）。
+   * 解析规则只有渲染层一份（`note-blocks.parseImageBlock`），所以这里刻意
+   * 不带结构化的 url/alt。
+   */
+  firstImageBlock: z.string().max(4000).nullable(),
 }).passthrough();
 export type DesktopNoteListItem = z.infer<typeof desktopNoteListItemSchema>;
 

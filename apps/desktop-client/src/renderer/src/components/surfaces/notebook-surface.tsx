@@ -27,6 +27,7 @@ import {
   SurfaceDataState,
   formatRelative,
   noteBlockText,
+  parseImageBlock,
   useSurfaceProjection,
 } from "./surface-data";
 import {
@@ -39,7 +40,6 @@ import {
   blocksMatchMarkdown,
   blocksToMarkdown,
   markdownToBlocks,
-  parseImageBlock,
   parseMarkdownTable,
 } from "./note-blocks";
 import { useSourceImage } from "./source-image";
@@ -101,11 +101,27 @@ type GenerationOptions = {
   readonly preferredStrategies: readonly DesktopCardStrategyV2[];
 };
 
+/**
+ * 题型是「系统按知识形态分配」的候选集合，不是优先级：勾掉某种即表示不要它，
+ * 全勾即完全交给 planner 决定（planner-service.allocateStrategies）。
+ * 默认值必须是全集——曾经默认 ["recall","why"] 时，即便题型真正生效，
+ * 事实类知识也会被压成清一色的回忆题。
+ */
+const STRATEGIES: readonly { readonly value: DesktopCardStrategyV2; readonly label: string }[] = [
+  { value: "recall", label: "主动回忆" },
+  { value: "cloze", label: "关键补全" },
+  { value: "compare", label: "对比辨析" },
+  { value: "sequence", label: "顺序重建" },
+  { value: "why", label: "机制解释" },
+  { value: "boundary", label: "边界判断" },
+  { value: "application", label: "情境应用" },
+];
+
 const DEFAULT_GENERATION_OPTIONS: GenerationOptions = {
   learningGoal: "understand",
   detailThreshold: "balanced",
   hardMaxCards: 8,
-  preferredStrategies: ["recall", "why"],
+  preferredStrategies: STRATEGIES.map((item) => item.value),
 };
 
 /** Session scope, like the library's view choice: a page visit keeps the writer's pick. */
@@ -125,16 +141,6 @@ const DETAIL_THRESHOLDS: readonly { readonly value: DesktopCardDetailThresholdV2
 ];
 
 const CARD_LIMITS = [4, 8, 12] as const;
-
-const STRATEGIES: readonly { readonly value: DesktopCardStrategyV2; readonly label: string }[] = [
-  { value: "recall", label: "主动回忆" },
-  { value: "cloze", label: "关键补全" },
-  { value: "compare", label: "对比辨析" },
-  { value: "sequence", label: "顺序重建" },
-  { value: "why", label: "机制解释" },
-  { value: "boundary", label: "边界判断" },
-  { value: "application", label: "情境应用" },
-];
 
 /** Statuses where the run has stopped; only those can be answered with feedback. */
 const FINISHED_RUN_STATUSES = new Set(["activated", "closed_without_activation", "cancelled", "failed", "stale"]);
@@ -308,7 +314,7 @@ export function NotebookSurface() {
     const primaryNote = focus?.objective.sources.primaryNote ?? null;
     const noteId = activeNoteRef?.noteId ?? primaryNote?.noteId;
     if (!noteId) {
-      throw new Error("当前书房没有服务端确认的主笔记身份，不能编辑或生成学习卡。");
+      throw new Error("这一篇笔记还没定下来是哪一篇，不能编辑，也不能生成学习卡。");
     }
     const noteResponse = await api.note.get({ meta: createRequestMeta(epochRef.current), noteId });
     if (noteResponse.workspaceEpoch) epochRef.current = noteResponse.workspaceEpoch;
@@ -377,13 +383,15 @@ export function NotebookSurface() {
   const sourceFailure = data?.sourceFailure ?? null;
   const objective = data?.objective ?? null;
   const capabilities = data?.capabilities ?? null;
-  const activeGenerationData = data?.activeGeneration?.state === "data" ? data.activeGeneration.data : null;
-  // This note's live run, if the workspace's one active generation belongs to
-  // it. While it exists, the generation entry is a *status sync*: the run runs
-  // server-side, so the page must show its step instead of offering a second
-  // start for the same version.
-  const noteGeneration: CardGenerationActiveSummaryV1 | null =
-    note && isLiveGenerationForNote(activeGenerationData, note.noteId) ? activeGenerationData : null;
+  const activeGenerations = data?.activeGeneration?.state === "data" ? data.activeGeneration.data : [];
+  // 这篇笔记自己的在制批次。一个工作区可以同时有多篇笔记各自在制一批卡，所以
+  // 必须按 noteId 找，不能取「最近更新的那一个」——此前取的是后者，于是第二篇
+  // 笔记的在制 run 一出现，这篇笔记的守卫就失效，「生成学习卡」可以再点一次
+  // （2026-09-20 实走复盘 #5）。run 在服务端跑，页面必须显示它的步骤而不是
+  // 对同一个版本再开一次。
+  const noteGeneration: CardGenerationActiveSummaryV1 | null = note
+    ? activeGenerations.find((generation) => isLiveGenerationForNote(generation, note.noteId)) ?? null
+    : null;
   const latestRun = data?.latestGenerationRun ?? null;
   // Only a run that has stopped can be answered; while one is live the page
   // offers the status sync instead of a second start.
@@ -562,9 +570,13 @@ export function NotebookSurface() {
     ? null
     : !capabilities
       ? "正在确认 Card Generation 能力。"
-      : generationRoutes
-        ? "当前工作区没有启用 Card Generation 能力。"
-        : "当前桌面合同尚未开放 Note Card Generation 路由。";
+      : !generationRoutes
+        ? "这台电脑还没有开放生成学习卡的入口。"
+        : capabilities.featureAvailability.card_generation_v2.state !== "enabled"
+          ? "学习卡生成现在没有开放。"
+          // 能力位被拒和开关没开是两件事：把前者说成后者，读者会以为去找管理员
+          // 开功能，而真实原因是在这个空间里自己是只读身份。
+          : "生成学习卡由空间所有者发起，你在这个空间是成员。";
 
   const startGeneration = async () => {
     if (!api || !note || dirty || startingGeneration || !generationEnabled) return;
@@ -603,6 +615,9 @@ export function NotebookSurface() {
       invoke("open-card-generation");
     } catch (error) {
       setGenerationFailure(gatewayErrorMessage(error));
+      // 被服务端拒绝说明页面看到的是过期状态（这篇笔记已有一批在制，或配额已满）。
+      // 不重读的话入口会一直停在「生成学习卡」，用户点一次撞一次 409。
+      reload();
     } finally {
       setStartingGeneration(false);
     }
@@ -678,7 +693,7 @@ export function NotebookSurface() {
   const page: HudPageId = mode === "edit" ? "note-edit" : "note-read";
   useHudPage(page);
 
-  const sourceTitle = source?.source.title ?? (note?.sourceId ? "来源暂时不可读" : "未关联服务端来源");
+  const sourceTitle = source?.source.title ?? (note?.sourceId ? "来源暂时不可读" : "没有关联来源");
   const validationLabel = objective?.personal.lastCanonicalAt
     ? formatRelative(objective.personal.lastCanonicalAt)
     : "尚未开始";
@@ -690,12 +705,12 @@ export function NotebookSurface() {
   const saveLabel = saving || saveState === "saving"
     ? "● 正在提交…"
     : saveState === "error"
-      ? "● 提交未确认，本机草稿仍在"
+      ? "● 这次提交没成功，你写的还在本机"
       : dirty
         ? "● 有未提交编辑"
         : saveState === "committed" && receipt
           ? `● ${receipt.isAutosave ? "已自动保存" : "已提交并确认"} · ${formatClock(receipt.savedAt)}`
-          : "● 与服务端版本一致";
+          : "● 已经存好，和服务器上的版本一致";
 
   const openSource = () => {
     if (!note?.sourceId) return;
@@ -773,7 +788,7 @@ export function NotebookSurface() {
   ) : failure ? (
     <SurfaceDataState kind="error" message="研究册暂时不可用" detail={failure} onRetry={() => void reload()} />
   ) : !note ? (
-    <SurfaceDataState kind="empty" message="当前书房还没有主笔记" detail="服务端没有返回可编辑的笔记身份，本页不会创建本机草稿。" />
+    <SurfaceDataState kind="empty" message="当前书房还没有主笔记" detail="这篇笔记没有给出可编辑的版本，这一页不会在本机另存草稿。" />
   ) : null;
 
   const clips = (
@@ -797,7 +812,7 @@ export function NotebookSurface() {
         {source
           ? `${source.source.title} · ${segments.length} 段已解析片段`
           : note?.sourceId
-            ? "来源读取未确认"
+            ? "来源暂时读不到"
             : "未关联来源"}
       </div>
     </div>
@@ -811,7 +826,7 @@ export function NotebookSurface() {
     <button
       type="button"
       className="button primary"
-      title="这次生成在服务端后台进行，查看进度不会打断它"
+      title="这次生成在后台进行，来回翻看不会打断它"
       onClick={openGeneration}
     >
       {isCardGenerationInFlight(noteGeneration.status)
@@ -824,7 +839,7 @@ export function NotebookSurface() {
       type="button"
       className="button primary"
       disabled={!generationEnabled || dirty || startingGeneration}
-      title={generationReason ?? "用服务端确认的整篇版本生成学习卡"}
+      title={generationReason ?? "用已经存好的整篇版本生成学习卡"}
       onClick={() => void startGeneration()}
     >
       <Sparkles size={15} aria-hidden="true" />
@@ -841,79 +856,13 @@ export function NotebookSurface() {
   // The reading page splits into a scrolling body and the pinned action row:
   // the paper is the scroll container's child, so the buttons stay reachable on
   // a note longer than one screen.
-  const readPageBody = note ? (
+  /**
+   * 版本历史 + 生成设置两个面板。此前只有阅读页能拉开它们，编辑页里同样的 state
+   * （`historyOpen` / `optionsOpen`）就在同一个组件中，却没有任何入口（复盘 #15）。
+   * 恢复历史版本在草稿未提交时仍然被按钮自己的 `dirty` 判断挡住。
+   */
+  const historyAndOptionsPapers = (
     <>
-      <div className="version-ribbon">
-        <span>阅读</span>
-        <span>版本 v{note.currentVersion.versionNo}</span>
-        <span>来源片段 {segments.length}</span>
-      </div>
-      <h2 className="title">{note.title || "未命名笔记"}</h2>
-      <div className="meta">
-        <span>{formatRelative(note.currentVersion.updatedAt)}</span>
-        <span>{note.sourceId ? `关联来源 ${source?.source.title ?? "读取未确认"}` : "未关联来源"}</span>
-        <span>{objective ? `理解目标：${objective.content.conceptLabel ?? "未命名目标"}` : "未关联理解目标"}</span>
-      </div>
-      <div className="rule" />
-      <div className="reading-body">
-        {note.currentVersion.blocks.length ? readingBlocks.map((block) => (
-          <ReadingBlock
-            key={block.ordinal}
-            block={block}
-            mark={mark?.ordinal === block.ordinal ? mark.range : null}
-            workspaceEpoch={epochRef.current}
-            imageIndex={noteImages.ordinalToIndex.get(block.ordinal)}
-            imageOpen={noteGallery.openIndex !== null
-              && noteImages.ordinalToIndex.get(block.ordinal) === noteGallery.openIndex}
-            onOpenImage={(open) => {
-              const index = noteImages.ordinalToIndex.get(block.ordinal);
-              if (open && index !== undefined) noteGallery.openAt(index);
-              else noteGallery.close();
-            }}
-          />
-        )) : <p className="small">这一版正文还没有段落。</p>}
-        {hiddenBlockCount > 0 ? (
-          <div className="actions reading-more">
-            <button type="button" className="button" onClick={() => setShowAllBlocks(true)}>
-              展开剩余 {hiddenBlockCount} 段
-            </button>
-          </div>
-        ) : null}
-      </div>
-      <div className="provenance-line">
-        <span>来源：{sourceTitle}</span>
-        <span>不可变版本：v{note.currentVersion.versionNo} · {note.currentVersion.contentHash.slice(0, 8)}</span>
-        <span>最近验证：{validationLabel}</span>
-      </div>
-      {/* The pasted source clips read as part of the provenance cluster, so they
-          sit in the flow right after it. They used to hang absolute off the
-          paper's right edge; real excerpts ran long and the sticky notes
-          covered body text and table columns. */}
-      {clips}
-      {/* Leaving the editor now commits the pending draft first, so a reader who
-          lands here must be told what happened to it instead of seeing the older
-          server text with no explanation. */}
-      {saving || dirty ? (
-        <p className="small notebook-note" role="status">
-          {saving ? "正在提交刚才的编辑…" : "有未提交编辑，切回编辑继续写。"}
-        </p>
-      ) : null}
-      {saveState === "error" ? (
-        <p className="small notebook-note" role="alert">
-          保存未确认：{saveFailure}
-          <button
-            type="button"
-            className="text-action text-action--strong"
-            disabled={saving}
-            onClick={() => void save("manual")}
-          >
-            重试保存
-          </button>
-        </p>
-      ) : null}
-      {generationReason ? <p className="small notebook-note">{generationReason}</p> : null}
-      {generationFailure ? <p className="small notebook-note" role="alert">{generationFailure}</p> : null}
-      {generationLiveNote}
       {historyOpen ? (
         <section className="version-history" aria-label="笔记版本历史">
           <h3 className="serif">版本历史</h3>
@@ -945,9 +894,11 @@ export function NotebookSurface() {
                       type="button"
                       className="text-action text-action--strong"
                       disabled={!editable || dirty || restoringVersionId !== null}
-                      title={dirty
-                        ? "先提交或撤销当前编辑，再恢复历史版本"
-                        : "把这篇笔记切回这一版，不删除任何版本"}
+                      title={!editable
+                        ? "你在这个空间是只读身份，不能改写这篇笔记的版本"
+                        : dirty
+                          ? "先提交或撤销当前编辑，再恢复历史版本"
+                          : "把这篇笔记切回这一版，不删除任何版本"}
                       onClick={() => void restoreVersion(version)}
                     >
                       {restoringVersionId === version.versionId ? "正在恢复…" : "恢复这一版"}
@@ -1032,6 +983,12 @@ export function NotebookSurface() {
               );
             })}
           </div>
+          {/* 让勾选成为筛选。顺序由 planner-service.allocateStrategies 按适配度定，
+              与勾选顺序无关——这里说清，是因为默认值就是全勾选。 */}
+          <p className="small">
+            已默认全选：每张卡用哪种题型由系统按笔记内容决定。取消某种即不要它，
+            但每种知识只有少数几种题型问得自然，系统会在这些范围内挑。
+          </p>
           {feedbackTarget ? (
             <>
               <div className="generation-options__row">
@@ -1085,19 +1042,92 @@ export function NotebookSurface() {
         </fieldset>
       ) : null}
     </>
+  );
+
+  const readPageBody = note ? (
+    <>
+      <div className="version-ribbon">
+        <span>阅读</span>
+        <span>版本 v{note.currentVersion.versionNo}</span>
+        <span>来源片段 {segments.length}</span>
+      </div>
+      <h2 className="title">{note.title || "未命名笔记"}</h2>
+      <div className="meta">
+        <span>{formatRelative(note.currentVersion.updatedAt)}</span>
+        <span>{note.sourceId ? `关联来源 ${source?.source.title ?? "暂时读不到"}` : "未关联来源"}</span>
+        <span>{objective ? `理解目标：${objective.content.conceptLabel ?? "未命名目标"}` : "未关联理解目标"}</span>
+      </div>
+      <div className="rule" />
+      <div className="reading-body">
+        {note.currentVersion.blocks.length ? readingBlocks.map((block) => (
+          <ReadingBlock
+            key={block.ordinal}
+            block={block}
+            mark={mark?.ordinal === block.ordinal ? mark.range : null}
+            workspaceEpoch={epochRef.current}
+            imageIndex={noteImages.ordinalToIndex.get(block.ordinal)}
+            imageOpen={noteGallery.openIndex !== null
+              && noteImages.ordinalToIndex.get(block.ordinal) === noteGallery.openIndex}
+            onOpenImage={(open) => {
+              const index = noteImages.ordinalToIndex.get(block.ordinal);
+              if (open && index !== undefined) noteGallery.openAt(index);
+              else noteGallery.close();
+            }}
+          />
+        )) : <p className="small">这一版正文还没有段落。</p>}
+        {hiddenBlockCount > 0 ? (
+          <div className="actions reading-more">
+            <button type="button" className="button" onClick={() => setShowAllBlocks(true)}>
+              展开剩余 {hiddenBlockCount} 段
+            </button>
+          </div>
+        ) : null}
+      </div>
+      <div className="provenance-line">
+        <span>来源：{sourceTitle}</span>
+        <span>不可变版本：v{note.currentVersion.versionNo} · {note.currentVersion.contentHash.slice(0, 8)}</span>
+        <span>最近验证：{validationLabel}</span>
+      </div>
+      {/* The pasted source clips read as part of the provenance cluster, so they
+          sit in the flow right after it. They used to hang absolute off the
+          paper's right edge; real excerpts ran long and the sticky notes
+          covered body text and table columns. */}
+      {clips}
+      {/* Leaving the editor now commits the pending draft first, so a reader who
+          lands here must be told what happened to it instead of seeing the older
+          server text with no explanation. */}
+      {saving || dirty ? (
+        <p className="small notebook-note" role="status">
+          {saving ? "正在提交刚才的编辑…" : "有未提交编辑，切回编辑继续写。"}
+        </p>
+      ) : null}
+      {saveState === "error" ? (
+        <p className="small notebook-note" role="alert">
+          保存没成功：{saveFailure}
+          <button
+            type="button"
+            className="text-action text-action--strong"
+            disabled={saving}
+            onClick={() => void save("manual")}
+          >
+            重试保存
+          </button>
+        </p>
+      ) : null}
+      {generationReason ? <p className="small notebook-note">{generationReason}</p> : null}
+      {generationFailure ? <p className="small notebook-note" role="alert">{generationFailure}</p> : null}
+      {generationLiveNote}
+      {historyAndOptionsPapers}
+    </>
   ) : null;
 
-  const readPageActions = note ? (
-    <div className="actions notebook-actions">
-      {!note.permissions.canEdit ? <span className="tag">只读</span> : null}
-      {note.permissions.canEdit ? (
-        <button type="button" className="button primary" onClick={() => switchMode("edit")}>
-          编辑这篇笔记
-        </button>
-      ) : null}
-      <button type="button" className="button" onClick={openSource} disabled={!note.sourceId}>
-        查看关联来源
-      </button>
+  /**
+   * 「版本历史」「生成设置」两个开关。阅读页与编辑页共用同一对：面板已经在同一
+   * 个组件里了（`historyAndOptionsPapers`），此前只有阅读页摆出按钮，编辑态摸不到
+   * （复盘 #15）。
+   */
+  const versionAndOptionsToggles = note ? (
+    <>
       <button
         type="button"
         className="button"
@@ -1121,6 +1151,21 @@ export function NotebookSurface() {
           生成设置
         </button>
       ) : null}
+    </>
+  ) : null;
+
+  const readPageActions = note ? (
+    <div className="actions notebook-actions">
+      {!note.permissions.canEdit ? <span className="tag">只读</span> : null}
+      {note.permissions.canEdit ? (
+        <button type="button" className="button primary" onClick={() => switchMode("edit")}>
+          编辑这篇笔记
+        </button>
+      ) : null}
+      <button type="button" className="button" onClick={openSource} disabled={!note.sourceId}>
+        查看关联来源
+      </button>
+      {versionAndOptionsToggles}
       {generationAction}
     </div>
   ) : null;
@@ -1137,7 +1182,7 @@ export function NotebookSurface() {
       <div className="editor-head">
         <div>
           <span className="tag red">{dirty || saveState === "error" ? "草稿" : "已同步"}</span>
-          <span className="small">标题与正文都由服务端版本记录</span>
+          <span className="small">标题和正文每次改动都会存成一个版本</span>
         </div>
         <div className="meta">
           <span>{note.permissions.canSave ? "自动保存开启" : "当前身份不能保存"}</span>
@@ -1246,10 +1291,11 @@ export function NotebookSurface() {
         onRetry={imageUploads.retry}
         onDismiss={imageUploads.dismiss}
       />
-      {saveFailure ? <p className="small notebook-note" role="alert">保存未确认：{saveFailure}</p> : null}
+      {saveFailure ? <p className="small notebook-note" role="alert">保存没成功：{saveFailure}</p> : null}
       {generationReason ? <p className="small notebook-note">{generationReason}</p> : null}
       {generationFailure ? <p className="small notebook-note" role="alert">{generationFailure}</p> : null}
       {generationLiveNote}
+      {historyAndOptionsPapers}
     </div>
   ) : null;
 
@@ -1267,6 +1313,7 @@ export function NotebookSurface() {
           <RefreshCw size={15} aria-hidden="true" />重试保存
         </button>
       ) : null}
+      {versionAndOptionsToggles}
       {generationAction}
     </div>
   ) : null;

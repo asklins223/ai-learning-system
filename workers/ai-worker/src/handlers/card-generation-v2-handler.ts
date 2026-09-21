@@ -101,6 +101,7 @@ import {
 } from "@ailearn/shared/card-generation-v2-contracts";
 import type {
   LearningCardCandidateRevisionV2,
+  CardHintPairV2,
   GenerationSemanticSpecV2,
   GenerationInputSnapshotV2,
 } from "@ailearn/shared/card-generation-v2-contracts";
@@ -1094,6 +1095,12 @@ async function processCardGenerationPlan(job: PendingOutboxJob, signal?: AbortSi
   // L1（评审）：确定性 provider 只能用于离线/测试路径（见 helper 说明）。
   assertDeterministicProvidersAllowed(useLLM);
 
+  // 治理（同意 + 数据外发政策 + provider 选择）必须在事务外解析，理由见
+  // resolveCardGenerationGovernance 的注释。确定性路径不出网，因而不需要它。
+  const governanceContext = useLLM
+    ? await resolveCardGenerationGovernance(workspaceId, runId)
+    : null;
+
   await withWorkerWorkspaceTransaction({ workspaceId, userId: null }, async (tx) => {
     // 1. Load run（FOR UPDATE 行锁：防止同 run 的双 job 并发跑完整 LLM 管道，
     //    避免 TOCTOU 双份计费/双写终态。在 withWorkerWorkspaceTransaction 事务内
@@ -1233,7 +1240,7 @@ const existingObjRows = (await tx.execute(sql`
 
     // 4a. 构造 providers（LLM 或确定性）
     const providers = useLLM
-      ? await buildProvidersForRun({ workspaceId, job, semanticSpec })
+      ? await buildProvidersForRun({ workspaceId, job, semanticSpec, governanceContext })
       : null;
 
     // 5. Execute Planner
@@ -1403,12 +1410,16 @@ const existingObjRows = (await tx.execute(sql`
         },
       );
     };
+    /** 提示与候选并行收集：候选对象参与审计哈希，提示不参与（迁移 0234）。 */
+    const authoredHints = new Map<string, CardHintPairV2>();
     const candidatePipelines = await mapWithConcurrency(
       planObjectives,
       V2_STAGE_CONCURRENCY,
       async (planObj, index): Promise<CandidateGroundingOutcome> => {
         throwIfPipelineAborted(signal);
-        const candidate = await authorCandidateForObjective(authorInput, planObj);
+        const authoredCandidate = await authorCandidateForObjective(authorInput, planObj);
+        const candidate = authoredCandidate.candidate;
+        authoredHints.set(candidate.candidateRevisionId, authoredCandidate.hints);
         // M2：evidenceSetHash 闭包断言（与改造前一致：不一致即闭包断裂，fail-closed）。
         if (candidate.evidenceSetHash !== sealed.evidenceSetHash) {
           throw new CardGenerationProviderErrorLike(
@@ -1467,7 +1478,7 @@ const existingObjRows = (await tx.execute(sql`
     // 10. Persist candidates（计划顺序；PipelinedAuthoring 已在上面完成闭包断言）。
     // 批量 INSERT + 批量 authored 事件（M8：主管线与 replan 共用同一 helper，
     // 避免两条路径的写放大/事件语义再次漂移）。
-    await insertAuthoredCandidatesBatched(tx, workspaceId, runId, candidates);
+    await insertAuthoredCandidatesBatched(tx, workspaceId, runId, candidates, authoredHints);
 
     // 11. Update run status to checking
     await tx.execute(sql`
@@ -2432,6 +2443,12 @@ async function processRegenerateCandidateJob(job: PendingOutboxJob, signal?: Abo
   assertDeterministicProvidersAllowed(useLLM);
   const payload = job.payload as { candidateRevisionId?: string; feedbackReasonCodes?: string[] };
 
+  // 治理（同意 + 数据外发政策 + provider 选择）必须在事务外解析，理由见
+  // resolveCardGenerationGovernance 的注释。确定性路径不出网，因而不需要它。
+  const governanceContext = useLLM
+    ? await resolveCardGenerationGovernance(workspaceId, runId)
+    : null;
+
   await withWorkerWorkspaceTransaction({ workspaceId, userId: null }, async (tx) => {
     throwIfPipelineAborted(signal);
     const ctx = await loadV2RunInputs(tx, workspaceId, runId);
@@ -2477,7 +2494,7 @@ async function processRegenerateCandidateJob(job: PendingOutboxJob, signal?: Abo
     });
 
     const providers = useLLM
-      ? await buildProvidersForRun({ workspaceId, job, semanticSpec: ctx.semanticSpec })
+      ? await buildProvidersForRun({ workspaceId, job, semanticSpec: ctx.semanticSpec, governanceContext })
       : null;
     const newRevision = await boundedRepairCandidate(tx, {
       runId,
@@ -2528,6 +2545,12 @@ async function processReplanSetJob(job: PendingOutboxJob, signal?: AbortSignal):
   assertDeterministicProvidersAllowed(useLLM);
   const payload = job.payload as { feedbackReasonCodes?: string[] };
 
+  // 治理（同意 + 数据外发政策 + provider 选择）必须在事务外解析，理由见
+  // resolveCardGenerationGovernance 的注释。确定性路径不出网，因而不需要它。
+  const governanceContext = useLLM
+    ? await resolveCardGenerationGovernance(workspaceId, runId)
+    : null;
+
   await withWorkerWorkspaceTransaction({ workspaceId, userId: null }, async (tx) => {
     throwIfPipelineAborted(signal);
     const ctx = await loadV2RunInputs(tx, workspaceId, runId);
@@ -2544,7 +2567,7 @@ async function processReplanSetJob(job: PendingOutboxJob, signal?: AbortSignal):
       throw new CardGenerationProviderErrorLike(false, `replan requires review_ready/needs_attention/checking run (got ${String(run.status)})`);
     }
     const providers = useLLM
-      ? await buildProvidersForRun({ workspaceId, job, semanticSpec: ctx.semanticSpec })
+      ? await buildProvidersForRun({ workspaceId, job, semanticSpec: ctx.semanticSpec, governanceContext })
       : null;
 
     // 1. 重跑 planner（同输入；feedback 偏好为 soft，仅 LLM 模式消费）
@@ -2647,7 +2670,9 @@ async function processReplanSetJob(job: PendingOutboxJob, signal?: AbortSignal):
     // round-trip），在已经很长的 run 行锁窗口内继续放大延迟。改为与主管线一致的
     // 批量写（一次多行 INSERT + 一次 insertEventsBatched），并由共享 helper
     // 保证两条路径不再漂移。
-    await insertAuthoredCandidatesBatched(tx, workspaceId, runId, candidates);
+    await insertAuthoredCandidatesBatched(
+      tx, workspaceId, runId, candidates, authorResult.hintsByCandidateRevisionId,
+    );
 
     // 6. checking → 重跑双 Critic + deck gate（§17.4 新计划必须完整过门禁）
     await tx.execute(sql`
@@ -2715,6 +2740,12 @@ async function processRecheckCandidateJob(job: PendingOutboxJob, signal?: AbortS
   assertDeterministicProvidersAllowed(useLLM);
   const payload = job.payload as { candidateRevisionId?: string; reason?: string };
 
+  // 治理（同意 + 数据外发政策 + provider 选择）必须在事务外解析，理由见
+  // resolveCardGenerationGovernance 的注释。确定性路径不出网，因而不需要它。
+  const governanceContext = useLLM
+    ? await resolveCardGenerationGovernance(workspaceId, runId)
+    : null;
+
   await withWorkerWorkspaceTransaction({ workspaceId, userId: null }, async (tx) => {
     throwIfPipelineAborted(signal);
     const ctx = await loadV2RunInputs(tx, workspaceId, runId);
@@ -2747,7 +2778,7 @@ async function processRecheckCandidateJob(job: PendingOutboxJob, signal?: AbortS
     const candidate = candidateRowToObject(row, runId);
 
     const providers = useLLM
-      ? await buildProvidersForRun({ workspaceId, job, semanticSpec: ctx.semanticSpec })
+      ? await buildProvidersForRun({ workspaceId, job, semanticSpec: ctx.semanticSpec, governanceContext })
       : null;
 
     // 完整重跑门禁（§12.2/§12.3：编辑/合并产物无绕 Gate 权）
@@ -2924,7 +2955,7 @@ async function boundedRepairCandidate(
       (id, workspace_id, run_id, candidate_id, candidate_revision_id, revision,
        plan_revision_id, plan_version, plan_hash, card_content_epoch,
        plan_objective_local_id, recommendation, derived_from,
-       objective_draft, presentation_draft, evidence_set_hash,
+       objective_draft, presentation_draft, hints, evidence_set_hash,
        candidate_revision_hash, quality_state, review_decision, publish_state)
     VALUES (
       ${randomUUID()}, ${input.workspaceId}, ${input.runId},
@@ -2935,6 +2966,7 @@ async function boundedRepairCandidate(
       ${JSON.stringify(final.derivedFromCandidateRevisions)}::jsonb,
       ${JSON.stringify(final.objective)}::jsonb,
       ${JSON.stringify(final.presentation)}::jsonb,
+      ${JSON.stringify(providerOutput.hints)}::jsonb,
       ${final.evidenceSetHash},
       ${final.candidateRevisionHash},
       'authored', 'undecided', 'unpublished'
@@ -3109,6 +3141,12 @@ async function insertEventsBatched(
 }
 
 /**
+ * 落库缺省值。作者链路总会给出提示，这里只兜住"确实没有提示"的行（历史数据、
+ * 以及不经过作者的未来来源）；读取方见到空 level1 时退回按卡片结构派生的提示。
+ */
+const EMPTY_HINTS: CardHintPairV2 = { level1: "", level2: "" };
+
+/**
  * 批量持久化刚 author 出来的候选（一次多行 INSERT + 一次批量事件）。
  *
  * M8（2026-09-15 管线评审）：主管线此前已批量化，replan 仍是逐候选 INSERT +
@@ -3120,6 +3158,7 @@ export async function insertAuthoredCandidatesBatched(
   workspaceId: string,
   runId: string,
   candidates: LearningCardCandidateRevisionV2[],
+  hintsByCandidateRevisionId: Map<string, CardHintPairV2>,
 ): Promise<void> {
   if (candidates.length === 0) return;
   await tx.execute(sql`
@@ -3127,7 +3166,7 @@ export async function insertAuthoredCandidatesBatched(
       (id, workspace_id, run_id, candidate_id, candidate_revision_id, revision,
        plan_revision_id, plan_version, plan_hash, card_content_epoch,
        plan_objective_local_id, recommendation, derived_from,
-       objective_draft, presentation_draft, evidence_set_hash,
+       objective_draft, presentation_draft, hints, evidence_set_hash,
        candidate_revision_hash, quality_state, review_decision, publish_state)
     VALUES ${sql.join(candidates.map((candidate) => sql`(
       ${randomUUID()}, ${workspaceId}, ${runId},
@@ -3138,6 +3177,7 @@ export async function insertAuthoredCandidatesBatched(
       ${JSON.stringify(candidate.derivedFromCandidateRevisions)}::jsonb,
       ${JSON.stringify(candidate.objective)}::jsonb,
       ${JSON.stringify(candidate.presentation)}::jsonb,
+      ${JSON.stringify(hintsByCandidateRevisionId.get(candidate.candidateRevisionId) ?? EMPTY_HINTS)}::jsonb,
       ${candidate.evidenceSetHash},
       ${candidate.candidateRevisionHash},
       'authored', 'undecided', 'unpublished'
@@ -3154,10 +3194,35 @@ export async function insertAuthoredCandidatesBatched(
 
 // ─── Providers 构造（惰性，减小 worker 重边）─────────────────────────────
 
+/**
+ * 在开管道事务**之前**解析治理上下文（A，2026-09-21）。
+ *
+ * 0237 把 AI 同意与数据外发政策从工作区级搬到账号级之后，读 `user_ai_settings`
+ * 必须带 `app.user_id`；而这四条 LLM 管道的事务是以 `userId: null` 打开的，
+ * 在事务内部再开一个带用户身份的作用域会被作用域守卫直接拒
+ * （`nested worker workspace database work cannot change workspace or user context`）。
+ * 伴星侧（`companion-thought.ts`、`companion-dialogue.ts`）一直是在事务外解析好
+ * 再传进去的，这里对齐同一个写法：一次普通读取 + 一次解析，都在 tx 外完成。
+ */
+async function resolveCardGenerationGovernance(workspaceId: string, runId: string) {
+  const ownerRows = await db.execute(sql`
+    SELECT user_id FROM public.card_generation_runs_v2
+    WHERE id = ${runId} AND workspace_id = ${workspaceId}
+    LIMIT 1
+  `) as unknown as Array<{ user_id: string }>;
+  const userId = ownerRows[0]?.user_id ?? null;
+  if (!userId) {
+    throw new Error(`card-generation run ${runId} has no owning user; refusing to call an external provider`);
+  }
+  const { resolveAIGovernanceContext } = await import("../lib/governance.ts");
+  return { userId, governance: await resolveAIGovernanceContext(workspaceId, userId) };
+}
+
 async function buildProvidersForRun(input: {
   workspaceId: string;
   job: PendingOutboxJob;
   semanticSpec: GenerationSemanticSpecV2;
+  governanceContext: Awaited<ReturnType<typeof resolveCardGenerationGovernance>> | null;
 }): Promise<{
   plannerExtraction: AtomExtractionProvider;
   author: AuthoringProvider;
@@ -3166,11 +3231,15 @@ async function buildProvidersForRun(input: {
   /** M5：本次 job 执行的累计 token/调用用量（成本审计 + 熔断输入）。 */
   usageTotals: () => CardGenerationUsageTotals;
 }> {
+  if (!input.governanceContext) {
+    throw new Error("LLM 路径必须在事务外先解析治理上下文（同意与外发政策是账号级的）");
+  }
   const { buildCardGenerationProviders } = await import("../card-generation-v2/providers.ts");
   const providers = await buildCardGenerationProviders({
     workspaceId: input.workspaceId,
-    userId: null,
+    userId: input.governanceContext.userId,
     semanticSpec: input.semanticSpec,
+    governance: input.governanceContext.governance,
   });
   return providers;
 }

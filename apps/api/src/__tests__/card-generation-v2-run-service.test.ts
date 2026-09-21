@@ -238,6 +238,8 @@ describe("createGenerationRunV2", () => {
             return {
               where: () => ({
                 limit: async () => [], // no existing
+                // 「上一个已激活批次」查询走 orderBy().limit()
+                orderBy: () => ({ limit: async () => [] }),
               }),
             };
           }
@@ -303,6 +305,124 @@ describe("createGenerationRunV2", () => {
       .map((u) => u.set.status)
       .filter((s) => s !== undefined);
     assert.deepEqual(statusUpdates, ["source_sealing", "planning"]);
+  });
+
+  /**
+   * 2026-09-20（实走复盘 #5）：一篇笔记同时只允许一批在制的学习卡。
+   * 此前配额只在 workspace 维度（在途数 + 日次数），同一篇笔记可以被反复点
+   * 「生成学习卡」，每点一次多一批候选卡。
+   *
+   * 两个新查询都打在 card_generation_runs_v2 上，所以替身按**调用顺序**发牌：
+   *   1 幂等回放（取锁前）· 2 幂等回放（取锁后）· 3 按笔记的在制守卫 ·
+   *   4 上一个已激活批次
+   */
+  function setupRunQuerySequence(results: unknown[][], inserted?: Record<string, unknown>[]) {
+    let callIndex = 0;
+    return setupTx({
+      select: () => ({
+        from: (table: unknown) => {
+          const next = () => {
+            if (table === cardGenerationRunsV2) return results[callIndex++] ?? [];
+            if (table === cardGenerationEventsV2) return [{ maxSeq: 0 }];
+            return [];
+          };
+          const chain: Record<string, unknown> = {
+            limit: async () => next(),
+            orderBy: () => chain,
+            // insertEvent 走 `await select().from(events).where(...)`（不经 limit），
+            // 所以链条本身必须可 await。events 不推进计数，只有 runs 推进。
+            then: (resolve: (value: unknown) => void) => Promise.resolve(next()).then(resolve),
+          };
+          chain.where = () => chain;
+          return chain;
+        },
+      }),
+      query: {
+        noteVersions: { findFirst: async () => makeBaseVersion() },
+        notes: { findFirst: async () => makeBaseNote() },
+        noteBlocks: { findMany: async () => [] },
+      },
+      insert: (table: unknown) => ({
+        values: (values: Record<string, unknown>) => {
+          inserted?.push({ ...values, table });
+          return { onConflictDoNothing: () => {} };
+        },
+      }),
+      update: () => ({ set: () => ({ where: () => ({}) }) }),
+    });
+  }
+
+  it("同一篇笔记已有在制批次时拒绝再次生成", async () => {
+    setupRunQuerySequence([[], [], [{ id: RUN_ID }], []]);
+
+    await assert.rejects(
+      () => createGenerationRunV2(
+        { workspaceId: WORKSPACE_ID, userId: USER_ID },
+        NOTE_VERSION_ID,
+        makeBaseRequest(),
+        "test-key-note-in-flight",
+      ),
+      (error: unknown) => {
+        const e = error as { code?: string; statusCode?: number };
+        assert.equal(e.code, "note_generation_in_flight");
+        assert.equal(e.statusCode, 409);
+        return true;
+      },
+    );
+  });
+
+  it("失败到没法就地重试的批次不把笔记永久锁死", async () => {
+    // needs_attention 且失败原因不是质量门禁时，retry 端点自己会拒绝
+    // （not_retryable），cancel 也判 invalid_state —— 只剩"重新生成"这一条路，
+    // 而在制守卫正是拦它的。判据与 retry 端点同一句话。
+    const inserted: Record<string, unknown>[] = [];
+    setupRunQuerySequence(
+      [[], [], [{ id: RUN_ID, status: "needs_attention", errorCode: "generation_failed" }], []],
+      inserted,
+    );
+
+    await createGenerationRunV2(
+      { workspaceId: WORKSPACE_ID, userId: USER_ID },
+      NOTE_VERSION_ID,
+      makeBaseRequest(),
+      "test-key-dead-batch",
+    );
+
+    assert.ok(
+      inserted.some((values) => values.table === cardGenerationRunsV2),
+      "上一个批次已经救不回来时，应当允许重新生成",
+    );
+  });
+
+  it("质量门禁造成的 needs_attention 仍然算在制（就地重试还有效）", async () => {
+    setupRunQuerySequence([[], [], [{ id: RUN_ID, status: "needs_attention", errorCode: "quality_gate_failed" }], []]);
+
+    await assert.rejects(
+      () => createGenerationRunV2(
+        { workspaceId: WORKSPACE_ID, userId: USER_ID },
+        NOTE_VERSION_ID,
+        makeBaseRequest(),
+        "test-key-quality-gate-in-flight",
+      ),
+      (error: unknown) => (error as { code?: string }).code === "note_generation_in_flight",
+    );
+  });
+
+  it("记录被替代的上一个已激活批次，供激活时废弃旧卡", async () => {
+    const previousRunId = "88888888-0000-4000-8000-000000000008";
+    const inserted: Record<string, unknown>[] = [];
+    setupRunQuerySequence([[], [], [], [{ id: previousRunId }]], inserted);
+
+    await createGenerationRunV2(
+      { workspaceId: WORKSPACE_ID, userId: USER_ID },
+      NOTE_VERSION_ID,
+      makeBaseRequest(),
+      "test-key-supersedes",
+    );
+
+    const runInsert = inserted.find((values) => values.table === cardGenerationRunsV2);
+    assert.ok(runInsert, "should have inserted the run row");
+    assert.equal(runInsert.supersedesRunId, previousRunId);
   });
 });
 

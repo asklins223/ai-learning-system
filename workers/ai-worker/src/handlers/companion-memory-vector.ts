@@ -129,6 +129,29 @@ function mapMemoryRow(row: Record<string, unknown>): RetrievedMemory {
   };
 }
 
+export interface KeywordRetrievalOptions {
+  /**
+   * 只召回"在这个 embedding 模型下没有 ready 向量"的条目。
+   * 向量检索路径用它做**并集补召回**（方案 29 §9.9），不再只当降级路径用。
+   */
+  onlyMissingEmbeddingForModel?: string;
+}
+
+/**
+ * 向量结果与「向量看不见」的补召回结果按 id 去重合并，向量侧优先（相关度更高）。
+ * 补召回侧本身已排除掉向量可返回的行，去重只是防止两侧边界条件漂移时重复注入同一条记忆。
+ */
+function mergeUniqueMemories(primary: RetrievedMemory[], extra: RetrievedMemory[]): RetrievedMemory[] {
+  const seen = new Set(primary.map((item) => item.memoryId));
+  const merged = [...primary];
+  for (const item of extra) {
+    if (seen.has(item.memoryId)) continue;
+    seen.add(item.memoryId);
+    merged.push(item);
+  }
+  return merged;
+}
+
 /** 关键词降级检索：不依赖 embedding provider。
  *  §2.4.3：按关键词匹配 + importance/pinned/updated_at 规则排序。
  *  §9.2.2：scope 过滤与向量检索一致——workspace / global / 当前 scope 均可召回。 */
@@ -138,15 +161,44 @@ export async function retrieveCompanionMemoriesKeyword(
   query: string,
   topK = 8,
   currentScope = "workspace",
+  opts: KeywordRetrievalOptions = {},
 ): Promise<MemoryRetrievalResult> {
   const startedAt = performance.now();
+  /**
+   * 「向量检索看不见这批行」的补召回过滤（方案 29 §9.9）。
+   *
+   * 判据必须与向量主查询**逐条取反**：向量侧要求
+   * `embedding_status='ready'` 且存在 `model_revision` 命中的向量行，
+   * 于是"看不见"= 二者任一不满足。少一条都会让某类记忆两边都不负责。
+   */
+  const missingEmbeddingFilter = opts.onlyMissingEmbeddingForModel
+    ? sql`AND (embedding_status <> 'ready'
+             OR NOT EXISTS (
+               SELECT 1 FROM assistant_memory_embeddings e
+               WHERE e.memory_id = assistant_memory_items.id
+                 AND e.model_revision = ${opts.onlyMissingEmbeddingForModel}
+             ))`
+    : sql``;
   // 修复（2026-08-19 审查）：此前把 ≤1000 字符整段查询塞进 `ILIKE '%<全文>%'`，
   // 模式比 content（≤200 字）还长，几乎永远匹配不到，降级检索形同虚设。
-  // 现改为提取关键词子串做 ILIKE ANY；无可用关键词时回退规则排序，保证仍有召回。
+  // 改为提取关键词做 ILIKE ANY。
+  //
+  // 再修（2026-09-20，方案 29 §9.9）：**上面那次修复其实还是坏的**。
+  // `extractQueryKeywords` 产出的是裸子串（`复习`、`光合`），而 LIKE 模式**不带 `%`
+  // 就是全等比较**——`'习惯在图书馆三楼复习' ILIKE '复习'` 为假。于是 keyword 路径
+  // 从来没匹配上过任何东西，这也解释了 memory_usage_log 为什么 290 行清一色
+  // retrieval_mode='vector'：降级路径形同虚设的第二种形态。
+  // 现在 content 走 `%子串%`，kind 保持全等（它是枚举名，子串匹配反而会误命中，
+  // 比如关键词 "goal" 会命中 "learning_context" 里的片段）。
+  // 关键词本身由 `extractQueryKeywords` 限定在 `[\p{L}\p{N}]+` 内，`%`/`_` 进不来，
+  // 因此加通配符不引入 LIKE 注入面。
   const keywords = extractQueryKeywords(query);
-  const keywordsLiteral = keywords.length > 0 ? toTextArrayLiteral(keywords) : null;
-  const keywordFilter = keywordsLiteral
-    ? sql` AND (content ILIKE ANY(${keywordsLiteral}::text[]) OR kind ILIKE ANY(${keywordsLiteral}::text[]))`
+  const contentPatternsLiteral = keywords.length > 0
+    ? toTextArrayLiteral(keywords.map((keyword) => `%${keyword}%`))
+    : null;
+  const kindLiteral = keywords.length > 0 ? toTextArrayLiteral(keywords) : null;
+  const keywordFilter = contentPatternsLiteral && kindLiteral
+    ? sql` AND (content ILIKE ANY(${contentPatternsLiteral}::text[]) OR kind ILIKE ANY(${kindLiteral}::text[]))`
     : sql``;
   const result = await tx.execute(sql`
     SELECT id, kind, content, importance, pinned, last_used_at, user_confirmed
@@ -157,6 +209,7 @@ export async function retrieveCompanionMemoriesKeyword(
       AND candidate = false
       AND archived_at IS NULL
       AND (scope = 'workspace' OR scope = 'global' OR scope = ${currentScope})
+      ${missingEmbeddingFilter}
       ${keywordFilter}
     ORDER BY pinned DESC, importance DESC, updated_at DESC
     LIMIT ${topK}
@@ -228,39 +281,32 @@ export async function retrieveCompanionMemoriesVector(
           END DESC
       LIMIT ${topK}
     `);
-    const items = rowsOf<Record<string, unknown>>(result).map(mapMemoryRow);
-    // 修复（2026-08-19 审查）：provider 可用但该用户还没有任何 ready embedding
-    // 时（新确认记忆 pending→ready 窗口、embedding 任务积压），此前直接返回空集，
-    // 造成"有记忆但永远召回不到"。现检测 ready embedding 是否存在，不存在则
-    // 降级 keyword 规则排序；存在但相似度不足时保持空集（真正无相关记忆）。
-    if (items.length === 0) {
-      // 修复（2026-08-22 审查）：探测条件必须与主检索查询一致（含 scope 过滤）。
-      // 此前缺 scope 条件——用户若只有其他 scope 的 ready embedding（如 task 页
-      // 只写过 workspace 记忆），会误判"有 ready"而不降级 keyword，零召回窗口仍在。
-      // AI P1（2026-09-15 审计）：同样必须带 model_revision 过滤，否则换过
-      // embedding 模型的用户会被判成"有 ready"（其实全属旧向量空间、主查询已排除），
-      // 于是既不召回也不降级 keyword —— 正是上面这条注释警告过的零召回窗口。
-      const hasReady = await tx.execute(sql`
-        SELECT EXISTS (
-          SELECT 1
-          FROM assistant_memory_embeddings e
-          JOIN assistant_memory_items m ON m.id = e.memory_id
-          WHERE e.workspace_id = ${scope.workspaceId}
-            AND e.user_id = ${scope.userId}
-            AND m.deleted_at IS NULL
-            AND m.candidate = false
-            AND m.archived_at IS NULL
-            AND m.embedding_status = 'ready'
-            AND (m.scope = 'workspace' OR m.scope = 'global' OR m.scope = ${currentScope})
-            AND e.model_revision = ${provider.embeddingModelId}
-        ) AS has_ready
-      `);
-      const hasReadyRow = rowsOf<{ has_ready: boolean }>(hasReady)[0];
-      if (!hasReadyRow || !hasReadyRow.has_ready) {
-        return retrieveCompanionMemoriesKeyword(tx, scope, query, topK, currentScope);
-      }
-    }
-    return { items, mode: "vector", latencyMs: Math.round(performance.now() - startedAt) };
+    const vectorItems = rowsOf<Record<string, unknown>>(result).map(mapMemoryRow);
+    // **并集补召回**（方案 29 §9.9，抱怨 #3「写了记不住」的真根因）。
+    //
+    // 旧行为是"向量返回空 → 探测有没有 ready → 没有才降级 keyword"。这个设计漏掉了
+    // 最常见的一种状态：用户**已经有**若干 ready 向量，而刚写下的那条还在
+    // pending（实测 21 条活记忆里只有 6 条有向量）。此时主查询非空 → 不降级 →
+    // 新记忆结构性隐身。活体复现：12:55 写进「习惯在图书馆三楼复习」，
+    // 12:56 问「我平时在哪儿复习」她答"记忆里没这条"。
+    //
+    // 现在无条件再跑一次 keyword，但**只取向量侧看不见的行**（缺 ready 向量的那些），
+    // 与向量结果按 id 去重合并。它同时取代了原来的 hasReady 探测：用户一条向量都没有时，
+    // 所有行都算"向量看不见"，补召回自然等价于全量 keyword 降级，不必再单独探一次。
+    const supplement = await retrieveCompanionMemoriesKeyword(
+      tx,
+      scope,
+      query,
+      topK,
+      currentScope,
+      { onlyMissingEmbeddingForModel: provider.embeddingModelId },
+    );
+    const items = mergeUniqueMemories(vectorItems, supplement.items).slice(0, topK);
+    return {
+      items,
+      mode: vectorItems.length > 0 ? "vector" : "keyword_fallback",
+      latencyMs: Math.round(performance.now() - startedAt),
+    };
   } catch (error) {
     // pgvector 查询失败（扩展/索引/类型问题）不阻塞对话，降级 keyword。
     logger.warn({ err: error }, "companion memory vector retrieval failed, falling back to keyword");

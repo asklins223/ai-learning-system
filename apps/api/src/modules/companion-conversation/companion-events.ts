@@ -160,7 +160,7 @@ export async function listCompanionAgentRoutes(args: {
 //      或伪造占位（方案 §1 明确要求区分这两种情况）。
 
 /** 折进"过程"的事件类型。与桌面端 companion-agent-nodes 认的三个 type 一致。 */
-const COMPANION_NODE_EVENT_TYPES = ["assistant.status", "agent.skill", "agent.tool"] as const;
+const COMPANION_NODE_EVENT_TYPES = ["assistant.status", "agent.tool"] as const;
 const COMPANION_NODE_EVENT_BATCH = 200;
 const COMPANION_RUN_SUMMARY_LIMIT = 20;
 
@@ -176,7 +176,6 @@ export interface CompanionRunSummaryRow {
   status: string;
   /** 客户端"接着说话"要用的 CAS 值（见 desktop 合同的 generation 字段）。 */
   generation: number;
-  mode: string;
   stepCount: number;
   toolCallCount: number;
   /** 本 run 冻结的预算（`budget_snapshot`），缺失时退回合同上限。 */
@@ -252,7 +251,6 @@ export async function listCompanionRunNodes(args: {
         runId: companionTurnRuns.id,
         status: companionTurnRuns.status,
         generation: companionTurnRuns.generation,
-        mode: companionTurnRuns.agentMode,
         stepCount: companionTurnRuns.stepCount,
         toolCallCount: companionTurnRuns.toolCallCount,
         budgetSnapshot: companionTurnRuns.budgetSnapshot,
@@ -294,7 +292,6 @@ export async function listCompanionRunNodes(args: {
           runId: row.runId,
           status: row.status,
           generation: row.generation,
-          mode: row.mode,
           stepCount: row.stepCount,
           toolCallCount: row.toolCallCount,
           maxSteps: typeof budget?.maxSteps === "number" ? budget.maxSteps : COMPANION_AGENT_MAX_STEPS,

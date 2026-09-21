@@ -181,6 +181,11 @@
       "import": "./src/companion-conversation-contracts.ts",
       "default": "./src/companion-conversation-contracts.ts"
     },
+    "./companion-proactive-policy": {
+      "types": "./src/companion-proactive-policy.ts",
+      "import": "./src/companion-proactive-policy.ts",
+      "default": "./src/companion-proactive-policy.ts"
+    },
     "./companion-home-contracts": {
       "types": "./src/companion-home-contracts.ts",
       "import": "./src/companion-home-contracts.ts",

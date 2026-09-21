@@ -55,7 +55,6 @@ export const learningRunAllowedActionSchema = z.discriminatedUnion("kind", [
   z.strictObject({ version: z.literal(2), kind: z.literal("resume") }),
   z.strictObject({ version: z.literal(2), kind: z.literal("switch_variant"), alternativeId: z.string().min(1).max(200) }),
   z.strictObject({ version: z.literal(2), kind: z.literal("request_hint"), level: z.union([z.literal(1), z.literal(2), z.literal(3)]) }),
-  z.strictObject({ version: z.literal(2), kind: z.literal("skip_task"), taskId: z.string().uuid(), confirmationRequired: z.literal(true) }),
   z.strictObject({ version: z.literal(2), kind: z.literal("skip_run"), confirmationRequired: z.literal(true) }),
   z.strictObject({ version: z.literal(2), kind: z.literal("activate_followup"), followupId: z.string().min(1).max(200) }),
   z.strictObject({ version: z.literal(2), kind: z.literal("finish_current_evidence") }),

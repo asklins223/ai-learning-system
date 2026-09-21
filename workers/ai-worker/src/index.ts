@@ -14,6 +14,8 @@ import { tickCompanionDailySummaryScheduler } from "./handlers/companion-daily-s
 import { tickCompanionThoughtScheduler } from "./handlers/companion-thought-scheduler.ts";
 import { tickCompanionMemoryMaintenance } from "./handlers/companion-memory-maintenance.ts";
 import { tickCompanionProposalExpiry } from "./handlers/companion-proposal-expiry-scheduler.ts";
+import { tickCompanionRunReconcile } from "./handlers/companion-run-reconcile-scheduler.ts";
+import { tickCompanionReminderDelivery } from "./handlers/companion-reminder-scheduler.ts";
 import {
   getV2OutboxInflightCount,
   pollV2Outbox,
@@ -460,6 +462,12 @@ export async function tick(): Promise<void> {
   // 不放在 claim 之后——被锁死的 conversation 没有 job 可 claim，必须在每轮
   // tick 都尝试终结，否则 run 会永久停在 waiting_for_confirmation。
   await tickCompanionProposalExpiry();
+  // 方案 29 §9.3：job 已死/缺失的孤儿 run 回收。与上一条同一个理由——必须在 claim
+  // 之前跑，被锁死的会话压根没有可 claim 的 job。
+  await tickCompanionRunReconcile();
+  // 方案 29 §4.6：到点提醒兑现（每分钟一次，函数自身幂等）。放在 claim 之前同属
+  // "不依赖有没有 job 可认领"这一类后台义务。
+  await tickCompanionReminderDelivery();
 
   // 只 claim 需要补充的 job 数量，每个 job 独立处理（fire-and-forget）。
   // AI 模型调用是网络 IO，并行处理可让多个 job 的模型调用同时进行。

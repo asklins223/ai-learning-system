@@ -1,4 +1,7 @@
-import type { CardGenerationActiveSummaryV1 } from "@ailearn/shared/card-generation-desktop-contracts";
+import type {
+  CardGenerationActiveSummaryV1,
+  CardGenerationProgressV1,
+} from "@ailearn/shared/card-generation-desktop-contracts";
 import { isCardGenerationReviewOpen } from "@ailearn/shared/card-generation-desktop-contracts";
 
 export { isCardGenerationReviewOpen };
@@ -27,37 +30,88 @@ export const cardGenerationStatusLabels: Record<string, string> = {
 };
 
 export function cardGenerationStatusLabel(status: string): string {
-  return cardGenerationStatusLabels[status] ?? "服务端处理中";
+  return cardGenerationStatusLabels[status] ?? "还在处理";
 }
 
-/** The four press stages of mockup page 12 and the run statuses they cover. */
-export function cardGenerationStage(status: string): number {
-  if (status === "queued" || status === "source_sealing") return 0;
-  if (status === "planning" || status === "authoring") return 1;
-  if (status === "checking") return 2;
-  return 3;
+/**
+ * 四段轨道的档位：0 读取笔记 · 1 形成问题 · 2 对齐证据 · 3 等待审核 · 4 全部走完。
+ *
+ * `null` 表示**这个状态说不出走到哪一步**（激活中/已结束/失败/待处理等）。此前这里
+ * 是 `return 3` 兜底，于是 14 个状态里凡是没列出的都算"审核阶段"，进度条恒定 75%
+ * 且前三行全部点亮「已完成」——用户看到的"从第 2 步直接跳完成"就是这么来的
+ * （2026-09-20 实走复盘 #2）。说不出就别说。
+ */
+const CARD_GENERATION_STAGE_BY_STATUS: Readonly<Record<string, number | null>> = {
+  queued: 0,
+  source_sealing: 0,
+  planning: 1,
+  authoring: 1,
+  checking: 2,
+  review_ready: 3,
+  // 提交激活与已激活都走完了那四步（第三步"等待审核"确实是过去了），
+  // 差别只在状态文案上；停在半路的状态（待处理/失败/过期/无候选）说不出档位。
+  activating: 4,
+  activated: 4,
+  needs_attention: null,
+  no_cards_recommended: null,
+  closed_without_activation: null,
+  failed: null,
+  cancelled: null,
+  stale: null,
+};
+
+export function cardGenerationStage(status: string): number | null {
+  return CARD_GENERATION_STAGE_BY_STATUS[status] ?? null;
 }
 
 /** The board draws four press stages; the meter counts the same four. */
 export const cardGenerationStageCount = 4;
 
 /**
- * Whether "第 N / 4 步" says anything true. A stopped run keeps whatever stage
- * number its status maps to, and `needs_attention` maps to the review stage it
- * never reached — so the meter is only shown while the server is still working
- * or has actually delivered the deck to review.
+ * 进度头条：档位、百分比、可解释的细分文案。
+ *
+ * 单靠 `run.status` 在 `authoring` 里是不动的（14 个状态覆盖不了"12 张写到第 3 张"），
+ * 所以阶段内部再按服务端聚合的候选计数走一小段。`detail` 与百分比同源，页面上不会
+ * 出现两个互相对不上的进度读数。
+ *
+ * 返回 `null` = 说不出进度（状态不在阶段表里，或还在排队），调用方必须改成显示
+ * 状态文案，不得显示百分比。
  */
-export function cardGenerationShowsProgress(status: string): boolean {
-  return status === "review_ready" || isCardGenerationInFlight(status);
+export function cardGenerationProgressView(
+  status: string,
+  progress: CardGenerationProgressV1 | null | undefined,
+): { stage: number; percent: number; detail: string | null } | null {
+  const stage = cardGenerationStage(status);
+  if (stage === null) return null;
+
+  const planned = progress?.plannedCards ?? 0;
+  const authored = progress?.authored ?? 0;
+  const passed = progress?.gatePassed ?? 0;
+
+  let fraction = 0;
+  let detail: string | null = null;
+  if (status === "planning") {
+    detail = "正在规划这一批要出哪些目标";
+  } else if (status === "authoring") {
+    fraction = planned > 0 ? Math.min(authored / planned, 0.95) : 0;
+    detail = planned > 0 ? `已写出 ${authored} / ${planned} 张候选` : `已写出 ${authored} 张候选`;
+  } else if (status === "checking") {
+    const total = Math.max(authored, planned);
+    fraction = total > 0 ? Math.min(passed / total, 0.95) : 0;
+    detail = total > 0 ? `已过质量门 ${passed} / ${total}` : "正在核对质量门与证据绑定";
+  }
+
+  const percent = Math.min(100, Math.round(((stage + fraction) / cardGenerationStageCount) * 100));
+  return { stage, percent, detail };
 }
 
 /** The manual-resync receipt: re-reading status must say what re-reading found. */
 export function cardGenerationSyncReportText(status: string | null, changed: boolean): string {
-  if (!status) return "这次同步没有读到服务端状态，页面仍是上一次的结果。";
+  if (!status) return "这次没读到最新进度，页面显示的还是上一次的结果。";
   const label = cardGenerationStatusLabel(status);
   return changed
-    ? `已同步 · 服务端把这次生成推进到「${label}」。`
-    : `已同步 · 服务端仍是「${label}」，这一步还没有新的进展。`;
+    ? `已刷新 · 这次生成到了「${label}」。`
+    : `已刷新 · 后台仍是「${label}」，这一步还没有新的进展。`;
 }
 
 /**
@@ -101,12 +155,12 @@ export const cardGenerationRecoveryReasonLabels: Record<string, string> = {
   quality_gate_failed: "候选没有通过质量检查",
   source_outdated: "生成来源已经过期",
   run_failed: "这次生成任务已经失败",
-  attention_required: "服务端需要进一步处理",
-  unknown: "服务端暂时无法说明这次生成状态",
+  attention_required: "需要后台再看一次才能继续",
+  unknown: "暂时说不清这次生成到哪一步了",
 };
 
 export function cardGenerationRecoveryReasonLabel(reasonCode: string): string {
-  return cardGenerationRecoveryReasonLabels[reasonCode] ?? "服务端需要进一步处理";
+  return cardGenerationRecoveryReasonLabels[reasonCode] ?? "需要后台再看一次才能继续";
 }
 
 /**

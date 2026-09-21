@@ -71,6 +71,10 @@
       "platform": "siliconflow-chat",
       "model": "THUDM/GLM-4-9B-0414"
     },
+    "companion_fallback": {
+      "platform": "siliconflow-chat",
+      "model": "THUDM/GLM-4-9B-0414"
+    },
     "vision": {
       "platform": "bigmodel",
       "model": "GLM-4.1V-Thinking-Flash"

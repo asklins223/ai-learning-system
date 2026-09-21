@@ -10,6 +10,7 @@ import {
   learningDashboardModeV2Schema,
   learningObjectivePrimaryActionV3Schema,
   learningObjectiveSurfaceV3Schema,
+  objectivePersonalStateV3Schema,
 } from "./learning-objective-surface-contracts.ts";
 import { cardGenerationActiveSummaryV1Schema } from "./card-generation-desktop-contracts.ts";
 
@@ -82,18 +83,7 @@ export const roomObjectiveSummaryV1Schema = z.strictObject({
   surfaceRevision: z.number().int().min(0),
   conceptLabel: z.string().min(1).max(200).nullable(),
   publicSummary: z.string().min(1).max(1500),
-  personalState: z.enum([
-    "unvalidated",
-    "learning",
-    "stable",
-    "fragile",
-    "needs_repair",
-    "due_review",
-    "scheduled",
-    "archived",
-    "superseded",
-    "outdated",
-  ]),
+  personalState: objectivePersonalStateV3Schema,
   primaryAction: learningObjectivePrimaryActionV3Schema,
 });
 
@@ -162,8 +152,14 @@ export const roomProjectionV1Schema = z.strictObject({
   queueSummary: roomSectionSchema(roomQueueSummaryDataSchema),
   sanitizedReviewSummary: roomSectionSchema(roomReviewSummaryDataSchema),
   activeRunSummary: roomSectionSchema(roomActiveRunSummaryDataSchema),
-  /** Owner-only Card Generation recovery summary; Member receives empty/error, never data. */
-  activeGenerationSummary: roomSectionSchema(cardGenerationActiveSummaryV1Schema),
+  /**
+   * Owner-only Card Generation recovery summary; Member receives empty/error, never data.
+   *
+   * 是**数组**：一个工作区可以同时有多篇笔记各自在制一批卡。此前这里只放
+   * "最近更新的那一个"，笔记页按 noteId 匹配守卫因此形同虚设
+   * （2026-09-20 实走复盘 #5：同一篇笔记能反复点「生成学习卡」）。
+   */
+  activeGenerationSummary: roomSectionSchema(z.array(cardGenerationActiveSummaryV1Schema).max(20)),
   recentObjectiveSummary: roomSectionSchema(roomRecentObjectiveSummaryDataSchema),
   recentActivitySummary: roomSectionSchema(roomRecentActivitySummaryDataSchema),
   captureCapability: roomCaptureCapabilityV1Schema,

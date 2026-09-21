@@ -37,7 +37,11 @@ const kinds = (view: LearningRunPublicV1): string[] => buildLearningRunAllowedAc
 
 test("projects every lifecycle phase to an exact, fail-closed action set", () => {
   assert.deepEqual(kinds(baseView("preparing")), ["end"]);
-  assert.deepEqual(kinds(baseView("active")), ["pause", "skip_run", "end"]);
+  // 2026-09-20 实走复盘 #12：active 阶段此前同时签发 skip_run / end（外加有任务时
+  // 的 skip_task，它与 skip_run 产生逐字节相同的终态）。三个近义出口收敛成
+  // 一个"不想做"的 skip_run；"不会做"走提交侧的 declared_unable。
+  // end 仍是其它阶段的唯一出口，照旧签发。
+  assert.deepEqual(kinds(baseView("active")), ["pause", "skip_run"]);
   assert.deepEqual(kinds(baseView("paused")), ["resume", "end"]);
   assert.deepEqual(kinds(baseView("assessing")), ["end"]);
   assert.deepEqual(kinds(baseView("committing")), ["end"]);
@@ -96,4 +100,37 @@ test("projects checkpoint and recoverable-error branches only from server proof"
   const commitFailure = baseView("recoverable_error");
   commitFailure.failure = { stage: "commit", code: "scheduler_unavailable", retryable: true };
   assert.deepEqual(kinds(commitFailure), ["retry_commit", "end"]);
+});
+
+/**
+ * 2026-09-20 实走复盘 #11：两级提示此前是**两个** request_hint 动作，界面把第二级
+ * 埋进「更多选择」的 details 里，看起来像提示套提示。服务端仍按 hintLevels 签发
+ * 1..N（客户端要在一个按钮里逐级放行），这里锁住签发数量与 hintLevels 一致。
+ */
+test("有任务时按 hintLevels 签发提示层级，且退出动作只有一个", () => {
+  const base = baseView("active");
+  const taskId = "00000000-0000-4000-8000-0000000000aa";
+  const view: LearningRunPublicV1 = {
+    ...base,
+    activeTaskId: taskId,
+    activeTask: {
+      version: 1,
+      taskId,
+      runId: base.runId,
+      sequence: 1,
+      intent: "recall",
+      prompt: "补全这条公式",
+      targetSummary: "牛顿第二定律",
+      activeVariant: null as never,
+      availableAlternatives: [],
+      assistancePolicy: { hintLevels: 2, exposureLowersTrust: true },
+      status: "active",
+      revision: 1,
+    } as LearningRunPublicV1["activeTask"],
+  };
+  assert.deepEqual(kinds(view), ["pause", "skip_run", "request_hint", "request_hint"]);
+  const levels = buildLearningRunAllowedActionsV2(view)
+    .filter((action) => action.kind === "request_hint")
+    .map((action) => (action as { level: number }).level);
+  assert.deepEqual(levels, [1, 2]);
 });

@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { SessionContextV1, WorkspaceSummaryV1 } from "@ailearn/shared/desktop-ipc-contracts";
 import { createRequestMeta, gatewayErrorMessage, unwrapGatewayResult } from "../../app/desktop-client";
+import { useRoomStore } from "../../app/room-store";
+import { spaceRoleLabel } from "../../app/space-identity";
 import { readAuthenticatedSession } from "../../app/surface-session";
-import { SPACE_MENU_REFRESH_EVENT } from "./space-menu-events";
+import { publishGateInvalidation } from "../../app/gate-invalidation";
+import { requestSpaceSwitchReceipt, SPACE_MENU_REFRESH_EVENT } from "./space-menu-events";
 
 type AccountMenuState = {
   readonly session: SessionContextV1 | null;
@@ -13,9 +16,9 @@ type AccountMenuState = {
   readonly ready: boolean;
 };
 
+/** 角色说法只有 `spaceRoleLabel` 一份：顶栏胶囊与这里的行不能各说各话。 */
 function roleLabel(workspace: WorkspaceSummaryV1): string {
-  const role = workspace.role === "owner" ? "Owner" : "Member";
-  return workspace.workspaceType === "personal" ? "Personal" : role;
+  return spaceRoleLabel({ role: workspace.role, isPersonal: workspace.isPersonal });
 }
 
 /**
@@ -32,7 +35,7 @@ export function HudAccountMenu({
   onSwitched,
 }: {
   readonly notice?: string | null;
-  readonly onSwitched?: () => void;
+  readonly onSwitched?: (workspaceName: string) => void;
 }) {
   const epochRef = useRef<number | undefined>(undefined);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -46,6 +49,41 @@ export function HudAccountMenu({
   const [inviteCode, setInviteCode] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  /**
+   * 二次确认已对哪个空间武装。切换会走门禁失效路径，主进程随即 `failClosed` 掉
+   * 正式测评并拆流，而房间 store 的 `activeRunId` 直接被清空——进行中的测评就
+   * 这样在一次没有任何提示的点击里消失。有活跃 run 时第一次点击只武装、第二次才切。
+   */
+  const [armedSwitchFor, setArmedSwitchFor] = useState<string | null>(null);
+  const [newSpaceName, setNewSpaceName] = useState("");
+  const activeRunId = useRoomStore((store) => store.activeRunId);
+
+  /**
+   * 新建协作空间并进入它。
+   *
+   * 此前客户端没有这个入口，"共享学习空间"只能靠把别人拉进自己的个人空间。
+   * 主进程在建好后会 switchWorkspace（邀请端点认当前 session 所在空间，不进去就
+   * 永远邀请不了人），所以这里与 onSwitched 走同一条失效路径：先停车回执，再让
+   * 门禁重验——本组件也会随之重挂载。
+   */
+  const create = async () => {
+    const name = newSpaceName.trim();
+    if (!name || busy !== null) return;
+    setBusy("create");
+    setMessage(null);
+    try {
+      const response = await window.ailearn.workspace.create({
+        meta: createRequestMeta(epochRef.current),
+        name,
+      });
+      unwrapGatewayResult(response);
+      requestSpaceSwitchReceipt(name);
+      publishGateInvalidation("stale_workspace");
+    } catch (error) {
+      setBusy(null);
+      setMessage(gatewayErrorMessage(error));
+    }
+  };
 
   const load = useCallback(async () => {
     setState((current) => ({ ...current, loading: true, failure: null }));
@@ -86,6 +124,12 @@ export function HudAccountMenu({
 
   const enter = async (workspace: WorkspaceSummaryV1) => {
     if (workspace.workspaceId === state.session?.workspace?.workspaceId) return;
+    if (activeRunId !== null && armedSwitchFor !== workspace.workspaceId) {
+      setArmedSwitchFor(workspace.workspaceId);
+      setMessage("有进行中的正式测评，切换会中断它。确认请再点一次。");
+      return;
+    }
+    setArmedSwitchFor(null);
     setBusy(workspace.workspaceId);
     setMessage(null);
     try {
@@ -95,7 +139,7 @@ export function HudAccountMenu({
       });
       if (response.workspaceEpoch) epochRef.current = response.workspaceEpoch;
       unwrapGatewayResult(response);
-      onSwitched?.();
+      onSwitched?.(workspace.name);
     } catch (error) {
       setMessage(gatewayErrorMessage(error));
     } finally {
@@ -181,7 +225,9 @@ export function HudAccountMenu({
                   ? <span className="tag">进入中…</span>
                   : current
                     ? <span className="tag green">已选择</span>
-                    : <span aria-hidden="true">›</span>}
+                    : armedSwitchFor === workspace.workspaceId
+                      ? <span className="tag red">再点确认</span>
+                      : <span aria-hidden="true">›</span>}
               </button>
             );
           })}
@@ -204,6 +250,27 @@ export function HudAccountMenu({
               disabled={busy !== null || !inviteCode.trim()}
             >
               {busy === "join" ? "加入中…" : "加入"}
+            </button>
+          </form>
+          <form
+            className="invite-line"
+            onSubmit={(event) => { event.preventDefault(); void create(); }}
+          >
+            <input
+              value={newSpaceName}
+              maxLength={50}
+              autoComplete="off"
+              spellCheck={false}
+              onChange={(event) => { setNewSpaceName(event.target.value); setMessage(null); }}
+              placeholder="新协作空间名称"
+              aria-label="新协作空间名称"
+            />
+            <button
+              type="submit"
+              className="button"
+              disabled={busy !== null || !newSpaceName.trim()}
+            >
+              {busy === "create" ? "创建中…" : "新建"}
             </button>
           </form>
           {status ? <p className="sub" role="status">{status}</p> : null}

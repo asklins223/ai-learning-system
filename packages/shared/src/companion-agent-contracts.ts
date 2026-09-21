@@ -1,9 +1,12 @@
 /**
  * Companion Agent v1 contracts.
  *
- * These contracts deliberately describe capabilities, not executable code. A
- * skill can select registered tools and add bounded policy text, but it cannot
- * introduce a new transport, arbitrary code, or an unbounded operation.
+ * 这些合同描述的是**能力**，不是可执行代码：一个工具能声明自己的参数、风险档和
+ * 是否需要确认，但不能带来新传输、任意代码或无界操作。
+ *
+ * 曾经还有一层"技能"（选工具 + 附加策略文本）。它现在整条删除了：工具面每轮全给、
+ * 只按权限档过滤（方案 29 §4.1），而"按关键词挑一个技能"正是 90.7% 轮次拿不到
+ * 工具的原因。留下一个不参与决策的层，比删掉它更容易骗到下一个读代码的人。
  */
 
 import { z } from "zod";
@@ -62,21 +65,15 @@ export const companionAgentStepStatusSchema = z.enum([
 export type CompanionAgentStepStatus = z.infer<typeof companionAgentStepStatusSchema>;
 
 /**
- * Persisted execution mode of a companion run (plan §6 "Agent 执行模式").
+ * 伴星 agent 的用户设置。只剩权限档。
  *
- * - `hybrid`: a Skill was selected, so the run may loop over its tools.
- * - `single_step`: no Skill matched (plain chitchat) — one tools-less model call.
- *
- * Recorded so the run row states what actually happened instead of relying on a
- * column default that no reader could distinguish.
+ * 这里曾有 `enabledSkillIds`（勾哪些技能）。技能层不再参与工具面的发现
+ * （方案 29 §4.1：每轮全给、只按权限过滤），那个开关就变成**界面上能勾、
+ * 勾了没有任何效果**的东西——留着比删掉更坏，删。
  */
-export const companionAgentModeSchema = z.enum(["hybrid", "single_step"]);
-export type CompanionAgentMode = z.infer<typeof companionAgentModeSchema>;
-
 export const companionAgentSettingsV1Schema = z.object({
   version: z.literal(COMPANION_AGENT_CONTRACT_VERSION),
   permissionLevel: companionAgentPermissionLevelSchema,
-  enabledSkillIds: z.array(z.string().regex(/^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$/)).max(32),
 }).strict();
 export type CompanionAgentSettingsV1 = z.infer<typeof companionAgentSettingsV1Schema>;
 
@@ -86,7 +83,6 @@ export const companionAgentToolDefinitionV1Schema = z.object({
   toolVersion: z.string().min(1).max(40),
   description: z.string().min(1).max(800),
   parameters: z.record(z.unknown()),
-  skillIds: z.array(z.string()).min(1).max(16),
   riskClass: companionAgentRiskClassSchema,
   requiresConfirmation: z.boolean(),
   maxInputChars: z.number().int().positive().max(20_000),
@@ -94,35 +90,6 @@ export const companionAgentToolDefinitionV1Schema = z.object({
 }).strict();
 export type CompanionAgentToolDefinitionV1 = z.infer<
   typeof companionAgentToolDefinitionV1Schema
->;
-
-export const companionAgentSkillManifestV1Schema = z.object({
-  version: z.literal(COMPANION_AGENT_CONTRACT_VERSION),
-  id: z.string().regex(/^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$/).max(80),
-  skillVersion: z.string().min(1).max(40),
-  name: z.string().min(1).max(80),
-  description: z.string().min(1).max(400),
-  triggerHints: z.array(z.string().min(1).max(120)).max(16),
-  systemPrompt: z.string().min(1).max(12_000),
-  toolNames: z.array(z.string()).max(64),
-  maxSteps: z.number().int().positive().max(COMPANION_AGENT_MAX_STEPS),
-  outputMaxChars: z.number().int().positive().max(20_000),
-}).strict();
-export type CompanionAgentSkillManifestV1 = z.infer<
-  typeof companionAgentSkillManifestV1Schema
->;
-
-/** Safe projection returned to clients; system prompt and schemas stay server-side. */
-export const companionAgentSkillSummaryV1Schema = z.object({
-  version: z.literal(COMPANION_AGENT_CONTRACT_VERSION),
-  id: z.string(),
-  skillVersion: z.string(),
-  name: z.string(),
-  description: z.string(),
-  enabled: z.boolean(),
-}).strict();
-export type CompanionAgentSkillSummaryV1 = z.infer<
-  typeof companionAgentSkillSummaryV1Schema
 >;
 
 export const companionAgentToolEventV1Schema = z.object({
@@ -145,14 +112,6 @@ export const companionAgentToolEventV1Schema = z.object({
   autoExecute: z.boolean().optional(),
 }).strict();
 export type CompanionAgentToolEventV1 = z.infer<typeof companionAgentToolEventV1Schema>;
-
-export const companionAgentSkillEventV1Schema = z.object({
-  skillId: z.string().min(1).max(80),
-  skillVersion: z.string().min(1).max(40),
-  name: z.string().min(1).max(80),
-  status: z.enum(["selected", "completed"]),
-}).strict();
-export type CompanionAgentSkillEventV1 = z.infer<typeof companionAgentSkillEventV1Schema>;
 
 export const companionAgentBudgetSnapshotV1Schema = z.object({
   maxSteps: z.number().int().positive().max(COMPANION_AGENT_MAX_STEPS),

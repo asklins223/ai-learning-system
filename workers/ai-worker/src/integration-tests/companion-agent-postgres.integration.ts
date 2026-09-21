@@ -2,8 +2,10 @@
  * Companion Agent 运行时实库集成测试（方案《将 AI 伴星升级为可扩展 Agent》§1–§6）。
  *
  * 覆盖 Agent loop 的真实 DB 编排（provider 用 mock，不产生外部模型调用）：
- * - 无 Skill → 单步、工具列表为空、agent_mode='single_step'；
- * - 有 Skill → 有限工具循环、审计行落库、agent_mode='hybrid'、SSE 事件符合共享合同；
+ * - 模型不调工具 → 单步、零工具审计行；
+ * - 模型调工具 → 有限循环、审计行落库、`agent.tool` SSE 事件符合共享合同；
+ *   （判据是 `tool_call_count`，不是曾经那个"选中了哪个技能/哪种执行模式"的读数——
+ *    技能层已整条删除，工具面每轮全给。）
  * - 确认续跑：run 停在 waiting_for_confirmation 并冻结 proposal → 带 proposalId 重新入队 →
  *   loadContinuation 回填结果 → 同一次 run 产出最终答复（不做新用户对话）；
  * - 执行预算耗尽：agent_elapsed_ms 已达 120s → 直接终结，不再调用 provider；
@@ -96,7 +98,7 @@ async function seedAgentRun(
                      ${"a".repeat(64)}, ${"b".repeat(64)},
                      ${opts.runAccountEpoch ?? 0}, ${opts.agentElapsedMs ?? 0})`;
     await tx`UPDATE companion_conversations SET next_message_seq = 3, next_event_seq = 100 WHERE id = ${cid}`;
-    // account state 决定 agent_settings(permissionLevel/enabledSkillIds) 与 epoch
+    // account state 决定 agent_settings(permissionLevel) 与 epoch
     await tx`INSERT INTO user_companion_account_state (user_id, epoch, global_enabled)
              VALUES (${uid}, ${opts.accountEpoch ?? 0}, true)
              ON CONFLICT (user_id) DO UPDATE SET epoch = EXCLUDED.epoch, global_enabled = true`;
@@ -137,7 +139,7 @@ async function readState(ws: string, uid: string, f: Fixture) {
   return sql.begin(async (tx) => {
     await tx`SELECT set_config('app.workspace_id', ${ws}, true)`;
     await tx`SELECT set_config('app.user_id', ${uid}, true)`;
-    const run = await tx`SELECT status, agent_mode, active_skill_id, step_count, tool_call_count,
+    const run = await tx`SELECT status, permission_level, step_count, tool_call_count,
                                 agent_elapsed_ms, waiting_proposal_id, last_event_seq
                          FROM companion_turn_runs WHERE id = ${f.runId}`;
     const assistant = await tx`SELECT id FROM companion_messages
@@ -148,9 +150,9 @@ async function readState(ws: string, uid: string, f: Fixture) {
                             WHERE conversation_id = ${f.conversationId} ORDER BY seq`;
     const toolCalls = await tx`SELECT tool_call_id, name, status, result_safe_summary
                                FROM companion_agent_tool_calls WHERE run_id = ${f.runId}`;
-    const steps = await tx`SELECT step_no, kind, status, skill_id, request_hash
+    const steps = await tx`SELECT step_no, kind, status, request_hash
                            FROM companion_agent_steps WHERE run_id = ${f.runId} ORDER BY step_no`;
-    const proposals = await tx`SELECT id, status, origin, risk_class, agent_skill_id, agent_tool_call_id,
+    const proposals = await tx`SELECT id, status, origin, risk_class, agent_tool_call_id,
                                       expires_at > now() AS live
                                FROM companion_action_proposals WHERE conversation_id = ${f.conversationId}`;
     return {
@@ -164,7 +166,7 @@ async function readState(ws: string, uid: string, f: Fixture) {
   });
 }
 
-test("Agent：无 Skill 的普通闲聊走单步、工具列表为空、不产生工具审计行", async () => {
+test("Agent：闲聊轮次正常收尾——有终态答复、不乱冻结确认", async () => {
   const { workspaceId, userId } = await seedBase();
   const f = await seedAgentRun(workspaceId, userId, { userText: "你好呀" });
   try {
@@ -172,15 +174,20 @@ test("Agent：无 Skill 的普通闲聊走单步、工具列表为空、不产�
     const s = await readState(workspaceId, userId, f);
 
     assert.equal(s.run.status, "succeeded");
-    assert.equal(s.run.agent_mode, "single_step", "无 Skill → 单步执行模式");
-    assert.equal(s.run.active_skill_id, null, "未选中 Skill");
-    assert.equal(s.run.tool_call_count, 0, "普通闲聊不得调用工具");
-    assert.equal(s.toolCalls.length, 0, "零工具审计行");
+    // 这里**不再断言"闲聊不该调工具"**：工具面每轮全给（方案 29 §4.1），
+    // 调不调是模型的选择。把"零工具"当不变量会反向逼系统去做无用调用——
+    // 那正是 §8 作废"零工具率"这个指标时说过的同一件事。
+    // 仍然要钉住的是：审计行数与 run 上的计数一致，且一句"你好呀"不许冻结任何确认。
+    assert.equal(s.toolCalls.length, Number(s.run.tool_call_count), "工具审计行数必须等于 run 计数");
+    assert.equal(s.proposals.length, 0, "闲聊不得冻结确认提案");
     assert.equal(s.assistant.length, 1, "产出 assistant 答复");
     const types = s.events.map((e) => (e as { type: string }).type);
-    assert.ok(types.includes("assistant.final"));
-    assert.ok(!types.includes("agent.skill"), "未选 Skill 时不应有 agent.skill 事件");
-    assert.ok(!types.includes("agent.tool"), "未调工具时不应有 agent.tool 事件");
+    assert.ok(types.includes("assistant.final"), "闲聊也必须给出终态答复");
+    // 有工具调用时才有 agent.tool 帧，且帧数与审计行数同源（不各自数一套）。
+    const toolEventCalls = new Set(s.events
+      .filter((e) => (e as { type: string }).type === "agent.tool")
+      .map((e) => (e.payload as { tool?: { toolCallId?: string } })?.tool?.toolCallId));
+    assert.equal(toolEventCalls.size, s.toolCalls.length, "工具事件覆盖的调用必须与审计行同一批");
     assert.ok(s.steps.length >= 1, "记录 model 步骤");
     assert.equal(s.steps[0].kind, "model");
     assert.ok(s.steps[0].request_hash, "步骤记录 request hash");
@@ -189,31 +196,29 @@ test("Agent：无 Skill 的普通闲聊走单步、工具列表为空、不产�
   }
 });
 
-test("Agent：Skill 触发工具循环，审计行与 agent.* SSE 事件符合共享合同", async () => {
+test("Agent：工具循环的审计行与 agent.tool SSE 事件符合共享合同", async () => {
   const { workspaceId, userId } = await seedBase();
-  // 触发词命中 learning-context（"进度"），该 Skill 含 companion_read_context
+  // mock provider 会被指示调用 companion_read_context；工具面每轮全给，
+  // 不再有"要命中哪个技能才拿得到它"这一步。
   const f = await seedAgentRun(workspaceId, userId, { userText: "看一下我的学习进度" });
   try {
     await invoke(workspaceId, userId, { runId: f.runId });
     const s = await readState(workspaceId, userId, f);
 
     assert.equal(s.run.status, "succeeded");
-    assert.equal(s.run.agent_mode, "hybrid", "选中 Skill → 可循环的 hybrid 模式");
-    assert.equal(s.run.active_skill_id, "learning-context");
+    assert.ok(s.run.step_count >= 2, "工具之后的回合才算一步完整的循环");
     assert.ok(s.run.tool_call_count >= 1, "至少执行一次工具");
     assert.ok(s.toolCalls.length >= 1, "工具调用写入审计表");
     assert.equal(s.toolCalls[0].status, "succeeded");
     assert.equal(s.toolCalls[0].name, "companion_read_context");
     assert.equal(s.assistant.length, 1, "循环结束后产出最终答复");
 
-    const skillEvents = s.events.filter((e) => (e as { type: string }).type === "agent.skill");
     const toolEvents = s.events.filter((e) => (e as { type: string }).type === "agent.tool");
-    assert.ok(skillEvents.length >= 2, "agent.skill 至少有 selected + completed");
     assert.ok(toolEvents.length >= 2, "agent.tool 至少有 requested + succeeded");
 
     // SSE 合同：每个 agent.* 事件都必须能被共享（strict）schema 解析。
     // 这里补齐 envelope 字段后校验 payload，等于端到端验证 §6 的事件合同。
-    for (const event of [...skillEvents, ...toolEvents]) {
+    for (const event of toolEvents) {
       const parsed = companionStreamEventV1Schema.safeParse({
         version: 1,
         eventId: `${event.conversation_id}:${event.seq}`,
@@ -248,29 +253,28 @@ test("Agent 确认续跑：带 proposalId 重新入队 → 同一次 run 回填�
       await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
       await tx`SELECT set_config('app.user_id', ${userId}, true)`;
       await tx`INSERT INTO companion_agent_steps
-                 (id, workspace_id, user_id, conversation_id, run_id, step_no, kind, status, skill_id)
-               VALUES (${stepId}, ${workspaceId}, ${userId}, ${f.conversationId}, ${f.runId}, 1, 'model', 'waiting', 'learning-context')`;
+                 (id, workspace_id, user_id, conversation_id, run_id, step_no, kind, status)
+               VALUES (${stepId}, ${workspaceId}, ${userId}, ${f.conversationId}, ${f.runId}, 1, 'model', 'waiting')`;
       await tx`INSERT INTO companion_agent_tool_calls
                  (id, workspace_id, user_id, conversation_id, run_id, step_id, tool_call_id, name,
-                  tool_version, skill_id, arguments, arguments_sha256, risk_class, status, proposal_id,
+                  tool_version, arguments, arguments_sha256, risk_class, status, proposal_id,
                   result_safe_summary)
                VALUES (${randomUUID()}, ${workspaceId}, ${userId}, ${f.conversationId}, ${f.runId}, ${stepId},
-                       ${toolCallId}, 'companion_start_learning', '1.0.0', 'learning-planner',
+                       ${toolCallId}, 'companion_start_learning', '1.0.0',
                        '{}'::jsonb, ${"c".repeat(64)}, 'consequential', 'succeeded', ${proposalId},
                        '已开始学习')`;
       await tx`INSERT INTO companion_action_proposals
                  (id, workspace_id, user_id, conversation_id, source_message_id, source_generation,
                   payload, payload_sha256, title, target_summary, impact_summary, status, decision,
                   decided_at, idempotency_key_hash, expires_at, origin, agent_run_id, agent_tool_call_id,
-                  agent_skill_id, agent_tool_version, risk_class)
+                  agent_tool_version, risk_class)
                VALUES (${proposalId}, ${workspaceId}, ${userId}, ${f.conversationId}, ${f.userMessageId}, 1,
                        ${tx.json({ kind: "start_learning_run" })}, ${"d".repeat(64)},
                        '开始学习', '开始学习', '会改变学习状态', 'succeeded', 'confirm', now(),
                        ${"e".repeat(64)}, now() + interval '5 minutes', 'agent_tool', ${f.runId},
-                       ${toolCallId}, 'learning-planner', '1.0.0', 'consequential')`;
+                       ${toolCallId}, '1.0.0', 'consequential')`;
       await tx`UPDATE companion_turn_runs
                SET status = 'waiting_for_confirmation', waiting_proposal_id = ${proposalId},
-                   active_skill_id = 'learning-context', active_skill_version = '1.0.0',
                    permission_level = 'guided', step_count = 1, tool_call_count = 1
                WHERE id = ${f.runId}`;
     });
@@ -282,7 +286,7 @@ test("Agent 确认续跑：带 proposalId 重新入队 → 同一次 run 回填�
     assert.equal(s.run.status, "succeeded", "续跑必须把同一次 run 带到终态");
     assert.equal(s.run.waiting_proposal_id, null, "终态清空挂起指针");
     assert.equal(s.assistant.length, 1, "续跑产出 assistant 答复");
-    assert.equal(s.run.active_skill_id, "learning-context", "续跑沿用原 Skill，不重新选择");
+    assert.equal(s.run.permission_level, "guided", "续跑沿用本轮冻结的权限档，不重读设置");
     assert.ok(Number(s.run.step_count) >= 2, "步骤计数在原基础上继续累计，不重置");
     const types = s.events.map((e) => (e as { type: string }).type);
     assert.ok(types.includes("assistant.final"), "续跑以 assistant.final 结束");
@@ -308,29 +312,28 @@ async function seedConfirmedProposal(
     await tx`SELECT set_config('app.workspace_id', ${ws}, true)`;
     await tx`SELECT set_config('app.user_id', ${uid}, true)`;
     await tx`INSERT INTO companion_agent_steps
-               (id, workspace_id, user_id, conversation_id, run_id, step_no, kind, status, skill_id)
-             VALUES (${stepId}, ${ws}, ${uid}, ${f.conversationId}, ${f.runId}, 1, 'model', 'waiting', 'learning-context')`;
+               (id, workspace_id, user_id, conversation_id, run_id, step_no, kind, status)
+             VALUES (${stepId}, ${ws}, ${uid}, ${f.conversationId}, ${f.runId}, 1, 'model', 'waiting')`;
     await tx`INSERT INTO companion_agent_tool_calls
                (id, workspace_id, user_id, conversation_id, run_id, step_id, tool_call_id, name,
-                tool_version, skill_id, arguments, arguments_sha256, risk_class, status, proposal_id,
+                tool_version, arguments, arguments_sha256, risk_class, status, proposal_id,
                 result_safe_summary, reasoning_handles)
              VALUES (${randomUUID()}, ${ws}, ${uid}, ${f.conversationId}, ${f.runId}, ${stepId},
-                     ${toolCallId}, 'companion_start_learning', '1.0.0', 'learning-planner',
+                     ${toolCallId}, 'companion_start_learning', '1.0.0',
                      '{}'::jsonb, ${"c".repeat(64)}, 'consequential', 'succeeded', ${proposalId},
                      '已开始学习', ${reasoningHandles === null ? null : tx.json(reasoningHandles as postgres.JSONValue)}::jsonb)`;
     await tx`INSERT INTO companion_action_proposals
                (id, workspace_id, user_id, conversation_id, source_message_id, source_generation,
                 payload, payload_sha256, title, target_summary, impact_summary, status, decision,
                 decided_at, idempotency_key_hash, expires_at, origin, agent_run_id, agent_tool_call_id,
-                agent_skill_id, agent_tool_version, risk_class)
+                agent_tool_version, risk_class)
              VALUES (${proposalId}, ${ws}, ${uid}, ${f.conversationId}, ${f.userMessageId}, 1,
                      ${tx.json({ kind: "start_learning_run" })}, ${"d".repeat(64)},
                      '开始学习', '开始学习', '会改变学习状态', 'succeeded', 'confirm', now(),
                      ${"e".repeat(64)}, now() + interval '5 minutes', 'agent_tool', ${f.runId},
-                     ${toolCallId}, 'learning-planner', '1.0.0', 'consequential')`;
+                     ${toolCallId}, '1.0.0', 'consequential')`;
     await tx`UPDATE companion_turn_runs
              SET status = 'waiting_for_confirmation', waiting_proposal_id = ${proposalId},
-                 active_skill_id = 'learning-context', active_skill_version = '1.0.0',
                  permission_level = 'guided', step_count = 1, tool_call_count = 1
              WHERE id = ${f.runId}`;
   });
@@ -360,6 +363,7 @@ function continuationEvent(ws: string, uid: string, f: Fixture) {
       userText: "",
       recentMessages: [],
       activeMemories: [],
+      hereAndNow: null,
       petProfile: null,
       nextMessageSeq: 3,
       nextEventSeq: 100,
@@ -438,9 +442,9 @@ test("Agent 工具调用：句柄经真实写入 SQL 落库，形状与读回一
       await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
       await tx`SELECT set_config('app.user_id', ${userId}, true)`;
       await tx`INSERT INTO companion_agent_steps
-                 (id, workspace_id, user_id, conversation_id, run_id, step_no, kind, status, skill_id)
+                 (id, workspace_id, user_id, conversation_id, run_id, step_no, kind, status)
                VALUES (${stepId}, ${workspaceId}, ${userId}, ${f.conversationId}, ${f.runId}, 1,
-                       'model', 'running', 'learning-planner')`;
+                       'model', 'running')`;
     });
     const definition = getCompanionAgentTool("companion_start_learning");
     assert.ok(definition, "工具定义必须存在");
@@ -450,7 +454,6 @@ test("Agent 工具调用：句柄经真实写入 SQL 落库，形状与读回一
       continuationEvent(workspaceId, userId, f),
       stepId,
       definition,
-      "learning-planner",
       { id: "call_rt_1", arguments: {} },
       "f".repeat(64),
       handles,
@@ -486,7 +489,10 @@ test("Agent 执行预算：agent_elapsed_ms 已达 120s → 直接终结且不�
     );
     const s = await readState(workspaceId, userId, f);
     assert.equal(s.run.status, "failed", "预算耗尽必须失败关闭");
-    assert.equal(s.assistant.length, 0, "不得产出答复");
+    // 被拒绝的轮次会留下**一条失败兜底答复**（fail-open：不能让用户面对空白），
+    // 所以这里钉的是"没有终态答复事件"，而不是"没有 assistant 行"。
+    assert.ok(!s.events.some((e) => (e as { type: string }).type === "assistant.final"),
+      "被拒绝的执行不得下发终态答复");
     assert.equal(s.toolCalls.length, 0, "不得执行任何工具");
     assert.equal(s.steps.length, 0, "不得开始新步骤");
   } finally {
@@ -507,7 +513,10 @@ test("Agent epoch fence：run 冻结的 epoch 与当前不一致 → 拒绝执�
       /epoch is stale or globally disabled/,
     );
     const s = await readState(workspaceId, userId, f);
-    assert.equal(s.assistant.length, 0, "epoch 失效时不得产出答复");
+    // 被拒绝的轮次会留下**一条失败兜底答复**（fail-open：不能让用户面对空白），
+    // 所以这里钉的是"没有终态答复事件"，而不是"没有 assistant 行"。
+    assert.ok(!s.events.some((e) => (e as { type: string }).type === "assistant.final"),
+      "被拒绝的执行不得下发终态答复");
     assert.equal(s.toolCalls.length, 0, "epoch 失效时不得执行工具");
     assert.equal(s.proposals.length, 0, "epoch 失效时不得冻结确认");
   } finally {

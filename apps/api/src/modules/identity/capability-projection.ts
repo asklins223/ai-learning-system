@@ -80,7 +80,7 @@ export function buildDesktopCapabilityProjection(input: CapabilityProjectionInpu
       actionCapabilities[capability] = "allowed";
     }
     if (cardGenerationEnabled) {
-      for (const capability of ["card_generation.start", "card_generation.review", "card_generation.reveal", "card_generation.activate", "card_generation.cancel", "card_generation.close"] as const) {
+      for (const capability of ["card_generation.start", "card_generation.review", "card_generation.reveal", "card_generation.activate", "card_generation.cancel", "card_generation.close", "card_generation.retry"] as const) {
         actionCapabilities[capability] = "allowed";
       }
     }

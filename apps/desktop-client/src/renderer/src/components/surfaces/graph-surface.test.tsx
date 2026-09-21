@@ -259,7 +259,7 @@ describe("GraphSurface · Web 成熟版 Understanding Universe 移植", () => {
     stubGateway(snapshot({ truncated: true }));
     render(<GraphSurface />);
 
-    expect(await screen.findByText(/当前星图已达到本次载入上限/)).toBeTruthy();
+    expect(await screen.findByText(/这张星图已经装到本次的上限/)).toBeTruthy();
   });
 
   it("缩放读数不进入无障碍树，避免缩放过程被逐帧播报", async () => {

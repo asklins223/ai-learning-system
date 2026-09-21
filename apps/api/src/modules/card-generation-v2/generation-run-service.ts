@@ -34,6 +34,7 @@ import {
   CardGenerationV2ServiceError,
   checkSourceOutdated,
   insertEvent,
+  readGenerationProgressV2,
   serializeRunPublic,
   serializeCandidatePublic,
   type RunContext,
@@ -161,6 +162,47 @@ export async function createGenerationRunV2(
     });
     if (!note) throw new CardGenerationV2ServiceError("note_not_found", 404, "笔记不存在");
 
+    // 2026-09-20（实走复盘 #5）：一篇笔记同时只允许一批在制的学习卡。
+    // 此前配额只落在 workspace 维度（在途数 + 日次数），同一篇笔记可以被反复
+    // 点「生成学习卡」，每点一次就多一批候选卡。
+    const noteInFlight = await tx
+      .select({ id: cardGenerationRunsV2.id, status: cardGenerationRunsV2.status, errorCode: cardGenerationRunsV2.errorCode })
+      .from(cardGenerationRunsV2)
+      .where(and(
+        eq(cardGenerationRunsV2.workspaceId, ctx.workspaceId),
+        eq(cardGenerationRunsV2.noteId, noteId),
+        inArray(cardGenerationRunsV2.status, [...ACTIVE_GENERATION_RUN_STATUSES]),
+      ))
+      .limit(1);
+    // 但"失败到没法就地重试"的那一批不能把笔记永久锁死：needs_attention 且失败原因
+    // 不是质量门禁时，retry 端点自己会拒绝（`not_retryable`），cancel 也判
+    // `invalid_state`，于是只剩"重新生成"这一条路——而这条守卫正是拦它的。
+    // 判据与 retry 端点保持同一句话：只有 quality_gate_failed 的失败批次仍然算在制。
+    const deadBatch = noteInFlight[0]?.status === "needs_attention"
+      && noteInFlight[0]?.errorCode !== "quality_gate_failed";
+    if (noteInFlight.length > 0 && !deadBatch) {
+      throw new CardGenerationV2ServiceError(
+        "note_generation_in_flight",
+        409,
+        "这篇笔记已经有一批学习卡在生成或等待审核，请先处理完那一批",
+      );
+    }
+
+    /**
+     * 本次生成替代的上一个批次。`supersedes_run_id` 列早已存在但生产代码从未
+     * 写入，跨 run 的旧候选批次因此永远不会被废弃，列表里新旧两批混在一起。
+     */
+    const previousActivatedRun = await tx
+      .select({ id: cardGenerationRunsV2.id })
+      .from(cardGenerationRunsV2)
+      .where(and(
+        eq(cardGenerationRunsV2.workspaceId, ctx.workspaceId),
+        eq(cardGenerationRunsV2.noteId, noteId),
+        eq(cardGenerationRunsV2.status, "activated"),
+      ))
+      .orderBy(desc(cardGenerationRunsV2.updatedAt))
+      .limit(1);
+
     const blocks = await tx.query.noteBlocks.findMany({
       where: eq(noteBlocks.versionId, body.noteVersionId),
       orderBy: (b, { asc }) => [asc(b.ordinal)],
@@ -216,6 +258,9 @@ export async function createGenerationRunV2(
         // （ordered_steps/mapping/comparison 此前从未被教过，导致排序/关系练习题
         // 零生成）+ preferredTaskIntents 按知识形态选择（此前模板硬编码 recall）+
         // rubric 覆盖整组答案单元。
+        // 2026-09-20：v21 —— 题型（strategy）改由 planner 在整批目标上确定性分配，
+        // author 提示按分配到的题型出模板与示例（此前模板与示例都写死 recall，且用户
+        // 勾选的 preferredStrategies 从未进入提示，导致整批卡全是同一题型）。
         stageRuntimes: [
           {
             stage: "planner" as const,
@@ -223,7 +268,7 @@ export async function createGenerationRunV2(
             modelSnapshot: "v1",
             deploymentId: "local",
             capabilityFingerprint: "basic",
-            promptVersion: "v20",
+            promptVersion: "v22",
             sampling: { temperature: 0 },
             outputSchemaVersion: "v2",
           },
@@ -233,7 +278,7 @@ export async function createGenerationRunV2(
             modelSnapshot: "v1",
             deploymentId: "local",
             capabilityFingerprint: "basic",
-            promptVersion: "v20",
+            promptVersion: "v22",
             sampling: { temperature: 0 },
             outputSchemaVersion: "v2",
           },
@@ -243,7 +288,7 @@ export async function createGenerationRunV2(
             modelSnapshot: "v1",
             deploymentId: "local",
             capabilityFingerprint: "basic",
-            promptVersion: "v20",
+            promptVersion: "v22",
             sampling: { temperature: 0 },
             outputSchemaVersion: "v2",
           },
@@ -253,7 +298,7 @@ export async function createGenerationRunV2(
             modelSnapshot: "v1",
             deploymentId: "local",
             capabilityFingerprint: "basic",
-            promptVersion: "v20",
+            promptVersion: "v22",
             sampling: { temperature: 0 },
             outputSchemaVersion: "v2",
           },
@@ -300,6 +345,7 @@ export async function createGenerationRunV2(
       sourceSnapshotHash, sourceContentHash,
       blockManifestHash, assetManifestHash, scopeManifestHash,
       currentPlanVersion: 0, reviewDraftRevision: 1,
+      supersedesRunId: previousActivatedRun[0]?.id ?? null,
       semanticSpec, inputSnapshot,
     });
 
@@ -382,7 +428,12 @@ export async function getGenerationRunV2(ctx: RunContext, runId: string) {
       .where(and(eq(cardGenerationRunsV2.id, runId), eq(cardGenerationRunsV2.workspaceId, ctx.workspaceId)))
       .limit(1);
     if (rows.length === 0) return null;
-    return serializeRunPublic(rows[0], tx);
+    // 进度只在单 run 读取时聚合：这是生成工作台与笔记页订阅后重读的那一条，
+    // 列表接口（active runs）不带，避免每次房间刷新都多打一遍候选表。
+    const progress = await readGenerationProgressV2(
+      tx, ctx.workspaceId, runId, rows[0].currentPlanVersion,
+    );
+    return serializeRunPublic(rows[0], tx, progress);
   });
 }
 

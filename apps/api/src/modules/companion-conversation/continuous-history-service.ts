@@ -75,8 +75,11 @@ type HistoryRow = {
   kind: "text" | "voice_transcript" | "proactive" | "action" | "result" | "error" | "cancelled";
   blocks: unknown[];
   run_id: string | null;
-  created_at: Date;
-  edited_at: Date | null;
+  // postgres-js 对 raw execute 不把 timestamptz 解析成 Date（返回
+  // "2026-08-20 01:33:39.135727+00" 这类字符串），时间一律在 SQL 层
+  // to_char 成 ISO 后再交给 item()。
+  created_at_iso: string;
+  edited_at_iso: string | null;
   cursor_created_at: string;
 };
 
@@ -88,8 +91,8 @@ function item(row: HistoryRow) {
     kind: row.kind,
     blocks: row.blocks,
     runId: row.run_id,
-    createdAt: row.created_at.toISOString(),
-    editedAt: row.edited_at?.toISOString() ?? null,
+    createdAt: row.created_at_iso,
+    editedAt: row.edited_at_iso,
   };
 }
 
@@ -103,7 +106,9 @@ export async function listContinuousHistory(args: {
   if (args.before && !cursor) return { invalidCursor: true as const };
   const page = await withWorkspaceTransaction(args, async (tx) => {
     const rows = await tx.execute<HistoryRow>(sql`
-      SELECT m.id, m.role, m.kind, m.blocks, m.run_id, m.created_at, m.edited_at,
+      SELECT m.id, m.role, m.kind, m.blocks, m.run_id,
+             to_char(m.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at_iso,
+             to_char(m.edited_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS edited_at_iso,
              to_char(m.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_created_at
       FROM companion_messages m
       JOIN companion_conversations c ON c.id = m.conversation_id
@@ -148,7 +153,9 @@ export async function searchContinuousHistory(args: {
   const keyword = `%${args.query}%`;
   return withWorkspaceTransaction(args, async (tx) => {
     const rows = await tx.execute<HistoryRow>(sql`
-      SELECT m.id, m.role, m.kind, m.blocks, m.run_id, m.created_at, m.edited_at,
+      SELECT m.id, m.role, m.kind, m.blocks, m.run_id,
+             to_char(m.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at_iso,
+             to_char(m.edited_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS edited_at_iso,
              to_char(m.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_created_at
       FROM companion_messages m
       JOIN companion_conversations c ON c.id = m.conversation_id

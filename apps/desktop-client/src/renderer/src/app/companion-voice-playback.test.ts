@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CompanionVoiceSpeakSegmentRequestV2 } from "@ailearn/shared/companion-voice-contracts";
 import {
+  COMPANION_SPEECH_FIRST_AUDIO_DEADLINE_MS,
   beginCompanionSpeechLine,
   resetCompanionVoicePlayback,
   setCompanionVoiceHost,
@@ -36,9 +37,13 @@ class FakeHost implements CompanionVoiceHost {
     return this.audibleValue;
   }
 
+  /** 命中即"永远不返回"，用来触发段级截止（方案 29 §4.9）。 */
+  hangFor = new Set<string>();
+
   synthesize(text: string): Promise<AudioBuffer> {
     this.synthesized.push(text);
     if (this.failFor.has(text)) return Promise.reject(new Error("合成失败"));
+    if (this.hangFor.has(text)) return new Promise<AudioBuffer>(() => undefined);
     return Promise.resolve(buffer(text));
   }
 
@@ -68,6 +73,22 @@ class FakeHost implements CompanionVoiceHost {
   reportProgress(fraction: number): void {
     this.progressHandlers.at(-1)?.(fraction);
   }
+}
+
+/**
+ * 等真实时间里的某个条件成立。
+ *
+ * 失败段的合成现在带退避重试（250ms、500ms），`setTimeout(0)` 的 flush 跨不过去；
+ * 断言"跳过坏段、后面的照常念"必须用真实等待，且**不写死重试次数**——
+ * 重试策略以后再调，这条测试不该跟着一起改。
+ */
+async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("waitUntil 超时");
 }
 
 /** 让所有排队的微任务跑完。 */
@@ -364,11 +385,61 @@ describe("beginCompanionSpeechLine", () => {
     await flush();
 
     host.finishSegment();
-    await flush();
+    await waitUntil(() => host.played.includes("第三句。"));
     host.finishSegment();
     await flush();
 
     expect(host.played).toEqual(["第一句。", "第三句。"]);
     expect(events.at(-1)).toMatchObject({ phase: "finished", planId: session.planId });
+  });
+
+  it("首段合成超时只跳过那一段，不再把整轮音频作废（方案 29 §4.9）", async () => {
+    // 回归护栏：旧行为是首段截止一到就 `generation += 1` + `host.stop()` +
+    // phase:"text_only"，于是"文字显示出来但语音根本不读"、且当轮不可恢复。
+    // 现在超时只丢那一段，后面的照常念，整轮以 finished 收尾。
+    vi.useFakeTimers();
+    try {
+      const host = new FakeHost();
+      host.hangFor.add("第一句。");
+      setCompanionVoiceHost(host);
+      const events = collect();
+
+      const session = beginCompanionSpeechLine();
+      session.feed("第一句。");
+      session.feed("第二句。");
+      session.finish("");
+
+      // 推进到首段截止之后；重试的退避落在同一段预算内，不会突破 deadline。
+      await vi.advanceTimersByTimeAsync(COMPANION_SPEECH_FIRST_AUDIO_DEADLINE_MS + 50);
+      await vi.runAllTimersAsync();
+
+      expect(host.played).toEqual(["第二句。"]);
+      expect(events.some((e) => e.phase === "text_only")).toBe(false);
+      expect(events.some((e) => e.phase === "speaking")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("整轮一段都没播出来时才降级 text_only（不静默无声）", async () => {
+    vi.useFakeTimers();
+    try {
+      const host = new FakeHost();
+      host.hangFor.add("只有一句。");
+      setCompanionVoiceHost(host);
+      const events = collect();
+
+      const session = beginCompanionSpeechLine();
+      session.feed("只有一句。");
+      session.finish("");
+
+      await vi.advanceTimersByTimeAsync(COMPANION_SPEECH_FIRST_AUDIO_DEADLINE_MS + 50);
+      await vi.runAllTimersAsync();
+
+      expect(host.played).toEqual([]);
+      expect(events.at(-1)).toMatchObject({ phase: "text_only" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

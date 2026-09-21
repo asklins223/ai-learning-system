@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { SpaceSharingNotice } from "../space-sharing-notice";
 import type { DesktopNoteListItem, DesktopNoteListPage, DesktopSourceDetail } from "@ailearn/shared/desktop-surface-contracts";
 import type { NoteDetailV1 } from "@ailearn/shared/note-projection-contracts";
 import { useRoomStore } from "../../app/room-store";
@@ -15,8 +16,10 @@ import {
   daysSince,
   formatRelative,
   noteBodyText,
+  parseImageBlock,
   useSurfaceProjection,
 } from "./surface-data";
+import { useSourceImage } from "./source-image";
 
 /**
  * Page 07 has two views over the same records, because a shelf and a library
@@ -72,6 +75,7 @@ type NoteShelfProjection = {
   /** How many notes the trash holds, so an empty shelf can still offer it. */
   readonly trashTotal: number;
   readonly createAllowed: boolean;
+  readonly saveAllowed: boolean;
   readonly deleteAllowed: boolean;
   readonly restoreAllowed: boolean;
 };
@@ -151,6 +155,9 @@ export function NoteLibrarySurface() {
       source,
       trashTotal: unwrapGatewayResult(trashResponse).total,
       createAllowed: capabilities.actionCapabilities["note.create"] === "allowed",
+      // 重命名走的是 note.save（标题只是它的一个字段），所以它必须和正文编辑
+      // 共用同一个判据；此前这条入口谁都能点，只读身份要等请求回来才知道不行。
+      saveAllowed: capabilities.actionCapabilities["note.save"] === "allowed",
       deleteAllowed: capabilities.actionCapabilities["note.delete"] === "allowed",
       restoreAllowed: capabilities.actionCapabilities["note.restore"] === "allowed",
     } satisfies NoteShelfProjection;
@@ -160,6 +167,7 @@ export function NoteLibrarySurface() {
   const total = data?.page.total ?? 0;
   const trashTotal = data?.trashTotal ?? 0;
   const createAllowed = data?.createAllowed ?? false;
+  const saveAllowed = data?.saveAllowed ?? false;
   const deleteAllowed = data?.deleteAllowed ?? false;
   const restoreAllowed = data?.restoreAllowed ?? false;
   // Pages are merged by id: a note renamed (or created) while the reader
@@ -331,6 +339,10 @@ export function NoteLibrarySurface() {
 
   /** Renaming a note is a title-only save against its current version. */
   const renameNote = async (note: DesktopNoteListItem) => {
+    if (!saveAllowed) {
+      setRenaming(null);
+      return;
+    }
     const title = renaming?.title.trim() ?? "";
     if (!title || title === note.title || !note.currentVersionId) {
       setRenaming(null);
@@ -444,6 +456,8 @@ export function NoteLibrarySurface() {
       action={(
         <div className="actions">
           {createButton(true)}
+          {/* 写下来也一样是放进共享空间：这一步必须说清楚。 */}
+          <SpaceSharingNotice testId="note-share-notice" />
           {trashTotal > 0 ? (
             <button type="button" className="button" onClick={openTrash}>打开回收站</button>
           ) : null}
@@ -478,8 +492,12 @@ export function NoteLibrarySurface() {
         <button
           type="button"
           className="text-action"
-          disabled={!note.currentVersionId || busyId === note.id}
-          title={note.currentVersionId ? "改写这篇笔记的标题" : "这篇笔记还没有可写版本"}
+          disabled={!saveAllowed || !note.currentVersionId || busyId === note.id}
+          title={!saveAllowed
+            ? "当前身份在这个工作区里只能读，改不了标题"
+            : note.currentVersionId
+              ? "改写这篇笔记的标题"
+              : "这篇笔记还没有可写版本"}
           onClick={() => setRenaming({ noteId: note.id, title: note.title })}
         >
           重命名
@@ -514,12 +532,18 @@ export function NoteLibrarySurface() {
         !showIndex ? (
           <div className="note-shelf">
             <section className="current-note">
-              <span className="tag red">继续写作</span>
-              <h2>
-                <button type="button" className="note-open" onClick={() => featured && openNote(featured)}>
-                  {featured?.title ?? ""}
+              {/* 整张卡都要能点开（复盘 #16：只有标题那一下能点，点正文、点空白都没反应）。
+                  用一层覆盖整卡的透明按钮，而不是把 <section> 做成 button——卡里还有
+                  「全部笔记」「新建」「继续写」三个真按钮，button 不能嵌套 button。
+                  覆盖层是 section 的第一个子元素，后面那两个绝对定位的动作区按 DOM 顺序
+                  绘在它之上，所以照常可点。 */}
+              {featured ? (
+                <button type="button" className="current-note__open" onClick={() => openNote(featured)}>
+                  <span className="sr-only">打开笔记：{featured.title}</span>
                 </button>
-              </h2>
+              ) : null}
+              <span className="tag red">继续写作</span>
+              <h2>{featured?.title ?? ""}</h2>
               <p className="sub">
                 {[
                   featured ? `${formatRelative(featured.updatedAt)}更新` : null,
@@ -535,7 +559,7 @@ export function NoteLibrarySurface() {
                 {[
                   `共 ${total} 篇笔记`,
                   data?.featured?.sourceId
-                    ? data.source ? `来源：${data.source.source.title}` : "来源读取未确认"
+                    ? data.source ? `来源：${data.source.source.title}` : "来源暂时读不到"
                     : "未关联来源",
                 ].join(" · ")}
               </div>
@@ -552,7 +576,7 @@ export function NoteLibrarySurface() {
                   </button>
                 ) : null}
               </div>
-              {createFailure ? <p className="small notebook-note" role="alert">新建未确认：{createFailure}</p> : null}
+              {createFailure ? <p className="small notebook-note" role="alert">新建没成功：{createFailure}</p> : null}
             </section>
 
             <section className="notebooks" aria-label={`其余笔记，显示最新 ${shelfCovers.length} 篇`}>
@@ -563,6 +587,9 @@ export function NoteLibrarySurface() {
                   className={`book-cover book-${COVER_TONES[index % COVER_TONES.length]}`}
                   onClick={() => openNote(note)}
                 >
+                  {note.firstImageBlock ? (
+                    <NoteCoverPhoto markdown={note.firstImageBlock} workspaceEpoch={epochRef.current} />
+                  ) : null}
                   <h3>{note.title}</h3>
                   <small>
                     {[note.currentVersionId ? "已有版本" : "等待首版", formatRelative(note.updatedAt)].join(" · ")}
@@ -743,12 +770,34 @@ export function NoteLibrarySurface() {
 }
 
 /**
+ * 封面图：列表项自带的第一个图片块（复盘 #17）。
+ *
+ * 取字节走的是正文图片同一条通道与同一份 blob 缓存（站内 `/api/uploads/…`
+ * 在渲染层协议下拿不到）。取不到或还在读就不画——封面本来就是纯色书皮，
+ * 没有图也不算坏状态，摆个灰色占位块反而像出了错。
+ */
+function NoteCoverPhoto({ markdown, workspaceEpoch }: {
+  readonly markdown: string;
+  readonly workspaceEpoch?: number;
+}) {
+  const image = parseImageBlock(markdown);
+  const { state } = useSourceImage(image?.url ?? "", workspaceEpoch);
+  if (!image) return null;
+  if (state.status !== "ready" && state.status !== "external") return null;
+  return (
+    <span className="book-cover__photo" aria-hidden="true">
+      <img src={state.src} alt="" loading="lazy" />
+    </span>
+  );
+}
+
+/**
  * The one line of real prose the shelf shows before a note is opened. A list
  * row without a detail is a failed read, not a versionless note — the two get
  * different lines so the shelf never blames the reader for a fetch failure.
  */
 function previewOf(note: NoteDetailV1 | null, listed: boolean): string {
-  if (!note) return listed ? "这篇笔记的详情暂时读取未确认，稍后会自动恢复。" : "这篇笔记还没有服务端版本，进入编辑写下第一段。";
+  if (!note) return listed ? "暂时读不到这篇笔记的详情，稍后会自动重试。" : "这篇笔记还没有存过版本，进入编辑写下第一段。";
   const text = noteBodyText(note.currentVersion.blocks);
   if (!text) return "这一版还没有正文段落，进入编辑继续写。";
   return text.length > 96 ? `${text.slice(0, 96)}……` : text;

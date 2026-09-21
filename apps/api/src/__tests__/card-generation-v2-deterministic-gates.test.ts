@@ -24,7 +24,7 @@ import {
 } from "@ailearn/shared/card-generation-v2-pipeline";
 import type { LearningCardCandidateRevisionV2 } from "@ailearn/shared/card-generation-v2-contracts";
 
-function makeCandidate(overrides: { objectiveStatement?: string; prompt?: string; answer?: string } = {}): LearningCardCandidateRevisionV2 {
+function makeCandidate(overrides: { objectiveStatement?: string; prompt?: string; answer?: string; strategy?: LearningCardCandidateRevisionV2["presentation"]["strategy"] } = {}): LearningCardCandidateRevisionV2 {
   const objStatement = overrides.objectiveStatement ?? "分布式共识的定义";
   return {
     version: 2,
@@ -68,7 +68,7 @@ function makeCandidate(overrides: { objectiveStatement?: string; prompt?: string
       evidenceRefIds: [],
     },
     presentation: {
-      strategy: "recall",
+      strategy: overrides.strategy ?? "recall",
       transformationKind: "retrieval_definition",
       front: { cue: "共识定义", prompt: overrides.prompt ?? "请回答：什么是共识？" },
       estimatedReviewSeconds: 45,
@@ -170,6 +170,32 @@ describe("frontLeakageGate", () => {
       "scrambled overlap (no verbatim fragment) is not hard");
     assert.ok(issues.some((i) => i.code === "surface_paraphrase_only" && i.severity === "soft"),
       "high character overlap on long answers surfaces as soft signal");
+  });
+
+  // 2026-09-20（题型由 planner 分配后必须一起放宽）：cloze 的题面按设计就是一句
+  // 挖掉一处的原句，沿用「≥12 连续字符照抄」会把填空题整批 hard 掉——症状不是
+  // 题型变多，而是交付 0 张卡。cloze/sequence 改用「整条答案被完整照搬」判定。
+  it("cloze front quoting the source sentence with a gap is not a leak", () => {
+    const clozeFront = "补全：分布式共识是指多个节点对某个值达成____。共识算法保证故障容忍。";
+    const asCloze = frontLeakageGate(makeCandidate({ strategy: "cloze", prompt: clozeFront }));
+    assert.equal(asCloze.filter((i) => i.code === "front_leaks_answer").length, 0,
+      "挖空题保留原句其余部分是正确形态，不是泄漏");
+
+    // 同一题面在 recall 尺度下必须仍然被判泄漏——放宽只针对题型，不是普遍放松。
+    const asRecall = frontLeakageGate(makeCandidate({ strategy: "recall", prompt: clozeFront }));
+    assert.ok(asRecall.some((i) => i.code === "front_leaks_answer"),
+      "同一题面作为回忆题仍是逐字照抄");
+  });
+
+  it("cloze that blanks nothing is still a leak (full answer present)", () => {
+    const answer = "分布式共识是指多个节点对某个值达成一致。共识算法保证故障容忍。";
+    const issues = frontLeakageGate(makeCandidate({
+      strategy: "cloze",
+      answer,
+      prompt: `${answer} ____。`,
+    }));
+    assert.ok(issues.some((i) => i.code === "front_leaks_answer"),
+      "没有真的挖掉内容时整段答案出现在题面，必须拦住");
   });
 });
 

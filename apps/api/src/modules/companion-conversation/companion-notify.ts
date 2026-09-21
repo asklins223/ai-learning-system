@@ -10,11 +10,12 @@
  */
 
 import postgres from "postgres";
+import { COMPANION_INBOX_NOTIFY_CHANNEL } from "@ailearn/shared/companion-conversation-contracts";
 
 const CHANNEL = "ailearn_companion_events_v1";
 export const COMPANION_ACCOUNT_NOTIFY_CHANNEL = "ailearn_companion_account_v1";
 /** 专用 inbox delivery NOTIFY 通道（16 §14.3）：deliver() 写入新 delivery 时随事务 NOTIFY。 */
-export const COMPANION_INBOX_NOTIFY_CHANNEL = "ailearn_companion_inbox_v1";
+export { COMPANION_INBOX_NOTIFY_CHANNEL };
 
 export interface CompanionNotifyPayload {
   conversationId: string;

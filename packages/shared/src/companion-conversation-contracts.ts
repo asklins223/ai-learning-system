@@ -15,16 +15,22 @@ import {
   characterCueEmotionV1Schema,
   characterCueIntentV1Schema,
 } from "./companion-character-contracts.ts";
-import {
-  companionAgentSkillEventV1Schema,
-  companionAgentToolEventV1Schema,
-} from "./companion-agent-contracts.ts";
+import { companionAgentToolEventV1Schema } from "./companion-agent-contracts.ts";
 import { createLearningRunV2RequestSchema } from "./learning-target-v2-contracts.ts";
 
 // ─── 基础 ────────────────────────────────────────────────────────────────
 
 export const companionHashV1Schema = z.string().regex(/^[a-f0-9]{64}$/);
 export type CompanionHashV1 = z.infer<typeof companionHashV1Schema>;
+
+/**
+ * 收件箱投递的 NOTIFY 通道（16 §14.3）。
+ *
+ * 放在 shared 而不是 api 的 companion-notify.ts 里，是因为写入方有两个进程：
+ * API 的 `deliver()` 和 worker 直投的主动念头/记忆候选。通道名写不一致**不会报错**，
+ * 只会让新投递安静地等到 SSE 的 durable 轮询才被发现——主动气泡因此"看起来从不出现"。
+ */
+export const COMPANION_INBOX_NOTIFY_CHANNEL = "ailearn_companion_inbox_v1";
 
 // ─── Conversation（§3.1） ────────────────────────────────────────────────
 
@@ -835,9 +841,6 @@ export const companionStreamEventV1Schema = z.discriminatedUnion("type", [
   }).strict() }).strict(),
   z.object({ ...companionStreamEventBaseShapeV1, type: z.literal("assistant.status"), payload: z.object({
     status: z.enum(["thinking", "acting"]), safeLabel: z.string().min(1).max(240),
-  }).strict() }).strict(),
-  z.object({ ...companionStreamEventBaseShapeV1, type: z.literal("agent.skill"), payload: z.object({
-    skill: companionAgentSkillEventV1Schema,
   }).strict() }).strict(),
   z.object({ ...companionStreamEventBaseShapeV1, type: z.literal("agent.tool"), payload: z.object({
     tool: companionAgentToolEventV1Schema,

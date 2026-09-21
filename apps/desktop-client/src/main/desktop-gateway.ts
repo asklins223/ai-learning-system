@@ -25,6 +25,7 @@ import {
   markdownImportResultV1Schema,
   memberListResultV1Schema,
   renameWorkspaceResultV1Schema,
+  createWorkspaceResultV1Schema,
   searchDriftResultV1Schema,
   searchReindexResultV1Schema,
   type AuthProfileResultV1,
@@ -34,6 +35,7 @@ import {
   type MarkdownImportResultV1,
   type MemberListResultV1,
   type RenameWorkspaceResultV1,
+  type CreateWorkspaceResultV1,
   type SearchDriftResultV1,
   type SearchReindexResultV1,
   type DesktopCreateLearningRunV2Request,
@@ -1086,6 +1088,32 @@ export class DesktopGateway {
     return parsed.data;
   }
 
+  /**
+   * POST /workspaces：新建协作空间，并**进入它**。
+   *
+   * 为什么要顺手进入：邀请端点认的是"当前 session 所在的空间"（`POST /invites`
+   * 取 `req.session.workspaceId`）。如果建完还留在原空间，用户下一步发邀请就会
+   * 打到自己的个人空间并被 409 拒掉——新建出来的协作空间反而永远邀请不了人。
+   * 进入这一步复用 switchWorkspace，因此令牌轮换、epoch 递增、投影与幂等缓存清理
+   * 都走已经验过的那条路，不在服务端另造一套"创建即切换"的语义。
+   */
+  async createWorkspace(name: string, requestId?: string): Promise<CreateWorkspaceResultV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request("/workspaces", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }, true, true, requestId);
+    const payload = (result.body ?? {}) as Record<string, unknown>;
+    const parsed = createWorkspaceResultV1Schema.safeParse({
+      version: 1,
+      workspaceId: payload.workspaceId,
+      name: payload.workspaceName,
+    });
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    await this.switchWorkspace(parsed.data.workspaceId, requestId);
+    return parsed.data;
+  }
+
   /** POST /invites（Owner）：token 只在这一次回执里出现。 */
   async createInvite(
     options: { role: "member" | "owner"; expiresInHours?: number },
@@ -1303,9 +1331,16 @@ export class DesktopGateway {
     });
   }
 
+  /**
+   * 本人的 AI 同意与数据外发政策（0237 起为账号级）。
+   *
+   * 方法名仍叫 getWorkspaceAiSettings、IPC 通道仍是 workspace.aiSettings.get —— 那是
+   * 它还是空间级时留下的名字。改名是纯粹的机械工作（contracts / desktop-ipc / preload /
+   * 设置页 一起动），留作待办；这里先保证读的是对的端点、对的语义。
+   */
   async getWorkspaceAiSettings(requestId?: string): Promise<WorkspaceAiSettingsV1> {
     await this.ensureConnected(requestId);
-    const result = await this.request("/workspace/ai-settings", { method: "GET" }, true, true, requestId);
+    const result = await this.request("/me/ai-settings", { method: "GET" }, true, true, requestId);
     const parsed = workspaceAiSettingsV1Schema.safeParse(result.body);
     if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
     return parsed.data;
@@ -1313,7 +1348,7 @@ export class DesktopGateway {
 
   async updateAiConsent(consentVersion: string, requestId?: string): Promise<WorkspaceAiSettingsV1> {
     await this.ensureConnected(requestId);
-    await this.request("/workspace/ai-consent", {
+    await this.request("/me/ai-consent", {
       method: "PUT",
       body: JSON.stringify({ consentVersion }),
     }, true, true, requestId);
@@ -1333,7 +1368,7 @@ export class DesktopGateway {
 
   async updateAiDataPolicy(policy: AiDataPolicyV1, requestId?: string): Promise<WorkspaceAiSettingsV1> {
     await this.ensureConnected(requestId);
-    await this.request("/workspace/ai-data-policy", {
+    await this.request("/me/ai-data-policy", {
       method: "PUT",
       body: JSON.stringify(policy),
     }, true, true, requestId);
@@ -1609,12 +1644,12 @@ export class DesktopGateway {
     }
     const generationRecoveryEnabled = capabilityProjection?.actionCapabilities["card_generation.start"] === "allowed"
       && capabilityProjection.featureAvailability.card_generation_v2.state === "enabled";
-    let activeGenerationSummary: CardGenerationActiveSummaryV1 | null = null;
+    let activeGenerationSummary: CardGenerationActiveSummaryV1[] = [];
     let activeGenerationSummaryError: Parameters<typeof projectLearningDashboardToRoomProjection>[1]["activeGenerationSummaryError"];
     if (generationRecoveryEnabled) {
       try {
         const active = await this.getActiveCardGenerationSummaries(requestId);
-        activeGenerationSummary = active.items[0] ?? null;
+        activeGenerationSummary = active.items;
       } catch (error) {
         activeGenerationSummaryError = roomActiveGenerationErrorReason(error);
       }

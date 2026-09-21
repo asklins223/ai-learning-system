@@ -6,6 +6,12 @@
 当前开发中的用户自有角色还记录在
 `apps/desktop-client/src/renderer/public/assets/companion/live2d-v2/seethrough/manifest.json`。
 
+## Yjs（`apps/api`；后续 `apps/desktop-client`）
+- 用途：笔记正文的协同内核（headless Y.Doc 是唯一的正文写入路径，`note_blocks` 由它派生）
+- 许可：MIT License
+- 来源：https://github.com/yjs/yjs
+- 引入批次：批次 4（4.0 前置验证已通过，见 `apps/api/src/__tests__/note-doc-collab-kernel.test.ts`）
+
 ## PIXI.js（`apps/desktop-client`）
 - 用途：Live2D 渲染器宿主
 - 许可：MIT License

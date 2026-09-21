@@ -12,6 +12,7 @@ import { describe, it } from "node:test";
 import type { FastifyInstance } from "fastify";
 import { cardGenerationV2Routes } from "../modules/card-generation-v2/routes.ts";
 import { createGenerationRunV2 } from "../modules/card-generation-v2/generation-run-service.ts";
+import { cardGenerationEventsV2 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { db } from "../db/client.ts";
 
 const WORKSPACE_ID = "00000000-0000-4000-8000-000000000001";
@@ -39,23 +40,25 @@ describe("createGenerationRunV2 — outbox enqueue", () => {
 
     const mockTx: any = {
       execute: async () => [{ workspace_id: WORKSPACE_ID, user_id: USER_ID }],
-      select: (columns?: unknown) => {
-        const result = columns !== undefined ? [{ maxSeq: 0 }] : [];
-        return {
-          from: (_table: unknown) => {
-            const whereResult = {
-              // Support both direct await (thenable) and .limit() chain
-              limit: async () => result,
-              then(resolve: any, _reject: any) {
-                return Promise.resolve(result).then(resolve);
-              },
-            };
-            return {
-              where: () => whereResult,
-            };
-          },
-        };
-      },
+      select: () => ({
+        from: (table: unknown) => {
+          // 按表判定，不按「有没有传 columns」——generation-run-service 里
+          // 带 columns 的查询不止 events 一处（幂等回放、按笔记的在制守卫、
+          // 上一个已激活批次），用 columns 区分会让它们全部命中同一份返回值。
+          const result = table === cardGenerationEventsV2 ? [{ maxSeq: 0 }] : [];
+          const whereResult = {
+            // Support both direct await (thenable) and .limit() chain
+            limit: async () => result,
+            orderBy: () => whereResult,
+            then(resolve: any, _reject: any) {
+              return Promise.resolve(result).then(resolve);
+            },
+          };
+          return {
+            where: () => whereResult,
+          };
+        },
+      }),
       query: {
         noteVersions: { findFirst: async () => ({ noteId: "note-1" }) },
         notes: { findFirst: async () => ({ id: "note-1" }) },

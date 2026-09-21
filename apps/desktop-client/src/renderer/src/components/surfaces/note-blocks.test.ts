@@ -6,7 +6,6 @@ import {
   blocksToMarkdown,
   isHorizontalRule,
   markdownToBlocks,
-  parseImageBlock,
   parseInlineMarkdown,
   parseMarkdownTable,
 } from "./note-blocks";
@@ -160,21 +159,6 @@ describe("blocksMatchMarkdown", () => {
       ["list", "- 甲\n- 乙"],
     ]);
     expect(blocksMatchMarkdown(blocksToMarkdown(legacy), legacy)).toBe(true);
-  });
-});
-
-describe("parseImageBlock", () => {
-  it("splits a markdown image into alt and url", () => {
-    expect(parseImageBlock("![实验装置](https://example.com/setup.png)")).toEqual({
-      alt: "实验装置",
-      url: "https://example.com/setup.png",
-    });
-  });
-
-  it("rejects content that is not a single markdown image", () => {
-    expect(parseImageBlock("asset-id")).toBeNull();
-    expect(parseImageBlock("![alt](https://a.test/x.png)\n更多文字")).toBeNull();
-    expect(parseImageBlock("![alt](https://a.test/x.png) 后缀")).toBeNull();
   });
 });
 

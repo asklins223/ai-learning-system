@@ -13,6 +13,25 @@ function opaqueId(prefix: string): string {
   return `${prefix}-${Date.now()}-${requestSequence}`;
 }
 
+/**
+ * 渲染层当前所在工作区的 epoch，由 `DesktopAccessGate` 在边界判定时写入。
+ *
+ * 为什么要有一个模块级兜底：主进程的 `assertEpoch` 已改成 fail-closed（不带 epoch
+ * 即视为过期），而"调用方漏传 epoch"是常态而非例外——`SourceIntake` 的批量采集、
+ * 笔记图片上传、伴星念头气泡都不持有任何 epoch 游标。让 `createRequestMeta()`
+ * 默认取当前边界，使漏传在结构上不可能发生；显式传参仍然优先，各 surface 自己的
+ * 游标语义不变。
+ */
+let currentWorkspaceEpoch = 0;
+
+export function setCurrentWorkspaceEpoch(epoch: number): void {
+  currentWorkspaceEpoch = epoch > 0 ? epoch : 0;
+}
+
+export function getCurrentWorkspaceEpoch(): number {
+  return currentWorkspaceEpoch;
+}
+
 export function createRequestMeta(workspaceEpoch?: number): RequestMetaV1 {
   const meta: RequestMetaV1 = {
     version: 1,
@@ -22,7 +41,8 @@ export function createRequestMeta(workspaceEpoch?: number): RequestMetaV1 {
     clientStartedAt: new Date().toISOString(),
   };
 
-  return workspaceEpoch && workspaceEpoch > 0 ? { ...meta, workspaceEpoch } : meta;
+  const boundary = workspaceEpoch && workspaceEpoch > 0 ? workspaceEpoch : currentWorkspaceEpoch;
+  return boundary > 0 ? { ...meta, workspaceEpoch: boundary } : meta;
 }
 
 export function createCommandId(prefix: string): string {

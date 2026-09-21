@@ -36,6 +36,12 @@ scripts/*.py
 scripts/*.js
 scripts/*.mjs
 !scripts/q0-doc-check.mjs
+# 伴星质量基线与回合链路验证器：方案 29 §4.10 要求的验收工具，不是临时脚本。
+# 上面这条 `scripts/*.py` 规则本意是挡满地的 tmp-*.py 探针，把这两份一起吞了会
+# 让"改动前后拿数字对比"这件事只存在于某一台机器上。
+!scripts/companion-quality-report.py
+!scripts/companion-turn-e2e-verify.py
+!scripts/companion-inbox-sse-probe.py
 apps/web/preview-ui.mjs
 
 # Documentation artifacts (keep source, ignore generated)

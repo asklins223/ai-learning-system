@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull, isNotNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, isNotNull, or, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import { type ApiTransaction } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks, noteImageAssets } from "@ailearn/shared/db-schema/note";
@@ -681,6 +681,36 @@ export async function createNote(
   return result;
 }
 
+/**
+ * 每个版本的第一张图片块（按 ordinal 最小），一次批量取。
+ *
+ * 只按 `version_id / ordinal` 走 `note_blocks_version_idx`，把命中版本的全部
+ * 图片块拉回来在内存里取每版第一块：一版通常 0~2 张图，比按行发 N 次请求便宜，
+ * 也比在 SQL 里写 DISTINCT ON 更好读。内容原样返回（`![alt](url)`），解析留给
+ * 渲染层那一份 `parseImageBlock`。
+ */
+async function firstImageBlockByVersion(
+  executor: ApiTransaction,
+  workspaceId: string,
+  versionIds: string[],
+): Promise<Map<string, string>> {
+  const firstBy = new Map<string, string>();
+  if (versionIds.length === 0) return firstBy;
+  const blocks = await executor
+    .select({ versionId: noteBlocks.versionId, content: noteBlocks.content })
+    .from(noteBlocks)
+    .where(and(
+      eq(noteBlocks.workspaceId, workspaceId),
+      inArray(noteBlocks.versionId, versionIds),
+      eq(noteBlocks.type, "image"),
+    ))
+    .orderBy(asc(noteBlocks.versionId), asc(noteBlocks.ordinal), asc(noteBlocks.id));
+  for (const block of blocks) {
+    if (!firstBy.has(block.versionId)) firstBy.set(block.versionId, block.content);
+  }
+  return firstBy;
+}
+
 export async function listNotes(
   executor: ApiTransaction,
   workspaceId: string,
@@ -752,11 +782,21 @@ export async function listNotes(
     ? encodeCursor(lastRow.cursorTimestamp, lastRow.id)
     : null;
 
+  // 封面图：正文里第一个 image 块（ordinal 最小）。列表此前什么都不带，
+  // 所以"哪篇笔记有图"只能挨篇点开看（复盘 #17）。一次批量查，不按行发请求。
+  // 这里回的是那一行原文 `![alt](url)`：解析规则全仓库只有渲染层一份
+  // （`note-blocks.parseImageBlock`），服务端不再写第二个 markdown 解析器。
+  const versionIds = pageRows
+    .map((r) => r.currentVersionId)
+    .filter((v): v is string => typeof v === "string" && v.length > 0);
+  const coverByVersion = await firstImageBlockByVersion(executor, workspaceId, versionIds);
+
   return {
     items: pageRows.map((r) => ({
       id: r.id,
       title: r.title,
       titleSource: r.titleSource,
+      firstImageBlock: r.currentVersionId ? coverByVersion.get(r.currentVersionId) ?? null : null,
       currentVersionId: r.currentVersionId,
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,

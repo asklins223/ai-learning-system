@@ -10,12 +10,19 @@
  *     embedding 语义去重消灭"换着花样说同一句"）。
  *
  * 纯函数（buildDeterministicThoughts / parseThoughtCandidates / isDuplicateThought /
- * selectThoughtExpression / isWithinQuietHoursLocal）均可单测；DB/provider 只在
+ * selectThoughtExpression / isWithinQuietHours[shared]）均可单测；DB/provider 只在
  * runCompanionThought 编排层出现。
  */
 
 import { sql } from "drizzle-orm";
+import { createHash } from "node:crypto";
 import { readCompanionThoughtJobPayload } from "@ailearn/shared";
+import {
+  evaluateDismissalFeedback,
+  isWithinQuietHours,
+  proactiveDailyLimit,
+  type CompanionInterventionLevelV1,
+} from "@ailearn/shared/companion-proactive-policy";
 import { logger } from "../lib/logger.ts";
 import { assertJobLease, withJobTransaction } from "../lib/job-lease.ts";
 import { createEmbeddingProvider } from "../lib/ai-provider.ts";
@@ -28,6 +35,8 @@ import { createProvider, withThinkingDisabled } from "../lib/ai-provider.ts";
 import { runWithAbortBudget } from "../lib/handler-timeout.ts";
 import { resolveProviderCallTimeout } from "../lib/handler-timeout-config.ts";
 import { looksLikeJsonEnvelope, unwrapCompanionJsonEnvelope } from "./companion-dialogue-content.ts";
+import { enqueueSystemEventDelivery } from "./companion-delivery-write.ts";
+import { loadHereAndNow, renderHereAndNow } from "./companion-here-and-now.ts";
 import type { JobPayload } from "./index.ts";
 
 // ── 类型 ─────────────────────────────────────────────────────────────────
@@ -50,6 +59,8 @@ export interface ThoughtCandidate {
 export interface ThoughtMaterial {
   readonly today: string;
   readonly readyReviews: number;
+  /** 未来 12 小时内到期（含被用户推到期初）的复习条数。 */
+  readonly dueSoonReviews: number;
   readonly streakDays: number;
   readonly daysSinceLastLearning: number | null;
   readonly familiarity: number;
@@ -65,8 +76,21 @@ export interface ThoughtMaterial {
   readonly recentThoughtEmbeddings: readonly (readonly number[])[];
   /** 最近送达的 delivery 状态（新→旧，仅 displayed/acted/dismissed）。 */
   readonly recentDeliveryStates: readonly string[];
-  /** 已有未过期念头的 dedupeKey（同 key 不重复生成）。 */
-  readonly activeDedupeKeys: ReadonlySet<string>;
+  /** 已有**已经说出口**（delivered/spent）念头的 dedupeKey：同一件事一天只提一次。 */
+  readonly blockedDedupeKeys: ReadonlySet<string>;
+  /**
+   * 库里躺着但还没说出去的候选（status='candidate'）：key → id。
+   * 必须是独立的一份而不是和 blocked 混在一起——被日预算/时机压住的念头正是
+   * 下一次调度该送出去的那条；一旦和"说过的"同等对待，念头库就变成**一次性**的：
+   * 生成那轮没送出去，之后就永远送不出去了（崩溃重试同理）。
+   */
+  readonly storedCandidates: ReadonlyMap<string, string>;
+  /**
+   * 环境事实块（here_and_now 渲染结果：本地时刻、今日学习量、最近笔记…）。
+   * 念头的素材不能只有"到期复习/连续天数/熟悉度"三个数——用户 30 天没跑正式
+   * 学习时这三项全为 0/空，模型无从下笔，于是整条管线静默产不出候选。
+   */
+  readonly facts: string | null;
 }
 
 // ── 常量 ─────────────────────────────────────────────────────────────────
@@ -78,8 +102,9 @@ export const THOUGHT_LIMITS = {
   maxExpressionChars: 80,
   /** 每次调度最多表达的念头数（沉默默认：多数候选默默过期）。 */
   maxDeliveredPerRun: 1,
-  /** 每用户每天最多送达的念头数。 */
-  maxDeliveredPerDay: 2,
+  // 单日额度不在这里写死：它来自 proactiveDailyLimit(intervention_level)，
+  // 与 API 的 proactive-hook 同源。两处各写一份时，同一个"安静一点"
+  // 在两条链路上会得到两个预算（§9.19）。
   /** embedding 相似度超过该值视为重复（cosine，1 - 余弦距离）。 */
   embeddingDuplicateThreshold: 0.85,
   /** 字符 bigram Jaccard 超过该值视为重复（embedding 不可用时的降级）。 */
@@ -97,13 +122,16 @@ export const THOUGHT_LIMITS = {
 /**
  * 确定性规则直接产念头（切片②"先接时间模式 + 复习到期"）：
  * - review_due：有到期复习且近 24h 没提过；
+ * - review_due_soon：12 小时内将要到期（含用户自己"稍后"推走的批次）——
+ *   这条覆盖的是"还没到期但马上要到期"，是复习提醒里最有用的一档；只有
+ *   review_due 的话，早上把所有卡"稍后"掉的人一整天都不会被提醒。
  * - streak：连续学习 ≥3 天（正向强化，温和）；
  * - inactivity：≥3 天没学习且有一点熟悉度才提（冷启动就该安静）。
  */
 export function buildDeterministicThoughts(material: ThoughtMaterial): ThoughtCandidate[] {
   const out: ThoughtCandidate[] = [];
   if (material.readyReviews > 0 && material.allowNudgeLearning) {
-    if (!material.activeDedupeKeys.has(`review_due:${material.today}`)) {
+    if (!material.blockedDedupeKeys.has(`review_due:${material.today}`)) {
       out.push({
         source: "review_due",
         topic: "review_due",
@@ -115,8 +143,21 @@ export function buildDeterministicThoughts(material: ThoughtMaterial): ThoughtCa
       });
     }
   }
+  if (material.dueSoonReviews > 0 && material.allowNudgeLearning) {
+    if (!material.blockedDedupeKeys.has(`review_due_soon:${material.today}`)) {
+      out.push({
+        source: "review_due",
+        topic: "review_due_soon",
+        dedupeKey: `review_due_soon:${material.today}`,
+        text: `接下来 12 小时里有 ${material.dueSoonReviews} 条复习要到期，要不要提前扫一眼？`,
+        urgency: 55,
+        familiarityRequired: 0.1,
+        grounding: [],
+      });
+    }
+  }
   if (material.streakDays >= 3 && material.allowPlayful) {
-    if (!material.activeDedupeKeys.has(`streak:${material.today}`)) {
+    if (!material.blockedDedupeKeys.has(`streak:${material.today}`)) {
       out.push({
         source: "streak",
         topic: "streak",
@@ -134,7 +175,7 @@ export function buildDeterministicThoughts(material: ThoughtMaterial): ThoughtCa
     && material.familiarity >= 0.2
     && material.allowNudgeLearning
   ) {
-    if (!material.activeDedupeKeys.has(`inactivity:${material.today}`)) {
+    if (!material.blockedDedupeKeys.has(`inactivity:${material.today}`)) {
       out.push({
         source: "inactivity",
         topic: "inactivity",
@@ -175,7 +216,10 @@ export function parseThoughtCandidates(raw: string, today: string): ThoughtCandi
     out.push({
       source: "llm",
       topic: typeof record.topic === "string" && record.topic.length > 0 ? record.topic.slice(0, 40) : "llm",
-      dedupeKey: `llm:${today}:${out.length}`,
+      // 按内容而不是按序号去重：序号去重会让**同一天第二次调度**只剩"位置 1、2"
+      // 可用——哪怕模型说了全新的话，只要它排在第 0 位就被当作重复丢掉，
+      // 于是"每天越早越有机会说话，越晚越必然产不出候选"。
+      dedupeKey: `llm:${today}:${createHash("sha1").update(text).digest("hex").slice(0, 10)}`,
       text,
       urgency,
       familiarityRequired: 0.2,
@@ -254,49 +298,8 @@ export function isDuplicateThought(
   return false;
 }
 
-/**
- * 反馈降权（切片①反馈回路）：最近 3 条送达里 dismiss ≥2 → 本轮沉默。
- * 与 api proactive-policy.evaluateDismissalFeedback 同规则（worker 侧独立副本，
- * 两侧都有测试钉住）。
- */
-export function shouldStaySilentForFeedback(states: readonly string[]): boolean {
-  const recent = states.slice(0, THOUGHT_LIMITS.feedbackWindowSize);
-  const dismissed = recent.filter((state) => state === "dismissed").length;
-  return dismissed >= THOUGHT_LIMITS.feedbackDismissLimit;
-}
 
-/** 静默时段（与 api proactive-hook.isWithinQuietHours 同语义：HH:MM + 跨午夜环绕）。 */
-export function isWithinQuietHoursLocal(
-  quietHours: { startLocal: string; endLocal: string; timezone: string },
-  now: Date,
-): boolean {
-  try {
-    const parts = new Intl.DateTimeFormat("en-US", {
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-      timeZone: quietHours.timezone,
-    }).formatToParts(now);
-    const hour = Number(parts.find((part) => part.type === "hour")?.value ?? "0") % 24;
-    const minute = Number(parts.find((part) => part.type === "minute")?.value ?? "0");
-    const current = hour * 60 + minute;
-    const parse = (value: string): number | null => {
-      const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
-      if (!match) return null;
-      return Number(match[1]) * 60 + Number(match[2]);
-    };
-    const start = parse(quietHours.startLocal);
-    const end = parse(quietHours.endLocal);
-    if (start === null || end === null) return false;
-    if (start === end) return true;
-    if (start < end) return current >= start && current < end;
-    return current >= start || current < end;
-  } catch {
-    return true; // fail closed：解析失败宁可不打扰
-  }
-}
-
-/** 表达校验（切片③ grounding）：长度 / 内部 token / 实体必须命中。 */
+/** 表达校验（切片③）：长度 / 内部 token 泄露 / grounding 命中。 */
 export function validateThoughtExpression(
   text: string,
   grounding: readonly ThoughtGrounding[],
@@ -323,13 +326,15 @@ export function selectThoughtExpression(
   return null;
 }
 
-/** 表达 prompt（切片③）：persona + 关系状态 + 最近说过的话一起进。 */
+/** 表达 prompt（切片③）：persona + 关系状态 + 当下事实 + 最近说过的话一起进。 */
 export function buildExpressionPrompt(args: {
   petName: string | null;
   familiarity: number;
   allowPlayful: boolean;
   allowNudgeLearning: boolean;
   catchphrase: string | null;
+  /** 环境事实块（含本地时刻）——主动开口的措辞要贴当下（早上/深夜不该同一句）。 */
+  facts: string | null;
   thoughtText: string;
   groundingNames: readonly string[];
   recentlySaid: readonly string[];
@@ -337,6 +342,7 @@ export function buildExpressionPrompt(args: {
   const lines = [
     `你是学习桌宠${args.petName ? `「${args.petName}」` : ""}。基于下面这条"念头"写一句主动开口的话。`,
     `念头：${args.thoughtText}`,
+    args.facts ? `你知道的当下（可以据此措辞，但不要照念数字）：\n${args.facts}` : "",
     `关系熟悉度：${args.familiarity.toFixed(2)}（0 刚认识，1 很熟）。刚认识就自来熟比机械更假——熟悉度低就写得克制、短。`,
     `风格允许：玩趣=${args.allowPlayful ? "可以" : "不要"}；催学习=${args.allowNudgeLearning ? "可以" : "不要"}。`,
     ...(args.catchphrase ? [`口头禅（可自然融入，不强求）：${args.catchphrase}`] : []),
@@ -349,8 +355,32 @@ export function buildExpressionPrompt(args: {
 
 // ── 编排层 ───────────────────────────────────────────────────────────────
 
+/**
+ * 未过期念头按"说过 / 还没说出口"分流（入参须按 created_at DESC）。
+ *
+ * 同一个 dedupe_key 可能有多行（表上没有唯一约束）：说过的以最先遇到的为准，
+ * 待送候选取**最新**那行（更早的通常是同一次生成的重复行）。
+ */
+export function splitActiveThoughts(
+  rows: readonly { dedupe_key: string; status: string; id: string }[],
+): Pick<ThoughtMaterial, "blockedDedupeKeys" | "storedCandidates"> {
+  const blockedDedupeKeys = new Set<string>();
+  const storedCandidates = new Map<string, string>();
+  for (const row of rows) {
+    const key = String(row.dedupe_key);
+    if (row.status === "candidate") {
+      if (!storedCandidates.has(key)) storedCandidates.set(key, row.id);
+      continue;
+    }
+    blockedDedupeKeys.add(key);
+    storedCandidates.delete(key);
+  }
+  return { blockedDedupeKeys, storedCandidates };
+}
+
 interface MaterialRow extends Record<string, unknown> {
   ready_reviews: number;
+  due_soon_reviews: number;
   familiarity: number;
   speaking_style: string | null;
   personality_tags: string[] | null;
@@ -374,6 +404,11 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
           WHERE workspace_id = ${job.workspaceId} AND user_id = ${userId}
           AND status = 'pending' AND next_review_at <= now()
           AND (user_deferred_until IS NULL OR user_deferred_until <= now())) AS ready_reviews,
+        (SELECT count(*)::int FROM review_schedules
+          WHERE workspace_id = ${job.workspaceId} AND user_id = ${userId}
+          AND status = 'pending'
+          AND coalesce(user_deferred_until, next_review_at) > now()
+          AND coalesce(user_deferred_until, next_review_at) <= now() + interval '12 hours') AS due_soon_reviews,
         (SELECT COALESCE(familiarity, 0) FROM pet_profiles
           WHERE workspace_id = ${job.workspaceId} AND user_id = ${userId} LIMIT 1) AS familiarity,
         (SELECT speaking_style FROM pet_profiles
@@ -415,11 +450,12 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
       ORDER BY created_at DESC LIMIT 3
     `);
 
-    const activeKeysRows = await tx.execute<{ dedupe_key: string }>(sql`
-      SELECT dedupe_key FROM assistant_thoughts
+    const activeKeysRows = await tx.execute<{ dedupe_key: string; status: string; id: string }>(sql`
+      SELECT dedupe_key, status, id FROM assistant_thoughts
       WHERE workspace_id = ${job.workspaceId} AND user_id = ${userId}
         AND status IN ('candidate', 'delivered', 'spent')
         AND expires_at > now()
+      ORDER BY created_at DESC
     `);
 
     const embeddingRows = await tx.execute<{ embedding: string }>(sql`
@@ -431,10 +467,21 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
       ORDER BY created_at DESC LIMIT 30
     `);
 
-    const accountRows = await tx.execute<{ quiet_hours: Record<string, unknown> | null }>(sql`
-      SELECT quiet_hours FROM user_companion_account_state
+    const accountRows = await tx.execute<{
+      quiet_hours: Record<string, unknown> | null;
+      intervention_level: string | null;
+    }>(sql`
+      SELECT quiet_hours, intervention_level FROM user_companion_account_state
       WHERE user_id = ${userId} LIMIT 1
     `);
+
+    // 环境事实块与对话侧同源（同一份 SQL、同一个 RLS 事务）：她主动开口时知道的
+    // 世界，必须和被动回答时知道的是同一个。
+    const hereAndNow = await loadHereAndNow(tx, {
+      workspaceId: job.workspaceId,
+      userId,
+      conversationId: null,
+    });
 
     // 连续学习天数：取最近 14 条日记（新→旧），learningRunsCompleted>0 连续计数。
     const streakRows = await tx.execute<{ date: string; runs: number }>(sql`
@@ -452,10 +499,15 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
 
     const boundaries = (row.boundaries ?? {}) as Record<string, unknown>;
     const quietHours = accountRows[0]?.quiet_hours as { startLocal: string; endLocal: string; timezone: string } | null;
+    // 没有账号行时按 moderate 处理：未知不等于"最多"，也不等于"静音"。
+    const rawLevel = accountRows[0]?.intervention_level;
+    const interventionLevel: CompanionInterventionLevelV1 =
+      rawLevel === "quiet" || rawLevel === "active" || rawLevel === "moderate" ? rawLevel : "moderate";
 
     return {
       today,
       readyReviews: Number(row.ready_reviews ?? 0),
+      dueSoonReviews: Number(row.due_soon_reviews ?? 0),
       streakDays,
       daysSinceLastLearning: row.days_since_last_learning != null ? Number(row.days_since_last_learning) : null,
       familiarity: Number(row.familiarity ?? 0),
@@ -468,98 +520,144 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
         .map((entry) => String(entry.text ?? ""))
         .filter((text) => text.length > 0),
       recentDeliveryStates: (Array.isArray(feedbackRows) ? feedbackRows : []).map((entry) => String(entry.state)),
-      activeDedupeKeys: new Set(
-        (Array.isArray(activeKeysRows) ? activeKeysRows : []).map((entry) => String(entry.dedupe_key)),
-      ),
+      ...splitActiveThoughts(Array.isArray(activeKeysRows) ? activeKeysRows : []),
       recentThoughtEmbeddings: (Array.isArray(embeddingRows) ? embeddingRows : [])
         .map((entry) => parseVectorText(String(entry.embedding ?? "")))
         .filter((values): values is number[] => values !== null),
       quietHours,
-    } satisfies ThoughtMaterial & { quietHours: typeof quietHours };
+      interventionLevel,
+      facts: renderHereAndNow(hereAndNow),
+    } satisfies ThoughtMaterial & {
+      quietHours: typeof quietHours;
+      interventionLevel: CompanionInterventionLevelV1;
+    };
   });
 
-  const { quietHours, ...thoughtMaterial } = material;
+  const { quietHours, interventionLevel, ...thoughtMaterial } = material;
+
+  // 每一次调度都留一行结局。沉默本身是对的（"沉默默认"是设计），但**沉默且无日志**
+  // 等于这个功能不存在——抱怨 #8 的排查过程里，这条管线跑完就是 "job ok"，
+  // 没有任何地方说明它为什么什么都没说。
+  const finish = (outcome: string, extra: Record<string, unknown> = {}) => {
+    logger.info({ jobId: job.id, outcome, ...extra }, "companion thought outcome");
+  };
 
   // ── 时机决策：沉默是默认 ─────────────────────────────────────────────
   // 1) 静默时段（fail closed）；2) 反馈降权；3) 日预算。
-  if (quietHours && isWithinQuietHoursLocal(quietHours, new Date())) {
-    logger.info({ jobId: job.id }, "companion thought skipped: quiet hours");
+  if (quietHours && isWithinQuietHours(quietHours, new Date())) {
+    finish("silent", { reason: "quiet_hours" });
     return;
   }
-  if (shouldStaySilentForFeedback(thoughtMaterial.recentDeliveryStates)) {
-    logger.info({ jobId: job.id }, "companion thought suppressed: dismissal feedback");
+  if (evaluateDismissalFeedback(thoughtMaterial.recentDeliveryStates).suppress) {
+    finish("silent", { reason: "dismissal_feedback" });
     return;
   }
 
-  // ── 阶段 2：候选念头（确定性规则 + 可选 LLM 批量） ───────────────────
+  // ── 阶段 2：候选念头（确定性规则打底，不足 3 条再让模型补） ───────────
+  // 授权/治理上下文两处调用完全一样，合并成一个工厂：consent 不通过时抛错走
+  // 各自的 catch，而不是静默跳过（静默跳过 = 上面那条 warn 日志也不会出现）。
+  const thoughtProvider = async () => {
+    const govCtx = await resolveAIGovernanceContext(job.workspaceId, userId);
+    if (!govCtx.consentOk) throw new Error("ai_consent_denied");
+    const textRes = resolveProviderForTask(govCtx, "companion_agent");
+    return createGovernedProvider(
+      createProvider(textRes.providerName, withThinkingDisabled(textRes.providerConfig)),
+      govCtx,
+      job.workspaceId,
+      { userId, operation: "companion_thought", jobId: job.id },
+    );
+  };
+
   let candidates = buildDeterministicThoughts(thoughtMaterial);
-  const enableLlm = process.env.COMPANION_THOUGHTS_LLM === "true";
-  if (enableLlm && candidates.length < 3) {
+  const llmGap = candidates.length < 3 ? 3 - candidates.length : 0;
+  if (llmGap > 0) {
     try {
-      const govCtx = await resolveAIGovernanceContext(job.workspaceId, userId);
-      if (govCtx.consentOk) {
-        const textRes = resolveProviderForTask(govCtx, "companion_agent");
-        const provider = createGovernedProvider(
-          createProvider(textRes.providerName, withThinkingDisabled(textRes.providerConfig)),
-          govCtx,
-          job.workspaceId,
-          { userId, operation: "companion_thought", jobId: job.id },
-        );
-        const prompt = [
-          `你是学习桌宠${thoughtMaterial.petName ? `「${thoughtMaterial.petName}」` : ""}。基于事实生成 1-3 条"主动开口的念头"候选。`,
-          `事实：到期复习 ${thoughtMaterial.readyReviews} 条；连续学习 ${thoughtMaterial.streakDays} 天；距上次学习 ${thoughtMaterial.daysSinceLastLearning ?? "未知"} 天；熟悉度 ${thoughtMaterial.familiarity.toFixed(2)}。`,
-          `风格允许：玩趣=${thoughtMaterial.allowPlayful ? "可以" : "不要"}；催学习=${thoughtMaterial.allowNudgeLearning ? "可以" : "不要"}。`,
-          ...(thoughtMaterial.recentlySaid.length > 0 ? [`最近说过（不要重复）：\n- ${thoughtMaterial.recentlySaid.slice(0, 5).join("\n- ")}`] : []),
-          "要求：每条 ≤80 字、中文、不出现 ID/系统词。返回 JSON：{\"thoughts\":[{\"text\":\"…\",\"urgency\":0-100,\"topic\":\"…\"}]}",
-        ].filter(Boolean).join("\n");
-        const raw = await runWithAbortBudget(
-          (signal) => provider.chatCompletion(
-            [{ role: "user", content: prompt }],
-            { temperature: 0.9, maxTokens: 500, responseFormat: "json_object" },
-            signal,
-          ),
-          undefined,
-          resolveProviderCallTimeout("companion_thought"),
-        );
-        const content = typeof (raw as { content?: unknown })?.content === "string" ? (raw as { content: string }).content : "";
-        candidates = [...candidates, ...parseThoughtCandidates(content, thoughtMaterial.today)];
-      }
+      const provider = await thoughtProvider();
+      const prompt = [
+        `你是学习桌宠${thoughtMaterial.petName ? `「${thoughtMaterial.petName}」` : ""}。基于事实生成 ${llmGap} 条"主动开口的念头"候选——就是你没被问、但想主动说一句的话。`,
+        thoughtMaterial.facts ? `你知道的当下：\n${thoughtMaterial.facts}` : "",
+        `关系数据：到期复习 ${thoughtMaterial.readyReviews} 条；12 小时内将要到期 ${thoughtMaterial.dueSoonReviews} 条；连续学习 ${thoughtMaterial.streakDays} 天；熟悉度 ${thoughtMaterial.familiarity.toFixed(2)}（0 刚认识，1 很熟）。`,
+        `风格允许：玩趣=${thoughtMaterial.allowPlayful ? "可以" : "不要"}；催学习=${thoughtMaterial.allowNudgeLearning ? "可以" : "不要"}。`,
+        "不要为了说话而编造事实，也不要把上面任何一条数字原样念出来。",
+        ...(thoughtMaterial.recentlySaid.length > 0 ? [`最近说过（不要重复、不要换着花样说同一句）：\n- ${thoughtMaterial.recentlySaid.slice(0, 5).join("\n- ")}`] : []),
+        "要求：每条 ≤80 字、中文、不出现 ID/系统词。返回 JSON：{\"thoughts\":[{\"text\":\"…\",\"urgency\":0-100,\"topic\":\"…\"}]}",
+      ].filter(Boolean).join("\n");
+      const raw = await runWithAbortBudget(
+        (signal) => provider.chatCompletion(
+          [{ role: "user", content: prompt }],
+          { temperature: 0.9, maxTokens: 500, responseFormat: "json_object" },
+          signal,
+        ),
+        undefined,
+        resolveProviderCallTimeout("companion_thought"),
+      );
+      const content = typeof (raw as { content?: unknown })?.content === "string" ? (raw as { content: string }).content : "";
+      candidates = [...candidates, ...parseThoughtCandidates(content, thoughtMaterial.today)];
     } catch (err) {
       logger.warn({ jobId: job.id, err: err instanceof Error ? err.message : String(err) }, "companion thought llm batch failed; deterministic only");
     }
   }
-  if (candidates.length === 0) return;
+  if (candidates.length === 0) {
+    finish("silent", { reason: "no_candidates", factsIncluded: thoughtMaterial.facts !== null });
+    return;
+  }
 
   // ── 阶段 3：念头库落库（多数候选默默过期） + 挑选 + 表达 + 去重 ──────
   const eligible = candidates
-    .filter((candidate) => !thoughtMaterial.activeDedupeKeys.has(candidate.dedupeKey))
+    .filter((candidate) => !thoughtMaterial.blockedDedupeKeys.has(candidate.dedupeKey))
     .filter((candidate) => thoughtMaterial.familiarity >= candidate.familiarityRequired)
     .sort((a, b) => b.urgency - a.urgency);
-  if (eligible.length === 0) return;
+  if (eligible.length === 0) {
+    finish("silent", {
+      reason: "all_candidates_gated",
+      generated: candidates.length,
+      dedupeFiltered: candidates.filter((c) => thoughtMaterial.blockedDedupeKeys.has(c.dedupeKey)).length,
+      familiarity: thoughtMaterial.familiarity,
+    });
+    return;
+  }
 
   // 候选先入念库（24h TTL）：被预算/时机压住的念头留档，大多数会被 expires 收走。
+  // 已经在库里、还没说出口的（上一轮被预算压住 / 上一轮在这之后崩溃）复用原行，
+  // 不重复插入也不跳过——否则念头库每轮都是全新的一次性样品。
   const candidateIds = new Map<string, string>();
-  await withJobTransaction(job, async (tx) => {
-    for (const candidate of eligible) {
-      const rows = await tx.execute<{ id: string }>(sql`
-        INSERT INTO assistant_thoughts
-          (workspace_id, user_id, source, topic, dedupe_key, text, grounding,
-           status, urgency, familiarity_required, expires_at)
-        VALUES
-          (${job.workspaceId}, ${userId}, ${candidate.source}, ${candidate.topic}, ${candidate.dedupeKey},
-           ${candidate.text}, ${JSON.stringify(candidate.grounding)}::jsonb,
-           'candidate', ${candidate.urgency}, ${candidate.familiarityRequired},
-           now() + (${THOUGHT_LIMITS.candidateTtlHours} * interval '1 hour'))
-        RETURNING id
-      `);
-      const id = (Array.isArray(rows) ? rows : [])[0]?.id;
-      if (id) candidateIds.set(candidate.dedupeKey, id);
-    }
+  const toInsert = eligible.filter((candidate) => {
+    const storedId = thoughtMaterial.storedCandidates.get(candidate.dedupeKey);
+    if (!storedId) return true;
+    candidateIds.set(candidate.dedupeKey, storedId);
+    return false;
   });
+  if (toInsert.length > 0) {
+    await withJobTransaction(job, async (tx) => {
+      for (const candidate of toInsert) {
+        const rows = await tx.execute<{ id: string }>(sql`
+          INSERT INTO assistant_thoughts
+            (workspace_id, user_id, source, topic, dedupe_key, text, grounding,
+             status, urgency, familiarity_required, expires_at)
+          VALUES
+            (${job.workspaceId}, ${userId}, ${candidate.source}, ${candidate.topic}, ${candidate.dedupeKey},
+             ${candidate.text}, ${JSON.stringify(candidate.grounding)}::jsonb,
+             'candidate', ${candidate.urgency}, ${candidate.familiarityRequired},
+             now() + (${THOUGHT_LIMITS.candidateTtlHours} * interval '1 hour'))
+          RETURNING id
+        `);
+        const id = (Array.isArray(rows) ? rows : [])[0]?.id;
+        if (id) candidateIds.set(candidate.dedupeKey, id);
+      }
+    });
+  }
 
-  // 日预算（沉默默认）：今天已送达 ≥2 条 → 本轮只入念库，不再表达。
-  if (material.deliveredToday >= THOUGHT_LIMITS.maxDeliveredPerDay) {
-    logger.info({ jobId: job.id }, "companion thought skipped: daily budget (candidates stored)");
+  // 日预算（沉默默认）：额度按 intervention_level 取，与 proactive-hook 同源。
+  // 冷却不需要在这里再判一次：念头调度按 2 小时桶入队，任何两档冷却都已过去。
+  const dailyLimit = proactiveDailyLimit(interventionLevel);
+  if (thoughtMaterial.deliveredToday >= dailyLimit) {
+    finish("silent", {
+      reason: "daily_budget",
+      interventionLevel,
+      deliveredToday: thoughtMaterial.deliveredToday,
+      dailyLimit,
+      candidatesStored: eligible.length,
+    });
     return;
   }
 
@@ -575,46 +673,36 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
     const thoughtId = candidateIds.get(candidate.dedupeKey);
     if (!thoughtId) continue;
     let expression = selectThoughtExpression([candidate.text], candidate.grounding) ?? candidate.text;
-    if (enableLlm) {
-      try {
-        const govCtx = await resolveAIGovernanceContext(job.workspaceId, userId);
-        if (govCtx.consentOk) {
-          const textRes = resolveProviderForTask(govCtx, "companion_agent");
-          const provider = createGovernedProvider(
-            createProvider(textRes.providerName, withThinkingDisabled(textRes.providerConfig)),
-            govCtx,
-            job.workspaceId,
-            { userId, operation: "companion_thought", jobId: job.id },
-          );
-          const raw = await runWithAbortBudget(
-            (signal) => provider.chatCompletion(
-              [{ role: "user", content: buildExpressionPrompt({
-                petName: thoughtMaterial.petName,
-                familiarity: thoughtMaterial.familiarity,
-                allowPlayful: thoughtMaterial.allowPlayful,
-                allowNudgeLearning: thoughtMaterial.allowNudgeLearning,
-                catchphrase: thoughtMaterial.catchphrase,
-                thoughtText: candidate.text,
-                groundingNames: candidate.grounding.map((entity) => entity.name),
-                recentlySaid: thoughtMaterial.recentlySaid,
-              }) }],
-              { temperature: 0.9, maxTokens: 400, responseFormat: "json_object" },
-              signal,
-            ),
-            undefined,
-            resolveProviderCallTimeout("companion_thought"),
-          );
-          const content = typeof (raw as { content?: unknown })?.content === "string" ? (raw as { content: string }).content : "";
-          const parsed = JSON.parse(content) as { variants?: unknown };
-          const variants = Array.isArray(parsed?.variants)
-            ? parsed.variants.filter((value): value is string => typeof value === "string")
-            : [];
-          const picked = selectThoughtExpression(variants, candidate.grounding);
-          if (picked) expression = picked;
-        }
-      } catch (err) {
-        logger.warn({ jobId: job.id, err: err instanceof Error ? err.message : String(err) }, "companion thought expression llm failed; template fallback");
-      }
+    try {
+      const provider = await thoughtProvider();
+      const raw = await runWithAbortBudget(
+        (signal) => provider.chatCompletion(
+          [{ role: "user", content: buildExpressionPrompt({
+            petName: thoughtMaterial.petName,
+            familiarity: thoughtMaterial.familiarity,
+            allowPlayful: thoughtMaterial.allowPlayful,
+            allowNudgeLearning: thoughtMaterial.allowNudgeLearning,
+            catchphrase: thoughtMaterial.catchphrase,
+            facts: thoughtMaterial.facts,
+            thoughtText: candidate.text,
+            groundingNames: candidate.grounding.map((entity) => entity.name),
+            recentlySaid: thoughtMaterial.recentlySaid,
+          }) }],
+          { temperature: 0.9, maxTokens: 400, responseFormat: "json_object" },
+          signal,
+        ),
+        undefined,
+        resolveProviderCallTimeout("companion_thought"),
+      );
+      const content = typeof (raw as { content?: unknown })?.content === "string" ? (raw as { content: string }).content : "";
+      const parsed = JSON.parse(content) as { variants?: unknown };
+      const variants = Array.isArray(parsed?.variants)
+        ? parsed.variants.filter((value): value is string => typeof value === "string")
+        : [];
+      const picked = selectThoughtExpression(variants, candidate.grounding);
+      if (picked) expression = picked;
+    } catch (err) {
+      logger.warn({ jobId: job.id, err: err instanceof Error ? err.message : String(err) }, "companion thought expression llm failed; template fallback");
     }
 
     // 语义去重（切片①）：embedding 优先，bigram 降级。
@@ -646,7 +734,7 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
       const updated = await tx.execute<{ id: string }>(sql`
         UPDATE assistant_thoughts
         SET status = 'delivered', text = ${expression},
-            embedding = ${candidateEmbedding ? `[${candidateEmbedding.map((value) => value.toFixed(6)).join(",")}]::vector` : null},
+            embedding = ${candidateEmbedding ? `[${candidateEmbedding.map((value) => value.toFixed(6)).join(",")}]` : null}::vector,
             delivered_at = now(),
             expires_at = now() + (${THOUGHT_LIMITS.deliveredTtlHours} * interval '1 hour'),
             updated_at = now()
@@ -657,27 +745,19 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
       if (!confirmedId) return false;
 
       // 送达：复用 assistant_deliveries 的展示通道（气泡从 home projection 读）。
-      const payloadRef = JSON.stringify({
-        kind: "system_event",
+      // 序列锁 + NOTIFY 都在 enqueueSystemEventDelivery 里，别再在这里手写一遍。
+      return enqueueSystemEventDelivery(tx, {
+        workspaceId: job.workspaceId,
+        userId,
         systemEventId: `thought:${confirmedId}`,
         text: expression,
+        ttlHours: THOUGHT_LIMITS.deliveredTtlHours,
       });
-      await tx.execute(sql`
-        INSERT INTO assistant_deliveries
-          (assistant_session_id, workspace_id, user_id, inbox_sequence, dedupe_key, state, kind, payload_ref, expires_at)
-        SELECT NULL, ${job.workspaceId}, ${userId},
-               COALESCE(MAX(inbox_sequence), 0) + 1,
-               ${`thought:${confirmedId}`}, 'queued', 'system_event',
-               ${payloadRef}::jsonb, now() + (${THOUGHT_LIMITS.deliveredTtlHours} * interval '1 hour')
-        FROM assistant_deliveries
-        WHERE workspace_id = ${job.workspaceId} AND user_id = ${userId}
-        ON CONFLICT (workspace_id, user_id, dedupe_key) DO NOTHING
-      `);
-      return true;
     });
     if (delivered) {
-      logger.info({ jobId: job.id, topic: candidate.topic }, "companion thought delivered");
+      finish("delivered", { topic: candidate.topic, thoughtId, chars: expression.length });
       return; // 每次调度最多送 1 条：沉默默认。
     }
   }
+  finish("silent", { reason: "no_candidate_survived", eligible: eligible.length });
 }

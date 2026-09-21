@@ -34,6 +34,7 @@ import {
   revealRunTargetV2,
   submitArtifact,
 } from "./run-service.ts";
+import { wakeLearningRunProcessing } from "./run-processing-tick.ts";
 import { createLearningRunV2RequestSchema } from "@ailearn/shared";
 import { LearningRunServiceError } from "./run-errors.ts";
 import { safeSseWrite } from "../../lib/safe-sse-write.ts";
@@ -131,8 +132,6 @@ function isV2ActionAllowed(
         return action.kind === "switch_variant" && action.alternativeId === allowed.alternativeId;
       case "request_hint":
         return action.kind === "request_hint" && action.level === allowed.level;
-      case "skip_task":
-        return action.kind === "skip_task" && action.taskId === allowed.taskId;
       case "activate_followup":
         return action.kind === "activate_followup" && action.followupId === allowed.followupId;
       case "retry_assessment":
@@ -466,6 +465,10 @@ export async function learningRunRoutes(app: FastifyInstance) {
           const parsed = parseServiceValue(submitTaskArtifactReceiptSchema, raw, "artifact receipt");
           return submitTaskArtifactReceiptV2Schema.parse({ ...parsed, version: 2, snapshotId: snapshot.snapshotId });
         });
+        // 提交就是"该去打分了"的明确信号：喊一声让处理循环立刻跑一轮，
+        // 而不是让用户在 10 秒轮询的节奏里干等（复盘 #6）。必须在事务外调用，
+        // 否则唤醒的那轮看不到刚提交的 outbox 行。
+        wakeLearningRunProcessing();
         enqueueLearningMetric(
           { workspaceId: req.session.workspaceId, userId: req.session.userId },
           { eventType: "artifact_locked", runId: params.data.runId, taskId: params.data.taskId },
@@ -525,6 +528,11 @@ export async function learningRunRoutes(app: FastifyInstance) {
             snapshot,
           });
         });
+        // retry_assessment / retry_commit / retry_prepare 都是"该重新干活了"的信号，
+        // 同样不该等 10 秒轮询（复盘 #6）。这里不按 action 类型枚举：多喊一轮的代价
+        // 只是一条 claim 查询（FOR UPDATE SKIP LOCKED，无活即空转），而一份类型清单
+        // 会随 service 新增入队分支而失真。必须在事务外调用。
+        wakeLearningRunProcessing();
         return reply.header("Cache-Control", "no-store").send(response);
       } catch (err) {
         if (err instanceof LearningRunServiceError) return reply.code(err.statusCode).send({ error: err.code, message: err.message, ...err.recoveryData });

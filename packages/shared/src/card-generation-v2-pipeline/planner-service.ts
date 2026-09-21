@@ -39,7 +39,10 @@ import type {
   GenerationSemanticSpecV2,
   GenerationInputSnapshotV2,
   KnowledgeFormV2,
+  CardStrategyV2,
 } from "../card-generation-v2-contracts.ts";
+import { CardStrategyValuesV2 } from "../card-generation-v2-contracts.ts";
+import type { TaskIntentV1 } from "../learning-run-contracts.ts";
 import {
   computeCardPlanHashV2,
 } from "../card-generation-v2-hashing.ts";
@@ -343,8 +346,12 @@ export async function executePlanner(input: PlannerInput): Promise<PlannerResult
     };
   } else {
     // §8.4: author_candidates
+    const allocations = allocateStrategies(
+      objectivesToCreate.map((atom) => atom.knowledgeFormHint),
+      input.semanticSpec.semanticRequest.preferredStrategies,
+    );
     const plannedObjectives = objectivesToCreate.map((atom, idx) =>
-      createPlannedObjective(atom, idx),
+      createPlannedObjective(atom, idx, allocations[idx]!),
     );
     const existingActions: PlannedExistingLifecycleActionV2[] = [];
 
@@ -530,16 +537,136 @@ function determineNoCardReasons(
 function createPlannedObjective(
   atom: ExtractedKnowledgeAtom,
   index: number,
+  strategy: StrategyAllocation,
 ): PlannedObjectiveV2 {
   const objectiveLocalId = `obj-${atom.atomId}`;
+  const reasonCodes = [
+    `learnability-${atom.learnabilityBps}`,
+    `importance-${atom.importanceBps}`,
+  ];
+  if (strategy.reasonCode) reasonCodes.push(strategy.reasonCode);
   return {
     objectiveLocalId,
     objectiveStatement: atom.proposition.slice(0, 2000),
     priority: index === 0 ? "critical" : index < 3 ? "important" : "optional",
     knowledgeForm: atom.knowledgeFormHint,
+    strategy: strategy.strategy,
     sourceAtomIds: [atom.atomId],
-    reasonCodes: [`learnability-${atom.learnabilityBps}`, `importance-${atom.importanceBps}`],
+    reasonCodes,
     estimatedReviewCostSeconds: Math.min(300, Math.max(30, atom.proposition.length)),
     changeContext: { kind: "create_new" },
   };
+}
+
+// ─── 题型分配（§8.4）─────────────────────────────────────────────────────
+
+/**
+ * 每种知识形态可接受的题型，按教学适配度从高到低排列。
+ *
+ * 这是硬约束的另一半：用户勾的题型是**偏好**，不能把"因果模型"塞进填空题，
+ * 但可以在同一形态的几个合理题型之间按偏好挑选。`fact`/`definition` 把
+ * `cloze` 排在前面——此前映射表只有 `fact → recall`，`cloze` 在整个确定性
+ * 链路上根本不可达（2026-09-20 实走：一批卡全是主观回忆题）。
+ */
+const STRATEGIES_FOR_KNOWLEDGE_FORM: Record<KnowledgeFormV2, readonly CardStrategyV2[]> = {
+  fact: ["cloze", "recall"],
+  definition: ["recall", "cloze"],
+  relationship: ["compare", "why", "recall"],
+  comparison: ["compare", "boundary"],
+  sequence: ["sequence", "cloze"],
+  procedure: ["sequence", "recall"],
+  causal_model: ["why", "recall"],
+  boundary: ["boundary", "compare"],
+  application_rule: ["application", "why"],
+};
+
+/** 该知识形态最自然的题型。 */
+export function strategyForKnowledgeForm(form: KnowledgeFormV2): CardStrategyV2 {
+  return STRATEGIES_FOR_KNOWLEDGE_FORM[form]?.[0] ?? "recall";
+}
+
+export interface StrategyAllocation {
+  strategy: CardStrategyV2;
+  /** 分配偏离了"最自然题型"或偏好无法完全满足时的可审计原因。 */
+  reasonCode?: string;
+}
+
+/**
+ * 在**整批**目标上分配题型。
+ *
+ * 三条规则，按优先级：
+ * 1. 形态适配（`STRATEGIES_FOR_KNOWLEDGE_FORM`）是硬边界，不越界出题；
+ * 2. 用户偏好 `preferredStrategies` 是一个**集合**（决定哪些题型可用），不是优先级；
+ *    可用集合内一律按教学适配度取先。最自然题型被偏好排除、由同形态的次优题型顶上时
+ *    记 `strategy_preference_applied`；偏好里没有任何一项与本卡形态适配时，该卡退回
+ *    最自然题型（即偏好被形态边界否决）。
+ * 3. 多样性上限：单一题型不超过 ⌈N/2⌉ 张，超出则取次优适配题型（记
+ *    `strategy_diversity_capped`）。**例外**：用户只勾了一种题型时不设上限——
+ *    明确的单一偏好就是要求，不是需要被"多样性"纠正的错误。
+ *
+ * 多样性必须在这里、按整批上下文决定，不能交给模型自觉——模型逐张出题时看不到
+ * 其他卡，且提示里给什么示例就会照抄什么。
+ */
+export function allocateStrategies(
+  forms: readonly KnowledgeFormV2[],
+  preferredStrategies?: readonly CardStrategyV2[],
+): StrategyAllocation[] {
+  const total = forms.length;
+  const preferred = [...new Set(preferredStrategies ?? [])];
+  /** 一种题型最多占几张：只有确实有多种可选时才限流。 */
+  const capPerStrategy = preferred.length === 1
+    ? total
+    : total >= 2 ? Math.ceil(total / 2) : total;
+  const used = new Map<CardStrategyV2, number>();
+
+  return forms.map((form) => {
+    const compatible = STRATEGIES_FOR_KNOWLEDGE_FORM[form] ?? ["recall"];
+    /**
+     * 偏好是**集合**不是优先级——界面上是一排 chip，用户的点选顺序不构成排序意图
+     * （默认值 `["recall","why"]` 若被当成优先级，会把 recall 顶到一切形态前面，
+     * 正好复刻 2026-09-20 复盘的那个缺陷）。因此候选顺序一律按教学适配度排，
+     * 偏好只决定"这一种形态上的哪些题型被允许"。
+     */
+    const ranked = preferred.length
+      ? [
+        ...compatible.filter((s) => preferred.includes(s)),
+        ...compatible.filter((s) => !preferred.includes(s)),
+      ]
+      : [...compatible];
+    const countOf = (strategy: CardStrategyV2) => used.get(strategy) ?? 0;
+    const natural = compatible[0]!;
+    const bestFit = ranked[0]!;
+    const unlocked = countOf(bestFit) < capPerStrategy
+      ? bestFit
+      : ranked.find((s) => countOf(s) < capPerStrategy) ?? bestFit;
+    used.set(unlocked, countOf(unlocked) + 1);
+
+    if (unlocked !== bestFit) return { strategy: unlocked, reasonCode: "strategy_diversity_capped" };
+    if (bestFit !== natural) return { strategy: unlocked, reasonCode: "strategy_preference_applied" };
+    return { strategy: unlocked };
+  });
+}
+
+/** 供 author 提示使用：全部题型枚举。 */
+export const ALL_CARD_STRATEGIES: readonly CardStrategyV2[] = CardStrategyValuesV2;
+
+/**
+ * 题型 → 作答任务意图。
+ *
+ * learning-runs 构造作答通道时读的是 objective.preferredTaskIntents，**不是**
+ * `presentation.strategy`（strategy 至今只用于卡片展示标签），因此必须由同一处
+ * 决定两者，否则会出现"填空题面 + 解释类作答通道"的错位。
+ */
+const TASK_INTENTS_FOR_STRATEGY: Record<CardStrategyV2, readonly TaskIntentV1[]> = {
+  recall: ["recall"],
+  cloze: ["recall"],
+  compare: ["relate", "paraphrase"],
+  sequence: ["procedure"],
+  why: ["explain"],
+  boundary: ["boundary"],
+  application: ["apply", "example"],
+};
+
+export function taskIntentsForStrategy(strategy: CardStrategyV2): readonly TaskIntentV1[] {
+  return TASK_INTENTS_FOR_STRATEGY[strategy];
 }

@@ -193,7 +193,7 @@ describe("CardGenerationSurface · 候选审核", () => {
     render(<CardGenerationSurface />);
 
     await waitFor(() => expect(screen.getByText("第一张")).toBeTruthy());
-    fireEvent.click(screen.getByRole("button", { name: "保留" }));
+    fireEvent.click(screen.getByRole("button", { name: /^保留（进入激活队列）/ }));
 
     await waitFor(() => expect(state.reviewCalls).toHaveLength(1));
     expect(state.reviewCalls[0]).toMatchObject({ type: "keep", candidateId: "cand-1" });
@@ -227,7 +227,7 @@ describe("CardGenerationSurface · 候选审核", () => {
     useRoomStore.setState({ activeCardGenerationRunId: RUN_ID });
     render(<CardGenerationSurface />);
 
-    await waitFor(() => expect(screen.getAllByText("已保留 · 待激活").length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getAllByText("已保留 · 在激活队列里").length).toBeGreaterThan(0));
     fireEvent.click(screen.getByRole("button", { name: /撤销决定/ }));
 
     await waitFor(() => expect(state.reviewCalls).toHaveLength(1));
@@ -243,14 +243,18 @@ describe("CardGenerationSurface · 候选审核", () => {
     render(<CardGenerationSurface />);
 
     await waitFor(() => expect(screen.getByText("第一张")).toBeTruthy());
-    fireEvent.click(screen.getByRole("button", { name: /查看答案与证据/ }));
+    // 代价要说在点之前：这个按钮的提示必须已经写明"看答案会让正式验证等 24 小时"。
+    const revealButton = screen.getByRole("button", { name: /查看答案与证据/ });
+    expect(revealButton.title).toContain("24 小时");
+    fireEvent.click(revealButton);
 
     await waitFor(() => expect(state.revealCalls).toEqual(["cand-1"]));
     await waitFor(() => expect(screen.getByText("提取练习强迫大脑重建记忆痕迹。")).toBeTruthy());
     expect(screen.getByText("来源第 3 段")).toBeTruthy();
     expect(screen.getByText("测试效应在多项研究中被重复。")).toBeTruthy();
     // 曝光有后果，而且后果是服务端的预检结果，不是一句笼统的说明。
-    await waitFor(() => expect(screen.getByText("需要等待首次验证")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("答案看过了：激活后要等 24 小时才能正式验证")).toBeTruthy());
+    expect(screen.getByText(/不计入正式状态/)).toBeTruthy();
     expect(screen.getByText(/已查看/)).toBeTruthy();
   });
 
@@ -263,12 +267,12 @@ describe("CardGenerationSurface · 候选审核", () => {
     render(<CardGenerationSurface />);
 
     await waitFor(() => expect(screen.getByText("第一张")).toBeTruthy());
-    fireEvent.click(screen.getByRole("button", { name: "保留" }));
+    fireEvent.click(screen.getByRole("button", { name: /^保留（进入激活队列）/ }));
 
-    await waitFor(() => expect(screen.getByText(/操作未确认/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/这一步没成功/)).toBeTruthy());
     // 候选卡与它的决定按钮仍在原地。
     expect(screen.getByText("第一张")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "保留" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /^保留（进入激活队列）/ })).toBeTruthy();
   });
 
   /**
@@ -297,14 +301,14 @@ describe("CardGenerationSurface · 候选审核", () => {
 
     // 页面身份仍是候选审核，候选卡与决定按钮都在。
     await waitFor(() => expect(screen.getByText("第一张")).toBeTruthy());
-    const keep = screen.getByRole("button", { name: "保留" });
+    const keep = screen.getByRole("button", { name: /^保留（进入激活队列）/ });
     expect(screen.getByRole("button", { name: /不保留/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: "结束本次审核" })).toBeTruthy();
 
     fireEvent.click(keep);
     await waitFor(() => expect(state.reviewCalls).toHaveLength(1));
     expect(state.reviewCalls[0]).toMatchObject({ type: "keep", candidateId: "cand-1" });
-    await waitFor(() => expect(screen.getAllByText("已保留 · 待激活").length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getAllByText("已保留 · 在激活队列里").length).toBeGreaterThan(0));
   });
 
   /**
@@ -330,7 +334,7 @@ describe("CardGenerationSurface · 候选审核", () => {
     useRoomStore.setState({ activeCardGenerationRunId: RUN_ID, activeNoteRef: null });
     render(<CardGenerationSurface />);
 
-    await waitFor(() => expect(screen.getAllByText("服务端需要进一步处理").length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getAllByText("需要后台再看一次才能继续").length).toBeGreaterThan(0));
     expect(screen.getAllByText("返回笔记")).toHaveLength(1);
     expect(screen.getByRole("button", { name: /重新检查/ })).toBeTruthy();
 
@@ -365,7 +369,7 @@ describe("CardGenerationSurface · 候选审核", () => {
     useRoomStore.setState({ activeCardGenerationRunId: RUN_ID, activeNoteRef: null });
     render(<CardGenerationSurface />);
 
-    await waitFor(() => expect(screen.getAllByText("服务端需要进一步处理").length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getAllByText("需要后台再看一次才能继续").length).toBeGreaterThan(0));
     fireEvent.click(screen.getByRole("button", { name: "结束本次审核" }));
     // 结束审核必须真的打到服务端，而不是一个点了没反应的按钮。
     await waitFor(() => expect(gateway.note.cardGeneration.close).toHaveBeenCalledTimes(1));

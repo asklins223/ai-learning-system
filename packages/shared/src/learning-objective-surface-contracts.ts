@@ -108,6 +108,11 @@ export const learningObjectivePrimaryActionV3Schema = z.discriminatedUnion("kind
     reasonCodes: z.array(z.string().min(1)).min(1).max(10),
     label: z.string().min(1).max(80),
     start: objectiveRunStartV3Schema,
+    /**
+     * 练习不推进正式验证，所以把「那什么时候能正式算」一起下发（复盘 #9）。
+     * 时间由服务端算好；客户端只展示，不参与裁决。
+     */
+    formalValidationNotBefore: z.string().datetime({ offset: true }).nullable(),
   }),
   z.strictObject({
     kind: z.literal("wait_for_initial_validation"),
@@ -256,6 +261,20 @@ export const objectiveListItemV3Schema = z.strictObject({
   personalState: z.strictObject({
     state: objectivePersonalStateV3Schema,
     activeRunId: z.string().uuid().nullable(),
+  }),
+  /**
+   * 列表行自己就要能说明"这张卡进展到哪了"。这些数据本来就在批量装配的
+   * surface 里（`batchAssembleObjectiveSurfacesV3` 一次查好），此前只是没往
+   * 列表 DTO 带——于是答完一张卡回到列表，行上什么变化都看不到（复盘 #7）。
+   */
+  progress: z.strictObject({
+    practiceTrailCount: z.number().int().min(0),
+    lastCanonicalAt: z.string().datetime({ offset: true }).nullable(),
+    reviewDueAt: z.string().datetime({ offset: true }).nullable(),
+    /** 详情里的 `personal.initialValidation.status` 精简版；null = 还没安排。 */
+    initialValidation: z.enum(["ready", "deferred", "completed"]).nullable(),
+    /** deferred 时的开放时间点；服务端算好，客户端只展示。 */
+    validationNotBefore: z.string().datetime({ offset: true }).nullable(),
   }),
   primaryAction: learningObjectivePrimaryActionV3Schema,
 });

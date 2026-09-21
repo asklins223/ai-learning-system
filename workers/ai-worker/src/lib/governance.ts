@@ -14,7 +14,7 @@ import { safeErrorMessage, DomainError, AI_CONSENT_REQUIRED_CODE } from "@ailear
 import { resolveSystemPlatform } from "@ailearn/shared/platform-config-node";
 import type { AITaskType } from "@ailearn/shared/task-router";
 import { getCapabilityForTask, getTaskComplexity } from "@ailearn/shared/task-router";
-import { db } from "../db.ts";
+import { db, withWorkerWorkspaceTransaction } from "../db.ts";
 import * as schema from "@ailearn/shared/db-schema";
 import { logger } from "./logger.ts";
 
@@ -141,6 +141,11 @@ export interface AIGovernanceContext {
    * 当未配置 vision 时,回退到 providerConfig。 */
   visionProviderName: string | null;
   visionProviderConfig: import("./ai-provider.ts").AIProviderRuntimeConfig | null;
+  /** 伴星退化兜底 provider（方案 29 §9.6 / B8）。
+   * 主模型高频返回"一词 + finish=stop"的退化补全时，agent loop 会用这个**不同模型、
+   * 最好不同 provider** 的槽再要一次答案。未配置时为 null，loop 跳过跨模型兜底。 */
+  companionFallbackProviderName: string | null;
+  companionFallbackProviderConfig: import("./ai-provider.ts").AIProviderRuntimeConfig | null;
   /** 独立的向量嵌入 provider 配置（plan §3.4: embedding 折进治理 map）。
    * 当系统配置了独立 embedding 平台时,
    * 此字段持有该平台配置。
@@ -218,12 +223,38 @@ export function resolveProviderForTask(
   return { providerName: ctx.providerName, providerConfig: ctx.providerConfig };
 }
 
+/**
+ * 读某个账号的 AI 设置（同意签署记录 + 数据外发政策）。0237 之后这是**唯一**
+ * 的同意来源；`workspaces` 上那几列已随迁移删除。
+ *
+ * 必须走 `withWorkerWorkspaceTransaction`：`user_ai_settings` 启用 RLS 且按
+ * `app.user_id` 隔离，裸查询会**静默返回 0 行**，表现成"这个人永远没同意"。
+ */
+export async function readUserAiSettings(
+  workspaceId: string,
+  userId: string | null,
+): Promise<typeof schema.userAiSettings.$inferSelect | null> {
+  if (!userId) return null;
+  const row = await withWorkerWorkspaceTransaction({ workspaceId, userId }, (transaction) =>
+    transaction.query.userAiSettings.findFirst({
+      where: eq(schema.userAiSettings.userId, userId),
+    }));
+  return row ?? null;
+}
+
+/** 账号级数据外发政策；没有行时回落到拒绝默认（fail closed）。 */
+export async function getAccountAIPolicy(workspaceId: string, userId: string | null): Promise<WorkspaceAIPolicy> {
+  const settings = await readUserAiSettings(workspaceId, userId);
+  return settings ? normalizeWorkspaceAIPolicy(settings.dataPolicy) : createDefaultAIPolicy();
+}
+
 export async function resolveAIGovernanceContext(
   workspaceId: string,
-  _userId: string | null,
+  userId: string | null,
 ): Promise<AIGovernanceContext> {
   // v0.6 单一配置源重构：不再查 personal BYOK，平台解析完全收敛到
-  // config/ai-platforms.json。仍查 workspaces 获取 policy/consent。
+  // config/ai-platforms.json。workspaces 现在只用来确认"这个工作区存在"——
+  // 同意与外发政策是账号级的（0237），见下面 settings 那段。
   const ws = await db.query.workspaces.findFirst({
     where: eq(schema.workspaces.id, workspaceId),
   });
@@ -299,6 +330,21 @@ export async function resolveAIGovernanceContext(
     };
   }
 
+  // companion_fallback — 伴星退化时的跨模型兜底（方案 29 §9.6）。
+  // 未配置就是 null：agent loop 会跳过这一级，只保留同模型思考档重试。
+  let companionFallbackProviderName: string | null = null;
+  let companionFallbackProviderConfig: import("./ai-provider.ts").AIProviderRuntimeConfig | null = null;
+  const fallbackPlatform = resolveSystemPlatform("companion_fallback");
+  if (fallbackPlatform) {
+    companionFallbackProviderName = fallbackPlatform.type;
+    companionFallbackProviderConfig = {
+      apiKey: fallbackPlatform.apiKey,
+      baseUrl: fallbackPlatform.baseUrl,
+      model: fallbackPlatform.model,
+      options: fallbackPlatform.options,
+    };
+  }
+
   // embedding — 独立系统级嵌入平台（未配置时回退到主 provider）
   let embeddingProviderName: string | null = null;
   let embeddingProviderConfig: import("./ai-provider.ts").AIProviderRuntimeConfig | null = null;
@@ -323,34 +369,32 @@ export async function resolveAIGovernanceContext(
     (textProviderName != null && textProviderName.toLowerCase() !== "mock") ||
     (embeddingProviderName != null && embeddingProviderName.toLowerCase() !== "mock");
 
-  if (ws) {
-    policy = normalizeWorkspaceAIPolicy(ws.aiDataPolicy);
-    // consent 检查（mock 豁免）
-    if (anyExternalNonMock) {
-      consentOk = ws.aiConsentVersion !== null && ws.aiConsentAt !== null;
-    }
-  } else if (anyExternalNonMock) {
-    // Fail-closed: workspace not found, deny non-mock providers
-    consentOk = false;
-  }
+  // 0237：AI 使用同意与数据外发政策从工作区级迁到**账号级**——同意管的是
+  // "我的内容能不能送出去"，授权范围只能是本人（挂在空间上等于由别人的
+  // 同意决定我的数据去向）。这里以前读 `workspaces.ai_data_policy`，而该列
+  // 已随迁移删除，于是每次都回落到默认 `sendToExternal=false`，
+  // **所有非 mock 调用在出网前就被拒**（表现为 provider 0ms 失败）。
+  //
+  // 读 `user_ai_settings` 必须走 `withWorkerWorkspaceTransaction`：这张表开了
+  // RLS 且按 `app.user_id` 隔离，不设会话变量的查询会**静默返回 0 行**，
+  // 表现成"这个人永远没同意"而不是报错（0237 注释同样强调了这点）。
+  const settings = await readUserAiSettings(workspaceId, userId);
 
-  return { providerName, providerConfig, textProviderName, textProviderConfig, visionProviderName, visionProviderConfig, embeddingProviderName, embeddingProviderConfig, consentOk, policy };
-}
-
-
-
-/**
- * N-011: 获取工作区 AI 数据策略。
- */
-export async function getWorkspaceAIPolicy(workspaceId: string): Promise<WorkspaceAIPolicy> {
-  const ws = await db.query.workspaces.findFirst({
-    where: eq(schema.workspaces.id, workspaceId),
-  });
   if (!ws) {
-    return createDefaultAIPolicy();
+    // Fail-closed: workspace not found, deny non-mock providers
+    if (anyExternalNonMock) consentOk = false;
+  } else {
+    if (settings) policy = normalizeWorkspaceAIPolicy(settings.dataPolicy);
+    // consent 检查（mock 豁免）：账号级签署记录
+    if (anyExternalNonMock) {
+      consentOk = settings?.consentVersion != null && settings.consentAt != null;
+    }
   }
-  return normalizeWorkspaceAIPolicy(ws.aiDataPolicy);
+
+  return { providerName, providerConfig, textProviderName, textProviderConfig, visionProviderName, visionProviderConfig, companionFallbackProviderName, companionFallbackProviderConfig, embeddingProviderName, embeddingProviderConfig, consentOk, policy };
 }
+
+
 
 /**
  * N-011: 写入 AI 调用审计日志。
@@ -782,7 +826,7 @@ interface AuditLogDependencies {
    *  Callers that already resolved governance earlier (e.g. via resolveAIGovernanceContext)
    *  should pass their resolved policy here (PERF: no redundant DB query per audit write). */
   policy?: WorkspaceAIPolicy;
-  getPolicy?: (workspaceId: string) => Promise<WorkspaceAIPolicy>;
+  getPolicy?: (workspaceId: string, userId: string | null) => Promise<WorkspaceAIPolicy>;
   write?: (values: typeof schema.aiAuditLog.$inferInsert) => Promise<void>;
 }
 
@@ -791,12 +835,12 @@ export async function logAICall(
   dependencies: AuditLogDependencies = {},
 ): Promise<boolean> {
   try {
-    const getPolicy = dependencies.getPolicy ?? getWorkspaceAIPolicy;
-    const policy = dependencies.policy ?? await getPolicy(params.workspaceId);
+    const getPolicy = dependencies.getPolicy ?? getAccountAIPolicy;
+    const policy = dependencies.policy ?? await getPolicy(params.workspaceId, params.userId);
     if (!policy.auditLogging) {
       logger.debug(
         { workspaceId: params.workspaceId, operation: params.operation },
-        "AI audit logging disabled by workspace policy",
+        "AI audit logging disabled by the account data policy",
       );
       return false;
     }

@@ -2,13 +2,13 @@
  * governance.ts DB 依赖函数补充测试
  *
  * 通过 mock db 对象的 transaction/query 属性，
- * 测试 getWorkspaceAIPolicy / enforcePrivacyGovernanceWithPolicy / logAICall 的核心业务逻辑分支。
+ * 测试 getAccountAIPolicy / enforcePrivacyGovernanceWithPolicy / logAICall 的核心业务逻辑分支。
  */
 
 import assert from "node:assert/strict";
 import { describe, it, before, after } from "node:test";
 import {
-  getWorkspaceAIPolicy,
+  getAccountAIPolicy,
   enforcePrivacyGovernanceWithPolicy,
   logAICall,
   DEFAULT_AI_DATA_POLICY,
@@ -42,28 +42,21 @@ after(() => {
   resetPlatformConfigCache();
 });
 
-function setupDbMock(opts: {
-  workspace?: any;
-  insertShouldThrow?: boolean;
-}) {
-  if (db.query?.workspaces) {
-    (db.query.workspaces.findFirst as any) = async () => opts.workspace ?? undefined;
-  }
-
-  let insertCallCount = 0;
-  db.insert = ((_table: any) => ({
-    values: (_data: any) => {
-      insertCallCount++;
-      if (opts.insertShouldThrow) {
-        return Promise.reject(new Error("db write failed"));
-      }
-      return chainable(undefined);
-    },
-  })) as typeof db.insert;
+/**
+ * `user_ai_settings` 开了 RLS，读它必须走带 `app.user_id` 的事务，所以这里桩掉
+ * `db.transaction`，并把 `applyContext` 的回读校验一并喂平 —— 少这一步，生产上
+ * 就是"静默 0 行 = 永远没同意"（0237 注释里点过的坑），测试要让它可见。
+ */
+function mockSettingsQuery(row: any) {
+  const fakeTransaction: any = {
+    query: { userAiSettings: { findFirst: async () => row } },
+    execute: async () => [{ workspace_id: WS_ID, user_id: USER_ID }],
+  };
+  let opened = 0;
+  db.transaction = (async (fn: any) => { opened += 1; return fn(fakeTransaction); }) as typeof db.transaction;
+  return () => opened > 0;
 }
 
-// Chainable helper
-// Mock execute for setWorkerTransactionContext
 function chainable(value: any): any {
   const obj: any = {
     then: (resolve: any, reject: any) => Promise.resolve(value).then(resolve, reject),
@@ -79,38 +72,43 @@ function chainable(value: any): any {
   });
 }
 
-// ─── getWorkspaceAIPolicy ──────────────────────────────────────────────
+function setupDbMock(opts: {
+  settings?: any;
+  insertShouldThrow?: boolean;
+}) {
+  mockSettingsQuery(opts.settings);
+  db.insert = ((_table: any) => ({
+    values: (_data: any) => {
+      if (opts.insertShouldThrow) return Promise.reject(new Error("db write failed"));
+      return chainable(undefined);
+    },
+  })) as typeof db.insert;
+}
 
-describe("governance getWorkspaceAIPolicy (DB mock)", () => {
-  it("工作区不存在时返回默认策略", async () => {
-    setupDbMock({ workspace: undefined });
-    const result = await getWorkspaceAIPolicy(WS_ID);
+describe("governance getAccountAIPolicy (DB mock)", () => {
+  it("没有 userId 时不查库，直接回落到拒绝默认", async () => {
+    const usedTransaction = mockSettingsQuery(undefined);
+    const result = await getAccountAIPolicy(WS_ID, null);
     assert.deepEqual(result, DEFAULT_AI_DATA_POLICY);
+    assert.equal(usedTransaction(), false, "无 userId 就不该开带 RLS 身份的事务");
   });
 
-  it("工作区有策略时返回规范化策略", async () => {
-    setupDbMock({
-      workspace: {
-        id: WS_ID,
-        aiDataPolicy: {
-          sendToExternal: true,
-          piiDetection: false,
-          auditLogging: true,
-        },
-      },
+  it("账号策略按规范化返回", async () => {
+    mockSettingsQuery({
+      userId: USER_ID,
+      dataPolicy: { sendToExternal: true, piiDetection: false, auditLogging: true },
     });
-    const result = await getWorkspaceAIPolicy(WS_ID);
+    const result = await getAccountAIPolicy(WS_ID, USER_ID);
     assert.equal(result.sendToExternal, true);
     assert.equal(result.piiDetection, false);
     assert.equal(result.auditLogging, true);
   });
 
-  it("工作区策略为 null 时返回默认策略", async () => {
-    setupDbMock({
-      workspace: { id: WS_ID, aiDataPolicy: null },
-    });
-    const result = await getWorkspaceAIPolicy(WS_ID);
-    assert.deepEqual(result, DEFAULT_AI_DATA_POLICY);
+  it("没有设置行时 fail closed（默认不允许外发），且确实走了带身份的事务", async () => {
+    const usedTransaction = mockSettingsQuery(undefined);
+    const result = await getAccountAIPolicy(WS_ID, USER_ID);
+    assert.equal(result.sendToExternal, false);
+    assert.equal(usedTransaction(), true);
   });
 });
 
@@ -171,7 +169,7 @@ describe("governance enforcePrivacyGovernanceWithPolicy", () => {
 describe("governance logAICall (DB mock)", () => {
   it("auditLogging=true 时写入审计日志", async () => {
     setupDbMock({
-      workspace: { id: WS_ID, aiDataPolicy: { sendToExternal: true, piiDetection: true, auditLogging: true } },
+      settings: { userId: USER_ID, dataPolicy: { sendToExternal: true, piiDetection: true, auditLogging: true } },
     });
     const params: AICallAuditParams = {
       workspaceId: WS_ID,
@@ -186,7 +184,7 @@ describe("governance logAICall (DB mock)", () => {
 
   it("auditLogging=false 时跳过写入", async () => {
     setupDbMock({
-      workspace: { id: WS_ID, aiDataPolicy: { sendToExternal: true, piiDetection: true, auditLogging: false } },
+      settings: { userId: USER_ID, dataPolicy: { sendToExternal: true, piiDetection: true, auditLogging: false } },
     });
     const params: AICallAuditParams = {
       workspaceId: WS_ID,
@@ -219,7 +217,7 @@ describe("governance logAICall (DB mock)", () => {
 
   it("写入失败时返回 false（不抛错）", async () => {
     setupDbMock({
-      workspace: { id: WS_ID, aiDataPolicy: { sendToExternal: true, piiDetection: true, auditLogging: true } },
+      settings: { userId: USER_ID, dataPolicy: { sendToExternal: true, piiDetection: true, auditLogging: true } },
       insertShouldThrow: true,
     });
     const params: AICallAuditParams = {

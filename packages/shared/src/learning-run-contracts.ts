@@ -712,7 +712,6 @@ export type LearningRunActionV1 =
   | { kind: "resume" }
   | { kind: "switch_variant"; alternativeId: string }
   | { kind: "request_hint"; level: 1 | 2 | 3 }
-  | { kind: "skip_task"; taskId: string }
   | { kind: "skip_run" }
   | { kind: "activate_followup"; followupId: string }
   | { kind: "finish_current_evidence" }
@@ -1475,7 +1474,6 @@ export const learningRunActionSchema = z.discriminatedUnion("kind", [
     kind: z.literal("request_hint"),
     level: z.union([z.literal(1), z.literal(2), z.literal(3)]),
   }),
-  z.strictObject({ kind: z.literal("skip_task"), taskId: z.string().uuid() }),
   z.strictObject({ kind: z.literal("skip_run") }),
   z.strictObject({ kind: z.literal("activate_followup"), followupId: z.string().min(1) }),
   z.strictObject({ kind: z.literal("finish_current_evidence") }),

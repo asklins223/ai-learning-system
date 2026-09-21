@@ -22,6 +22,17 @@ export type Capability =
   | "text_generation"       // 文本生成（chat completion + JSON output）
   | "vision"                // 视觉理解（图片分析、OCR）
   | "agent_turn"            // Agent 工具调用（native tool calls）
+  /**
+   * 伴星对话的**跨模型兜底**槽（方案 29 §9.6 / B8）。
+   *
+   * 为什么单独一个槽而不是复用 `text_generation`：`agent_turn` 主模型
+   * （qwen3.8-flash）会高频返回退化补全（实测近 3 小时 32 条回复里 21 条不足
+   * 6 字，且 `finishReason=stop`、无 maxTokens 截断日志）。同档思考重试救不回
+   * 连续两次的退化，必须换一个**模型甚至换一家 provider**。
+   * 复用 `text_generation` 会让这个兜底跟着摘要器一起被调走，两者耦合且没人
+   * 会想到它们共享一个降级路径。
+   */
+  | "companion_fallback"    // 伴星退化时的备用对话模型
   | "embedding"             // 向量嵌入
   | "rerank"                // 重排序
   // ── 未来扩展 ──

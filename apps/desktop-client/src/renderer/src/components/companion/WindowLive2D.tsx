@@ -7,7 +7,10 @@ import {
 } from "react";
 import { WindowLive2DDriver } from "./WindowLive2DDriver";
 import {
+  DEFAULT_WINDOW_LIVE2D_MODEL_ID,
   WINDOW_LIVE2D_ASSETS,
+  type WindowLive2DCharacterMoment,
+  type WindowLive2DModelId,
   type WindowLive2DMotionMode,
   type WindowLive2DFraming,
   type WindowLive2DPresentation,
@@ -23,6 +26,8 @@ export interface WindowLive2DProps {
   readonly paused?: boolean;
   /** `lite`, `off` and reduced motion retain the last Live2D frame but stop its ticker. */
   readonly motionMode: WindowLive2DMotionMode;
+  /** 伴星形态（模型注册表 id）；运行时切换走驱动器内淡出/淡入，不重挂组件。 */
+  readonly modelId?: WindowLive2DModelId;
   readonly presentation?: WindowLive2DPresentation;
   /** `full` keeps the whole character visible; `bust` frames head and torso. */
   readonly framing?: WindowLive2DFraming;
@@ -36,6 +41,13 @@ export interface WindowLive2DProps {
    * 极小幅「看向手边」。这是纯参数层的冲量，不触发 motion（方案 §5 第 9 项）。
    */
   readonly toolAttentionTrigger?: number;
+  /**
+   * 一次「语义时刻」（接到任务 / 工具成功 / 失败 / 等确认 / 主动提醒）。
+   *
+   * 带 `at` 而不只是名字：连续两次成功要演两次，只比名字的话第二次会被 React 当作
+   * 没变化而吞掉。父组件只在真实事件发生时递增它，角色层不自己编时机。
+   */
+  readonly moment?: { readonly name: WindowLive2DCharacterMoment; readonly at: number } | null;
   /** Click/keyboard intent only; the parent remains owner of state transitions. */
   readonly onInviteRequest?: () => void;
   readonly onPointerDown?: PointerEventHandler<HTMLButtonElement>;
@@ -64,6 +76,7 @@ export function WindowLive2D({
   active,
   paused = false,
   motionMode,
+  modelId = DEFAULT_WINDOW_LIVE2D_MODEL_ID,
   presentation = "idle",
   framing = "full",
   className,
@@ -71,6 +84,7 @@ export function WindowLive2D({
   onStatus,
   inviteTrigger = 0,
   toolAttentionTrigger = 0,
+  moment = null,
   onInviteRequest,
   onPointerDown,
   onPointerMove,
@@ -86,11 +100,16 @@ export function WindowLive2D({
   const driverRef = useRef<WindowLive2DDriver | null>(null);
   const lastInviteTriggerRef = useRef(inviteTrigger);
   const lastToolAttentionTriggerRef = useRef(toolAttentionTrigger);
+  /** 已经演过哪个时刻（用 `at` 去重，React 重渲不会重复演同一个时刻）。 */
+  const seenMomentRef = useRef<number>(moment?.at ?? 0);
   const [reducedMotion, setReducedMotion] = useState(prefersReducedMotion);
   const runtimePaused = paused || motionMode !== "full" || reducedMotion;
   const pausedRef = useRef(runtimePaused);
   const [status, setStatus] = useState<WindowLive2DStatus>("loading");
   pausedRef.current = runtimePaused;
+  // 启动 effect 只跑一次；切换形态时从这里读最新值，避免用过期闭包里的模型。
+  const modelIdRef = useRef(modelId);
+  modelIdRef.current = modelId;
 
   useEffect(() => {
     const query = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -134,7 +153,7 @@ export function WindowLive2D({
     driver.setVoiceLevel(voiceLevel);
     const syncPaused = () => driver.setPaused(pausedRef.current || document.hidden || !document.hasFocus());
     syncPaused();
-    void driver.init();
+    void driver.init(modelIdRef.current);
     bootTimer = window.setTimeout(() => {
       if (cancelled || settled) return;
       settled = true;
@@ -164,6 +183,13 @@ export function WindowLive2D({
   useEffect(() => {
     driverRef.current?.setPresentation(presentation);
   }, [presentation, status]);
+
+  // 形态切换：ready 之后模型 id 变化 → 驱动器内做淡出/淡入过渡。首次 ready 时
+  // id 与启动模型相同，setModel 内部会直接返回，不会多余地加载一次。
+  useEffect(() => {
+    if (status !== "ready") return;
+    void driverRef.current?.setModel(modelId);
+  }, [modelId, status]);
 
   useEffect(() => {
     driverRef.current?.setFraming(framing);
@@ -207,6 +233,13 @@ export function WindowLive2D({
     lastToolAttentionTriggerRef.current = toolAttentionTrigger;
     driverRef.current?.pushToolAttention();
   }, [toolAttentionTrigger, runtimePaused, status]);
+
+  useEffect(() => {
+    if (!moment) return;
+    if (seenMomentRef.current === moment.at) return;
+    seenMomentRef.current = moment.at;
+    driverRef.current?.pushMoment(moment.name);
+  }, [moment]);
 
   const effectiveStatus: WindowLive2DStatus = status;
   const rootClassName = ["window-live2d", className].filter(Boolean).join(" ");

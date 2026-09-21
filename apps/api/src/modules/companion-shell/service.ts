@@ -50,7 +50,6 @@ import {
   type RuntimeFenceRequest,
   type RuntimeFenceResponse,
   type TransitionAction,
-  COMPANION_AGENT_DEFAULT_SKILL_IDS,
   companionAgentSettingsV1Schema,
   type CompanionAgentSettingsV1,
 } from "@ailearn/shared";
@@ -77,7 +76,6 @@ const RUNTIME_FENCE_MAX_PER_USER = 64;
 
 /** account revision 冲突（客户端 base revision 与服务端不一致）。 */
 export const ACCOUNT_STATE_STALE_REVISION = "ACCOUNT_STATE_STALE_REVISION" as const;
-export const INVALID_AGENT_SETTINGS = "INVALID_AGENT_SETTINGS" as const;
 /** 版本号非法（空串或超长）。 */
 const INVALID_ONBOARDING_VERSION = "INVALID_ONBOARDING_VERSION" as const;
 
@@ -162,12 +160,7 @@ function serializeAccount(row: AccountRow): CompanionAccountStateV1 {
 }
 
 function defaultAgentSettings(): CompanionAgentSettingsV1 {
-  return {
-    version: 1,
-    permissionLevel: "guided",
-    // 默认开启当前内置 Skill 全集；空数组是用户主动关闭全部 Skill。
-    enabledSkillIds: [...COMPANION_AGENT_DEFAULT_SKILL_IDS],
-  };
+  return { version: 1, permissionLevel: "guided" };
 }
 
 function emptyAccountState(): CompanionAccountStateV1 {
@@ -181,34 +174,20 @@ function emptyAccountState(): CompanionAccountStateV1 {
   };
 }
 
-function validateAgentSettingsPatch(patch: CompanionAccountPatch): void {
-  if (!patch.enabledSkillIds) return;
-  const allowed = new Set(COMPANION_AGENT_DEFAULT_SKILL_IDS);
-  if (patch.enabledSkillIds.some((skillId) => !allowed.has(skillId))) {
-    throw new CompanionStateError(
-      INVALID_AGENT_SETTINGS,
-      400,
-      "enabledSkillIds contains an unknown built-in skill",
-    );
-  }
-}
-
 /**
  * 组装并校验落库的 Agent 设置。
  *
  * worker 侧用 companionAgentSettingsV1Schema.safeParse 读取，解析失败会静默回落
  * 到 DEFAULT_SETTINGS。写入侧若只做 allowlist 校验、不按同一 schema 收口，两处
- * 一旦漂移（version、字段名、id 形态）用户的权限与 Skill 开关会被无声忽略——
+ * 一旦漂移（version、字段名）用户的权限档会被无声忽略——
  * 所以写入前用同一 schema parse（抛错即 400，不落半合法数据）。
  */
 function buildAgentSettings(input: {
   permissionLevel: CompanionAgentSettingsV1["permissionLevel"];
-  enabledSkillIds: string[];
 }): CompanionAgentSettingsV1 {
   return companionAgentSettingsV1Schema.parse({
     version: 1,
     permissionLevel: input.permissionLevel,
-    enabledSkillIds: input.enabledSkillIds,
   });
 }
 
@@ -624,7 +603,6 @@ export async function updateCompanionAccountState(
   workspaceId: string,
   patch: CompanionAccountPatch,
 ): Promise<CompanionAccountStateV1> {
-  validateAgentSettingsPatch(patch);
   return withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
     const existing = await tx
       .select()
@@ -663,7 +641,6 @@ export async function updateCompanionAccountState(
           quietHours: patch.quietHours ?? null,
           agentSettings: buildAgentSettings({
             permissionLevel: patch.agentPermissionLevel ?? "guided",
-            enabledSkillIds: patch.enabledSkillIds ?? [...COMPANION_AGENT_DEFAULT_SKILL_IDS],
           }),
           updatedAt: now,
         })
@@ -705,7 +682,6 @@ export async function updateCompanionAccountState(
         quietHours: patch.quietHours !== undefined ? patch.quietHours : row.quietHours,
         agentSettings: buildAgentSettings({
           permissionLevel: patch.agentPermissionLevel ?? currentAgentSettings.permissionLevel,
-          enabledSkillIds: patch.enabledSkillIds ?? currentAgentSettings.enabledSkillIds,
         }),
         revision: row.revision + 1,
         // global off → account epoch 递增（**边沿触发**：仅 on→off 跃迁，

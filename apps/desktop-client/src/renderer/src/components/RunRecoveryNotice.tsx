@@ -17,7 +17,8 @@ function activeRunsFromProjection(projection: RoomProjectionV1): ActiveRunItem[]
 function activeGenerationFromProjection(projection: RoomProjectionV1): CardGenerationActiveSummaryV1 | null | undefined {
   if (projection.activeGenerationSummary.state === "error") return undefined;
   if (projection.activeGenerationSummary.state !== "data") return null;
-  return projection.activeGenerationSummary.data;
+  // 恢复横幅只播报最近推进的那一批；多篇笔记同时在制时逐篇的入口在笔记页。
+  return projection.activeGenerationSummary.data[0] ?? null;
 }
 
 function recoverySectionErrorMessage(subject: string, reason: ActiveRunError["reason"]): string {

@@ -245,7 +245,7 @@ export function ClipboardLinkPrompt({ url, onClose }: { readonly url: string; re
         {phase.kind === "done" ? (
           <p className="source-intake-dialog__hint" role="status">《{phase.title}》正在解析，解析完会出现在来源库里。</p>
         ) : (
-          <p className="source-intake-dialog__hint">由服务端抓取正文并解析，和采集栏里填链接走的是同一条路。</p>
+          <p className="source-intake-dialog__hint">由后台抓取正文并解析，和采集栏里填链接走的是同一条路。</p>
         )}
         {denied ? <p className="source-intake-dialog__locked">只有工作区所有者可以采集来源，这条链接先不收。</p> : null}
         {phase.kind === "failed" ? <p className="source-intake-dialog__error" role="alert">{phase.message}</p> : null}

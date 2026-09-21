@@ -223,3 +223,60 @@ test("P2 §5.2 userText 归属：voice_transcript turn 取本 run 用户消息�
     await s.cleanup();
   }
 });
+
+test("fail-open §4.9：一个字都没下发时落兜底话术，界面不得空白（抱怨 #4）", async () => {
+  const { workspaceId, userId } = await seedBase();
+  const seeded = await seedDialogueRun(workspaceId, userId, { runStatus: "failed" });
+  try {
+    const { persistFailedPartial } = await import("../handlers/companion-dialogue.ts");
+    const wrote = await persistFailedPartial({
+      workspaceId,
+      userId,
+      conversationId: seeded.cid,
+      runId: seeded.runId,
+      deliveredText: "",
+    });
+    assert.equal(wrote, true, "空下发也必须写出消息（旧实现直接 return false → 用户看到空白）");
+
+    const rows = await sql`
+      SELECT role, kind, blocks->0->>'text' AS text, run_id
+      FROM companion_messages
+      WHERE conversation_id = ${seeded.cid} AND role = 'assistant'`;
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].kind, "error", "兜底消息要可区分于正常答复（kind='error'），便于统计");
+    assert.ok((rows[0].text as string).trim().length >= 12);
+    const backfilled = await sql`
+      SELECT assistant_message_id FROM companion_turn_runs WHERE id = ${seeded.runId}`;
+    assert.ok(backfilled[0]?.assistant_message_id, "run 必须回填 assistant_message_id");
+
+    // 幂等：同一 run 再走一次不得写第二条（claim 要求 assistant_message_id IS NULL）。
+    await persistFailedPartial({
+      workspaceId, userId, conversationId: seeded.cid, runId: seeded.runId, deliveredText: "",
+    });
+    const after = await sql`
+      SELECT count(*)::int n FROM companion_messages
+      WHERE conversation_id = ${seeded.cid} AND role = 'assistant'`;
+    assert.equal(after[0].n, 1, "重投不应产生第二条兜底消息");
+  } finally {
+    await seeded.cleanup();
+  }
+});
+
+test("fail-open §4.9：已有半句可保留时优先保留原文，不覆盖成兜底话术", async () => {
+  const { workspaceId, userId } = await seedBase();
+  const seeded = await seedDialogueRun(workspaceId, userId, { runStatus: "failed" });
+  try {
+    const { persistFailedPartial } = await import("../handlers/companion-dialogue.ts");
+    const partial = "我先把这道题的思路说清楚，然后再给你举一个例子";
+    await persistFailedPartial({
+      workspaceId, userId, conversationId: seeded.cid, runId: seeded.runId, deliveredText: partial,
+    });
+    const rows = await sql`
+      SELECT blocks->0->>'text' AS text FROM companion_messages
+      WHERE conversation_id = ${seeded.cid} AND role = 'assistant'`;
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].text, partial, "已经说出口的那半句不能被人造话术顶掉");
+  } finally {
+    await seeded.cleanup();
+  }
+});

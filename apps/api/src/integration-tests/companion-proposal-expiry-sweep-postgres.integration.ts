@@ -109,21 +109,21 @@ async function seedWaitingConfirmation(
              VALUES (${stepId}, ${fx.workspaceId}, ${fx.userId}, ${fx.conversationId}, ${runId}, 1, 'model', 'waiting')`;
     await tx`INSERT INTO companion_agent_tool_calls
                (id, workspace_id, user_id, conversation_id, run_id, step_id, tool_call_id, name,
-                tool_version, skill_id, arguments, arguments_sha256, risk_class, status, proposal_id)
+                tool_version, arguments, arguments_sha256, risk_class, status, proposal_id)
              VALUES (${randomUUID()}, ${fx.workspaceId}, ${fx.userId}, ${fx.conversationId}, ${runId},
-                     ${stepId}, ${toolCallId}, 'companion_start_learning', '1.0.0', 'learning-planner',
+                     ${stepId}, ${toolCallId}, 'companion_start_learning', '1.0.0',
                      '{}'::jsonb, ${"a".repeat(64)}, 'consequential', 'waiting_confirmation', ${proposalId})`;
     await tx`INSERT INTO companion_action_proposals
                (id, workspace_id, user_id, conversation_id, source_message_id, source_generation,
                 payload, payload_sha256, title, target_summary, impact_summary, status,
                 idempotency_key_hash, expires_at, origin, agent_run_id, agent_tool_call_id,
-                agent_skill_id, agent_tool_version, risk_class)
+                agent_tool_version, risk_class)
              VALUES (${proposalId}, ${fx.workspaceId}, ${fx.userId}, ${fx.conversationId}, ${messageId}, 1,
                      ${tx.json({ kind: "start_learning_run" })}, ${"b".repeat(64)},
                      '开始学习', '开始学习', '会改变学习状态', 'pending',
                      ${"f".repeat(64)},
                      now() + make_interval(secs => ${opts.ttlSeconds}),
-                     'agent_tool', ${runId}, ${toolCallId}, 'learning-planner', '1.0.0', 'consequential')`;
+                     'agent_tool', ${runId}, ${toolCallId}, '1.0.0', 'consequential')`;
   });
   return { proposalId, runId, toolCallId };
 }

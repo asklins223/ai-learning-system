@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { DomainError } from "@ailearn/shared";
 import bcrypt from "bcryptjs";
 import { and, eq, isNull, lt, or, gte, inArray, desc, count, sql, ne } from "drizzle-orm";
-import { db } from "../../db/client.ts";
+import { db, withWorkspaceTransaction } from "../../db/client.ts";
 import {
   users,
   workspaceMembers,
@@ -10,6 +10,7 @@ import {
   workspaces,
   aiAuditLog,
   onboardingStates,
+  userAiSettings,
 } from "@ailearn/shared/db-schema/identity";
 import { sessions } from "@ailearn/shared/db-schema/session";
 import {
@@ -98,6 +99,16 @@ export interface SessionContext {
   /** 2026-08-11（性能专项）：decodeToken 合并 JOIN 时顺带取回的成员角色，
    * 供 /auth/me 等端点复用（避免重复查 workspace_members）。 */
   membershipRole?: string | null;
+  /**
+   * 当前空间的 `owner_id`，同样由 decodeToken 一次 JOIN 带回。
+   *
+   * 为什么要有它：`isWorkspaceOwner` 是 OR 语义（成员行写着 owner，**或**空间
+   * owner_id 就是本人）。此前只有 `requireOwner` 自己再去查一遍 owner_id，于是
+   * `/auth/capabilities/v1` 与笔记投影这些"只想判一次角色"的地方拿不到 owner_id，
+   * 就各自写了个只看 membershipRole 的简化版——同一个人在服务端可写、在 UI 上却被
+   * 判成只读。把 owner_id 放进 session 上下文，判据才有唯一的落点。
+   */
+  workspaceOwnerId?: string | null;
 }
 
 export async function issueSession(userId: string, workspaceId: string): Promise<{ token: string; ctx: SessionContext }> {
@@ -152,13 +163,18 @@ export async function loginWithPassword(
   const workspaceById = new Map(workspaceRows.map((w) => [w.id, w]));
   const workspacesList: WorkspaceInfo[] = memberships.map((m) => {
     const ws = workspaceById.get(m.workspaceId);
-    // ADR-0009 §3.6: isPersonal 基于 ownerId === userId，而非 personalWorkspaceId
-    const isPersonal = ws?.ownerId === user.id;
+    // `workspaceType` 是空间自身的属性，不是"谁在看"的函数。此前它由
+    // ownerId === 查看者派生，于是任何人的个人空间被别人加入后都会自称
+    // collaborative，而真正的协作空间反而没有创建入口。
+    const workspaceType = ws?.workspaceType ?? "personal";
+    // ADR-0009 §3.6: 个人归属仍按 ownerId 判定（而非 personalWorkspaceId），
+    // 但只有这一行本身是 personal 类型时才算"我的个人空间"。
+    const isPersonal = workspaceType === "personal" && ws?.ownerId === user.id;
     return {
       workspaceId: m.workspaceId,
       workspaceName: ws?.name ?? "未命名工作区",
       role: m.role,
-      workspaceType: isPersonal ? "personal" : "collaborative",
+      workspaceType,
       isPersonal,
       leftAt: m.leftAt,
     };
@@ -281,6 +297,9 @@ export async function decodeToken(token: string): Promise<SessionContext | null>
       memberLeftAt: workspaceMembers.leftAt,
       // 顺带取成员角色（/auth/me 复用，避免重复查询）
       membershipRole: workspaceMembers.role,
+      // 空间归属人：isWorkspaceOwner 的 OR 判据需要它。sessions→workspaces 是多对一，
+      // 不会放大行数。
+      workspaceOwnerId: workspaces.ownerId,
     })
     .from(sessions)
     .leftJoin(
@@ -290,6 +309,7 @@ export async function decodeToken(token: string): Promise<SessionContext | null>
         eq(workspaceMembers.userId, sessions.userId),
       ),
     )
+    .leftJoin(workspaces, eq(workspaces.id, sessions.workspaceId))
     .where(eq(sessions.token, tokenHash))
     .limit(1);
   const session = row[0];
@@ -313,7 +333,12 @@ export async function decodeToken(token: string): Promise<SessionContext | null>
   if (renewed) {
     await db.update(sessions).set({ expiresAt: renewed }).where(eq(sessions.token, tokenHash));
   }
-  return { userId: session.userId, workspaceId: session.workspaceId, membershipRole: session.membershipRole ?? null };
+  return {
+    userId: session.userId,
+    workspaceId: session.workspaceId,
+    membershipRole: session.membershipRole ?? null,
+    workspaceOwnerId: session.workspaceOwnerId ?? null,
+  };
 }
 
 /** Revoke a session by its raw bearer/cookie token. */
@@ -425,6 +450,77 @@ export async function switchWorkspace(
   });
 }
 
+export type CreateWorkspaceError = "invalid_name" | "workspace_limit_reached";
+
+/**
+ * 新建一个协作工作区。
+ *
+ * 为什么需要它：生产代码里此前**没有任何创建工作区的入口**——`workspaces` 只在注册
+ * 时建 `personal` 行，而 `workspaceType` 是按"查看者是不是 owner"派生出来的。于是
+ * 协作空间事实上无法存在，唯一的共享方式是把别人拉进**自己的个人空间**，ADR-0009 的
+ * 个人/协作二分因此只剩一半是真的。
+ *
+ * 配额沿用加入邀请码那套 `MAX_COLLABORATIVE_WORKSPACES`：自己建的协作空间同样占一个
+ * 活跃协作名额，不另开第二条政策。
+ */
+export async function createCollaborativeWorkspace(
+  userId: string,
+  name: string,
+): Promise<
+  | { ok: true; workspaceId: string; workspaceName: string }
+  | { ok: false; error: CreateWorkspaceError }
+> {
+  const trimmed = name.trim();
+  if (trimmed.length === 0 || trimmed.length > MAX_WORKSPACE_NAME_LENGTH) {
+    return { ok: false, error: "invalid_name" };
+  }
+
+  return db.transaction(async (tx) => {
+    // 与 joinWorkspaceByInviteToken 同一把 users 行锁：两个并发请求不能各自越过配额。
+    const userRows = await tx
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.id, userId))
+      .for("update");
+    if (userRows.length === 0) return { ok: false, error: "invalid_name" } as const;
+
+    const activeCollaborative = await tx
+      .select({ workspaceId: workspaceMembers.workspaceId })
+      .from(workspaceMembers)
+      .innerJoin(workspaces, eq(workspaces.id, workspaceMembers.workspaceId))
+      .where(
+        and(
+          eq(workspaceMembers.userId, userId),
+          isNull(workspaceMembers.leftAt),
+          eq(workspaces.workspaceType, "collaborative"),
+        ),
+      );
+    if (activeCollaborative.length >= MAX_COLLABORATIVE_WORKSPACES) {
+      return { ok: false, error: "workspace_limit_reached" } as const;
+    }
+
+    const [created] = await tx
+      .insert(workspaces)
+      .values({ ownerId: userId, name: trimmed, workspaceType: "collaborative" })
+      .returning({ id: workspaces.id, name: workspaces.name });
+
+    await tx.insert(workspaceMembers).values({
+      workspaceId: created.id,
+      userId,
+      role: "owner",
+    });
+    await tx.insert(onboardingStates).values({
+      workspaceId: created.id,
+      userId,
+      version: "v1",
+      steps: {},
+      status: "pending",
+    });
+
+    return { ok: true, workspaceId: created.id, workspaceName: created.name };
+  });
+}
+
 /**
  * ADR-0009: 列出用户可访问的所有活跃工作区（含个人工作区和协作工作区）。
  */
@@ -446,13 +542,14 @@ export async function listUserWorkspaces(userId: string): Promise<WorkspaceInfo[
   const workspaceById = new Map(workspaceRows.map((w) => [w.id, w]));
   return memberships.map((m) => {
     const ws = workspaceById.get(m.workspaceId);
-    // ADR-0009 §3.6: isPersonal 基于 ownerId === userId，而非 personalWorkspaceId
-    const isPersonal = ws?.ownerId === userId;
+    // 见 listUserWorkspaces 同名注释：类型属于空间，不属于查看者。
+    const workspaceType = ws?.workspaceType ?? "personal";
+    const isPersonal = workspaceType === "personal" && ws?.ownerId === userId;
     return {
       workspaceId: m.workspaceId,
       workspaceName: ws?.name ?? "未命名工作区",
       role: m.role,
-      workspaceType: isPersonal ? "personal" : "collaborative",
+      workspaceType,
       isPersonal,
       leftAt: m.leftAt,
     };
@@ -850,48 +947,66 @@ export async function renameWorkspace(
 /**
  * N-011: 获取工作区的 AI 隐私治理配置。
  */
-export async function getAIPrivacySettings(workspaceId: string) {
-  const ws = await db.query.workspaces.findFirst({
-    where: eq(workspaces.id, workspaceId),
-  });
-  if (!ws) return null;
+/**
+ * 读取本人的 AI 同意与数据外发政策（0237 起为账号级）。
+ *
+ * 必须走 `withWorkspaceTransaction`：`user_ai_settings` 启用了 RLS 且策略按
+ * `app.user_id`，用默认 `db` 连接查它会**静默返回 0 行**，表现成"同意永远未签"
+ * 而不是报错。`workspaceId` 只用于设置事务上下文，不参与这张表的隔离。
+ */
+export async function getAIPrivacySettings(workspaceId: string, userId: string) {
+  const rows = await withWorkspaceTransaction(
+    { workspaceId, userId },
+    (transaction) => transaction
+      .select()
+      .from(userAiSettings)
+      .where(eq(userAiSettings.userId, userId))
+      .limit(1),
+  );
+  const settings = rows[0];
+  if (!settings) return null;
   return {
-    requiresAIConsent: systemUsesExternalAI(),
-    aiConsentVersion: ws.aiConsentVersion,
-    aiConsentAt: ws.aiConsentAt,
-    aiConsentBy: ws.aiConsentBy,
-    aiDataPolicy: {
-      sendToExternal: ws.aiDataPolicy.sendToExternal,
-      sendImageContent: ws.aiDataPolicy.sendImageContent ?? false,
-      piiDetection: ws.aiDataPolicy.piiDetection,
-      auditLogging: ws.aiDataPolicy.auditLogging,
+    requiresConsent: systemUsesExternalAI(),
+    consentVersion: settings.consentVersion,
+    consentAt: settings.consentAt,
+    dataPolicy: {
+      sendToExternal: settings.dataPolicy.sendToExternal,
+      sendImageContent: settings.dataPolicy.sendImageContent ?? false,
+      piiDetection: settings.dataPolicy.piiDetection,
+      auditLogging: settings.dataPolicy.auditLogging,
     },
   };
 }
 
 /**
- * N-011: 更新工作区 AI 同意状态（owner 签署同意）。
+ * 签署本人的 AI 使用同意。0237 起不再要求 owner 身份，也不再影响同空间的其他人。
  */
 export async function updateAIConsent(
   workspaceId: string,
   userId: string,
   consentVersion: string,
 ): Promise<void> {
-  await db
-    .update(workspaces)
-    .set({
-      aiConsentVersion: consentVersion,
-      aiConsentAt: new Date(),
-      aiConsentBy: userId,
-    })
-    .where(eq(workspaces.id, workspaceId));
+  await withWorkspaceTransaction(
+    { workspaceId, userId },
+    (transaction) => transaction
+      .insert(userAiSettings)
+      .values({
+        userId,
+        consentVersion,
+        consentAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: userAiSettings.userId,
+        set: { consentVersion, consentAt: new Date(), updatedAt: new Date() },
+      }),
+  );
 }
 
-/**
- * N-011: 更新工作区 AI 数据策略。
- */
+/** 更新本人的 AI 数据外发政策。 */
 export async function updateAIDataPolicy(
   workspaceId: string,
+  userId: string,
   policy: {
     sendToExternal: boolean;
     sendImageContent: boolean;
@@ -899,10 +1014,16 @@ export async function updateAIDataPolicy(
     auditLogging: boolean;
   },
 ): Promise<void> {
-  await db
-    .update(workspaces)
-    .set({ aiDataPolicy: policy })
-    .where(eq(workspaces.id, workspaceId));
+  await withWorkspaceTransaction(
+    { workspaceId, userId },
+    (transaction) => transaction
+      .insert(userAiSettings)
+      .values({ userId, dataPolicy: policy, updatedAt: new Date() })
+      .onConflictDoUpdate({
+        target: userAiSettings.userId,
+        set: { dataPolicy: policy, updatedAt: new Date() },
+      }),
+  );
 }
 
 /**

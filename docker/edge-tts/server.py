@@ -107,13 +107,31 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # 静默访问日志（容器内由 compose 收集）
         pass
 
+    def handle(self):
+        """客户端中途断开不是服务端故障。
+
+        调用方（worker）对每段音频都有截止，超时就会放弃连接；此时 `self.wfile.write`
+        抛 BrokenPipeError / ConnectionResetError，`socketserver` 默认把它打成
+        traceback 并关掉连接——实测容器日志里 15 次 "edge-tts unavailable" 500 之外
+        还有一批从 do_GET 冒出来的 BrokenPipeError，把真正的故障淹了。
+        请求已经无法送达，安静收场即可。
+        """
+        try:
+            super().handle()
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+
     def _send(self, status: int, body: bytes, content_type: str) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # 头已经发不出去，同上：客户端不在了。
+            self.close_connection = True
 
     def _authorized(self) -> bool:
         """共享 secret 校验（security_review MEDIUM）：未配置 token → fail closed。"""

@@ -10,7 +10,7 @@ import {
 
 /**
  * 这些用例固定的是"轨道不会越长越长"这条契约：同一个工具调用/技能/状态迁移只能占一行。
- * 它们是方案 §1 行为表里 `agent.tool` / `agent.skill` 两行的可执行版本。
+ * 它们是方案 §1 行为表里 `agent.tool` 那行的可执行版本（`agent.skill` 随技能层删除）。
  */
 
 function fold(events: readonly { eventType: string; payload: unknown }[]): CompanionAgentNodes {
@@ -44,15 +44,6 @@ describe("companion agent node stream", () => {
     expect(countAgentToolCalls(nodes)).toBe(1);
   });
 
-  it("does not append a row for the skill's completed update", () => {
-    const nodes = fold([
-      { eventType: "agent.skill", payload: { skill: { skillId: "review-coach", name: "复习教练", status: "selected" } } },
-      { eventType: "agent.skill", payload: { skill: { skillId: "review-coach", name: "复习教练", status: "completed" } } },
-    ]);
-    expect(nodes).toHaveLength(1);
-    expect(nodes[0]).toMatchObject({ kind: "skill", label: "复习教练", state: "succeeded" });
-  });
-
   it("rewrites the trailing status row instead of stacking status lines", () => {
     const nodes = fold([
       { eventType: "assistant.status", payload: { status: "thinking", safeLabel: "我先结合当前页面想一想" } },
@@ -75,7 +66,6 @@ describe("companion agent node stream", () => {
       { eventType: "agent.tool", payload: { tool: { toolCallId: "c", name: "n", status: "succeeded" } } },
       { eventType: "agent.tool", payload: { tool: { name: "n", safeLabel: "x" } } },
       { eventType: "assistant.status", payload: { status: "thinking" } },
-      { eventType: "agent.skill", payload: {} },
       { eventType: "assistant.delta", payload: { textDelta: "hi" } },
     ]);
     expect(nodes).toHaveLength(0);

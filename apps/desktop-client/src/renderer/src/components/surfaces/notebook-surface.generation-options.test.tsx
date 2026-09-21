@@ -118,6 +118,7 @@ describe("NotebookSurface · 生成参数与反馈重生成", () => {
     fireEvent.click(screen.getByRole("button", { name: "应用" }));
     fireEvent.click(screen.getByRole("button", { name: "深入" }));
     fireEvent.click(screen.getByRole("button", { name: "12 张" }));
+    // 默认全选题型（= 交给 planner 按知识形态分配），点一下即取消该题型。
     fireEvent.click(screen.getByRole("button", { name: "对比辨析" }));
 
     fireEvent.click(screen.getByRole("button", { name: /生成学习卡/ }));
@@ -128,7 +129,10 @@ describe("NotebookSurface · 生成参数与反馈重生成", () => {
       quantity: { kind: "adaptive", hardMaxCards: 12 },
     });
     expect((state.startRequests[0] as { preferredStrategies: string[] }).preferredStrategies)
-      .toEqual(["recall", "why", "compare"]);
+      .toEqual(["recall", "cloze", "sequence", "why", "boundary", "application"]);
+    // 题型说明必须可见：勾选现在是筛选，不解释会被当成优先级。
+    expect(screen.getByText(/由系统按笔记内容决定/).textContent)
+      .toContain("少数几种题型问得自然");
   });
 
   it("上次生成已结束时，选原因即按反馈重生成并带上 previousRunId", async () => {
@@ -151,6 +155,24 @@ describe("NotebookSurface · 生成参数与反馈重生成", () => {
         optionalNote: "最多 5 张",
       },
     });
+  });
+
+  it("编辑态同样摸得到版本历史与生成设置（复盘 #15）", async () => {
+    // 这两个面板的 state 一直在同一个组件里，此前只有阅读页摆出按钮，
+    // 于是"边写边看有哪几版""改完设置直接再生成"都只能先退回只读。
+    stubGateway(null);
+    useRoomStore.setState({
+      activeNoteRef: { noteId: NOTE_ID, noteVersionId: VERSION_ID, mode: "edit" },
+    });
+    render(<NotebookSurface />);
+    await waitFor(() => expect(document.querySelector('.notebook[data-mode="edit"]')).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "生成设置" }));
+    await waitFor(() => expect(screen.getByText(/这次生成怎么出题/)).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "版本历史" }));
+    await waitFor(() => expect(screen.getByLabelText("笔记版本历史")).toBeTruthy());
+    expect(screen.getByText(/还没有可列出的版本/)).toBeTruthy();
   });
 
   it("没有生成记录时不显示反馈区，也不带 feedbackContext", async () => {

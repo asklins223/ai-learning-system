@@ -120,6 +120,12 @@ export const cardGenerationCandidatesV2 = pgTable(
     derivedFrom: jsonb("derived_from").notNull().default(sql`'[]'::jsonb`),
     objectiveDraft: jsonb("objective_draft").notNull(),
     presentationDraft: jsonb("presentation_draft").notNull(),
+    /**
+     * 两级提示（迁移 0234）。刻意做成兄弟列而不是塞进上面两个草稿：
+     * `computeCandidateRevisionHashV2` 对整对象取哈希，塞进去就把提示并进了
+     * 判分内容的审计链。
+     */
+    hints: jsonb("hints").notNull().default(sql`'{}'::jsonb`),
     evidenceSetHash: text("evidence_set_hash").notNull(),
     candidateRevisionHash: text("candidate_revision_hash").notNull(),
     qualityState: text("quality_state").notNull().default("authored"),
@@ -188,6 +194,15 @@ export const learningObjectiveRevisionsV2 = pgTable(
     preferredIntents: text("preferred_intents").array().notNull(),
     canonicalAnswer: jsonb("canonical_answer").notNull(),
     learningSupport: jsonb("learning_support").notNull(),
+    /**
+     * 两级提示（迁移 0234），由制卡阶段随卡片产出。
+     *
+     * 独立成列而不是并入 learning_support：那张 jsonb 受 R30「必须严格基于证据」
+     * 约束并由 Grounding Critic 逐字段核对，而提示是**教学引导不是事实断言**
+     * （"先想它由哪两部分构成"无法指回证据），混进去会被误杀；同时它也不进
+     * target_revision_hash / private_payload_hash 的输入。
+     */
+    hints: jsonb("hints").notNull().default(sql`'{}'::jsonb`),
     scoringRubric: jsonb("scoring_rubric").notNull(),
     relations: jsonb("relations").notNull().default(sql`'[]'::jsonb`),
     evidenceBindings: jsonb("evidence_bindings").notNull().default(sql`'[]'::jsonb`),
@@ -859,6 +874,8 @@ export const cardCandidateFeedbackV2 = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     workspaceId: uuid("workspace_id").notNull(),
     runId: uuid("run_id").notNull(),
+    // 判定是个人行为：协作空间里必须分得清是谁驳回/留下了这张卡（迁移 0242）。
+    userId: uuid("user_id").notNull(),
     candidateId: uuid("candidate_id").notNull(),
     action: text("action").notNull(),
     reasonCode: text("reason_code"),

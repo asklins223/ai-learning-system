@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildDesktopCapabilityProjection, type WorkspaceAiConsentFacts } from "./capability-projection.ts";
+import { actionCapabilityValues } from "@ailearn/shared/desktop-ipc-contracts";
 
 const originalRun = process.env.LEARNING_RUN_ENABLED;
 const originalCard = process.env.CARD_GENERATION_V2_ENABLED;
@@ -85,6 +86,27 @@ test("desktop capability projection: companion dialogue features follow their re
     const projection = buildDesktopCapabilityProjection({ role: "owner", ai: mockOnlyAi });
     assert.equal(projection.featureAvailability.companion_dialogue_v1.state, "enabled");
     assert.equal(projection.featureAvailability.companion_voice_dialogue_v1.state, "disabled");
+  } finally {
+    restoreFlags();
+  }
+});
+
+test("desktop capability projection: 合同里声明的每个 card_generation 动作位，owner 都必须被放行", () => {
+  // 起因：`card_generation.retry` 在合同里声明、主进程 IPC 硬性校验它，但投影的
+  // owner 放行清单漏了它——结果所有人点"重试生成"永远 forbidden。这类"声明了却
+  // 忘了放行"的漂移不该靠人记住，所以按合同枚举反查。
+  try {
+    process.env.CARD_GENERATION_V2_ENABLED = "true";
+    const declared = actionCapabilityValues.filter((capability) => capability.startsWith("card_generation."));
+    assert.ok(declared.length >= 7, `合同里的 card_generation 动作位异常少：${declared.join(", ")}`);
+    const projection = buildDesktopCapabilityProjection({ role: "owner", ai: mockOnlyAi });
+    for (const capability of declared) {
+      assert.equal(
+        projection.actionCapabilities[capability],
+        "allowed",
+        `${capability} 在合同里声明了，owner 却没被放行：投影漏了放行清单`,
+      );
+    }
   } finally {
     restoreFlags();
   }

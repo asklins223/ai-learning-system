@@ -384,6 +384,12 @@ export const plannedObjectiveV2Schema = z
     objectiveStatement: z.string().min(1).max(2000),
     priority: z.enum(["critical", "important", "optional"]),
     knowledgeForm: knowledgeFormV2Schema,
+    /**
+     * 题型由 planner 在整批目标上统一分配（`allocateStrategies`），author 只能
+     * 执行不能自选——此前 strategy 完全交给模型，而 author 提示的输出模板与唯一
+     * 示例都写死 `recall`，模型照抄导致整批卡同一个题型。
+     */
+    strategy: cardStrategyV2Schema,
     sourceAtomIds: z.array(z.string().min(1).max(160)).min(1).max(100),
     reasonCodes: z.array(z.string().min(1).max(120)).min(1).max(20),
     estimatedReviewCostSeconds: z.number().int().min(1).max(3600),
@@ -607,6 +613,23 @@ export const objectiveRelationV2Schema = z
   })
   .strict();
 export type ObjectiveRelationV2 = z.infer<typeof objectiveRelationV2Schema>;
+
+/**
+ * 一张卡的两级提示（2026-09-20 实走复盘 #10）。
+ *
+ * 此前提示由 `buildDeterministicHint`（learning-runs/run-planner.ts:746）从一张
+ * 9 意图 × 3 文案的常量表里取，卡片正文完全不参与——任意两张卡的第一级提示一字不差。
+ * 现在改为**作者制卡时随卡片一起产出**，作答时按级下发。
+ *
+ * 两级都不许出现 canonicalAnswer 的判分要点（与 front 同一纪律，由 Pedagogy Critic
+ * 语义裁决）：一级给结构线索（"先说出它由哪两部分构成"），二级给更强的定位但不给结论
+ * （首字、组成部分数量、易混点）。
+ */
+export const cardHintPairV2Schema = z.strictObject({
+  level1: z.string().min(1).max(600),
+  level2: z.string().min(1).max(600),
+});
+export type CardHintPairV2 = z.infer<typeof cardHintPairV2Schema>;
 
 export const learningObjectiveDraftV2Schema = z
   .strictObject({

@@ -2,14 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   canUseCompanionAgentTool,
-  companionAgentSkillEventV1Schema,
   companionAgentToolEventV1Schema,
 } from "./companion-agent-contracts.ts";
 import {
-  COMPANION_AGENT_DEFAULT_SKILL_IDS,
+  COMPANION_AGENT_TOOL_DEFINITIONS,
   getCompanionAgentTool,
-  resolveCompanionAgentSkills,
-  resolveCompanionAgentTools,
+  resolveAllCompanionAgentTools,
   validateCompanionAgentToolArguments,
 } from "./companion-agent-registry.ts";
 
@@ -40,16 +38,19 @@ test("Agent permission levels keep hard confirmation boundaries", () => {
   assert.equal(canUseCompanionAgentTool("guided", focusGraph).requiresConfirmation, false);
 });
 
-test("Skill resolver and tool resolver fail closed", () => {
-  const skills = resolveCompanionAgentSkills({
-    version: 1,
-    permissionLevel: "read_only",
-    enabledSkillIds: ["learning-context"],
-  });
-  assert.deepEqual(skills.map((skill) => skill.id), ["learning-context"]);
-  assert.ok(resolveCompanionAgentTools(skills, "read_only").every((tool) => tool.riskClass === "read"));
-  assert.equal(resolveCompanionAgentSkills({ version: 1, permissionLevel: "guided", enabledSkillIds: ["missing"] }).length, 0);
-  assert.ok(COMPANION_AGENT_DEFAULT_SKILL_IDS.includes("learning-tutor"));
+test("扁平工具面 fail closed：read_only 只剩读工具，未知档位不会放开写工具", () => {
+  const readOnly = resolveAllCompanionAgentTools("read_only");
+  assert.ok(readOnly.length > 0);
+  assert.ok(readOnly.every((definition) => definition.riskClass === "read"));
+  assert.ok(
+    resolveAllCompanionAgentTools("guided").length > readOnly.length,
+    "guided 必须比 read_only 多出写工具",
+  );
+  assert.deepEqual(
+    resolveAllCompanionAgentTools("full").map((definition) => definition.name),
+    COMPANION_AGENT_TOOL_DEFINITIONS.map((definition) => definition.name),
+    "full 档就是整个注册表",
+  );
 });
 
 test("Tool argument validation rejects unknown and malformed calls", () => {
@@ -71,8 +72,6 @@ test("Auto-set / auto-fill 工具按权限分级走确认或直执行（2026-09-
     assert.equal(canUseCompanionAgentTool("read_only", definition).allowed, false);
     assert.equal(canUseCompanionAgentTool("guided", definition).requiresConfirmation, true);
     assert.equal(canUseCompanionAgentTool("full", definition).requiresConfirmation, false);
-    // 两个工具都挂在 companion-memory skill 下（老账号的 enabledSkillIds 已包含它）。
-    assert.ok(definition.skillIds.includes("companion-memory"));
   }
 
   // 参数校验：kind 枚举与 DB CHECK 同源；content ≤200 字。
@@ -91,20 +90,15 @@ test("Auto-set / auto-fill 工具按权限分级走确认或直执行（2026-09-
   assert.equal(validateCompanionAgentToolArguments("companion_set_activeness", { activeness: "active" }).success, true);
   assert.equal(validateCompanionAgentToolArguments("companion_set_activeness", { activeness: "loud" }).success, false);
 
-  // companion-memory skill 清单包含新工具，且 triggerHints 能命中"帮我记住"。
-  const memorySkill = resolveCompanionAgentSkills({
-    version: 1,
-    permissionLevel: "guided",
-    enabledSkillIds: ["companion-memory"],
-  });
-  assert.deepEqual(memorySkill.map((skill) => skill.id), ["companion-memory"]);
-  const memoryTools = resolveCompanionAgentTools(memorySkill, "guided").map((tool) => tool.name);
-  assert.ok(memoryTools.includes("companion_save_memory"));
-  assert.ok(memoryTools.includes("companion_set_activeness"));
+  // 记忆类工具在扁平面上每轮都在——它们曾经挂在 companion-memory 技能下，
+  // 关键词没命中就根本不出现在她面前（方案 29 §4.1）。
+  const guided = resolveAllCompanionAgentTools("guided").map((definition) => definition.name);
+  assert.ok(guided.includes("companion_save_memory"));
+  assert.ok(guided.includes("companion_set_activeness"));
 });
 
 test("Agent SSE event schemas expose only safe tool metadata", () => {
-  const tool = getCompanionAgentTool("companion_open_review");
+  const tool = getCompanionAgentTool("companion_open_page");
   assert.ok(tool);
   assert.equal(companionAgentToolEventV1Schema.safeParse({
     toolCallId: "call-1",
@@ -115,10 +109,6 @@ test("Agent SSE event schemas expose only safe tool metadata", () => {
     safeLabel: tool.description,
     route: { kind: "review" },
   }).success, true);
-  assert.equal(companionAgentSkillEventV1Schema.safeParse({
-    skillId: "learning-context",
-    skillVersion: "1.0.0",
-    name: "学习上下文",
-    status: "selected",
-  }).success, true);
+  // `agent.skill` 这个 SSE 事件类型已随技能层删除：现在每轮工具面是固定的
+  // （只按权限档过滤），"选中了哪个技能"再也不是一个需要广播的事实。
 });

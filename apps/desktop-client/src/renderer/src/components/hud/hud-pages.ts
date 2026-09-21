@@ -97,7 +97,7 @@ export const HUD_PAGES: Readonly<Record<HudPageId, HudPageDefinition>> = {
     id: "space",
     number: "04",
     title: "学习空间",
-    subtitle: "首次进入时在当前首页完成选择",
+    subtitle: "这里列出你加入的每个空间；顶栏的空间胶囊随时可以切换",
     plate: "home",
     companion: {
       mode: "ambient", seat: "right", framing: "bust", interaction: "on-demand", proactive: "silent", draggable: false,
@@ -157,7 +157,7 @@ export const HUD_PAGES: Readonly<Record<HudPageId, HudPageDefinition>> = {
     id: "note-edit",
     number: "09",
     title: "笔记编辑",
-    subtitle: "纯文本块专注写作；标题与正文都由服务端版本记录",
+    subtitle: "纯文本块专注写作；标题和正文每次改动都会存成版本",
     plate: "writing",
     // Reading and writing are one page in two modes, so they share a seat: the
     // clips hang over the right edge in both, and flipping the seat moved the
@@ -197,7 +197,7 @@ export const HUD_PAGES: Readonly<Record<HudPageId, HudPageDefinition>> = {
     plate: "workshop",
     companion: {
       mode: "ambient", seat: "right", framing: "bust", interaction: "on-demand", proactive: "silent", draggable: false,
-      starter: "每一步都来自服务端确认的阶段，离开本页不会中断。",
+      starter: "每一步都是已经确认的阶段，离开本页不会中断。",
     },
   },
   candidate: {

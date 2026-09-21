@@ -112,7 +112,7 @@ export function describeStructure(
   if (segments.length === 0) {
     if (status === "draft" || status === "processing") return "正在解析，完成后这里会列出结构与片段。";
     if (status === "failed") return "解析没有成功完成，因此没有结构可以展示。";
-    return "服务端还没有返回正文结构。";
+    return "还没有取到正文结构。";
   }
   const counts = new Map<string, number>();
   for (const segment of segments) counts.set(segment.segmentType, (counts.get(segment.segmentType) ?? 0) + 1);

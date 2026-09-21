@@ -7,7 +7,7 @@
  *                      templateTrustCeiling（授权上限；精确 effectiveTrustClass
  *                      在 assessment 内部，不重复存储）；
  * - artifact_locked    runId×taskId×variantId（task_presented → locked 转化率）；
- * - action             action_kind（hint_revealed/variant_switched/skip_task/
+ * - action             action_kind（hint_revealed/variant_switched/
  *                      skip_run/pause/resume 等，含 hint level）；
  * - run_result         outcome × scheduleImpact × activeSecondsUsed。
  *

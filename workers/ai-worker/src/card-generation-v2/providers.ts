@@ -33,6 +33,7 @@ import {
   AIConsentRequiredError,
   createGovernedProvider,
   resolveAIGovernanceContext,
+  type AIGovernanceContext,
 } from "../lib/governance.ts";
 import { extractJsonFromText } from "../lib/providers/json-response.ts";
 import type { ChatMessage, ChatOptions, ChatResult } from "@ailearn/shared";
@@ -42,7 +43,8 @@ import type {
   NoCardReasonCodeV2,
 } from "@ailearn/shared/card-generation-v2-contracts";
 import { z } from "zod";
-import { cardPresentationDraftV2Schema, canonicalAnswerV2Schema } from "@ailearn/shared/card-generation-v2-contracts";
+import { cardPresentationDraftV2Schema, canonicalAnswerV2Schema, cardHintPairV2Schema } from "@ailearn/shared/card-generation-v2-contracts";
+import { fallbackCardHints, countAnswerUnits } from "@ailearn/shared/card-generation-v2-pipeline";
 import type {
   ExtractedKnowledgeAtom,
   AtomExtractionProvider,
@@ -774,16 +776,18 @@ export class CardAuthoringProvider implements AuthoringProvider {
   }
 
   async authorCandidate(input: AuthoringProviderInput): Promise<AuthoringProviderOutput> {
+    const strategy = input.planObjective.strategy;
     const user = buildAuthorUserPrompt({
       objective: input.planObjective,
       semanticSpecHash: input.semanticSpecHash,
       planHash: input.planHash,
       sourceContent: input.sourceContent,
       evidenceList: input.evidenceList,
+      strategy,
     });
     const raw = await this.runtime.chatJsonWithRepair<AuthoringProviderOutput>({
       stage: AUTHOR_PROMPT_VERSION,
-      system: buildAuthorSystemPrompt(),
+      system: buildAuthorSystemPrompt(strategy),
       user,
       signal: input.signal,
       requiredKeys: ["objective", "presentation"],
@@ -873,8 +877,7 @@ ${describeSchemaIssues(error)}
       // 内的有限重试），重试耗尽仍 failed（fail-closed 不变）。
       throw new CardGenerationProviderError("retryable", `author output objective schema violation: ${paths}`);
     }
-    const presParse = cardPresentationDraftV2Schema.safeParse(presentation);
-    if (!presParse.success) {
+    const presParse = cardPresentationDraftV2Schema.safeParse(presentation);    if (!presParse.success) {
       const paths = presParse.error.issues.map((i) => i.path.join(".")).join(",");
       logger.warn({
         stage: "author",
@@ -909,9 +912,30 @@ ${describeSchemaIssues(error)}
       evidenceRefIds: Array.isArray(validated.evidenceRefIds) ? validated.evidenceRefIds : [],
       rubric: { ...rubricFinal, rubricHash: computeRubricHashV2(rubricForHash) },
     };
+    /**
+     * 提示：模型漏交或交空时**不重跑也不淘汰候选**——提示不是判分内容，为它牺牲
+     * 一张卡不值得；退回按本卡结构派生的兜底对（同一张卡每次得到同样的提示）。
+     * 之所以绝不退回 `buildDeterministicHint` 那种常量表：那正是"任意两张卡的
+     * 第一级提示一字不差"的来源（2026-09-20 实走复盘 #10）。
+     */
+    const modelHints = cardHintPairV2Schema.safeParse(raw.hints);
+    const hints = modelHints.success
+      ? modelHints.data
+      : fallbackCardHints({
+        conceptLabel: validated.conceptLabel,
+        knowledgeForm: validated.knowledgeForm,
+        strategy: input.planObjective.strategy,
+        answerUnitCount: countAnswerUnits(validated.canonicalAnswer as never),
+      });
     return {
+      hints,
       objective: fixedObjective as never,
-      presentation: presParse.data as never,
+      // 题型以 planner 的整批分配为准，模型改写无效——多样性是靠同批配额算出来的，
+      // 单张卡上模型自选会把整批配比破坏掉（v21 的根因即"示例写 recall、张张 recall"）。
+      presentation: {
+        ...presParse.data,
+        strategy: input.planObjective.strategy,
+      } as never,
       // M2：原样回传调用方（handler）基于 sealed manifest 计算的
       // evidenceSetHash——author-service 用它参与 candidateRevisionHash 闭包。
       evidenceSetHash: input.evidenceSetHash ?? "",
@@ -1314,6 +1338,13 @@ export async function buildCardGenerationProviders(input: {
   providerName?: string;
   providerConfig?: AIProviderRuntimeConfig;
   providerInstance?: AIProvider;
+  /**
+   * 在事务**外**解析好的治理上下文。调用方（V2 管道的四个 job）必须走这条：
+   * 0237 之后同意是账号级的，读 `user_ai_settings` 得带 `app.user_id`，
+   * 而管道的大事务是以 `userId: null` 打开的，在事务里再开一个带身份的作用域
+   * 会被作用域守卫判成"嵌套里不许改上下文"。伴星侧本来就是事务外解析再传进来。
+   */
+  governance?: AIGovernanceContext;
 }): Promise<{
   plannerExtraction: AtomExtractionProvider;
   author: AuthoringProvider;
@@ -1327,7 +1358,7 @@ export async function buildCardGenerationProviders(input: {
 }> {
   const governance = input.providerInstance
     ? null
-    : await resolveAIGovernanceContext(input.workspaceId, input.userId);
+    : input.governance ?? await resolveAIGovernanceContext(input.workspaceId, input.userId);
   if (governance && !governance.consentOk) throw new AIConsentRequiredError();
 
   let providerName = input.providerName;

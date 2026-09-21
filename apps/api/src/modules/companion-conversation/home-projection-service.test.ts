@@ -334,10 +334,35 @@ test("home projection uses the safe system profile and exposes only aggregate me
     text: "今天可以复习一小组卡片。",
     expiresAt: "2026-09-10T09:00:00.000Z",
     revision: 8,
+    origin: "system",
   });
   assert.equal("privateMemory" in projection, false);
   assert.equal("rawMemories" in projection.memorySummary, false);
   assert.doesNotMatch(JSON.stringify(projection), /never return|privateMemory|rawMemories/);
+});
+
+test("proactive cue origin：念头可点开、到点提醒是承诺、其余算系统事件", async () => {
+  const uuid = "11111111-1111-1111-1111-111111111111";
+  const cases: [string, Record<string, unknown>, Record<string, unknown>][] = [
+    ["thought", { kind: "system_event", systemEventId: `thought:${uuid}`, text: "想起你昨天那道题。" },
+      { text: "想起你昨天那道题。", origin: "thought", thoughtId: uuid }],
+    ["reminder", { kind: "system_event", systemEventId: `reminder:${uuid}`, text: "该去复习了。" },
+      { text: "该去复习了。", origin: "reminder" }],
+    ["run.completed", { kind: "system_event", systemEventId: `run.completed:${uuid}`, text: "刚学完了。" },
+      { text: "刚学完了。", origin: "system" }],
+  ];
+  for (const [label, payloadRef, expected] of cases) {
+    const fake = fakeExecutor({
+      initialProfile: profileRow(),
+      proactiveDeliveries: [{ payloadRef, expiresAt: new Date("2026-09-10T09:00:00.000Z"), inboxSequence: 3 }],
+    });
+    const projection = await getCompanionHomeProjection(fake.executor, scope, fake.now);
+    assert.deepEqual({ ...(projection.proactiveCue ?? {}) }, {
+      expiresAt: "2026-09-10T09:00:00.000Z",
+      revision: 3,
+      ...expected,
+    }, label);
+  }
 });
 
 test("saved companion profile is projected through an explicit safe field allowlist", async () => {

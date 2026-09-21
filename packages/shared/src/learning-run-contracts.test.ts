@@ -347,13 +347,16 @@ test("learningRunActionRequestSchema：action union 严格、epoch/revision 必�
     idempotencyKey: "k",
   };
   assert.equal(learningRunActionRequestSchema.parse({ ...base, action: { kind: "pause" } }).action.kind, "pause");
+  // skip_task 已于 2026-09-20 删除（与 skip_run 产生逐字节相同的终态，用户面前
+  // 摆了两个同义按钮）。这里断言它**被拒绝**而不是被忽略：陈旧客户端不能
+  // 静默把"无痕跳过"当成合法动作送进来。
   assert.equal(
-    learningRunActionRequestSchema.parse({
+    learningRunActionRequestSchema.safeParse({
       ...base,
       taskRevision: 1,
       action: { kind: "skip_task", taskId: uuid() },
-    }).action.kind,
-    "skip_task",
+    }).success,
+    false,
   );
   // end 必须显式 abandonLockedEvidence
   assert.equal(

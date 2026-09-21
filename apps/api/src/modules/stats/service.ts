@@ -1,5 +1,5 @@
-import { and, eq, count, isNull, lt } from "drizzle-orm";
-import { withWorkspaceTransaction, SYSTEM_USER_ID } from "../../db/client.ts";
+import { and, eq, count, isNull, lt, or } from "drizzle-orm";
+import { withWorkspaceTransaction } from "../../db/client.ts";
 import { learningCardsV2, learningObjectiveEvidenceBindingsV2, learningObjectiveRevisionsV2, learningObjectivesV2 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
 import { notes } from "@ailearn/shared/db-schema/note";
@@ -35,10 +35,15 @@ export interface StatsOverview {
  */
 const STATS_ACTIVE_CARDS_MAX = 2000;
 
-export async function getStatsOverview(workspaceId: string, userId?: string): Promise<StatsOverview> {
+/**
+ * 首页聚合统计。`userId` 必填：复习排程、到期数属于**个人行为**，共享空间只共享
+ * 学习资料（PRODUCT.md:127 的边界）。以前它是可选参数且 `objectiveReviewDueCount`
+ * 根本不按人过滤，所以成员一到期，owner 的首页就会报出别人的复习数。
+ */
+export async function getStatsOverview(workspaceId: string, userId: string): Promise<StatsOverview> {
   // QUAL-58/SEC-26 修复：使用 withWorkspaceTransaction 替代裸 db 查询
   return withWorkspaceTransaction(
-    { workspaceId, userId: userId ?? SYSTEM_USER_ID },
+    { workspaceId, userId },
     async (tx) => {
   // BUG-23 修复：先用 COUNT 查询获取活跃卡片数，仅当 count > 0 时才加载 ID。
   // 原代码通过 findMany 加载所有活跃卡片 ID 到内存再取 .length，
@@ -91,6 +96,9 @@ export async function getStatsOverview(workspaceId: string, userId?: string): Pr
       )
       .where(and(
         eq(reviewSchedules.workspaceId, workspaceId),
+        // 归因到人：0240 起 user_id 可为 NULL（系统级到期投影，人人可见），
+        // 所以放行 NULL 与「我自己的」，挡掉「别人的」。
+        or(isNull(reviewSchedules.userId), eq(reviewSchedules.userId, userId)),
         eq(reviewSchedules.status, ReviewStatus.PENDING),
         eq(reviewSchedules.subjectType, "card"),
         lt(reviewSchedules.nextReviewAt, now),
@@ -155,9 +163,9 @@ export async function getStatsOverview(workspaceId: string, userId?: string): Pr
         )
         .where(and(
           eq(reviewSchedules.workspaceId, workspaceId),
+          or(isNull(reviewSchedules.userId), eq(reviewSchedules.userId, userId)),
           eq(reviewSchedules.status, ReviewStatus.PENDING),
           eq(reviewSchedules.subjectType, "card"),
-          ...(userId ? [eq(reviewSchedules.userId, userId)] : []),
         ))
     : [];
   const pendingReviewCount = Number(v2ReviewCountRows[0]?.count ?? 0);

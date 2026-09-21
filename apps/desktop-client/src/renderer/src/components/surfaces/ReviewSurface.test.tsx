@@ -603,7 +603,7 @@ describe("ReviewSurface · 稍后提醒", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "稍后提醒" }));
 
-    expect(await screen.findByText("这张卡的状态刚发生过变化，队列已按服务端现状刷新。")).toBeTruthy();
+    expect(await screen.findByText("这张卡的状态刚变过，队列已经按最新情况刷新。")).toBeTruthy();
     await waitFor(() => expect(gateway.review.getQueue.mock.calls.length).toBe(2));
     await waitFor(() => expect(deck.getAttribute("data-review-id")).toBe(THREE[1].reviewId));
   });
@@ -622,7 +622,7 @@ describe("ReviewSurface · 稍后提醒", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "稍后提醒" }));
 
-    expect(await screen.findByText("延后没有送达服务端，这张卡仍在队列里。")).toBeTruthy();
+    expect(await screen.findByText("延后没送出去，这张卡还在队列里。")).toBeTruthy();
     expect(screen.getByRole("button", { name: "重试延后" })).toBeTruthy();
     // No refetch: the queue the user sees is still the one that holds this card.
     expect(gateway.review.getQueue.mock.calls.length).toBe(1);

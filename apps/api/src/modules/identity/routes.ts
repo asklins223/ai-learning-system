@@ -3,9 +3,9 @@ import { z } from "zod";
 import { eq } from "drizzle-orm";
 import { db } from "../../db/client.ts";
 import { users, workspaces } from "@ailearn/shared/db-schema/identity";
-import { loginWithPassword, registerWithoutInvite, switchWorkspace, listUserWorkspaces, joinWorkspaceByInviteToken, leaveWorkspace, JoinWorkspaceError, getAIPrivacySettings, updateAIConsent, updateAIDataPolicy, listAIAuditLog, revokeSession, resetRecoveredUserPassword, SESSION_TTL_MS, updateUserProfile, renameWorkspace, changePassword, revokeAllSessionsForUser } from "./service.ts";
+import { loginWithPassword, registerWithoutInvite, switchWorkspace, createCollaborativeWorkspace, listUserWorkspaces, joinWorkspaceByInviteToken, leaveWorkspace, JoinWorkspaceError, getAIPrivacySettings, updateAIConsent, updateAIDataPolicy, listAIAuditLog, revokeSession, resetRecoveredUserPassword, SESSION_TTL_MS, updateUserProfile, renameWorkspace, changePassword, revokeAllSessionsForUser } from "./service.ts";
 import { parseBody } from "../../lib/validate.ts";
-import { requireSession, requireOwner, getRequestCredential } from "./middleware.ts";
+import { requireSession, requireOwner, isWorkspaceOwner, getRequestCredential } from "./middleware.ts";
 import { clampLimit, clampOffset, parseQuery } from "../../lib/pagination.ts";
 import {
   createAuthCookieHeaders,
@@ -237,10 +237,10 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
     // 2026-08-11（性能专项）：membership 已由 decodeToken 合并 JOIN 取回，
     // 不再重复查 workspace_members（原 /auth/me 共 5 次 DB 查询 → 3 次）。
     const workspace = await db.query.workspaces.findFirst({ where: eq(workspaces.id, workspaceId) });
-    const role = membershipRole === "owner" || workspace?.ownerId === userId
-      ? "owner"
-      : membershipRole ?? "member";
-    const isPersonal = workspace?.ownerId === userId;
+    // 角色只由 isWorkspaceOwner 决定，与 requireOwner、能力投影、笔记投影同一谓词。
+    const role = isWorkspaceOwner(req.session) ? "owner" : membershipRole ?? "member";
+    const workspaceType = workspace?.workspaceType ?? "personal";
+    const isPersonal = workspaceType === "personal" && workspace?.ownerId === userId;
     return {
       userId,
       workspaceId,
@@ -249,27 +249,28 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
       displayName: user.displayName ?? null,
       avatarUrl: user.avatarUrl ?? null,
       workspaceName: workspace?.name ?? "个人工作区",
-      // ADR-0009 §3.6: membership perspective determines whether this is
-      // the user's personal workspace; a member of another user's personal
-      // workspace receives the collaborative projection.
-      workspaceType: isPersonal ? "personal" : "collaborative",
+      // 类型取自 workspaces.workspace_type 这一列本身。原先它由"查看者是不是
+      // owner"派生，注释还明说"别人的个人空间对我投影成 collaborative"——那是
+      // 因为没有创建协作空间的入口而将就地补的洞：它让个人空间一旦被人加入就
+      // 改名成协作空间，也让权限与协同判据无法建立在类型上。
+      workspaceType,
       isPersonal,
       personalWorkspaceId: user.personalWorkspaceId,
     };
   });
 
   app.get("/auth/capabilities/v1", { preHandler: [requireSession] }, async (req) => {
-    const role = req.session.membershipRole === "owner" ? "owner" : "member";
-    // 伴星相关能力由工作区 AI 同意与数据策略决定，所以投影必须读真实的
-    // workspaces 行；读不到时按 fail-closed 交给投影处理。
-    const aiSettings = await getAIPrivacySettings(req.session.workspaceId);
+    const role = isWorkspaceOwner(req.session) ? "owner" : "member";
+    // 伴星能否外发由**请求者本人**的 AI 同意与数据策略决定（0237 起为账号级）。
+    // 读不到时按 fail-closed 交给投影处理。
+    const aiSettings = await getAIPrivacySettings(req.session.workspaceId, req.session.userId);
     return buildDesktopCapabilityProjection({
       role,
       ai: aiSettings
         ? {
-            requiresConsent: aiSettings.requiresAIConsent,
-            consentSigned: Boolean(aiSettings.aiConsentVersion && aiSettings.aiConsentAt),
-            sendToExternal: aiSettings.aiDataPolicy.sendToExternal,
+            requiresConsent: aiSettings.requiresConsent,
+            consentSigned: Boolean(aiSettings.consentVersion && aiSettings.consentAt),
+            sendToExternal: aiSettings.dataPolicy.sendToExternal,
           }
         : null,
     });
@@ -336,6 +337,26 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
     return { ...result, csrfToken };
   });
 
+  // 新建协作空间。此前生产代码里没有任何创建工作区的入口，"共享"只能是把别人拉进
+  // 自己的个人空间，协作类型因此从未真实存在过（dev 库实测 856 个空间全是 personal）。
+  const createWorkspaceSchema = z.object({
+    name: z.string().min(1).max(50),
+  });
+  app.post(
+    "/workspaces",
+    { preHandler: [requireSession] },
+    async (req, reply) => {
+      const body = parseBody(app, createWorkspaceSchema, req.body);
+      const result = await createCollaborativeWorkspace(req.session.userId, body.name);
+      if (!result.ok) {
+        return reply
+          .code(result.error === "workspace_limit_reached" ? 409 : 400)
+          .send({ error: result.error });
+      }
+      return { workspaceId: result.workspaceId, workspaceName: result.workspaceName };
+    },
+  );
+
   const recoveredPasswordParamsSchema = z.object({ userId: z.string().uuid() });
   const recoveredPasswordBodySchema = z.object({
     password: z.string().min(12).max(200),
@@ -383,44 +404,39 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
     return reply.code(204).send();
   });
 
-  // GET /workspace/ai-settings — 获取当前工作区 AI 隐私配置
-  // 桌面设置页的「AI 数据同意」分区直接消费这份形状：同意状态 + 四个策略开关
-  // + 当前身份能否修改（写入仍由下面两个 PUT 的 requireOwner 收口）。
-  app.get("/workspace/ai-settings", { preHandler: [requireSession] }, async (req) => {
-    const settings = await getAIPrivacySettings(req.session.workspaceId);
-    if (!settings) throw app.httpErrors.notFound("workspace not found");
+  // GET /me/ai-settings — 本人的 AI 使用同意与数据外发政策。
+  // 0237 起这是账号级数据：它管的是"我的内容能不能送出去"，授权范围只能是本人，
+  // 所以不再有 requireOwner，也不再有 canManage——本人永远能改自己的。
+  app.get("/me/ai-settings", { preHandler: [requireSession] }, async (req) => {
+    const settings = await getAIPrivacySettings(req.session.workspaceId, req.session.userId);
+    if (!settings) throw app.httpErrors.notFound("user not found");
     return {
       version: 1 as const,
-      workspaceId: req.session.workspaceId,
-      canManage: req.session.membershipRole === "owner",
-      requiresConsent: settings.requiresAIConsent,
-      consentVersion: settings.aiConsentVersion,
-      consentAt: settings.aiConsentAt ? settings.aiConsentAt.toISOString() : null,
-      consentBy: settings.aiConsentBy,
-      dataPolicy: settings.aiDataPolicy,
+      requiresConsent: settings.requiresConsent,
+      consentVersion: settings.consentVersion,
+      consentAt: settings.consentAt ? settings.consentAt.toISOString() : null,
+      dataPolicy: settings.dataPolicy,
     };
   });
 
-  // PUT /workspace/ai-consent — Owner 签署 AI 同意
   const aiConsentSchema = z.object({
     consentVersion: z.string().min(1).max(50),
   });
-  app.put("/workspace/ai-consent", { preHandler: [requireSession, requireOwner] }, async (req) => {
+  app.put("/me/ai-consent", { preHandler: [requireSession] }, async (req) => {
     const body = parseBody(app, aiConsentSchema, req.body);
     await updateAIConsent(req.session.workspaceId, req.session.userId, body.consentVersion);
     return { success: true };
   });
 
-  // PUT /workspace/ai-data-policy — Owner 更新 AI 数据策略
   const aiDataPolicySchema = z.object({
     sendToExternal: z.boolean(),
     sendImageContent: z.boolean(),
     piiDetection: z.boolean(),
     auditLogging: z.boolean(),
   });
-  app.put("/workspace/ai-data-policy", { preHandler: [requireSession, requireOwner] }, async (req) => {
+  app.put("/me/ai-data-policy", { preHandler: [requireSession] }, async (req) => {
     const body = parseBody(app, aiDataPolicySchema, req.body);
-    await updateAIDataPolicy(req.session.workspaceId, body);
+    await updateAIDataPolicy(req.session.workspaceId, req.session.userId, body);
     return { success: true };
   });
 

@@ -11,6 +11,10 @@
  */
 
 import { sha256Hex } from "@ailearn/shared/content-hash";
+import type {
+  PetPersonaPresetBoundaries,
+  PetProfileActiveness,
+} from "@ailearn/shared";
 import { sql } from "drizzle-orm";
 import { logger } from "../lib/logger.ts";
 import { withWorkerWorkspaceTransaction } from "../db.ts";
@@ -47,11 +51,23 @@ export interface ReadContext {
   userText: string;
   recentMessages: { role: "user" | "assistant"; text: string }[];
   activeMemories: { kind: string; content: string }[];
+  /**
+   * 环境快照渲染好的 `<here_and_now>` 数据块（方案 29 §4.1），null = 没有任何有值行。
+   * 每轮无条件注入，不经工具、不经模型。
+   */
+  hereAndNow: string | null;
   petProfile: {
     name: string;
     speakingStyle: string;
     personalityTags: string[];
     examples: { text: string }[];
+    /**
+     * 活跃度与边界（方案 29 §3.3 / 抱怨 #2）。此前对话链路**根本不查这两列**——
+     * 它们只被念头调度器读，所以用户在设置里调的活跃度、勾的边界，对日常对话的
+     * 影响是字面意义的零。
+     */
+    activeness: PetProfileActiveness | null;
+    boundaries: PetPersonaPresetBoundaries | null;
   } | null;
   nextMessageSeq: number;
   nextEventSeq: number;

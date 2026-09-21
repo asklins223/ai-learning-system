@@ -174,8 +174,6 @@ export const companionRunSummaryV1Schema = z.strictObject({
    * 拿不到它，只能被 409 挡在门外（拒绝发生在写用户消息之前，历史里连这句话都没有）。
    */
   generation: z.number().int().positive(),
-  /** hybrid 才有"多步"可言；single_step（闲聊）不显示轨道与进度。 */
-  mode: z.enum(["hybrid", "single_step"]),
   stepCount: z.number().int().nonnegative(),
   toolCallCount: z.number().int().nonnegative(),
   /**

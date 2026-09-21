@@ -1157,13 +1157,22 @@
   cursor: pointer;
 }
 
+/* 滚动容器只负责 overflow。它自身高度由 .companion-history 的 1fr 行决定、不随内容
+   变化，所以 ResizeObserver 观察它看不到「执行过程」气泡撑高那一刀（见 CompanionHud
+   的贴底跟随注释）—— 会变化的是里面的内容层。 */
 .companion-history__list {
+  overflow: auto;
+  scroll-behavior: auto;
+}
+
+/* 内容层：原先挂在 .companion-history__list 上的排布样式搬到这里。padding 也必须跟
+   过来，让底部那 14px 明确属于「被滚动的内容」，贴底时最后一条才有一眼可辨的余量，
+   而不是贴死在容器边缘被输入行压住。 */
+.companion-history__content {
   display: flex;
   flex-direction: column;
   gap: 9px;
   padding: 14px;
-  overflow: auto;
-  scroll-behavior: auto;
 }
 
 /* ── 微信式历史浏览（2026-09-19）：工具行 / 搜索 / 日期分组 / 跳转最新 ── */
@@ -1925,4 +1934,24 @@
 /* 生成中的表单三列：输入 + 停止 + 发送并接替（方案 §2）。 */
 .companion-hud__composer form[data-sending] {
   grid-template-columns: minmax(0, 1fr) 48px 48px;
+}
+
+/* 鲸鱼娘（2026-09-20 用户标注「设置上来」→「再往旁边移动」）：她的内容盒是一整幅
+   海景背景，角色居中，盒子内侧没有不压到人的落点——悬在 8px 正好压住发饰。
+   改成整列移出盒子左侧（44px = 一颗按钮宽，右边缘贴盒边），配合 `bustSinkRatio`
+   把模型下沉腾出的头顶空档一起用。只按模型 id 生效：Mao / Seethrough 不命中。 */
+.desktop-app .companion-presence[data-companion-model-id="whale"]:not([data-policy-mode="home"]) .companion-hud__controls {
+  top: 14%;
+  left: -44px;
+  right: auto;
+  transform: none;
+}
+
+/* 伴星居左边（comp-left）时按钮一律放右侧，不放左侧（2026-09-20 用户指示）。
+   鲸鱼娘同样整列移出盒子右侧，高度沿用基础 46%。 */
+.desktop-app.comp-left .companion-presence[data-companion-model-id="whale"]:not([data-policy-mode="home"]) .companion-hud__controls {
+  right: -44px;
+  left: auto;
+  top: 46%;
+  transform: translateY(-50%);
 }

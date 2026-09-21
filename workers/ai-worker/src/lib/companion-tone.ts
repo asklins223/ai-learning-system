@@ -79,12 +79,18 @@ export interface ToneSegmentInput {
  * （TTS_MAX_SEGMENT_CHARS），超长段会被静默丢弃（文字显示、音频缺失）。
  * 切段发生在注入之前，注入 9-12 字符可能把 160 字符的满段顶过上限——
  * 此类段跳过注入（保住音频；该段只是缺语气，不缺内容）。
+ *
+ * `injectTags=false` 是用户在伴星中心关掉「语气标签」那条边界
+ * （`pet_profiles.boundaries.allowVoiceTags`）：仍然净化模型自己写出的幻觉标签，
+ * 只是不再由我们注入。不接这条的话，那个开关就只是个显示用的复选框——
+ * 她可以说"我关掉语气标签了"，音频却照旧带标签。
  */
 export function applyDeterministicToneToSegments(
   segments: ToneSegmentInput[],
   replyEmotion: CharacterCueEmotionV1,
+  injectTags = true,
 ): ToneSegmentInput[] {
-  const tag = EMOTION_TONE_TAGS[replyEmotion] ?? "";
+  const tag = injectTags ? (EMOTION_TONE_TAGS[replyEmotion] ?? "") : "";
   return segments.map((s) => {
     const cleaned = stripUnknownVoiceExpressionTags(s.text);
     // 段内已有任何已知标签（控制类或富语言类）→ 不叠加，避免双标签。

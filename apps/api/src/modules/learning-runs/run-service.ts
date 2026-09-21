@@ -44,8 +44,10 @@ import {
   learningCardsV2,
   learningExposuresV2,
   learningObjectivesV2,
+  learningObjectiveRevisionsV2,
   learningTargetSnapshotsV2,
 } from "@ailearn/shared/db-schema/card-generation-v2";
+import { cardHintPairV2Schema, type CardHintPairV2 } from "@ailearn/shared/card-generation-v2-contracts";
 import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
 import { validationAssistanceExposures } from "@ailearn/shared/db-schema/validation-v2";
 import { companionSandboxNamespaces } from "@ailearn/shared/db-schema/companion-sandbox";
@@ -1689,34 +1691,6 @@ export async function applyAction(
       await insertRunEvent(tx, input, "learning_run.skipped", {}, at, run.eventCursor);
       break;
     }
-    case "skip_task": {
-      if (run.phase !== "active") throw invalidPhase(run.phase, "active");
-      const taskId = input.action.taskId;
-      const taskRows = await tx.select().from(learningTasks).where(and(eq(learningTasks.id, taskId), eq(learningTasks.runId, run.id))).limit(1);
-      if (!taskRows[0]) throw new LearningRunServiceError("task_not_found", "任务不存在", 404);
-      await tx.update(learningTasks).set({ status: "skipped", revision: taskRows[0].revision + 1, updatedAt: at })
-        .where(eq(learningTasks.id, taskId));
-      // P2 单任务无 followup：skip_task → run skipped（§13.2 无预授权替代时）。
-      const skippedResult: LearningRunResultV1 = {
-        outcome: "skipped",
-        demonstratedFacets: [],
-        gapFacets: [],
-        scheduleImpact: { kind: "none", reasonCode: "skipped" },
-        returnTarget: run.returnTarget as LearningRunPublicV1["returnTarget"],
-      };
-      await tx.update(learningRuns)
-        .set({
-          phase: "skipped",
-          result: skippedResult as never,
-          terminalReasonCode: "user_ended",
-          revision: run.revision + 1,
-          updatedAt: at,
-        })
-        .where(eq(learningRuns.id, run.id));
-      await insertRunEvent(tx, input, "learning_task.skipped", { taskId }, at, run.eventCursor);
-      await insertRunEvent(tx, input, "learning_run.skipped", {}, at, run.eventCursor);
-      break;
-    }
     case "end": {
       if (run.phase === "completed") {
         // §13.2.5：Commit 完成后到达的 End 返回 completed snapshot（幂等）。
@@ -1784,7 +1758,15 @@ export async function applyAction(
       const exposureEventId = crypto.randomUUID();
       await insertRunEvent(tx, input, "learning_task.hint_requested", { taskId: run.activeTaskId, hintLevel: level }, at, run.eventCursor);
       await tx.update(learningRuns).set({ revision: run.revision + 1, updatedAt: at }).where(eq(learningRuns.id, run.id));
-      const text = buildDeterministicHint({ intent: taskRows[0].intent as never }, level);
+      /**
+       * 优先用**这张卡自带**的提示（制卡阶段由作者产出，见 cardHintPairV2Schema）。
+       * 常量表 `buildDeterministicHint` 只在卡片确实没有作者提示时才兜底——那正是
+       * 用户投诉"提示是写死的、跟卡片无关"的来源（2026-09-20 实走复盘 #10）。
+       */
+      const authoredHints = await readObjectiveHints(tx, input.workspaceId, run.origin);
+      const text = authoredHints
+        ? level === 1 ? authoredHints.level1 : authoredHints.level2
+        : buildDeterministicHint({ intent: taskRows[0].intent as never }, level);
       const snapshot = {
         actionResult: "hint_revealed",
         hint: { hintId: crypto.randomUUID(), level, text, exposureEventId },
@@ -1817,8 +1799,16 @@ export async function applyAction(
         .where(and(eq(learningTaskVariants.taskId, run.activeTaskId), eq(learningTaskVariants.status, "active")))
         .for("update");
       for (const v of currentRows) {
-        // 旧 active → superseded（§7.4：旧 revision 随即不可提交）。
-        await tx.update(learningTaskVariants).set({ status: "superseded", updatedAt: at }).where(eq(learningTaskVariants.id, v.id));
+        /**
+         * 被换下的 variant 退回 `standby`，不是 `superseded`（2026-09-20 实走复盘 #8）。
+         *
+         * 此前它是**单向门**：`availableAlternatives` 只列 `standby`，所以切到语音之后
+         * 再也没有回到文本的动作可发——只能靠"跳过这一步 / 安全退出"脱身。
+         * 提交安全不依赖 superseded：`submitArtifact` 只接受 `status = 'active'` 的
+         * variant（见本文件提交路径），standby 一样提交不进去；FOR UPDATE 行锁
+         * 也照旧挡住并发下的 stale-submit 竞态。
+         */
+        await tx.update(learningTaskVariants).set({ status: "standby", updatedAt: at }).where(eq(learningTaskVariants.id, v.id));
       }
       await tx.update(learningTaskVariants).set({ status: "active", updatedAt: at }).where(eq(learningTaskVariants.id, targetVariantId));
       await tx.update(learningRuns).set({ revision: run.revision + 1, updatedAt: at }).where(eq(learningRuns.id, run.id));
@@ -3078,6 +3068,43 @@ export async function recordActivityLease(
       updatedAt: new Date(),
     })
     .where(eq(learningRuns.id, run.id));
+}
+
+/**
+ * 读出这张卡自带的两级提示（迁移 0234 存在 objective revision 上）。
+ *
+ * 取的是目标**当前修订**——提示与答案同版本，答案被改写后旧提示不得继续下发。
+ * run.origin 里没有 objectiveId（V1 来源、沙箱样例等）或该修订没有作者提示时
+ * 返回 null，调用方退回派生文案；绝不因为缺提示而拒绝作答动作。
+ */
+async function readObjectiveHints(
+  tx: ApiTransaction,
+  workspaceId: string,
+  origin: unknown,
+): Promise<CardHintPairV2 | null> {
+  const objectiveId = (origin as { objectiveId?: unknown }).objectiveId;
+  if (typeof objectiveId !== "string" || objectiveId.length === 0) return null;
+  const rows = await tx
+    .select({ hints: learningObjectiveRevisionsV2.hints })
+    .from(learningObjectiveRevisionsV2)
+    .innerJoin(
+      learningObjectivesV2,
+      and(
+        eq(learningObjectivesV2.workspaceId, learningObjectiveRevisionsV2.workspaceId),
+        eq(learningObjectivesV2.objectiveId, learningObjectiveRevisionsV2.objectiveId),
+      ),
+    )
+    .where(and(
+      eq(learningObjectiveRevisionsV2.workspaceId, workspaceId),
+      eq(learningObjectivesV2.objectiveId, objectiveId),
+      eq(
+        learningObjectivesV2.currentObjectiveRevisionId,
+        learningObjectiveRevisionsV2.objectiveRevisionId,
+      ),
+    ))
+    .limit(1);
+  const parsed = cardHintPairV2Schema.safeParse(rows[0]?.hints);
+  return parsed.success ? parsed.data : null;
 }
 
 // ─── 导出供 Finalizer 使用 ───────────────────────────────────────────────

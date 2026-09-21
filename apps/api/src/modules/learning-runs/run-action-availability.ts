@@ -21,13 +21,17 @@ export function buildLearningRunAllowedActionsV2(view: LearningRunPublicV1): Lea
   const task = view.activeTask;
 
   if (view.phase === "active") {
+    // 2026-09-20 实走复盘 #12：active 阶段曾经同时提供 skip_run / end / skip_task
+    // 三个"无痕离开"，其中 skip_run 与 skip_task 产生逐字节相同的终态，而
+    // 「暂时不会」是另一种真实作答结果。三个近义出口堆在菜单里，用户分不清也
+    // 不需要分。现在只剩：不想做 → 稍后再做；不会做 → 暂时不会（提交侧）。
+    // end 在其他阶段仍是唯一出口（paused / checkpoint / recoverable_error /
+    // assessing / committing / preparing），照旧签发。
     actions.push(
       { version: 2, kind: "pause" },
       { version: 2, kind: "skip_run", confirmationRequired: true },
-      { version: 2, kind: "end", abandonLockedEvidence: false, confirmationRequired: true },
     );
     if (task) {
-      actions.push({ version: 2, kind: "skip_task", taskId: task.taskId, confirmationRequired: true });
       for (let level = 1; level <= task.assistancePolicy.hintLevels; level += 1) {
         actions.push({ version: 2, kind: "request_hint", level: level as 1 | 2 | 3 });
       }

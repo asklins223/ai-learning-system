@@ -21,7 +21,6 @@ import {
 import { sql } from "drizzle-orm";
 import { users, workspaces } from "./identity.ts";
 import type {
-  CompanionAgentMode,
   CompanionAgentRiskClass,
   CompanionAgentStepKind,
   CompanionAgentStepStatus,
@@ -144,9 +143,6 @@ export const companionTurnRuns = pgTable(
     routerContextRevision: char("router_context_revision", { length: 64 }),
     routerPayloadHash: char("router_payload_hash", { length: 64 }),
     // Companion Agent v1 frozen runtime state.
-    agentMode: text("agent_mode").$type<CompanionAgentMode>().notNull().default("hybrid"),
-    activeSkillId: text("active_skill_id"),
-    activeSkillVersion: text("active_skill_version"),
     permissionLevel: text("permission_level").$type<"read_only" | "guided" | "full">(),
     permissionSnapshot: jsonb("permission_snapshot"),
     budgetSnapshot: jsonb("budget_snapshot"),
@@ -210,7 +206,6 @@ export const companionAgentSteps = pgTable(
     stepNo: integer("step_no").notNull(),
     kind: text("kind").$type<CompanionAgentStepKind>().notNull(),
     status: text("status").$type<CompanionAgentStepStatus>().notNull(),
-    skillId: text("skill_id"),
     requestHash: char("request_hash", { length: 64 }),
     resultHash: char("result_hash", { length: 64 }),
     errorCode: text("error_code"),
@@ -236,7 +231,6 @@ export const companionAgentToolCalls = pgTable(
     toolCallId: text("tool_call_id").notNull(),
     name: text("name").notNull(),
     toolVersion: text("tool_version").notNull(),
-    skillId: text("skill_id").notNull(),
     arguments: jsonb("arguments").notNull(),
     argumentsSha256: char("arguments_sha256", { length: 64 }).notNull(),
     riskClass: text("risk_class").$type<CompanionAgentRiskClass>().notNull(),
@@ -351,7 +345,6 @@ export const companionActionProposals = pgTable(
     origin: text("origin").$type<"menu" | "agent_tool">(),
     agentRunId: uuid("agent_run_id"),
     agentToolCallId: text("agent_tool_call_id"),
-    agentSkillId: text("agent_skill_id"),
     agentToolVersion: text("agent_tool_version"),
     riskClass: text("risk_class").$type<CompanionAgentRiskClass>(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),

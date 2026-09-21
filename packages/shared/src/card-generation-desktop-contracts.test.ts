@@ -8,6 +8,7 @@ import {
   cardGenerationExposureEligibilityV1Schema,
   cardGenerationCandidateV1Schema,
   desktopCreateCardGenerationRunRequestV2Schema,
+  projectCardGenerationRunSnapshotV1,
   isCardGenerationReviewOpen,
 } from "./card-generation-desktop-contracts.ts";
 
@@ -44,6 +45,7 @@ test("main-only run view projects without hashes", () => {
     currentPlanVersion: 0,
     reviewDraftRevision: 1,
     sourceOutdated: false,
+    progress: { plannedCards: 0, authored: 0, gatePassed: 0, gateFailed: 0 },
     recovery: null,
     error: null,
     createdAt: "2026-08-23T00:00:00.000Z",
@@ -59,12 +61,17 @@ test("main-only run view projects without hashes", () => {
     currentPlanVersion: 0,
     reviewDraftRevision: 1,
     sourceOutdated: false,
+    progress: server.progress,
     recovery: null,
     sourceRef: { noteId: NOTE_ID, noteVersionId: VERSION_ID },
     createdAt: server.createdAt,
     updatedAt: server.updatedAt,
   });
   assert.equal("sourceSnapshotHash" in publicView, false);
+  // 主进程→渲染层的投影是 #2「进度只到第 2 步就跳完成」的断点所在：投影必须
+  // 把逐候选计数原样带过去，否则进度条除了档位以外无数可用。
+  const projected = projectCardGenerationRunSnapshotV1(server);
+  assert.deepEqual(projected.progress, server.progress);
 });
 
 test("Owner recovery summary is strict and carries only a safe navigation target", () => {

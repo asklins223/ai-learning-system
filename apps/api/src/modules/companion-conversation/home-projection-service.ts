@@ -405,12 +405,22 @@ async function readProactiveCue(
     const trimmed = text.trim();
     if (trimmed.length === 0 || trimmed.length > 200) continue;
     // 念头管线切片④：systemEventId 形如 "thought:<uuid>" 时气泡可点击开场。
-    const systemEventId = (payload as Record<string, unknown>).systemEventId;
-    const thoughtMatch = typeof systemEventId === "string" ? /^thought:([0-9a-fA-F-]{36})$/.exec(systemEventId) : null;
+    const systemEventIdRaw = (payload as Record<string, unknown>).systemEventId;
+    const systemEventId = typeof systemEventIdRaw === "string" ? systemEventIdRaw : null;
+    const thoughtMatch = systemEventId ? /^thought:([0-9a-fA-F-]{36})$/.exec(systemEventId) : null;
+    // 到点提醒（0238）走同一条 system_event 通道，但它是用户明确要过的东西：
+    // 前端按 origin 决定气泡停留时长与是否念出口。run.completed 这类系统事件
+    // 既不是念头也不是提醒，归 system。
+    const origin = thoughtMatch !== null
+      ? "thought"
+      : (systemEventId !== null && /^reminder:[0-9a-fA-F-]{36}$/.test(systemEventId))
+        ? "reminder"
+        : "system";
     return {
       text: trimmed,
       expiresAt: row.expiresAt.toISOString(),
       revision: row.inboxSequence,
+      origin,
       ...(thoughtMatch ? { thoughtId: thoughtMatch[1] } : {}),
     };
   }

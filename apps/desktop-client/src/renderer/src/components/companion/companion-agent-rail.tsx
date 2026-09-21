@@ -1,9 +1,13 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import {
+  BarChart3,
+  Bell,
   BookOpen,
   Brain,
+  CalendarClock,
   Check,
   CircleDashed,
+  FileText,
   History,
   Layers,
   ListChecks,
@@ -59,14 +63,20 @@ const TOOL_ICONS: Record<string, LucideIcon> = {
   companion_read_history: History,
   companion_read_memory: Brain,
   companion_open_card: Layers,
-  companion_open_review: ListChecks,
-  companion_open_star_map: Network,
-  companion_open_history: History,
+  companion_open_page: Network,
+  companion_open_note: FileText,
+  companion_search_notes: ScanSearch,
+  companion_read_note: FileText,
+  companion_get_learning_stats: BarChart3,
+  companion_list_task_queue: ListChecks,
+  companion_list_due_reviews: CalendarClock,
+  companion_schedule_reminder: Bell,
+  companion_list_reminders: Bell,
+  companion_cancel_reminder: Bell,
   companion_start_learning: Sparkles,
 };
 
 function nodeIcon(node: CompanionAgentNode): LucideIcon {
-  if (node.kind === "skill") return Sparkles;
   if (node.kind === "acting") return Wrench;
   if (node.kind === "thinking") return BookOpen;
   return (node.toolName ? TOOL_ICONS[node.toolName] : undefined) ?? Wrench;

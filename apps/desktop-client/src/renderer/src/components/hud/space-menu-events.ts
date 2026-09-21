@@ -42,3 +42,28 @@ export const SPACE_MENU_REFRESH_EVENT = "ailearn:space-menu-refresh";
 export function requestSpaceMenuRefresh(): void {
   window.dispatchEvent(new CustomEvent(SPACE_MENU_REFRESH_EVENT));
 }
+
+/**
+ * 切换学习空间的成功回执。
+ *
+ * 为什么需要它：切换会 `publishGateInvalidation("stale_workspace")`，整棵房间被门禁
+ * 页顶替再重新挂载。所以**任何 surface 自己的 state 都活不过这一次切换**——设置页
+ * 原先就是先 `publishGateInvalidation` 再 `setNotice("已切换到…")`，同一 tick 后组件
+ * 就被卸载，提示永远看不到。回执因此由门禁外侧的宿主（房间控制药丸）持有，并沿用
+ * 上面同一套"停车"手法跨过同 commit 的监听竞态。
+ */
+export const SPACE_SWITCH_RECEIPT_EVENT = "ailearn:space-switch-receipt";
+
+let pendingSpaceSwitchReceipt: string | null = null;
+
+export function requestSpaceSwitchReceipt(workspaceName: string): void {
+  pendingSpaceSwitchReceipt = workspaceName;
+  window.dispatchEvent(new CustomEvent(SPACE_SWITCH_RECEIPT_EVENT, { detail: { workspaceName } }));
+}
+
+/** 消费停车的回执：药丸在切换后的重挂载里取回它。 */
+export function takePendingSpaceSwitchReceipt(): string | null {
+  const receipt = pendingSpaceSwitchReceipt;
+  pendingSpaceSwitchReceipt = null;
+  return receipt;
+}

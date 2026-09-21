@@ -17,7 +17,7 @@ type RoomProjectionContext = {
   readonly workspaceEpoch: number;
   readonly enabledRoutes: readonly string[];
   readonly capabilityProjection: CapabilityProjectionV1 | null;
-  readonly activeGenerationSummary?: CardGenerationActiveSummaryV1 | null;
+  readonly activeGenerationSummary?: readonly CardGenerationActiveSummaryV1[] | null;
   readonly activeGenerationSummaryError?: "upstream_unavailable" | "unsupported_contract" | "permission_denied" | "stale_workspace" | "route_not_available";
 };
 
@@ -169,7 +169,7 @@ export function projectLearningDashboardToRoomProjection(
   const recentActivitySummary = sectionError("upstream_unavailable");
   const activeGenerationSummary = context.activeGenerationSummaryError
     ? sectionError(context.activeGenerationSummaryError)
-    : context.activeGenerationSummary
+    : context.activeGenerationSummary?.length
       ? { state: "data" as const, data: context.activeGenerationSummary }
       : { state: "empty" as const };
 

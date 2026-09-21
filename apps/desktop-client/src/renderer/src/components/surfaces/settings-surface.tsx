@@ -115,19 +115,19 @@ type NativeCapabilityValue = CapabilityProjectionV1["nativeCapabilities"][keyof 
  * the chip can always explain itself instead of leaving "未允许" unexplained.
  */
 function actionReason(value: ActionCapabilityValue | undefined): string {
-  if (!value) return "服务端还没有回答这一项。";
-  if (value === "allowed") return "服务端已允许。";
-  if (value === "conditional") return "满足条件时才允许，服务端会按当前上下文判断。";
-  return "服务端当前不允许。伴星相关能力由工作区 AI 同意与数据外发策略决定，管理类能力由角色决定。";
+  if (!value) return "这一项还没拿到答复。";
+  if (value === "allowed") return "已经允许。";
+  if (value === "conditional") return "满足条件时才允许，由系统按当前情况判断。";
+  return "当前不允许。伴星相关能力由工作区 AI 同意与数据外发策略决定，管理类能力由角色决定。";
 }
 
 function featureReason(state: string | undefined, reason: string | undefined): string {
-  if (!state) return "服务端还没有回答这一项。";
-  if (state === "enabled") return "服务端已启用这条链路。";
+  if (!state) return "这一项还没拿到答复。";
+  if (state === "enabled") return "这条链路已经启用。";
   if (state === "conditional") return "按条件启用。";
   return reason === "error.feature_disabled"
-    ? "服务端的部署开关没有打开这条链路。"
-    : "服务端当前不可用。";
+    ? "部署时没有打开这条链路。"
+    : "这一项当前不可用。";
 }
 
 function nativeReason(value: NativeCapabilityValue | undefined): string {
@@ -198,10 +198,10 @@ const INVITE_EXPIRY_OPTIONS: ReadonlyArray<readonly [string, string]> = [
  * 只有一处写错就会让开关写进另一个字段，而那种错误在类型上是看不出来的。
  */
 const DATA_POLICY_FIELDS: ReadonlyArray<readonly [keyof AiDataPolicyV1, string, string]> = [
-  ["sendToExternal", "允许发送到外部模型服务", "关闭后，工作区内容不会发送给外部模型服务。"],
+  ["sendToExternal", "允许发送到外部模型服务", "关闭后，内容不会发送给外部模型服务。"],
   ["sendImageContent", "允许发送图片内容", "只影响图片类素材；关闭后图片留在本机。"],
   ["piiDetection", "外发前做个人信息检测", "在内容离开本机前先标记可能的个人信息。"],
-  ["auditLogging", "记录 AI 审计日志", "每次外发都留下可追溯的记录，供 Owner 复核。"],
+  ["auditLogging", "记录 AI 审计日志", "每次外发都留下可追溯的记录，供你回看。"],
 ];
 
 const ANSWER_MODE_OPTIONS: ReadonlyArray<readonly [CompanionAnswerModePreferenceV1["preference"], string]> = [
@@ -311,8 +311,8 @@ function SettingsInlineState({
  * groups the room's defaults, membership is a ledger plus a real invite form,
  * appearance picks the theme off the plate itself, the companion tab is a
  * control block over a capability list, consent is drawn as the path data takes
- * and is **writable by the Owner**, and data management is an inventory of what
- * the workspace holds.
+ * and is **writable by the signed-in account only**, and data management is an
+ * inventory of what the workspace holds.
  *
  * Every control is drawn here rather than borrowed from the browser, and every
  * value comes from a real client or server fact. Nothing offers what the product
@@ -1396,8 +1396,9 @@ export function SettingsSurface() {
 
         {/* Owner 专属：创建邀请、邀请记录、成员管理。写入由服务端 requireOwner 收口。
             三个 settings-group 用与「数据与维护」一致的小标题节奏，不再用 block 堆叠。
-            「谁能改政策」由这一页的页脚说明：它属于「AI 数据同意」，在这里再放一枚
-            能力标签只会和那一页重复，还把这一页的节奏打断。 */}
+            Member 侧不是整块消失，而是留一个说清边界的锁定块：看不见不等于知道
+            自己不能做，审查里「只读没有常驻表达」正是从这里来的。
+            「谁能改政策」不在这一页说：它已经归到「AI 数据同意」的账号级设置里。 */}
         {isOwner ? (
           <>
             <section className="settings-group">
@@ -1517,12 +1518,24 @@ export function SettingsSurface() {
               </div>
             </section>
           </>
-        ) : null}
+        ) : (
+          <section className="settings-group">
+            <h3 className="settings-group__title">邀请与成员</h3>
+            <div className="settings-rows">
+              <SettingRow
+                title="只有空间所有者能发邀请、看名册、移成员"
+                detail="你在这个空间是成员：可以读写学习资料，但成员名册与邀请由所有者管理。需要别人加入或离开，请找所有者。"
+              >
+                <span className="tag">只读</span>
+              </SettingRow>
+            </div>
+          </section>
+        )}
       </>
     ),
     footerNote: isOwner
-      ? "邀请与成员管理只对当前空间生效；同意与数据政策在「AI 数据同意」里，只有 Owner 能改。"
-      : "加入协作空间需要空间 Owner 发出的邀请码；同意与数据政策也只有 Owner 能改。",
+      ? "邀请与成员管理只对当前空间生效；AI 同意与数据政策在你的账号上，在「AI 数据同意」里改。"
+      : "加入协作空间需要空间所有者发出的邀请码；AI 同意与数据政策始终由你本人签署，不看这里的角色。",
   });
 
 
@@ -1667,8 +1680,8 @@ export function SettingsSurface() {
             <SettingRow
               title="默认作答方式"
               detail={answerMode
-                ? "账号级偏好，跨设备一致；「跟随安排」交给服务端按情境编排。"
-                : "正在从服务端读取这个账号的作答偏好。"}
+                ? "账号级偏好，跨设备一致；「跟随安排」由系统按当时情况编排。"
+                : "正在读取这个账号的作答偏好。"}
             >
               {answerMode ? (
                 <HudSegmented
@@ -1689,7 +1702,9 @@ export function SettingsSurface() {
         <section className="settings-group">
           <h3 className="settings-group__title">伴星能力</h3>
           <div className="settings-rows settings-rows--split">
-            <SettingRow mark={<Sparkles size={15} />} title="半身形象" detail="窗口内 Live2D，是伴星的唯一形态。">
+            {/* 伴星形态的切换入口在伴星快捷设置（「更多功能」→ 伴星设置），2026-09-20 用户裁决；
+                这里只保留本机加载状态。 */}
+            <SettingRow mark={<Sparkles size={15} />} title="模型状态" detail="当前形态的模型在本机的加载状态。">
               <span
                 className={live2dStatus === "ready" ? "tag green" : "tag"}
                 title={live2dStatus === "ready"
@@ -1701,7 +1716,7 @@ export function SettingsSurface() {
                 {live2dStatus === "ready" ? "已加载" : live2dStatus === "loading" ? "加载中" : "不可用"}
               </span>
             </SettingRow>
-            <SettingRow mark={<MessageCircle size={15} />} title="实时对话" detail="完整对话写入由服务端开关决定。">
+            <SettingRow mark={<MessageCircle size={15} />} title="实时对话" detail="完整对话是否写入由系统开关决定。">
               <CapabilityChip value={companion?.["companion.sendMessage"]} reason={actionReason(companion?.["companion.sendMessage"])} />
             </SettingRow>
             <SettingRow mark={<MessagesSquare size={15} />} title="对话能力" detail="伴星对话链路的启用状态。">
@@ -1714,7 +1729,7 @@ export function SettingsSurface() {
             <SettingRow mark={<Mic size={15} />} title="本机语音识别" detail="不可用时自动回落到文字输入。">
               <CapabilityChip kind="native" value={capabilities?.nativeCapabilities.asr} reason={nativeReason(capabilities?.nativeCapabilities.asr)} />
             </SettingRow>
-            <SettingRow mark={<AudioLines size={15} />} title="语音对话" detail="语音链路由服务端能力开关决定。">
+            <SettingRow mark={<AudioLines size={15} />} title="语音对话" detail="语音能力由系统开关决定。">
               <CapabilityChip
                 kind="feature"
                 value={features?.companion_voice_dialogue_v1.state}
@@ -1725,13 +1740,12 @@ export function SettingsSurface() {
         </section>
       </>
     ),
-    footerNote: "伴星能力全部来自服务端的 capability 投影，这里不提供模型选择。",
+    footerNote: "伴星的能力全部来自服务器返回的开关状态；形态选择只保存在这台设备上。",
   });
 
-  /** Consent drawn as the path the data takes, then the policy the Owner signs. */
+  /** Consent drawn as the path the data takes, then the policy your own account signs. */
   const dataPanel = (): SettingsPanel => {
     const policy = aiSettings?.dataPolicy ?? null;
-    const canManage = aiSettings?.canManage === true;
     const signed = Boolean(aiSettings?.consentVersion);
     const busy = aiSaving !== null;
     if (aiSettingsFailure) {
@@ -1739,8 +1753,8 @@ export function SettingsSurface() {
         title: "AI 数据同意",
         body: (
           <SettingsInlineState
-            title="无法确认当前工作区的 AI 数据政策"
-            detail={`${aiSettingsFailure} 为避免展示错误状态，本页不会用默认值代替服务端答案。`}
+            title="没能读到你的 AI 数据设置"
+            detail={`${aiSettingsFailure} 这一页不用默认值猜一个状态给你看，重试即可。`}
             tone="error"
             onRetry={() => void load()}
           />
@@ -1778,7 +1792,7 @@ export function SettingsSurface() {
               <div className={`settings-boundary__node${companion?.["companion.read"] === "allowed" ? "" : " settings-boundary__node--stop"}`}>
                 <span>外发边界</span>
                 <b>{companion?.["companion.read"] === "allowed" ? "可能发送至模型服务" : "当前不会外发"}</b>
-                <small>由 Owner 签署</small>
+                <small>由你本人签署</small>
               </div>
             </div>
           </section>
@@ -1793,30 +1807,25 @@ export function SettingsSurface() {
               <SettingRow
                 title="AI 使用同意"
                 detail={!aiSettings
-                  ? "还没有读到这个空间的同意状态。"
+                  ? "还没有读到你的同意状态。"
                   : signed
                     ? `已签署（版本 ${aiSettings.consentVersion}）${aiSettings.consentAt ? ` · ${aiSettings.consentAt.slice(0, 10)}` : ""}`
                     : aiSettings.requiresConsent
-                      ? "这个部署配置了外部模型供应商，未签署前内容不会外发。"
-                      : "当前部署只用本机模型，不强制要求签署。"}
+                      ? "这里配了外部模型服务，没签署前你的内容不会离开这台设备。"
+                      : "现在只用本机模型跑，不需要签署。"}
               >
                 {signed
                   ? <span className="tag green">已签署</span>
                   : <span className="tag">{aiSettings?.requiresConsent ? "需要签署" : "未签署"}</span>}
               </SettingRow>
-              {canManage && !signed ? (
+              {!signed ? (
                 <SettingRow
                   title="签署同意"
-                  detail={`以 Owner 身份签署当前版本（${AI_CONSENT_VERSION}），签署后内容才允许离开本机。`}
+                  detail={`用你的账号签署当前版本（${AI_CONSENT_VERSION}），签署后内容才允许离开本机。签署只对你自己生效，换到别人的空间也要重新签署。`}
                 >
                   <button type="button" className="button primary" disabled={busy} onClick={() => void signConsent()}>
                     {aiSaving === "consent" ? "签署中…" : "签署"}
                   </button>
-                </SettingRow>
-              ) : null}
-              {!canManage && aiSettings ? (
-                <SettingRow title="签署权限" detail="只有空间 Owner 可以签署或修改这些政策；你在这个空间是 Member。">
-                  <span className="tag">只读</span>
                 </SettingRow>
               ) : null}
             </div>
@@ -1824,13 +1833,14 @@ export function SettingsSurface() {
 
           <section className="settings-group">
             <h3 className="settings-group__title">数据外发策略</h3>
+            <p className="settings-group__note">跟着你的账号走，不跟空间走：在这个部署里签一次、调一次，去哪个空间都沿用同一份设置。</p>
             <div className="settings-rows">
               {DATA_POLICY_FIELDS.map(([field, title, detail]) => (
                 <SettingRow key={field} title={title} detail={detail}>
                   {aiSaving === field ? <span className="tag">保存中…</span> : null}
                   <HudSwitch
                     checked={policy?.[field] ?? false}
-                    disabled={!canManage || !policy || busy}
+                    disabled={!policy || busy}
                     onChange={(next) => void saveDataPolicy({ [field]: next }, field)}
                     label={title}
                   />
@@ -1846,27 +1856,25 @@ export function SettingsSurface() {
               <SettingRow mark={<BookOpen size={15} />} title="伴星读取工作区内容" detail="决定伴星能看到哪些来源、笔记与目标。">
                 <CapabilityChip value={companion?.["companion.read"]} reason={actionReason(companion?.["companion.read"])} />
               </SettingRow>
-              <SettingRow mark={<MessageCircle size={15} />} title="向伴星发送消息" detail="消息内容可能离开本机，由服务端处理。">
+              <SettingRow mark={<MessageCircle size={15} />} title="向伴星发送消息" detail="消息内容可能离开这台电脑，交给服务器处理。">
                 <CapabilityChip value={companion?.["companion.sendMessage"]} reason={actionReason(companion?.["companion.sendMessage"])} />
               </SettingRow>
               <SettingRow mark={<ClipboardCheck size={15} />} title="确认伴星的提议" detail="提议写入笔记或目标前始终需要你确认。">
                 <CapabilityChip value={companion?.["companion.decideProposal"]} reason={actionReason(companion?.["companion.decideProposal"])} />
               </SettingRow>
-              <SettingRow mark={<KeyRound size={15} />} title="管理工作区政策" detail="只有 Owner 可以更改同意与数据政策。">
+              <SettingRow mark={<KeyRound size={15} />} title="代你改空间设置" detail="空间级的设置只有所有者能改；上面那份同意与策略始终归你自己。">
                 <CapabilityChip value={companion?.["settings.update"]} reason={actionReason(companion?.["settings.update"])} />
               </SettingRow>
             </div>
           </section>
 
           <p className="settings-notice-paper">
-            本产品没有用户级模型或供应商选择，也没有 BYOK 配置；工作区级 AI 同意与
-            数据策略由 Owner 在上面签署和调整。
+            本产品没有用户级模型或供应商选择，也没有 BYOK 配置；AI 同意与数据策略是
+            账号级设置，由你在上面这几行签署和调整，不随空间转移。
           </p>
         </>
       ),
-      footerNote: canManage
-        ? "改动立即写入服务端，并同步刷新这一页的能力投影。"
-        : "你在这个空间是 Member，因此这些政策只读。",
+      footerNote: "改动会立刻存到服务器，这一页的能力状态同时刷新。",
     };
   };
 
@@ -1924,7 +1932,7 @@ export function SettingsSurface() {
                 title="导出工作区"
                 detail={currentRole === "owner"
                   ? "把当前空间的来源、笔记、理解目标与版本写成一个 JSON 文件；保存位置由你在系统对话框里选择。"
-                  : "整库导出由服务端 requireOwner 收口，你在这个空间是 Member。"}
+                  : "整库导出只对空间所有者开放，你在这个空间是成员。"}
               >
                 <button
                   type="button"
@@ -1938,8 +1946,8 @@ export function SettingsSurface() {
               <SettingRow
                 title="导入 Markdown 笔记"
                 detail={currentRole === "owner"
-                  ? "一次最多 100 个 .md 文件，文件名作标题；相同批次重试不会产生重复笔记。"
-                  : "批量导入由服务端 requireOwner 收口，你在这个空间是 Member。"}
+                  ? "一次最多 100 个 .md 文件，文件名作标题；相同批次重试不会产生重复笔记。导进来的文件属于这个空间——协作空间里所有成员和他们的伴星都会读到。"
+                  : "批量导入只对空间所有者开放，你在这个空间是成员。"}
               >
                 <label
                   className="button"
@@ -2025,7 +2033,7 @@ export function SettingsSurface() {
               <SettingRow
                 title="重建索引"
                 detail={!reindexResult
-                  ? "删除并原子重建当前空间的搜索投影；任何一步失败都会回滚。"
+                  ? "清空并重建这个空间的搜索索引；中间任何一步失败都会退回原样。"
                   : `已删除 ${reindexResult.deleted} 条旧文档，重建笔记 ${reindexResult.indexedNotes} / 来源 ${reindexResult.indexedSources} / 目标 ${reindexResult.indexedObjectives}${reindexResult.errors > 0 ? `，${reindexResult.errors} 条失败` : ""}${reindexResult.capped ? "（超出单表行数上限，结果被截断）" : ""}。`}
               >
                 <button type="button" className="button" disabled={ownerBusy !== null} onClick={() => void runSearchReindex()}>
@@ -2098,7 +2106,7 @@ export function SettingsSurface() {
 
         {loading ? (
           <article className="settings-card settings-card--state">
-            <SurfaceDataState kind="loading" message="正在读取设置" detail="设置页只显示服务端确认的账户、空间与能力。" />
+            <SurfaceDataState kind="loading" message="正在读取设置" detail="这一页只显示服务器确认过的账户、空间与能力。" />
           </article>
         ) : failure ? (
           <article className="settings-card settings-card--state">

@@ -36,6 +36,7 @@ export * from "./learning-run-v2-contracts.ts";
 export * from "./review-queue-v2-contracts.ts";
 export * from "./formal-assessment-guard-contracts.ts";
 export * from "./room-projection-contracts.ts";
+export * from "./companion-proactive-policy.ts";
 export * from "./companion-home-contracts.ts";
 // 伴星中心（桌面页 20）读取合同：记忆 / 记忆星图 / 日记 / 人格档案 / 对话记录。
 export * from "./companion-memory-desktop-contracts.ts";

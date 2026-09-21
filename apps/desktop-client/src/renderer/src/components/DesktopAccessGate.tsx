@@ -50,6 +50,7 @@ import {
 import {
   createRequestMeta,
   RendererGatewayError,
+  setCurrentWorkspaceEpoch,
   unwrapGatewayResult,
 } from "../app/desktop-client";
 import {
@@ -62,6 +63,7 @@ import {
 } from "../app/runtime-gate-subscription";
 import { mediaAssetUrl, useLearningRoomManifest } from "../media/learning-room-manifest";
 import { sceneMotionDuration, type SceneMotionMode } from "../scene/scene-motion";
+import { useRoomStore } from "../app/room-store";
 import { HudFirstSpaceScene } from "./hud/HudFirstSpace";
 import { requestSpaceMenu, requestSpaceMenuRefresh } from "./hud/space-menu-events";
 import { AuthAmbientCanvas, type AuthAmbientLampCue } from "./AuthAmbientCanvas";
@@ -764,6 +766,8 @@ export function DesktopAccessGate({
   const forceConnectionRef = useRef(false);
   const connectionFlightRef = useRef<Promise<unknown> | null>(null);
   const readyBoundaryRef = useRef<string | null>(null);
+  /** 上一次发布给顶栏胶囊的空间身份；只在真的变了时写 store，避免每次 ready 都刷一遍订阅者。 */
+  const spaceIdentityBoundaryRef = useRef<string | null>(null);
   const lastTrustedSessionRef = useRef<ReadyDesktopSession | null>(null);
   // Set when an invite redemption fails right after login: the next bootstrap
   // resolves into the workspace phase so the failure has a surface to land on.
@@ -838,10 +842,16 @@ export function DesktopAccessGate({
     setRefreshRevision((revision) => revision + 1);
   }, []);
 
-  const takeWorkspaceNotice = useCallback((): { notice?: string } => {
+  /**
+   * 取走（并清空）待报告的邀请码失败提示。返回**值**而不是对象：两个消费方的字段名
+   * 本来就不同（`workspace` 视图叫 `notice`、`ready` 视图叫 `spaceNotice`），此前
+   * 这里返回 `{ notice }` 再被 spread 进 ready 视图，读的一直是 `view.spaceNotice`，
+   * 于是登录页填的邀请码失败后没有任何地方能把话说出来。
+   */
+  const takeWorkspaceNotice = useCallback((): string | undefined => {
     const notice = pendingWorkspaceNoticeRef.current;
     pendingWorkspaceNoticeRef.current = null;
-    return notice ? { notice } : {};
+    return notice ?? undefined;
   }, []);
 
   const invalidateReadyGate = useCallback((code?: GateInvalidationCode) => {
@@ -887,6 +897,23 @@ export function DesktopAccessGate({
         }
         readyBoundaryRef.current = nextBoundary;
         lastTrustedSessionRef.current = next.session;
+        // 边界一旦确定就同步给 createRequestMeta 的兜底，漏传 epoch 的调用点因此
+        // 不可能把请求打到别的空间上；登出后视图不再是 ready，这里保持最后一次的
+        // 值，而主进程届时已把 activeWorkspaceEpoch 归零 → 不匹配 → stale_workspace。
+        setCurrentWorkspaceEpoch(next.session.workspaceEpoch);
+        // 顶栏空间胶囊的身份随同一次已验证会话发布：胶囊不自己发请求，也就不会
+        // 出现「菜单说 A、胶囊说 B」。登出后视图不再是 ready，这里保留最后一次的
+        // 值——届时药丸本身也不在屏幕上。
+        const identity = {
+          name: next.session.workspace.name,
+          role: next.session.workspace.role,
+          isPersonal: next.session.workspace.isPersonal,
+        };
+        const identityBoundary = [identity.name, identity.role, String(identity.isPersonal)].join(":");
+        if (spaceIdentityBoundaryRef.current !== identityBoundary) {
+          spaceIdentityBoundaryRef.current = identityBoundary;
+          useRoomStore.getState().setSpaceIdentity(identity);
+        }
       }
       setView(next);
     };
@@ -1061,7 +1088,7 @@ export function DesktopAccessGate({
             });
             const response = await api.workspace.list({ meta: createRequestMeta(sessionDecision.session.workspaceEpoch) });
             const workspaces = unwrapGatewayResult(response).workspaces;
-            apply({ phase: "workspace", session: sessionDecision.session, workspaces, ...takeWorkspaceNotice() });
+            apply({ phase: "workspace", session: sessionDecision.session, workspaces, notice: takeWorkspaceNotice() });
             return;
           }
           case "ready": {
@@ -1076,7 +1103,7 @@ export function DesktopAccessGate({
               phase: "ready",
               runtime,
               session: sessionDecision.session,
-              ...takeWorkspaceNotice(),
+              spaceNotice: takeWorkspaceNotice(),
             });
             return;
           }

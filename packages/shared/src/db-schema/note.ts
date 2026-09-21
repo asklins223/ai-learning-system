@@ -1,7 +1,20 @@
-import { pgTable, uuid, text, integer, timestamp, index, uniqueIndex, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, integer, bigint, customType, timestamp, index, uniqueIndex, jsonb } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
-import { users } from "./identity.ts";
+import { users, workspaces } from "./identity.ts";
 import { sourceStatusEnum } from "./enums.ts";
+
+/**
+ * drizzle-orm 0.45 的 pg-core 没有内置 bytea（只有 PgBinaryVector），所以 CRDT 快照
+ * 这一列要自己声明。读写都是原样透传：Postgres 的 bytea 驱动层已经是 Buffer，
+ * 自己再做一次 base64 只会让"快照落盘再读回"多一个可能出错的环节。
+ */
+const bytea = customType<{ data: Buffer; driverParam: Buffer }>({
+  dataType() {
+    return "bytea";
+  },
+  toDriver: (value: unknown) => value as Buffer,
+  fromDriver: (value: unknown) => value as Buffer,
+});
 
 export const sources = pgTable(
   "sources",
@@ -162,4 +175,25 @@ export const noteBlocks = pgTable(
 
     idWorkspaceUnique: uniqueIndex("note_blocks_id_workspace_unique").on(t.id, t.workspaceId),
     workspaceVersionIdUnique: uniqueIndex("note_blocks_workspace_version_id_unique_idx").on(t.workspaceId, t.versionId, t.id),}),
+);
+
+/**
+ * 笔记正文的 CRDT 文档状态（迁移 0244）。一行 = 一篇笔记当前 Y.Doc 的快照。
+ *
+ * 从这张表起，正文的事实源是 Y.Doc，`note_blocks` 是由它派生的投影关系表。
+ * 组合外键挡住"note_id 属于 A 空间、workspace_id 写 B 空间"的行——那种行会让
+ * RLS 的 workspace 判定形同虚设。
+ */
+export const noteDocumentStates = pgTable(
+  "note_document_states",
+  {
+    noteId: uuid("note_id").primaryKey().references(() => notes.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    state: bytea("state").notNull(),
+    revision: bigint("revision", { mode: "number" }).notNull().default(0),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    workspaceIdx: index("note_document_states_workspace_idx").on(t.workspaceId),
+  }),
 );

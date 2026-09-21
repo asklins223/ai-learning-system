@@ -478,7 +478,6 @@ export async function companionConversationRoutes(app: FastifyInstance) {
             runId: run.runId,
             status: run.status,
             generation: run.generation,
-            mode: run.mode === "single_step" ? ("single_step" as const) : ("hybrid" as const),
             stepCount: run.stepCount,
             toolCallCount: run.toolCallCount,
             maxSteps: run.maxSteps,

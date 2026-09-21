@@ -100,7 +100,8 @@ const desktopApi: AILearnDesktopApiM2 = {
     updateAiConsent: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceAiConsentUpdate, input),
     updateAiDataPolicy: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceAiDataPolicyUpdate, input),
     export: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceExport, input),
-    rename: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceRename, input)
+    rename: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceRename, input),
+    create: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceCreate, input)
   },
   // SEC-02 / ADR-0009：Owner 的邀请发出与成员管理。
   invites: {

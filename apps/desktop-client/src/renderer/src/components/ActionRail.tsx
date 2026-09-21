@@ -204,7 +204,7 @@ export function ActionRail() {
   };
   const openNote = () => {
     if (!home.note || !enabledRoutes.has("note.detail")) {
-      showPending("研究册暂时没有可打开的书签", "首页只会打开服务端确认过身份的笔记；完整笔记库仍在迁移中。");
+      showPending("研究册暂时没有可打开的书签", "首页只打开已经存好的笔记；完整笔记库还在搬过来。");
       return;
     }
     setActiveNoteRef({ noteId: home.note.noteId, noteVersionId: home.note.noteVersionId });
@@ -212,14 +212,14 @@ export function ActionRail() {
   };
   const openReview = () => {
     if (!enabledRoutes.has("review.queue")) {
-      showPending("复习台尚未开放", "复习入口已经保留，当前桌面合同还没有签发可用路由。");
+      showPending("复习台尚未开放", "复习入口先留着，这一版还没有接上可用的复习路由。");
       return;
     }
     invoke("review");
   };
   const openCurrentTarget = () => {
     if (!home.hasFocus) {
-      showPending("当前还没有学习目标", "先从研究册或来源资料形成目标，服务端确认后会出现在这里。");
+      showPending("当前还没有学习目标", "先从笔记或来源资料形成目标，存好之后会出现在这里。");
       return;
     }
     const objectiveId = projection?.primaryFocus.state === "data"
@@ -310,24 +310,24 @@ export function ActionRail() {
             <h2 id="home-group-today">今天</h2>
             <CatalogEntry icon={BookOpenText} title={home.primaryLabel} detail={home.title} meta={loading ? "同步中" : home.retry ? "重试" : "主任务"} state={home.retry ? "context" : "ready"} onClick={runPrimary} />
             <CatalogEntry icon={CalendarCheck2} title="今日复习" detail={home.reviewLabel} meta={home.dueCount === null ? "待同步" : `${home.dueCount} 项`} state="ready" onClick={openReview} />
-            <CatalogEntry icon={Sparkles} title="当前学习目标" detail={home.hasFocus ? "查看公开目标与下一步" : "等待服务端主焦点"} state={home.hasFocus ? "ready" : "context"} onClick={openCurrentTarget} />
+            <CatalogEntry icon={Sparkles} title="当前学习目标" detail={home.hasFocus ? "查看公开目标与下一步" : "还没定下今天的主焦点"} state={home.hasFocus ? "ready" : "context"} onClick={openCurrentTarget} />
           </section>
 
           <section className="home-catalog-group" aria-labelledby="home-group-organize">
             <h2 id="home-group-organize">整理</h2>
             <CatalogEntry icon={BookOpenText} title="当前研究册" detail={home.note ? home.note.title : "尚无可打开的书签"} meta={home.note ? "可编辑" : "待内容"} state="context" onClick={openNote} />
-            <CatalogEntry icon={BookOpenText} title="全部笔记" detail="新建、导入、回收与版本" state="pending" onClick={() => showPending("完整笔记库正在迁移", "当前可以进入服务端确认的研究册；新建、导入、回收站和版本列表尚未接入桌面端。")}/>
+            <CatalogEntry icon={BookOpenText} title="全部笔记" detail="新建、导入、回收与版本" state="pending" onClick={() => showPending("完整笔记库正在迁移", "现在能打开的是已经存好的那几篇；新建、导入、回收站和版本列表还没接到桌面端。")}/>
             <CatalogEntry icon={Search} title="来源资料" detail="收录、解析与归档" state="pending" onClick={() => showPending("来源资料库正在迁移", "资料列表、处理状态和转为笔记的桌面链路尚未开放。")}/>
-            <CatalogEntry icon={Sparkles} title="快速收录" detail="文本、Markdown、代码或链接" meta={home.captureState === "enabled" ? "后端允许" : "待授权"} state="pending" onClick={() => showPending("快速收录尚未接入桌面", home.captureState === "enabled" ? "后端已经确认当前身份可以收录资料，但桌面创建链路尚未开放。" : "当前身份或桌面合同尚未开放资料收录。")}/>
+            <CatalogEntry icon={Sparkles} title="快速收录" detail="文本、Markdown、代码或链接" meta={home.captureState === "enabled" ? "后端允许" : "待授权"} state="pending" onClick={() => showPending("快速收录尚未接入桌面", home.captureState === "enabled" ? "服务器上这个身份已经可以收录资料，但桌面端还没接上创建这一步。" : "当前身份或这一版桌面端还没有开放资料收录。")}/>
           </section>
 
           <section className="home-catalog-group" aria-labelledby="home-group-explore">
             <h2 id="home-group-explore">探索</h2>
             <CatalogEntry icon={Search} title="房内查找" detail="查当前公开目标与摘要" meta="可进入" state="ready" onClick={() => invoke("search")} />
-            <CatalogEntry icon={SquareStack} title="学习卡" detail="目标库、版本与证据" state="pending" onClick={() => showPending("学习卡库正在迁移", "当前可以查看服务端主焦点；完整目标库、历史版本与证据浏览尚未接入桌面端。")}/>
+            <CatalogEntry icon={SquareStack} title="学习卡" detail="目标库、版本与证据" state="pending" onClick={() => showPending("学习卡库正在迁移", "现在能看今天的主焦点；完整目标库、历史版本和证据浏览还没接到桌面端。")}/>
             <CatalogEntry icon={Search} title="全局搜索" detail="笔记、来源与全部目标" state="pending" onClick={() => showPending("全局搜索正在迁移", "当前可用的是房内查找；完整的跨来源、笔记与目标搜索尚未接入桌面 IPC。")}/>
             <CatalogEntry icon={Orbit} title="理解星图" detail="来源、目标与证据关系" state="ready" onClick={() => invoke("graph")} />
-            <CatalogEntry icon={CalendarDays} title="学习动态" detail="回看真实学习轨迹" state="pending" onClick={() => showPending("学习动态正在迁移", "当前投影没有稳定的活动账本数据；首页不会用本机记录拼出一条假时间线。")}/>
+            <CatalogEntry icon={CalendarDays} title="学习动态" detail="回看真实学习轨迹" state="pending" onClick={() => showPending("学习动态正在迁移", "这一版还没有稳定的学习活动记录；首页不会拿本机数据拼一条假时间线。")}/>
           </section>
 
           <section className="home-catalog-group" aria-labelledby="home-group-room">
@@ -335,7 +335,7 @@ export function ActionRail() {
             <CatalogEntry icon={MessageCircle} title="唤醒伴星" detail="打开当前 Live2D 伴星" state="ready" onClick={openCompanion} />
             <CatalogEntry icon={CalendarDays} title="伴星日记" detail="每日总结与历史日期" state="pending" onClick={() => showPending("伴星日记正在迁移", "日总结服务仍受功能门控，桌面端页面尚未开放。")}/>
             <CatalogEntry icon={UserRoundCog} title="伴星人格" detail="语气、关系与边界" state="pending" onClick={() => showPending("伴星人格正在迁移", "人格档案和关系边界会保留，桌面端设置页面尚未开放。")}/>
-            <CatalogEntry icon={Orbit} title="记忆星图" detail="查看记忆之间的联系" state="pending" onClick={() => showPending("记忆星图正在迁移", "伴星记忆的真实拓扑接口尚未进入当前桌面合同。")}/>
+            <CatalogEntry icon={Orbit} title="记忆星图" detail="查看记忆之间的联系" state="pending" onClick={() => showPending("记忆星图正在迁移", "伴星记忆的真实结构还没接到这一版桌面端。")}/>
             <CatalogEntry icon={BrainCircuit} title="伴星记忆" detail="查看、确认与管理记忆" state="pending" onClick={() => showPending("伴星记忆正在迁移", "记忆确认与管理页面尚未接入桌面端，首页不会展示本机推测的记忆。")}/>
             <CatalogEntry icon={Gauge} title="设置" detail="账户、工作区、隐私与数据" state="pending" onClick={() => showPending("桌面设置正在迁移", "账户、工作区、AI 数据政策和导入导出入口尚未接入当前桌面端。")}/>
           </section>

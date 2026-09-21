@@ -31,6 +31,7 @@ import type {
   PlannedObjectiveV2,
   KnowledgeFormV2,
   CardStrategyV2,
+  CardHintPairV2,
   TeachingTransformationV2,
 } from "../card-generation-v2-contracts.ts";
 import {
@@ -40,6 +41,7 @@ import {
 import { hashCanonicalV2 } from "../hash-canonical-v2.ts";
 import { DomainError } from "../domain-error.ts";
 import { deriveConceptLabel } from "./concept-label.ts";
+import { taskIntentsForStrategy } from "./planner-service.ts";
 import { DEFAULT_V2_STAGE_CONCURRENCY, mapWithConcurrency } from "./concurrency.ts";
 
 // ─── Authoring Provider 接口 ─────────────────────────────────────────────
@@ -79,6 +81,12 @@ export interface AuthoringProviderOutput {
   objective: LearningObjectiveDraftV2;
   presentation: CardPresentationDraftV2;
   evidenceSetHash: string;
+  /**
+   * 两级提示。**不是** objective/presentation 的一部分：候选修订哈希
+   * （computeCandidateRevisionHashV2）对整对象取哈希，塞进那两个草稿里就等于
+   * 把提示并入判分内容的审计链。提示按候选行的兄弟列独立存放。
+   */
+  hints: CardHintPairV2;
 }
 
 // ─── Author Service ──────────────────────────────────────────────────────
@@ -112,8 +120,20 @@ export interface AuthorInput {
   providerConcurrency?: number;
 }
 
+/** 一次出卡的结果：候选修订（参与审计哈希）+ 它自带的提示（不参与）。 */
+export interface AuthoredCandidate {
+  candidate: LearningCardCandidateRevisionV2;
+  hints: CardHintPairV2;
+}
+
 export interface AuthorResult {
   candidates: LearningCardCandidateRevisionV2[];
+  /**
+   * 提示按 candidateRevisionId 索引，**不放进候选对象**：
+   * `computeCandidateRevisionHashV2` 对整个候选对象取哈希，那会把提示并进判分内容的
+   * 审计链。持久化时它是候选行的兄弟列（迁移 0234）。
+   */
+  hintsByCandidateRevisionId: Map<string, CardHintPairV2>;
 }
 
 /**
@@ -149,7 +169,7 @@ export function budgetedPlanObjectives(plan: CardPlanV2): PlannedObjectiveV2[] {
 export async function authorCandidateForObjective(
   input: AuthorInput,
   planObj: PlannedObjectiveV2,
-): Promise<LearningCardCandidateRevisionV2> {
+): Promise<AuthoredCandidate> {
   const providerOutput = await input.provider.authorCandidate({
     planObjective: planObj,
     sourceContent: input.sourceContent,
@@ -203,7 +223,8 @@ export async function authorCandidateForObjective(
   };
 
   const candidateRevisionHash = computeCandidateRevisionHashV2(candidateWithoutHash);
-  return { ...candidateWithoutHash, candidateRevisionHash };
+  // 提示与候选并行返回：它不进 candidateRevisionHash 的输入对象。
+  return { candidate: { ...candidateWithoutHash, candidateRevisionHash }, hints: providerOutput.hints };
 }
 
 /**
@@ -219,15 +240,20 @@ export async function authorCandidateForObjective(
 export async function executeAuthor(input: AuthorInput): Promise<AuthorResult> {
   if (input.plan.result.kind !== "author_candidates") {
     // no_cards_recommended: Author 不调用
-    return { candidates: [] };
+    return { candidates: [], hintsByCandidateRevisionId: new Map() };
   }
   // §8.5：只对预算内的目标出卡（超出预算会让 deck gate 以 count_out_of_plan 硬失败）。
-  const candidates = await mapWithConcurrency(
+  const authored = await mapWithConcurrency(
     budgetedPlanObjectives(input.plan),
     input.providerConcurrency ?? DEFAULT_V2_STAGE_CONCURRENCY,
     (planObj) => authorCandidateForObjective(input, planObj),
   );
-  return { candidates };
+  return {
+    candidates: authored.map((entry) => entry.candidate),
+    hintsByCandidateRevisionId: new Map(
+      authored.map((entry) => [entry.candidate.candidateRevisionId, entry.hints]),
+    ),
+  };
 }
 
 // ─── Deterministic Authoring Fallback ────────────────────────────────────
@@ -285,7 +311,7 @@ export class DeterministicAuthoringProvider implements AuthoringProvider {
       publicSummary: conceptLabel,
       conceptLabel,
       knowledgeForm: planObjective.knowledgeForm,
-      preferredTaskIntents: ["recall"],
+      preferredTaskIntents: [...taskIntentsForStrategy(planObjective.strategy)],
       canonicalAnswer,
       learningSupport: {
         explanation: sourceContent.slice(0, 6000),
@@ -297,21 +323,50 @@ export class DeterministicAuthoringProvider implements AuthoringProvider {
     };
 
     // Build presentation
-    const strategy = mapKnowledgeFormToStrategy(planObjective.knowledgeForm);
+    // 题型来自 planner 的整批分配（`planObjective.strategy`），此处不再自行推导——
+    // 此前每次都由 knowledgeForm 现推，用户在生成设置里勾的题型因此对产出毫无影响。
+    const strategy = planObjective.strategy;
     const transformationKind = mapKnowledgeFormToTransformation(planObjective.knowledgeForm);
     const presentation: CardPresentationDraftV2 = {
       strategy,
       transformationKind,
       front: {
         cue: conceptLabel,
-        prompt: `请回忆并说明「${conceptLabel}」的关键内容`,
+        prompt: deterministicFrontPrompt(strategy, conceptLabel),
       },
       estimatedReviewSeconds: planObjective.estimatedReviewCostSeconds,
     };
 
     const evidenceSetHash = hashCanonicalV2("evidence-set-v2", { source: sourceContent.slice(0, 500) });
 
-    return { objective, presentation, evidenceSetHash };
+    return {
+      objective,
+      presentation,
+      evidenceSetHash,
+      hints: fallbackCardHints({
+        conceptLabel,
+        knowledgeForm: planObjective.knowledgeForm,
+        strategy,
+        answerUnitCount: countAnswerUnits(canonicalAnswer),
+      }),
+    };
+  }
+}
+
+/**
+ * 答案单元数——提示用它描述"答案由几块构成"，不取任何单元文本。
+ *
+ * 导出给 worker 复用：模型漏交提示时也要用同一套派生规则兜底，两处不能各写一份。
+ */
+export function countAnswerUnits(answer: CanonicalAnswerV2): number {
+  switch (answer.kind) {
+    case "text": return 1;
+    case "bullets": return answer.items.length;
+    case "ordered_steps": return answer.steps.length;
+    case "mapping": return answer.pairs.length;
+    case "comparison": return answer.rows.length;
+    case "formula": return 1;
+    case "code": return 1;
   }
 }
 
@@ -322,19 +377,57 @@ function stripRubricHash(rubric: ObjectiveRubricV2): Omit<ObjectiveRubricV2, "ru
   return rest;
 }
 
-function mapKnowledgeFormToStrategy(form: KnowledgeFormV2): CardStrategyV2 {
-  const map: Record<KnowledgeFormV2, CardStrategyV2> = {
-    fact: "recall",
-    definition: "recall",
-    relationship: "compare",
-    comparison: "compare",
-    sequence: "sequence",
-    procedure: "sequence",
-    causal_model: "why",
-    boundary: "boundary",
-    application_rule: "application",
+/**
+ * 兜底提示对：作者没交出提示（或走确定性链路）时，用**这张卡自己的**结构信息拼出来。
+ *
+ * 只使用不会把答案送进提示的原料：概念标签、知识形态、答案单元的**数量**、题型。
+ * 单元文本本身绝不进提示——那等于把 canonicalAnswer 提前下发。
+ * 常量表（learning-runs 的 buildDeterministicHint）只在连这些都拿不到时才退回去。
+ */
+export function fallbackCardHints(input: {
+  conceptLabel: string;
+  knowledgeForm: KnowledgeFormV2;
+  strategy: CardStrategyV2;
+  answerUnitCount: number;
+}): CardHintPairV2 {
+  const { conceptLabel, knowledgeForm, strategy, answerUnitCount } = input;
+  const shape: Record<KnowledgeFormV2, string> = {
+    fact: "这一条是一个具体事实",
+    definition: "这一条是一个定义：被定义项、它属于什么类、以及它的区别特征",
+    relationship: "这一条讲的是两个东西之间的关系，不是各自的定义",
+    comparison: "这一条要同时说出两侧，以及它们在哪里分开",
+    sequence: "这一条有先后顺序，顺序本身就是要记住的东西",
+    procedure: "这一条是一套步骤，逐步都要对上",
+    causal_model: "这一条讲的是原因如何导致结果，不是结论本身",
+    boundary: "这一条讲的是适用条件，以及在什么条件下失效",
+    application_rule: "这一条要落到一个具体场景里才说得清",
   };
-  return map[form] ?? "recall";
+  const structural = answerUnitCount > 1
+    ? `答案由 ${answerUnitCount} 个部分构成，先想清楚它们各自管什么。`
+    : "答案是一个整体，先试着说出它的主干，再补限定。";
+  return {
+    level1: `${shape[knowledgeForm]}。${structural}`,
+    level2: strategy === "cloze"
+      ? `被遮住的那一处正是判分要点：回到「${conceptLabel}」这句话，看它缺的是主体、结论还是数值。`
+      : `先从「${conceptLabel}」里挑一个侧面开口，说错也没关系，评分只看必答要点。`,
+  };
+}
+
+/**
+ * 确定性兜底的题面措辞。真实的教学转换（挖空、构造对照表、设计反例）需要模型，
+ * 兜底路径只能保证**题面按分配到的题型提问**，而不是所有卡都问同一句"请回忆并说明"。
+ */
+function deterministicFrontPrompt(strategy: CardStrategyV2, conceptLabel: string): string {
+  const prompts: Record<CardStrategyV2, string> = {
+    recall: `请回忆并说明「${conceptLabel}」的关键内容`,
+    cloze: `「${conceptLabel}」中缺掉的关键表述是什么？请补全`,
+    compare: `请对比「${conceptLabel}」与它最容易被混淆的对象，说出差别在哪里`,
+    sequence: `请按顺序说出「${conceptLabel}」的各个步骤，并指出顺序不能换的原因`,
+    why: `请解释「${conceptLabel}」成立的原因，而不是复述结论`,
+    boundary: `「${conceptLabel}」在什么情况下不成立？请给出边界`,
+    application: `给出一个「${conceptLabel}」的具体应用场景，并说明怎么用`,
+  };
+  return prompts[strategy];
 }
 
 function mapKnowledgeFormToTransformation(form: KnowledgeFormV2): TeachingTransformationV2 {

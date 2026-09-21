@@ -234,7 +234,7 @@ export function HudFirstSpaceScene({
       </div>
       <DirectoryRail readOnly />
       <CompanionPresence />
-      <HudRoomControl readOnly />
+      <HudRoomControl decorative />
       <HudFirstSpace
         workspaces={workspaces}
         workspaceEpoch={session.workspaceEpoch}

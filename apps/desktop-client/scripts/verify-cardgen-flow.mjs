@@ -47,7 +47,9 @@ if (await firstSpace.count()) {
 // 2. 打开一篇笔记：rail「笔记」→ 笔记库第一篇
 await page.locator('.nav-chip[aria-label="笔记"]').click()
 await page.waitForTimeout(1200)
-const noteOpen = page.locator('.note-open').first()
+// 书架主卡现在是整卡可点（.current-note__open），索引行仍是标题按钮（.note-open）；
+// 两个入口都接受，但只点可见的那一个，否则会等到 0x0 的隐藏节点上超时。
+const noteOpen = page.locator('.current-note__open:visible, .note-open:visible').first()
 await noteOpen.waitFor({ timeout: 8000 })
 await noteOpen.click()
 await page.waitForTimeout(1200)

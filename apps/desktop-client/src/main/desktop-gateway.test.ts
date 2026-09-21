@@ -1087,7 +1087,7 @@ describe("DesktopGateway", () => {
     const second = await gateway.getRoomProjection();
     expect(activeRequests).toBe(2);
     expect(activeAuthorization).toBe("Bearer test-owner-token");
-    expect(first.activeGenerationSummary).toEqual({ state: "data", data: ACTIVE_GENERATION_SUMMARIES.items[0] });
+    expect(first.activeGenerationSummary).toEqual({ state: "data", data: ACTIVE_GENERATION_SUMMARIES.items });
     expect(second.activeGenerationSummary).toEqual(first.activeGenerationSummary);
   });
 
@@ -1767,15 +1767,12 @@ describe("DesktopGateway", () => {
  * never shows an optimistic guess), and the native capability values come from
  * the desktop shell rather than from whatever the server guessed.
  */
-describe("workspace AI settings", () => {
+describe("account AI settings", () => {
   const AI_SETTINGS = {
     version: 1,
-    workspaceId: "00000000-0000-4000-8000-000000000099",
-    canManage: true,
     requiresConsent: true,
     consentVersion: null,
     consentAt: null,
-    consentBy: null,
     dataPolicy: { sendToExternal: false, sendImageContent: false, piiDetection: true, auditLogging: false },
   };
 
@@ -1790,8 +1787,8 @@ describe("workspace AI settings", () => {
     });
   }
 
-  it("reads the workspace's consent state and role from the server", async () => {
-    mockApi((url) => (url.includes("/workspace/ai-settings")
+  it("reads the signed-in account's consent state from the server", async () => {
+    mockApi((url) => (url.includes("/me/ai-settings")
       ? new Response(JSON.stringify(AI_SETTINGS), { status: 200 })
       : null));
 
@@ -1804,12 +1801,12 @@ describe("workspace AI settings", () => {
     const sent: unknown[] = [];
     let signed = false;
     mockApi((url, init) => {
-      if (url.includes("/workspace/ai-consent")) {
+      if (url.includes("/me/ai-consent")) {
         sent.push(JSON.parse(String(init?.body)));
         signed = true;
         return new Response(JSON.stringify({ success: true }), { status: 200 });
       }
-      if (url.includes("/workspace/ai-settings")) {
+      if (url.includes("/me/ai-settings")) {
         return new Response(JSON.stringify({
           ...AI_SETTINGS,
           consentVersion: signed ? "ai-consent-v1" : null,
@@ -1831,11 +1828,11 @@ describe("workspace AI settings", () => {
   it("sends the whole policy object and refuses an unknown contract shape", async () => {
     const sent: unknown[] = [];
     mockApi((url, init) => {
-      if (url.includes("/workspace/ai-data-policy")) {
+      if (url.includes("/me/ai-data-policy")) {
         sent.push(JSON.parse(String(init?.body)));
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
       }
-      if (url.includes("/workspace/ai-settings")) {
+      if (url.includes("/me/ai-settings")) {
         return new Response(JSON.stringify({ ...AI_SETTINGS, canManage: "yes" }), { status: 200 });
       }
       return null;

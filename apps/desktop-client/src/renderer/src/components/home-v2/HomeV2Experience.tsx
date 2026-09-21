@@ -331,11 +331,11 @@ export function HomeV2Provider({ children }: { readonly children: ReactNode }) {
         meta = home.dueCount === null ? "数量 —" : `${home.dueCount} 项待复习`;
         break;
       case "current-notebook":
-        detail = home.note?.title ?? "尚无服务端确认的研究册书签";
+        detail = home.note?.title ?? "还没有存好的研究册";
         meta = home.noteCount === null ? "数量 —" : `${home.noteCount} 本`;
         break;
       case "current-target":
-        detail = home.hasFocus ? "服务端已确认当前主目标" : "等待服务端确认主目标";
+        detail = home.hasFocus ? "今天的主目标已经定下" : "还没定下今天的主目标";
         meta = home.objectiveCount === null ? "数量 —" : `${home.objectiveCount} 个目标`;
         break;
       case "companion-center":
@@ -515,7 +515,7 @@ export function HomeV2Provider({ children }: { readonly children: ReactNode }) {
 }
 
 const HOME_V2_DECOR_COPY: Readonly<Record<CompanionDecorIdV1, { readonly title: string; readonly detail: string }>> = Object.freeze({
-  "keepsake.first-note": { title: "第一张研究札记", detail: "来自第一份服务端确认的笔记" },
+  "keepsake.first-note": { title: "第一张研究札记", detail: "来自第一篇存好的笔记" },
   "keepsake.first-goal": { title: "第一枚目标罗盘", detail: "来自第一个正式学习目标" },
   "keepsake.first-review": { title: "第一本复习历", detail: "来自第一次完成复习" },
   "keepsake.first-memory": { title: "第一幅记忆标本", detail: "来自第一条确认的伴星记忆" },
@@ -684,7 +684,7 @@ function HomeV2Catalog({ open, notice, onNotice, onClose }: { readonly open: boo
                   );
                 })}
               </div>
-            ) : <p>完成首个笔记、目标、复习或确认记忆后，纪念物会由服务端解锁。</p>}
+            ) : <p>完成第一篇笔记、第一个目标、第一次复习或确认记忆之后，纪念物会自动解锁。</p>}
             {roomProfile?.unlockedEffectIds.length ? (
               <div className="home-v2-collection__effects" role="group" aria-label="完成学习时的魔法轨迹">
                 <span>完成轨迹</span>

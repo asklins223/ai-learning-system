@@ -305,7 +305,6 @@ services:
       COMPANION_SUMMARIZER_V1: ${COMPANION_SUMMARIZER_V1:-true}
       COMPANION_DAILY_SUMMARY_V1: ${COMPANION_DAILY_SUMMARY_V1:-true}
       COMPANION_THOUGHTS_V1: ${COMPANION_THOUGHTS_V1:-true}
-      COMPANION_THOUGHTS_LLM: ${COMPANION_THOUGHTS_LLM:-false}
       # 方案 16/20 trusted Commit 评估（dev 默认开启）。
       # Source image upload: MinIO/S3 storage for embedded images
       STORAGE_ENDPOINT: http://minio:9000

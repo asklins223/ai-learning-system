@@ -69,6 +69,15 @@ function createMockTx(): any {
         findFirst: async () => undefined,
         findMany: async () => [],
       },
+      // 0237 之后治理读的是账号级同意/政策（RLS 表，必须走带身份的事务）。
+      userAiSettings: {
+        findFirst: async () => ({
+          userId: USER_ID,
+          consentVersion: "v0.7-ai-use-2026-08-12",
+          consentAt: new Date(),
+          dataPolicy: { sendToExternal: true, piiDetection: true, auditLogging: true },
+        }),
+      },
     },
   };
 }

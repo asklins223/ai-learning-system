@@ -4,12 +4,15 @@
  * topology contract — no layout, no geometry, no invented records.
  */
 
+import {
+  formatObjectiveState,
+  objectiveStateNeedsAttention,
+} from "./objective-state-copy";
 import type {
   UnderstandingEdgeProjectionV3,
   UnderstandingNodeProjectionV3,
 } from "@ailearn/shared/understanding-topology-v3-contracts";
 export type GraphNodeKind = UnderstandingNodeProjectionV3["nodeRef"]["kind"];
-
 /** The record's own id, whichever kind it is — the one field all four node
  *  refs share under a different name. */
 function nodeRefId(node: UnderstandingNodeProjectionV3): string {
@@ -53,40 +56,20 @@ export function graphEdgeKindLabel(kind: UnderstandingEdgeProjectionV3["kind"]):
   return EDGE_KIND_LABEL[kind] ?? kind;
 }
 
-const OBJECTIVE_STATE_LABEL = {
-  unvalidated: "待验证",
-  learning: "学习中",
-  stable: "已稳定",
-  fragile: "需要巩固",
-  needs_repair: "需要修复",
-  due_review: "到期复习",
-  scheduled: "已排期",
-  outdated: "内容过期",
-  archived: "已归档",
-  superseded: "已被替代",
-} as const;
-
 export function graphObjectiveStateLabel(state: string): string {
-  return (OBJECTIVE_STATE_LABEL as Record<string, string>)[state] ?? state;
+  return formatObjectiveState(state);
 }
 
 /** States that mean "this claim needs the learner" — they earn the bigger star. */
-const ATTENTION_STATES: ReadonlySet<string> = new Set([
-  "unvalidated",
-  "fragile",
-  "needs_repair",
-  "due_review",
-  "outdated",
-]);
-
 export function objectiveNeedsAttention(state: string): boolean {
-  return ATTENTION_STATES.has(state);
+  return objectiveStateNeedsAttention(state);
 }
 
 /** The 来源库 writes the same four words in `formatSourceKindLabel`; that
  *  helper lives in a React module this pure layout file must not import, so
- *  the graph keeps its own table exactly as it already does for kinds, edges
- *  and objective states. */
+ *  the graph keeps its own table for kinds, edges and source modality.
+ *  Objective states no longer need one — the wording moved to
+ *  `objective-state-copy.ts`, which is pure and shared by every surface. */
 const SOURCE_MODALITY_LABEL: Record<string, string> = {
   url: "网页",
   web: "网页",

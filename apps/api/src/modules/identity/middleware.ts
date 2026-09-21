@@ -1,13 +1,15 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
-import { eq, and } from "drizzle-orm";
 import { decodeToken } from "./service.ts";
-import { withWorkspaceTransaction } from "../../db/client.ts";
-import { workspaceMembers, workspaces } from "@ailearn/shared/db-schema/identity";
 import { extractAuthCredential, hasValidCookieCsrf, type AuthCredential } from "./session-auth.ts";
 
 declare module "fastify" {
   interface FastifyRequest {
-    session: { userId: string; workspaceId: string; membershipRole?: string | null };
+    session: {
+      userId: string;
+      workspaceId: string;
+      membershipRole?: string | null;
+      workspaceOwnerId?: string | null;
+    };
   }
 }
 
@@ -44,43 +46,23 @@ export function getRequestCredential(req: FastifyRequest): AuthCredential | null
  * This mirrors the OR semantics in requireOwner and /auth/me role derivation.
  */
 export function isWorkspaceOwner(ctx: {
-  membershipRole: string | null | undefined;
-  workspaceOwnerId: string | null | undefined;
   userId: string;
+  membershipRole?: string | null;
+  workspaceOwnerId?: string | null;
 }): boolean {
   return ctx.membershipRole === "owner" || ctx.workspaceOwnerId === ctx.userId;
 }
 
+/**
+ * 判据只有一处：`req.session` 里的 `membershipRole` 与 `workspaceOwnerId` 都由
+ * `decodeToken` 每次请求实时 JOIN 带回（成员失效时它直接吊销 session），所以这里
+ * 不再自己查一遍。
+ *
+ * 此前它自己查、而 `/auth/capabilities/v1` 与笔记投影只看 `membershipRole`，同一个
+ * 人于是可能"服务端允许写、UI 判它只读"。收敛成同一个谓词后这类分裂不再可能。
+ */
 export async function requireOwner(req: FastifyRequest, reply: FastifyReply) {
-  const { userId, workspaceId } = req.session;
-  // 2026-08-11（性能专项）：2 个并行查询合并为单条 LEFT JOIN（membership + workspace），
-  // 事务内往返 3 次→2 次（BEGIN+set_config+查询+COMMIT）。JOIN 不命中 membership 时
-  // membershipRole 为 null，等价于原"无成员记录 → 非 owner"。
-  const { membershipRole, workspaceOwnerId } = await withWorkspaceTransaction(
-    { workspaceId, userId },
-    async (transaction) => {
-      const row = await transaction
-        .select({
-          membershipRole: workspaceMembers.role,
-          workspaceOwnerId: workspaces.ownerId,
-        })
-        .from(workspaces)
-        .leftJoin(
-          workspaceMembers,
-          and(
-            eq(workspaceMembers.workspaceId, workspaces.id),
-            eq(workspaceMembers.userId, userId),
-          ),
-        )
-        .where(eq(workspaces.id, workspaceId))
-        .limit(1);
-      return {
-        membershipRole: row[0]?.membershipRole ?? null,
-        workspaceOwnerId: row[0]?.workspaceOwnerId ?? null,
-      };
-    },
-  );
-  if (!isWorkspaceOwner({ membershipRole, workspaceOwnerId, userId })) {
+  if (!isWorkspaceOwner(req.session)) {
     return reply.code(403).send({ error: "owner role required" });
   }
 }

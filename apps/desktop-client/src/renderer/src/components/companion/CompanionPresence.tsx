@@ -44,9 +44,15 @@ import {
   type CompanionCuePriority,
 } from "./companion-home-placement";
 import { WindowLive2D, type WindowLive2DStatus } from "./WindowLive2D";
+import {
+  presentationForCharacterCueIntent,
+  windowLive2DModelDescriptor,
+  type WindowLive2DCharacterMoment,
+} from "./window-live2d-contract";
 import { CompanionBubble } from "./CompanionBubble";
 import { CompanionHud, type CompanionHudAction } from "./CompanionHud";
 import { useCompanionChat } from "../../app/companion-chat-session";
+import type { CompanionAgentNodeState } from "../../app/companion-agent-nodes";
 import { HOME_FEATURE_ICONS } from "../home-v2/home-feature-icons";
 import { getHomeFeature, type HomeFeatureId } from "../home-v2/home-feature-registry";
 import { SurfaceDataState } from "../surfaces/surface-data";
@@ -109,6 +115,7 @@ export function CompanionPresence() {
   const companionPlacementOwner = useRoomStore((state) => state.companionPlacementOwner);
   const companionUserAnchor = useRoomStore((state) => state.companionUserAnchor);
   const companionScale = useRoomStore((state) => state.companionScale);
+  const companionModelId = useRoomStore((state) => state.companionModelId);
   // 滑条刻度语义不变（100% = 基准），渲染时统一乘基准倍率：100% 的实际观感 =
   // 改造前的 120%（2026-09-19 用户裁决）。滑条 UI、持久化值仍用原刻度。
   const companionVisualScale = companionScale * COMPANION_SCALE_BASE;
@@ -122,6 +129,7 @@ export function CompanionPresence() {
   const setCompanionTemporarilyHidden = useRoomStore((state) => state.setCompanionTemporarilyHidden);
   const setCompanionUserPlacement = useRoomStore((state) => state.setCompanionUserPlacement);
   const setCompanionScale = useRoomStore((state) => state.setCompanionScale);
+  const setCompanionModelId = useRoomStore((state) => state.setCompanionModelId);
   const setCompanionMoment = useRoomStore((state) => state.setCompanionMoment);
   const resetCompanionPosition = useRoomStore((state) => state.resetCompanionPosition);
   const {
@@ -192,6 +200,14 @@ export function CompanionPresence() {
   /** 工具开始执行的次数（方案 §5 第 9 项）：递增即请求一次「看向手边」参数冲量。 */
   const [toolAttentionTrigger, setToolAttentionTrigger] = useState(0);
   /**
+   * 最近一次「语义时刻」（2026-09-20 接入）：接到任务、工具成功/失败、等她确认、
+   * 主动提醒、这一轮没跑成。之前这些时刻她只改文字，身体完全不动。
+   */
+  const [characterMoment, setCharacterMoment] = useState<{
+    name: WindowLive2DCharacterMoment;
+    at: number;
+  } | null>(null);
+  /**
    * 「被叫醒的中介帧」（方案 §5 第 4 项）：点头顶先冒一个 0.9s 的「嗯？」，
    * 交互台才是随后展开的。现在没有这一下，交互台像被"点开"而不是"她转过头来"。
    */
@@ -227,6 +243,32 @@ export function CompanionPresence() {
     }
     setChatEmotion({ emotion: assistantCue.emotion, intensity: assistantCue.intensity, at: Date.now() });
   }, [assistantCue]);
+  /**
+   * 请求一次时刻表演。`at` 用单调递增的 revision 而不是墙钟：同一毫秒里连着发生
+   * 两件事（两个工具同时返回）时，墙钟相等会被 `WindowLive2D` 当成重复事件吞掉。
+   */
+  const momentRevisionRef = useRef(0);
+  const pushCharacterMoment = useCallback((name: WindowLive2DCharacterMoment) => {
+    momentRevisionRef.current += 1;
+    setCharacterMoment({ name, at: momentRevisionRef.current });
+  }, []);
+  /**
+   * 一轮对话的三个阶段各有身体反应（2026-09-20 接入）。
+   *
+   * 只看 `phase` 的**迁移**，不看它的值：`sending` 一直挂着不代表"她还在接任务"，
+   * 接任务这一下只发生一次。终态同理——`ready` 是"这一轮说完了"，`error` 是
+   * "这一轮没跑成"（错误那条 cue 被会话层提前退订吞掉，所以这里补上，
+   * 不靠服务端那一帧）。
+   */
+  const previousChatPhaseRef = useRef(chatPhase);
+  useEffect(() => {
+    const previous = previousChatPhaseRef.current;
+    previousChatPhaseRef.current = chatPhase;
+    if (previous === chatPhase) return;
+    if (chatPhase === "sending") pushCharacterMoment("task_started");
+    else if (previous === "sending" && chatPhase === "ready") pushCharacterMoment("reply_completed");
+    else if (chatPhase === "error") pushCharacterMoment("run_failed");
+  }, [chatPhase, pushCharacterMoment]);
   // 账号级 presence（2026-09-16 裁决 3）：跨设备同步，写入走 revision CAS。
   const [accountState, setAccountState] = useState<CompanionAccountStateV1 | null>(null);
   const [accountFailure, setAccountFailure] = useState<string | null>(null);
@@ -354,6 +396,7 @@ export function CompanionPresence() {
     readonly zone: "desk" | "shelf" | "window" | "rest";
     readonly key: string;
     readonly thoughtId: string | null;
+    readonly origin: "thought" | "reminder" | "system";
   } | null => {
     if (!HOME_V2_ENABLED || companionProjection.loading || companionProjection.failure) return null;
     const proactive = companionProjection.projection?.proactiveCue;
@@ -364,6 +407,7 @@ export function CompanionPresence() {
       zone: "rest",
       key: `ordinary:${proactive.revision}`,
       thoughtId: proactive.thoughtId ?? null,
+      origin: proactive.origin,
     };
   }, [companionProjection.failure, companionProjection.loading, companionProjection.projection]);
 
@@ -546,9 +590,11 @@ export function CompanionPresence() {
       })) return;
     }
     const revealAt = prioritizedCue.priority === "ordinary" ? 3.2 : 1.05;
-    // 念头气泡（切片④）停留更久，给用户点开主动开场的时间。
+    // 到点的**提醒**是用户亲口要过的东西（0238），不是她随口一提：气泡要停得久，
+    // 而且必须念出口——只在头顶闪 7.4 秒的闹钟等于没有闹钟。
+    const isCommitment = prioritizedCue.origin === "reminder";
     const hideAt = prioritizedCue.priority === "ordinary"
-      ? (prioritizedCue.thoughtId ? 30 : 7.4)
+      ? (prioritizedCue.thoughtId || isCommitment ? 30 : 7.4)
       : 5;
     const cueTimeline = gsap.timeline();
     cueTimeline.call(() => {
@@ -560,7 +606,9 @@ export function CompanionPresence() {
       }
       setHomeCue(prioritizedCue.text);
       setHomeCueThoughtId(prioritizedCue.thoughtId);
-      if (prioritizedCue.priority !== "ordinary") {
+      // 主动开口不只是长出一个气泡：她得先有个"咦，你看这边"的动作。
+      pushCharacterMoment("reminder");
+      if (prioritizedCue.priority !== "ordinary" || isCommitment) {
         speakHomeV2Cue(prioritizedCue.text);
       }
       window.dispatchEvent(new CustomEvent("ailearn:home-v2-sound", { detail: { kind: "footstep" } }));
@@ -1208,24 +1256,47 @@ export function CompanionPresence() {
    * 用 `useCallback` 固定身份，HUD 侧那个 effect 才不会每帧重跑（虽然按节点 key 记账
    * 本身是幂等的，但没必要让它反复扫描）。
    */
-  const handleAgentToolExecuting = useCallback(() => {
-    setToolAttentionTrigger((value) => value + 1);
-  }, []);
+  /**
+   * 「看向手边」（方案 §5 第 9 项）+ 工具的结果表情（2026-09-20 接入）：会话层在
+   * HUD 里、角色层是它的兄弟节点，所以由 HUD 回调把"这一步发生了什么"提上来。
+   *
+   * 之前只有 executing 有一次 3° 侧身，成功/失败/卡在一个确认上全都零反应——
+   * 用户看到的她是一台只会在动手时歪一下头、结果无论好坏都面无表情的机器。
+   * 用 `useCallback` 固定身份，HUD 侧那个 effect 才不会每帧重跑。
+   */
+  const handleAgentToolState = useCallback((state: CompanionAgentNodeState) => {
+    if (state === "running") {
+      setToolAttentionTrigger((value) => value + 1);
+      pushCharacterMoment("working");
+      return;
+    }
+    if (state === "succeeded") pushCharacterMoment("tool_succeeded");
+    else if (state === "failed") pushCharacterMoment("tool_failed");
+    else if (state === "waiting_confirmation") pushCharacterMoment("awaiting_confirmation");
+  }, [pushCharacterMoment]);
 
   // 功能夹是首页弹层：暂停（弹窗/窗口隐藏）、进入任务页或伴星不可用时收起。
   // （放在 companionUnavailable 声明之后，见该常量定义处。）
 
   const completionCue = companionMoment === "confirm" ? "这次学习已经收好，新的理解正回到小屋里。" : null;
   const visibleHomeCue = completionCue ?? (homeV2IntroVisible ? null : homeCue);
+  /**
+   * 她这一轮在做什么，由服务端那条 cue 的 `intent` 决定**姿势**（2026-09-20 接入）。
+   *
+   * `intent` 一直在流里、一直在 `streamCue` 里，只是被这行代码前的那个三元式无视了：
+   * "我在解释"和"我在替你担心"是同一副站姿。只在事件还活着的时候采纳（`sending`
+   * 或回复还在播），过完这一轮就还给本地状态，不然她会一直定格在最后一次姿势上。
+   */
+  const cuePresentation = chatPhase === "sending" || liveReply
+    ? presentationForCharacterCueIntent(assistantCue?.intent ?? null)
+    : null;
   const presentation = touchKind === "head"
     ? "celebrate"
     : touchKind === "body"
       ? "think"
       : companionMoment === "lamp" || companionMoment === "confirm"
         ? "celebrate"
-        : engaged
-          ? "invite"
-          : "idle";
+        : cuePresentation ?? (engaged ? "invite" : "idle");
   const presentationEmotion: Live2DEmotionEvent | null = touchKind === "head"
     ? { emotion: "happy", intensity: 0.9 }
     : touchKind === "body"
@@ -1354,6 +1425,7 @@ export function CompanionPresence() {
       data-touch-kind={touchKind ?? undefined}
       data-formal-silent={assessmentMode || undefined}
       data-policy-mode={companionPolicy.mode}
+      data-companion-model-id={companionModelId}
       data-engaged={engaged || undefined}
       data-task-surface-quiet={taskSurfaceQuiet || undefined}
       data-presence-paused={presencePaused || undefined}
@@ -1384,6 +1456,7 @@ export function CompanionPresence() {
             <WindowLive2D
               key={live2dAttempt}
               active={!presenceHidden && !companionUnavailable}
+              modelId={companionModelId}
               // 2026-09-16 追加裁决：任务页保留原地动作（低幅呼吸与眨眼，不位移、
               // 不出气泡），不再冻结当前帧。真正停止 ticker 的只有隐藏/弹窗/窗口不可见
               // 与用户自己的 motionMode（lite/off）或 reduced-motion。
@@ -1393,6 +1466,7 @@ export function CompanionPresence() {
               emotion={presentationEmotion}
               inviteTrigger={inviteTrigger}
               toolAttentionTrigger={toolAttentionTrigger}
+              moment={characterMoment}
               onStatus={setStatus}
               // 首页全身取景；任务页半身取景（头与上半身充满容器，腿部裁出）。
               framing={companionPolicy.framing}
@@ -1439,7 +1513,7 @@ export function CompanionPresence() {
           ) : null}
           {companionVisualOnly && status === "ready" ? (
             <span className="companion-surface-label" aria-hidden="true">
-              {assessmentMode ? "需要提示？" : "Mao · 伴星"}
+              {assessmentMode ? "需要提示？" : `${windowLive2DModelDescriptor(companionModelId).displayName} · 伴星`}
             </span>
           ) : null}
           {!HOME_V2_ENABLED && !engaged ? <span className="companion-invite-label" aria-hidden="true">我在这里</span> : null}
@@ -1455,7 +1529,7 @@ export function CompanionPresence() {
             contextHint={companionPolicy.starter ?? null}
             actions={homeMode ? actionItems : []}
             onRunAction={runActionItem}
-            onAgentToolExecuting={handleAgentToolExecuting}
+            onAgentToolState={handleAgentToolState}
             settings={{
               scale: companionScale,
               scaleMin: MIN_COMPANION_SCALE,
@@ -1467,6 +1541,8 @@ export function CompanionPresence() {
               accountState,
               accountSaving,
               accountFailure,
+              companionModelId,
+              onCompanionModelChange: setCompanionModelId,
               onScale: setCompanionScale,
               onTogglePageMuted: () => setCompanionSceneMuted(sceneKey, !pageMuted),
               onToggleFocus: () => setCompanionFocusUntilTaskEnd(!companionFocusUntilTaskEnd),

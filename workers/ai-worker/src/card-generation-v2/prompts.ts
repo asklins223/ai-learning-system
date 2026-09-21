@@ -130,7 +130,26 @@
  *    答案的可判分命题）+ 整类清单（玩笑段子/情绪吐槽/闲聊寒暄/无意义字符/
  *    个人事务/身份凭据/传闻八卦/纯链接/无答案的提问/口味偏好）。
  */
-export const CARD_GENERATION_V2_PROMPT_VERSION = "card-generation-v2/v20";
+import type { CardStrategyV2 } from "@ailearn/shared/card-generation-v2-contracts";
+import { taskIntentsForStrategy } from "@ailearn/shared/card-generation-v2-pipeline";
+
+/**
+  * v22：author 同时交出这张卡自带的两级提示 hints（top-level 兄弟字段，不进 objective/presentation）。
+ *    依据（2026-09-20 实走复盘 #10）：作答侧提示取自 run-planner.ts:746 的 9×3 常量表，
+ *    卡片正文不参与，任意两张卡的第一级提示一字不差。规则含"两级都不许出现判分要点术语"
+ *    与"不许写再想想/看看原文这类无信息量的话"。缺提示不重跑也不淘汰候选：提示不是判分
+ *    内容，为它牺牲一张卡不值得，改由 fallbackCardHints 按本卡结构派生。
+ * v21：author 按 planner 分配的 strategy 出题（planner prompt 内容不变）。
+ *
+ * 依据（2026-09-20 实走）：一篇笔记生成的 5 张卡全部是"主动回忆"题型，用户在生成
+ * 设置里勾的题型对产出毫无影响。三层原因叠加——`preferredStrategies` 存库后从未进入
+ * 任何提示；`buildAuthorSystemPrompt` 的输出模板与唯一示例都写死 `recall`（模型照抄
+ * 示例）；确定性兜底的映射表让 `cloze` 不可达。
+ * 修法把决策权收回服务端：planner 在**整批**目标上按 knowledgeForm 适配边界 + 用户
+ * 偏好 + 单一题型 ≤⌈N/2⌉ 分配 strategy，author 只能执行。模型逐张出题时看不到同批
+ * 其他卡，题型多样性不可能靠提示词自觉达成。
+ */
+export const CARD_GENERATION_V2_PROMPT_VERSION = "card-generation-v2/v22";
 
 export const PLANNER_PROMPT_VERSION = `${CARD_GENERATION_V2_PROMPT_VERSION}/planner`;
 export const AUTHOR_PROMPT_VERSION = `${CARD_GENERATION_V2_PROMPT_VERSION}/author`;
@@ -390,14 +409,146 @@ ${evidenceBlock}
 };
 
 /**
+ * 题型（strategy）由 planner 在整批目标上确定性分配，author 只执行不自选。
+ *
+ * 为什么必须在服务端分配（2026-09-20 实走复盘：一篇笔记出的 5 张卡全是主观回忆题）：
+ * - 模型逐张出题时看不到同批其他卡，无法自己做到题型多样；
+ * - 本 prompt 的输出模板与此前唯一的完整示例都写死 `recall`，模型照抄示例；
+ * - `preferredStrategies`（用户在生成设置里勾的题型）此前存库后从未进入任何提示。
+ *
+ * 每项包含：一句"这张卡到底在练什么"、题面写法、以及**该题型专属的泄题边界**——
+ * 挖空题尤其容易把要回忆的答案留在题面上，v7 的正面不泄题规则在这里必须重述。
+ */
+const authorStrategySpecs: Record<
+  CardStrategyV2,
+  {
+    label: string;
+    trains: string;
+    frontRule: string;
+    exampleFront: { cue: string; prompt: string };
+  }
+> = {
+  recall: {
+    label: "主动回忆",
+    trains: "不看材料把结论/定义说回来",
+    frontRule: "正面只圈定主题范围，不出现答案术语、结论与数值。",
+    exampleFront: { cue: "牛顿第二定律", prompt: "它的公式表达式是什么？" },
+  },
+  cloze: {
+    label: "补全空缺",
+    trains: "在一句话里定位并补出被遮住的那个关键表述",
+    frontRule: "被挖掉的空**就是**要回忆的答案；挖空句的其余部分不得再出现该术语"
+      + "（否则等于把答案写在题面上），并且只挖一处，不要一句话挖多个空。",
+    exampleFront: { cue: "牛顿第二定律的公式", prompt: "补全：物体的加速度与所受合外力成正比、与质量成反比，写成 ____。" },
+  },
+  compare: {
+    label: "对比辨析",
+    trains: "同时说出两个对象的差别，而不是分别复述",
+    frontRule: "正面给出被比较的对象范围，但不给出判分依赖的那个**区别本身**。",
+    exampleFront: { cue: "牛顿第二定律与牛顿第一定律", prompt: "这两条定律各自回答的问题有什么不同？" },
+  },
+  sequence: {
+    label: "顺序重建",
+    trains: "按正确顺序重建步骤/阶段，并知道顺序为什么不能换",
+    frontRule: "正面可以列出各步骤的名字（若证据就是把它们作为整体给出的），但不得给出顺序。",
+    exampleFront: { cue: "牛顿第二定律的使用流程", prompt: "已知受力求加速度的各个步骤，正确顺序是什么？" },
+  },
+  why: {
+    label: "解释机制",
+    trains: "说出结论背后的原因/机制，而不是复述结论",
+    frontRule: "正面陈述现象或结论，把判分依赖的**原因**留空；不得在正面写出因果链的任何一环。",
+    exampleFront: { cue: "合外力不变时质量与加速度", prompt: "为什么同一辆装满货的小车比空车起步更慢？" },
+  },
+  boundary: {
+    label: "边界判定",
+    trains: "说出一个结论在什么情况下不成立",
+    frontRule: "正面给出该结论适用的常规情形，不给出使它失效的那个条件。",
+    exampleFront: { cue: "牛顿第二定律的适用范围", prompt: "在什么样的参考系里，F=ma 不能再直接使用？" },
+  },
+  application: {
+    label: "场景应用",
+    trains: "把结论用到一个新场景里并说明怎么用",
+    frontRule: "正面给出场景事实，不给出该场景下要用的那个结论或数值。",
+    exampleFront: { cue: "用牛顿第二定律求加速度", prompt: "一个 2kg 物体受 6N 合外力，加速度多大？写出依据。" },
+  },
+};
+
+/**
+ * 题型对应的教学转换形态。模板与示例里的 transformationKind 必须由题型派生——
+ * 此前两处都写死 `retrieval_definition`，与 canonicalAnswer 五种形态那一节自相矛盾，
+ * 模型对着一张对比卡也会填 retrieval_definition。
+ */
+const transformationForStrategy: Record<CardStrategyV2, string> = {
+  recall: "retrieval_definition",
+  cloze: "retrieval_definition",
+  compare: "structured_comparison",
+  sequence: "procedure_reconstruction",
+  why: "mechanism_reconstruction",
+  boundary: "boundary_discrimination",
+  application: "source_grounded_application",
+};
+
+/**
+ * 示例里的两级提示同样按题型变化（v22）。提示写成"这一类题该怎么开口"，
+ * 不给 F=ma 这个结论本身——示例如果自带泄题的提示，模型就会照抄。
+ */
+const exampleHintsForStrategy: Record<CardStrategyV2, { level1: string; level2: string }> = {
+  recall: {
+    level1: "它是一条公式：先说等号两边各自是什么，再说三个字母分别代表什么。",
+    level2: "等号一侧只有一个字母，另一侧是另外两个字母相乘。",
+  },
+  cloze: {
+    level1: "被挖掉的是一整条等式，它把三个量连成一个关系。",
+    level2: "这个关系是「乘积等于」，不是「比值等于」。",
+  },
+  compare: {
+    level1: "两条定律一条讲「状态不变」、一条讲「为什么会变」，先确定你手上这条讲哪个。",
+    level2: "分界线是「有没有受到不为零的合外力」。",
+  },
+  sequence: {
+    level1: "先选研究对象，再做受力分析，最后列式求解。",
+    level2: "第一步的产出是一个被隔离出来的研究对象。",
+  },
+  why: {
+    level1: "从「同样的力作用在不同物体上」这个现象开口，不要直接背结论。",
+    level2: "这条链条里被改变的唯一量是质量。",
+  },
+  boundary: {
+    level1: "要说的不是公式本身，而是它在什么样的观察条件下不再成立。",
+    level2: "失效的那一类参考系是「自己就在加速」的。",
+  },
+  application: {
+    level1: "先把场景里的已知量列出来，再决定用哪个关系把它们连起来。",
+    level2: "单位统一到 SI 之后，数值才落在同一个量级上。",
+  },
+};
+
+/**
  * Author 提示：从 PlannedObjective 生成 objective + presentation + rubric。
  *
  * 禁止 §10.5：title=claim、summary=claim、"理解：claim"、直接复制原文切片。
  * 必须输出 transformationKind、被隐藏的 answer units、可判分 rubric。
+ *
+ * v21：按 planner 分配的 strategy 出题（模板与示例的 strategy 值不再是常量 recall）。
  */
-export const buildAuthorSystemPrompt = (): string => `
+export const buildAuthorSystemPrompt = (strategy: CardStrategyV2): string => {
+  const spec = authorStrategySpecs[strategy];
+  return `
 你是 Candidate Author。你为规划好的学习目标编写候选卡片：objective（含 canonical
 answer 与 rubric）、presentation（含 front cue/prompt 与教学转换类型）。
+
+## 本卡的题型已经定好了：${strategy}（${spec.label}）
+
+- 这张卡练的是：${spec.trains}。
+- 题面写法：${spec.frontRule}
+- 输出 JSON 里 presentation.strategy **必须**写 "${strategy}"，不得改成别的题型。
+  题型由规划阶段在整批卡片之间统一分配，目的是让一套卡片不只练一种能力；
+  你认为别的题型更合适也不能换。
+- objective.preferredTaskIntents **必须**写 ${JSON.stringify(taskIntentsForStrategy(strategy))}
+  （第一个是主意图）。作答通道按 preferredTaskIntents 构造，不按 strategy——两者不一致
+  会让题面与实际练习方式错位。
+- 下面所有关于 canonicalAnswer / rubric / evidence 的要求在换题型时**一条都不放松**：
+  题型改变的是题面怎么问，不是答案的来源与判分标准。
 
 要求：
 - canonical answer 是经过教学转换的可判分结构，不是把原文整段复制；每一行都应
@@ -464,10 +615,10 @@ answer 与 rubric）、presentation（含 front cue/prompt 与教学转换类型
   选择依据：证据写的是步骤就给 ordered_steps，写的是配对就给 mapping，写的是多维对比就给
   comparison，拿不准就退回 text/bullets。**结构化答案会被规划器转成排序题 / 关系连线题
   （练习通道）——这是它们独有的价值，text/bullets 给不了。**
-- **preferredTaskIntents 按知识形态选，不要永远写 ["recall"]（2026-09-18：此前模板硬编码
-  recall，导致全部目标只能考"复述"）**：fact/definition → recall；causal_model/relationship
-  → explain；procedure/sequence → procedure；application_rule → apply；boundary → boundary。
-  可以给 1-2 个（第一个是主意图）。
+- **preferredTaskIntents 一律取本块开头指定的那一组，不要永远写 ["recall"]（2026-09-18：
+  此前模板硬编码 recall，导致全部目标只能考"复述"）**。上面「本卡的题型已经定好了」
+  一节给出的 preferredTaskIntents 与本条同源（都由规划阶段按知识形态决定），
+  两处冲突时以开头那一节为准。
 - **rubric 要覆盖整组答案单元（与"不得丢掉并列项"配套）**：canonicalAnswer 有 N 个 unit 时，
   rubric 至少给出覆盖全部 required 要点的条目；若证据还支撑边界或易混点，可追加一条
   boundary / relate facet 的条目（仍须严格基于证据，R30 不变）。不要永远只写一条。
@@ -508,16 +659,23 @@ answer 与 rubric）、presentation（含 front cue/prompt 与教学转换类型
   * 证据写了"常被误认为 / 实际上 / 注意 / 并非"这类纠偏表述 → **必须**提取进 misconception；
   * 证据给了具体例子、题设、样本 → **必须**提取进 workedExample；
   确实没有对应内容才输出空字符串。判定方法是逐句回到证据里找，不是凭感觉。
+- **hints 是这张卡自带的两级提示，必须一起交出（v22）**：
+  * level1 给**结构线索**——这条知识该从哪个侧面开口（"它是一组步骤还是一个条件？"）；
+  * level2 给更强的定位，但仍不给出结论（可以说组成部分的数量、首个词的词性、
+    最常见的混淆点是什么类型的）；
+  * **两级都不许出现 canonicalAnswer / rubric 里的判分要点术语**，与 front 同一纪律；
+  * 不许写"再想想""看看原文""别急"这类无信息量的话——那种提示等于没有提示
+    （此前作答侧提示取自一张与卡片内容无关的常量表，用户的全部三张卡看到同一句）。
 - 不要为了凑数编造不存在的知识；不要输出思维链，只输出严格 JSON。
 
-输出 JSON 结构（objectiveDraft + presentationDraft 合并为单个对象）：
+输出 JSON 结构（objectiveDraft + presentationDraft + hints 合并为单个对象）：
 {
   "objective": {
     "objectiveStatement": "...",
     "publicSummary": "...",
     "conceptLabel": "概念级标题（名词短语，建议≤40字）",
     "knowledgeForm": "...",
-    "preferredTaskIntents": ["recall", "explain"],
+    "preferredTaskIntents": ${JSON.stringify(taskIntentsForStrategy(strategy))},
     "canonicalAnswer": {
       "kind": "bullets",
       "items": [
@@ -538,11 +696,12 @@ answer 与 rubric）、presentation（含 front cue/prompt 与教学转换类型
     "evidenceRefIds": []
   },
   "presentation": {
-    "strategy": "recall",
-    "transformationKind": "retrieval_definition",
+    "strategy": "${strategy}",
+    "transformationKind": "${transformationForStrategy[strategy]}",
     "front": { "cue": "...", "prompt": "..." },
     "estimatedReviewSeconds": 45
   },
+  "hints": ${JSON.stringify({ level1: exampleHintsForStrategy[strategy].level1, level2: exampleHintsForStrategy[strategy].level2 })},
   "marginalValueRationale": "用 2-3 句话说明为何这项比重读原文更值得练习"
 }
 
@@ -554,7 +713,7 @@ answer 与 rubric）、presentation（含 front cue/prompt 与教学转换类型
     "publicSummary": "F=ma 公式表述",
     "conceptLabel": "牛顿第二定律",
     "knowledgeForm": "relationship",
-    "preferredTaskIntents": ["recall", "explain"],
+    "preferredTaskIntents": ${JSON.stringify(taskIntentsForStrategy(strategy))},
     "canonicalAnswer": {
       "kind": "text",
       "unit": { "unitId": "ans-1", "text": "F=ma" }
@@ -570,18 +729,24 @@ answer 与 rubric）、presentation（含 front cue/prompt 与教学转换类型
     "evidenceRefIds": ["<从可用证据ID列表中选择>"]
   },
   "presentation": {
-    "strategy": "recall",
-    "transformationKind": "retrieval_definition",
-    "front": { "cue": "牛顿第二定律", "prompt": "它的公式表达式是什么？" },
+    "strategy": "${strategy}",
+    "transformationKind": "${transformationForStrategy[strategy]}",
+    "front": ${JSON.stringify({ cue: spec.exampleFront.cue, prompt: spec.exampleFront.prompt })},
     "estimatedReviewSeconds": 40
   },
+  "hints": ${JSON.stringify(exampleHintsForStrategy[strategy])},
   "marginalValueRationale": "公式是力学推理的基本工具，主动回忆比重读更能巩固符号-含义绑定。"
 }
 注意：conceptLabel 是名词短语而非句子；front.cue 不含 "F=ma"（不泄题）；
 canonicalAnswer 用单对象 unit 而非数组；explanation 必须非空且严格基于证据
 （无证据支撑的边界/误区/例题字段输出空字符串）；evidenceRefIds 一律从用户
 消息给出的可用证据 ID 列表中选择，示例中的写法仅为占位。
+**本示例只演示 ${strategy}（${spec.label}）这一种题面写法**：presentation 一节按你
+这张卡的题型照它的形态写；objective 一节只是最小示意，canonicalAnswer 该用哪种形态
+（text / bullets / ordered_steps / mapping / comparison）按上面「canonicalAnswer 五种形态」
+一节依据证据自己决定，不要把示例的 text 形态当成默认。
 `;
+};
 
 export const buildAuthorUserPrompt = (input: {
   objective: unknown;
@@ -589,12 +754,16 @@ export const buildAuthorUserPrompt = (input: {
   planHash: string;
   sourceContent: string;
   evidenceList?: Array<{ evidenceSnapshotId: string; quoteHash?: string | null }>;
+  strategy: CardStrategyV2;
 }): string => {
   const evidenceBlock = (input.evidenceList?.length ?? 0) > 0
     ? `\n\n可用证据（evidenceRefIds 必须从以下 ID 中选择；来源正文各句由这些证据支持）：\n${(input.evidenceList ?? []).map((e) => `- ${e.evidenceSnapshotId}${e.quoteHash ? ` (quote hash: ${e.quoteHash.slice(0, 16)}…)` : ""}`).join("\n")}`
     : "";
   return `
 为以下规划目标编写 candidate（objective + presentation）。只输出 JSON。
+
+本卡题型：${input.strategy}（已在系统提示中给出该题型的题面写法要求；presentation.strategy
+必须原样写 "${input.strategy}"）。
 
 规划目标：${JSON.stringify(input.objective)}
 
@@ -720,6 +889,17 @@ goal_mismatch
     判据：把 front 遮住答案后问"只看正面，答案还剩下多少要想？"——若关键术语/结论
     已出现在正面、学习者只需补全枝节，就判 hard issue；若正面只是圈定范围并指向
     需要回忆的内容（指向性提问），不判。
+  * **泄漏是相对题型而言的，判之前必须先读该候选的 presentation.strategy**
+    （2026-09-20：题型改由规划阶段分配后，用"回忆题"的标准去判挖空题会系统性误杀）：
+    - cloze：题面是一句挖掉一处原句。**被挖掉的那个空**才是要回忆的内容；
+      句子其余部分出现背景术语不判。只有当空只是一个枝节（标点、量词、连接词），
+      而答案的实质结论已全部写在题面上时才判；
+    - sequence：正面列出各个步骤/阶段的**名称**但要求给出顺序时不判——顺序才是
+      要回忆的内容。把顺序也写出来了才判；
+    - compare：正面点明被比较的两个对象不判——那是题干的定义。只有正面给出了
+      判分依赖的**区别结论**时才判；
+    - recall / why / boundary / application：按本条上面的原判据执行，不因
+      题型放开而放松。
 - 不要求 chain-of-thought，只输出结构化 verdict；
 - 必须读取 candidateEvidenceBindingPlanHashes（每个候选的证据绑定计划 hash）；
 - verdict：pass / repair / fail / no_cards。只有确认整个集合都不值得成卡时才给

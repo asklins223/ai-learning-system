@@ -34,6 +34,7 @@ import {
 import { noteVersions, noteBlocks } from "@ailearn/shared/db-schema/note";
 import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
 import { frontLeaksAnswerVerbatimV2 } from "@ailearn/shared/card-generation-v2-pipeline";
+import { cardStrategyV2Schema } from "@ailearn/shared/card-generation-v2-contracts";
 import {
   parseLearningCardRevealV2,
   parsePublicLearningCardV2,
@@ -257,7 +258,7 @@ export async function archiveCardV2(
     });
 
     // §16.7：pending Schedule 以 lifecycle reason 关闭（保留 generation/history；0 successor）
-    const closedSchedules = await closePendingSchedules(tx, ctx.workspaceId, objective.objectiveId);
+    const closedSchedules = await closePendingSchedules(tx, ctx.workspaceId, ctx.userId, objective.objectiveId);
 
     // Reminder 取消
     const cancelledReminders = await tx.update(initialValidationRemindersV2)
@@ -341,8 +342,12 @@ export async function updateCardPresentationV2(
       prompt: patch.front?.prompt ?? currentFront.prompt ?? "",
     };
     const answerText = extractAnswerText(revision.canonicalAnswer);
+    // 判定尺度跟着题型走：cloze/sequence 的题面按设计会复述答案片段。
+    // 枚举外的值落回最严尺度，不留「未知题型 = 免检」的缝。
+    const nextStrategy = cardStrategyV2Schema.safeParse(patch.strategy ?? card.strategy).data
+      ?? "recall";
     if (answerText && front.prompt
-        && frontLeaksAnswerVerbatimV2(`${front.cue} ${front.prompt}`, answerText)) {
+        && frontLeaksAnswerVerbatimV2(`${front.cue} ${front.prompt}`, answerText, nextStrategy)) {
       throw new CardGenerationV2ServiceError("front_leaks_answer", 409, "正面内容逐字照抄了答案，请修改");
     }
 
@@ -1045,15 +1050,34 @@ async function deferReminderOnReveal(
   // completed → 不重开（§17.3）
 }
 
-async function closePendingSchedules(
+/**
+ * 关闭某 objective 下仍待办的复习排程（保留 generation/history）。
+ *
+ * 导出给激活链路复用：卡片因重新生成而被替代时同样要关排程，否则旧卡会留在
+ * 复习队列里继续出题（归档与替代必须走同一套收尾动作）。
+ */
+/**
+ * 归档卡片时收掉自己的到期排程。
+ *
+ * `userId` 是必填的：复习排程属于个人（批次 3 的归属裁决），而这张表的重开 RLS
+ * 里有一条 RESTRICTIVE 的 `actor_guard`（`user_id = app.user_id`）。少了这个参数，
+ * 语句在开发库（连接角色带 BYPASSRLS）看着正常，到生产会**静默更新 0 行**——
+ * 卡片已经归档、到期队列里却还留着它。
+ *
+ * 留一个待裁决的产品问题：协作空间里一张卡被所有者归档时，其他成员指向这张卡的
+ * 排程要不要一起取消。现在的语义是"只取消操作者自己的"，与"行为归个人"一致。
+ */
+export async function closePendingSchedules(
   tx: ApiTransaction,
   workspaceId: string,
+  userId: string,
   objectiveId: string,
 ): Promise<number> {
   const rows = await tx.update(reviewSchedules)
     .set({ status: "cancelled", reasonCode: "lifecycle_archived" })
     .where(and(
       eq(reviewSchedules.workspaceId, workspaceId),
+      eq(reviewSchedules.userId, userId),
       eq(reviewSchedules.subjectType, "card"),
       eq(reviewSchedules.subjectId, objectiveId),
       eq(reviewSchedules.status, "pending"),

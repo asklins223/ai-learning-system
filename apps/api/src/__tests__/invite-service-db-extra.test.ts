@@ -166,6 +166,8 @@ describe("invite-service createInvite (DB mock)", () => {
     setupDbMock({
       workspaceId: WS_ID,
       userId: USER_ID,
+      // createInvite 会先确认目标空间是协作类型（个人空间不可分享）
+      selectResult: [[{ workspaceType: "collaborative" }]],
       insertReturning: [[{ id: "invite-1", createdAt }]],
     });
 
@@ -185,6 +187,8 @@ describe("invite-service createInvite (DB mock)", () => {
     setupDbMock({
       workspaceId: WS_ID,
       userId: USER_ID,
+      // createInvite 会先确认目标空间是协作类型（个人空间不可分享）
+      selectResult: [[{ workspaceType: "collaborative" }]],
       insertReturning: [[{ id: "invite-2", createdAt }]],
     });
 
@@ -202,6 +206,8 @@ describe("invite-service createInvite (DB mock)", () => {
     setupDbMock({
       workspaceId: WS_ID,
       userId: USER_ID,
+      // createInvite 会先确认目标空间是协作类型（个人空间不可分享）
+      selectResult: [[{ workspaceType: "collaborative" }]],
       insertReturning: [[{ id: "invite-3", createdAt }]],
     });
 
@@ -214,6 +220,8 @@ describe("invite-service createInvite (DB mock)", () => {
     setupDbMock({
       workspaceId: WS_ID,
       userId: USER_ID,
+      // createInvite 会先确认目标空间是协作类型（个人空间不可分享）
+      selectResult: [[{ workspaceType: "collaborative" }]],
       insertReturning: [[{ id: "invite-owner-1", createdAt }]],
     });
 
@@ -222,6 +230,24 @@ describe("invite-service createInvite (DB mock)", () => {
     assert.ok(result);
     assert.equal(result.role, "owner");
     assert.equal(result.id, "invite-owner-1");
+  });
+
+  it("个人空间不能被发邀请", async () => {
+    setupDbMock({
+      workspaceId: WS_ID,
+      userId: USER_ID,
+      // 目标空间是 personal：分享只能发生在协作空间里，否则"个人空间"名不副实，
+      // 且批次 4 的协同门控与 member 只读判据都失去立足点。
+      selectResult: [[{ workspaceType: "personal" }]],
+      insertReturning: [[{ id: "should-not-exist", createdAt: new Date() }]],
+    });
+
+    await assert.rejects(
+      () => createInvite(WS_ID, USER_ID, { role: "member" }),
+      (err: unknown) =>
+        (err as { code?: string }).code === "personal_workspace_not_shareable"
+        && (err as { statusCode?: number }).statusCode === 409,
+    );
   });
 
   it("无效角色抛错", async () => {
@@ -237,6 +263,8 @@ describe("invite-service createInvite (DB mock)", () => {
     setupDbMock({
       workspaceId: WS_ID,
       userId: USER_ID,
+      // createInvite 会先确认目标空间是协作类型（个人空间不可分享）
+      selectResult: [[{ workspaceType: "collaborative" }]],
       insertReturning: [[]],
     });
 

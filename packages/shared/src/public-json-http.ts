@@ -1,6 +1,7 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 import { request as httpsRequest, type RequestOptions } from "node:https";
 import { isIP, type LookupFunction } from "node:net";
+import type { Readable } from "node:stream";
 
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const CONNECT_TIMEOUT_MS = 10_000;
@@ -276,6 +277,22 @@ export const postJsonToPublicEndpoint: PublicJsonRequester = async (
   });
 };
 
+/**
+ * 给 SSE 响应体挂"流仍在推进"的进度回调，且**不消费**这个流。
+ *
+ * 必须用 `readable` 而不是 `data`：`data` 监听会把响应切到 flowing 模式，于是
+ * **在读取方（`for await (const chunk of body)`）挂上来之前**到达的分片被这个监听
+ * 直接吃掉。响应头与第一个分片常在同一个 I/O 回调里到达，所以丢的往往正是模型输出的
+ * **第一个 token**：`好呀，…` → `呀，…`、`嗨～今天…` → `～今天…`。
+ * 而 `content` 与交给读取方的增量累自同一批分片，缺的头两边一致，终态校验查不出来
+ * （近两周 257 条回复里 27 条缺头，run 全部记为 succeeded）。
+ * `readable` 与读取方走的是同一套机制，只观察、不取数据，所以既拿到逐分片的进度
+ * 信号，又不会把内容从缓冲区里提前拿走。
+ */
+export function onSseBodyProgress(body: Readable, onTouch: () => void): void {
+  body.on("readable", onTouch);
+}
+
 /** HTTPS-only streaming POST with the same DNS validation and connection-time IP pinning. */
 export const postSseToPublicEndpoint: PublicStreamingRequester = async (
   url,
@@ -330,13 +347,18 @@ export const postSseToPublicEndpoint: PublicStreamingRequester = async (
     // 后保留，同时覆盖"响应头到了但 body 永不推流"的挂起：触发 destroy →
     // error → reject → 调用方（chatCompletionStream）抛错 → 标记 run failed。
     // 2026-08-16（性能专项）：健康流正常结束或 cancel() 时清理 totalTimer 防
-    // 泄漏；且每收到一个 data chunk 就重置该计时器（body-stall 语义），使
+    // 泄漏；且每收到一个数据分片就重置该计时器（body-stall 语义），使
     // 合法长流（总时长 > TOTAL_RESPONSE_TIMEOUT_MS）不会被残留定时器误杀。
-    let totalTimer = setTimeout(() => {
-      request.destroy(new Error(
-        `AI endpoint SSE request exceeded total timeout ${TOTAL_RESPONSE_TIMEOUT_MS}ms (connect + response body)`,
-      ));
-    }, TOTAL_RESPONSE_TIMEOUT_MS);
+    let totalTimer: ReturnType<typeof setTimeout> | undefined;
+    const rearmTotalTimer = (): void => {
+      clearTimeout(totalTimer);
+      totalTimer = setTimeout(() => {
+        request.destroy(new Error(
+          `AI endpoint SSE request exceeded total timeout ${TOTAL_RESPONSE_TIMEOUT_MS}ms (connect + response body)`,
+        ));
+      }, TOTAL_RESPONSE_TIMEOUT_MS);
+    };
+    rearmTotalTimer();
     request.on("socket", (socket) => {
       if (!socket.connecting) {
         clearTimeout(connectTimer);
@@ -349,15 +371,8 @@ export const postSseToPublicEndpoint: PublicStreamingRequester = async (
       // 正常收尾与显式取消都清掉残留定时器，避免每连接泄漏一个 300s 定时器。
       response.once("end", () => clearTimeout(totalTimer));
       response.once("close", () => clearTimeout(totalTimer));
-      // body-stall：每次收到数据说明流仍在推进，重置整体超时。
-      response.on("data", () => {
-        clearTimeout(totalTimer);
-        totalTimer = setTimeout(() => {
-          request.destroy(new Error(
-            `AI endpoint SSE request exceeded total timeout ${TOTAL_RESPONSE_TIMEOUT_MS}ms (connect + response body)`,
-          ));
-        }, TOTAL_RESPONSE_TIMEOUT_MS);
-      });
+      // body-stall：每次有分片可读说明流仍在推进，重置整体超时。
+      onSseBodyProgress(response, rearmTotalTimer);
     });
     request.once("error", (error) => {
       clearTimeout(connectTimer);

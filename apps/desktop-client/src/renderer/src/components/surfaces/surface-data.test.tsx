@@ -2,8 +2,9 @@
 
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 import type { GatewayResultV1, SessionContextV1 } from "@ailearn/shared/desktop-ipc-contracts";
+import type { NoteBlockProjectionV1 } from "@ailearn/shared/note-projection-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { useSurfaceProjection, formatRelative, formatSourceStamp, type SurfaceProjectionOptions } from "./surface-data";
+import { useSurfaceProjection, formatRelative, formatSourceStamp, noteBodyText, parseImageBlock, type SurfaceProjectionOptions } from "./surface-data";
 
 function session(workspaceEpoch: number): SessionContextV1 {
   return {
@@ -78,9 +79,18 @@ describe("the index row's two time columns", () => {
   });
 
   it("keeps the clock on every row, which is what the relative line omits", () => {
-    expect(formatSourceStamp(new Date().toISOString())).toMatch(/^今天 \d{2}:\d{2}$/);
-    expect(formatSourceStamp(new Date(Date.now() - 26 * 3_600_000).toISOString())).toMatch(/^昨天 \d{2}:\d{2}$/);
-    expect(formatSourceStamp(new Date(Date.now() - 40 * 86_400_000).toISOString())).toMatch(/日 \d{2}:\d{2}$/);
+    // 「昨天 / 前天」按日历天算，而这里给的是"多少小时前"——真实时钟在凌晨
+    // 00:00–02:00 之间会让 26 小时前落到前天，测试就只在那段时间里红。
+    // 把"现在"钉在正午，日历差才只由 age 决定。
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 8, 20, 12, 0, 0));
+    try {
+      expect(formatSourceStamp(new Date().toISOString())).toMatch(/^今天 \d{2}:\d{2}$/);
+      expect(formatSourceStamp(new Date(Date.now() - 26 * 3_600_000).toISOString())).toMatch(/^昨天 \d{2}:\d{2}$/);
+      expect(formatSourceStamp(new Date(Date.now() - 40 * 86_400_000).toISOString())).toMatch(/日 \d{2}:\d{2}$/);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -187,5 +197,37 @@ describe("useSurfaceProjection refreshOnFocus", () => {
     await act(async () => { document.dispatchEvent(new Event("visibilitychange")); await Promise.resolve(); });
 
     await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  });
+});
+
+describe("parseImageBlock", () => {
+  it("splits a markdown image into alt and url", () => {
+    expect(parseImageBlock("![实验装置](https://example.com/setup.png)")).toEqual({
+      alt: "实验装置",
+      url: "https://example.com/setup.png",
+    });
+  });
+
+  it("rejects content that is not a single markdown image", () => {
+    expect(parseImageBlock("asset-id")).toBeNull();
+    expect(parseImageBlock("![alt](https://a.test/x.png)\n更多文字")).toBeNull();
+    expect(parseImageBlock("![alt](https://a.test/x.png) 后缀")).toBeNull();
+  });
+});
+
+describe("noteBodyText 遇到图片块", () => {
+  it("预览里不出现 markdown 图片语法，只留说明文字", () => {
+    const blocks = [
+      { ordinal: 1, type: "paragraph", content: "装置接好之后先跑空白对照。" },
+      { ordinal: 2, type: "image", content: "![实验装置](/api/uploads/w-1/setup.png)" },
+    ] as unknown as NoteBlockProjectionV1[];
+    const text = noteBodyText(blocks);
+    expect(text).toBe("装置接好之后先跑空白对照。 实验装置");
+    expect(text).not.toContain("![");
+  });
+
+  it("没有说明文字的图片块不留下一串标记", () => {
+    const blocks = [{ ordinal: 1, type: "image", content: "![](/api/uploads/w-1/x.png)" }] as unknown as NoteBlockProjectionV1[];
+    expect(noteBodyText(blocks)).toBe("");
   });
 });

@@ -36,17 +36,6 @@ const FENCE_LINE = /^```[ \t]*[A-Za-z0-9_+-]*[ \t]*$/;
 const IMAGE_LINE = /^!\[([^\]]*)\]\(([^)\s]+)\)$/;
 
 /**
- * Parses an image block's stored markdown (`![alt](url)`) into its parts, so a
- * reading surface can render the picture instead of the markup. Returns null
- * for content that is not a well-formed single markdown image.
- */
-export function parseImageBlock(content: string): { readonly alt: string; readonly url: string } | null {
-  const match = /^!\[([^\]]*)\]\(([^)]+)\)$/.exec(content.trim());
-  if (!match) return null;
-  return { alt: match[1] ?? "", url: match[2] ?? "" };
-}
-
-/**
  * Parses a paragraph whose text is a GitHub-flavored markdown table into cell
  * rows (first row is the header). Returns null when the text is not a table,
  * so ordinary paragraphs stay prose. Tables have no dedicated block type in

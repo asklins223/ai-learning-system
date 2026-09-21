@@ -112,7 +112,8 @@ test("W1-10: action union is exhaustive over all kinds", () => {
     { kind: "create_run", objectiveId: OBJ, label: "首次验证", start: cardStart },
     { kind: "resume_run", runId: RUN, objectiveId: OBJ },
     { kind: "create_review_run", objectiveId: OBJ, label: "开始复习", start: { ...cardStart, originV2: { kind: "review", scheduleId: RUN, objectiveId: OBJ, scheduleGeneration: 2 } } },
-    { kind: "practice_only", objectiveId: OBJ, label: "开始练习", start: cardStart, reasonCodes: ["exposed"] },
+    { kind: "practice_only", objectiveId: OBJ, label: "带着参考答案练一下", start: cardStart, reasonCodes: ["exposed"], formalValidationNotBefore: "2026-08-18T00:00:00.000Z" },
+    { kind: "practice_only", objectiveId: OBJ, label: "带着参考答案练一下", start: cardStart, reasonCodes: ["exposed"], formalValidationNotBefore: null },
     { kind: "wait_for_initial_validation", reminderId: RUN, qualificationNotBefore: "2026-08-18T00:00:00.000Z" },
     { kind: "view_successor", successorObjectiveId: OBJ, successorCardId: CARD },
     { kind: "refresh" },
@@ -123,6 +124,14 @@ test("W1-10: action union is exhaustive over all kinds", () => {
   }
   assert.equal(
     learningObjectivePrimaryActionV3Schema.safeParse({ kind: "guess", objectiveId: OBJ }).success,
+    false,
+  );
+  // 练习动作必须自带「什么时候能正式算」；漏掉要在这里挡下，而不是让
+  // 客户端各自决定怎么解释一个没有终点的等待（复盘 #9）。
+  assert.equal(
+    learningObjectivePrimaryActionV3Schema.safeParse({
+      kind: "practice_only", objectiveId: OBJ, label: "练习", start: cardStart, reasonCodes: ["exposed"],
+    }).success,
     false,
   );
 });

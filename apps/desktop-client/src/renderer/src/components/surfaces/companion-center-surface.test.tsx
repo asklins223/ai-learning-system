@@ -90,6 +90,16 @@ function memoryItem(): CompanionMemoryItemV1 {
   };
 }
 
+function secondMemoryItem(): CompanionMemoryItemV1 {
+  return {
+    ...memoryItem(),
+    memoryItemId: "66666666-6666-4666-8666-666666666666",
+    kind: "goal",
+    content: "这个月完成力学复习",
+    pinned: false,
+  };
+}
+
 function starMap(): CompanionMemoryStarMapV2 {
   return {
     version: 2,
@@ -243,5 +253,20 @@ describe("the companion center reads the shell's companion session", () => {
     expect(shellMode).toBe("conversation");
     // 服务端确认的对话记录按全局时间排在同一页上。
     await screen.findByText("可以先从这道例题入手。");
+  });
+
+  it("scopes destructive confirmation to the selected memory", async () => {
+    const api = installApi();
+    api.companion.memory.list.mockResolvedValue(ok({ version: 2, items: [memoryItem(), secondMemoryItem()] }));
+    renderCompanionCenter();
+
+    const first = await screen.findByRole("button", { name: /我更喜欢从例子开始理解概念/ });
+    fireEvent.click(first);
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    expect(screen.getByRole("button", { name: "确认删除" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /这个月完成力学复习/ }));
+    expect(screen.queryByRole("button", { name: "确认删除" })).toBeNull();
+    expect(screen.getByRole("button", { name: "删除" })).toBeTruthy();
   });
 });

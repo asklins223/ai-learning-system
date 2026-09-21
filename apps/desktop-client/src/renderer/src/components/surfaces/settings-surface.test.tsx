@@ -54,12 +54,9 @@ function ok<T>(data: T): GatewayResultV1<T> {
 function aiSettings(overrides: Partial<WorkspaceAiSettingsV1> = {}): WorkspaceAiSettingsV1 {
   return {
     version: 1,
-    workspaceId: OWNER_WORKSPACE,
     requiresConsent: true,
     consentVersion: null,
     consentAt: null,
-    consentBy: null,
-    canManage: true,
     dataPolicy: { sendToExternal: false, sendImageContent: false, piiDetection: true, auditLogging: false },
     ...overrides,
   };
@@ -113,7 +110,7 @@ function installApi(options: {
   };
 } = {}) {
   const role = options.role ?? "owner";
-  let ai = options.ai ?? aiSettings({ canManage: role === "owner" });
+  let ai = options.ai ?? aiSettings();
   const calls: { method: string; input: unknown }[] = [];
   const api = {
     auth: {
@@ -173,7 +170,7 @@ function installApi(options: {
       getAiSettings: vi.fn(async () => ok(ai)),
       updateAiConsent: vi.fn(async (input: { consentVersion: string }) => {
         calls.push({ method: "updateAiConsent", input });
-        ai = aiSettings({ canManage: role === "owner", consentVersion: input.consentVersion, consentAt: "2026-09-17T00:00:00.000Z" });
+        ai = aiSettings({ consentVersion: input.consentVersion, consentAt: "2026-09-17T00:00:00.000Z" });
         return ok(ai);
       }),
       updateAiDataPolicy: vi.fn(async (input: { policy: WorkspaceAiSettingsV1["dataPolicy"] }) => {
@@ -347,16 +344,18 @@ describe("AI consent is a real control, not a display", () => {
     await waitFor(() => expect(api.capabilities.get).toHaveBeenCalledTimes(2));
   });
 
-  it("keeps every policy read-only for a member", async () => {
-    installApi({ role: "member" });
+  it("stays writable for a member: the consent belongs to the account, not the space", async () => {
+    const { api } = installApi({ role: "member" });
     render(<SettingsSurface />);
     await screen.findByText("理解空间", { selector: ".space-identity h3" });
 
     openSection("AI 数据同意");
     const row = (await screen.findByText("允许发送到外部模型服务")).closest(".settings-row") as HTMLElement;
-    expect(within(row).getByRole("switch").hasAttribute("disabled")).toBe(true);
-    expect(screen.queryByRole("button", { name: "签署" })).toBeNull();
-    await screen.findByText("只读");
+    expect(within(row).getByRole("switch").hasAttribute("disabled")).toBe(false);
+    const sign = await screen.findByRole("button", { name: "签署" });
+    fireEvent.click(sign);
+    await waitFor(() => expect(api.workspace.updateAiConsent).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText("只有空间 Owner 可以签署或修改这些政策")).toBeNull();
   });
 
   it("labels a native capability as 未接入 with the reason attached", async () => {
@@ -419,7 +418,7 @@ describe("AI consent is a real control, not a display", () => {
     expect(await screen.findByRole("radiogroup", { name: "动效等级" })).toBeTruthy();
 
     openSection("AI 数据同意");
-    await screen.findByText("无法确认当前工作区的 AI 数据政策");
+    await screen.findByText("没能读到你的 AI 数据设置");
     expect(screen.queryByRole("switch")).toBeNull();
   });
 });
@@ -488,7 +487,7 @@ describe("owner invite and member management (旧版设置页回补)", () => {
     expect(api.members.remove.mock.calls[0]![0]).toMatchObject({ userId: OTHER_WORKSPACE });
   });
 
-  it("hides the owner roster from members", async () => {
+  it("tells a member why the roster is missing instead of deleting the block", async () => {
     installApi({ role: "member" });
     render(<SettingsSurface />);
     await screen.findByText("理解空间", { selector: ".space-identity h3" });
@@ -496,6 +495,9 @@ describe("owner invite and member management (旧版设置页回补)", () => {
     openSection("成员与邀请");
     await screen.findByText("用邀请码加入协作空间");
     expect(screen.queryByRole("button", { name: "生成邀请" })).toBeNull();
+    // 看不见 ≠ 知道自己不能做：这一块必须以锁定态出现在原位。
+    const row = (await screen.findByText("只有空间所有者能发邀请、看名册、移成员")).closest(".settings-row") as HTMLElement;
+    expect(within(row).getByText("只读")).toBeTruthy();
   });
 });
 

@@ -1066,6 +1066,15 @@ export function toObjectiveListItemV3(surface: LearningObjectiveSurfaceV3): Obje
     primaryNoteTitle: surface.sources.primaryNote?.title ?? null,
     createdAt: surface.createdAt,
     personalState: surface.personalState,
+    progress: {
+      practiceTrailCount: surface.personal.practiceTrailCount,
+      lastCanonicalAt: surface.personal.lastCanonicalAt,
+      reviewDueAt: surface.personal.review?.dueAt ?? null,
+      initialValidation: surface.personal.initialValidation?.status === "idle"
+        ? null
+        : surface.personal.initialValidation?.status ?? null,
+      validationNotBefore: surface.personal.initialValidation?.qualificationNotBefore ?? null,
+    },
     primaryAction: surface.primaryAction,
   };
 }

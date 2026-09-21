@@ -1,7 +1,7 @@
 /**
  * Plan 23 W2-15/W2-16：Primary Action 解析器单元测试。
  * 优先级：superseded > archived/blocked > resume > review due > initial ready
- * > initial deferred > practice_only > create_run > refresh/none。
+ * > practice_only > initial deferred > create_run > refresh/none。
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -100,6 +100,38 @@ test("initial deferred → wait_for_initial_validation（§7.5）", () => {
   });
 });
 
+test("看过答案 + 正式验证还在冷却 = 练习照给，不是整卡停用（复盘 #9）", () => {
+  const action = resolvePrimaryActionV3(base({
+    initialDeferred: { reminderId: REMINDER, qualificationNotBefore: "2026-08-16T00:00:00.000Z" },
+    practiceOnly: true,
+    practiceReasonCodes: ["exposed"],
+  }));
+  assert.deepEqual(action, {
+    kind: "practice_only",
+    objectiveId: OBJ,
+    reasonCodes: ["exposed"],
+    label: "带着参考答案练一下",
+    start: {
+      version: 2,
+      originV2: { kind: "card", cardId: CARD, objectiveId: OBJ },
+      goal: "stabilize",
+      requestedTimeBudgetSeconds: 180,
+      responsePreference: "adaptive",
+    },
+    formalValidationNotBefore: "2026-08-16T00:00:00.000Z",
+  });
+});
+
+test("冷却到期（initialReady）时正式验证重新压过练习", () => {
+  const action = resolvePrimaryActionV3(base({
+    initialReady: { reminderId: REMINDER, qualificationNotBefore: "2026-08-15T00:00:00.000Z" },
+    practiceOnly: true,
+    practiceReasonCodes: ["exposed"],
+  }));
+  assert.equal(action.kind, "create_run");
+  assert.equal(action.label, "开始首次验证");
+});
+
 test("practice_only → practice_only（reasonCodes 保留服务端裁决）", () => {
   const action = resolvePrimaryActionV3(
     base({ practiceOnly: true, practiceReasonCodes: ["exposed", "practice_only_ledger"] }),
@@ -107,6 +139,8 @@ test("practice_only → practice_only（reasonCodes 保留服务端裁决）", (
   assert.equal(action.kind, "practice_only");
   if (action.kind === "practice_only") {
     assert.deepEqual(action.reasonCodes, ["exposed", "practice_only_ledger"]);
+    // 没有冷却记录时明确给 null，而不是留一个"看起来永远等不到"的时间。
+    assert.equal(action.formalValidationNotBefore, null);
   }
 });
 

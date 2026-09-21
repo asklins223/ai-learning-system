@@ -428,6 +428,24 @@ async function createMainWindow(): Promise<BrowserWindow> {
   return window
 }
 
+/**
+ * 单实例锁。两个实例同开时，同一篇笔记会在两份内存草稿之间互相原地覆盖：自动保存
+ * 走的是"原地改写版本行且令牌不推进"，所以后写的一方静默赢，而两边的界面都显示
+ * "已同步"。锁按 userData 目录生效，因此协同验收仍可以用不同的 `--user-data-dir`
+ * 起两个互不干扰的实例。
+ */
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    const [window] = BrowserWindow.getAllWindows()
+    if (!window) return
+    if (window.isMinimized()) window.restore()
+    window.show()
+    window.focus()
+  })
+}
+
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null)
   registerAppProtocol()

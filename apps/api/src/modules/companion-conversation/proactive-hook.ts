@@ -9,68 +9,16 @@
 import type { ApiTransaction } from "../../db/client.ts";
 import { resolveAssessmentCriticConfig } from "../../lib/assessment-critic-config.ts";
 import { sql } from "drizzle-orm";
-import { evaluateDismissalFeedback, evaluateProactivePolicy } from "./proactive-policy.ts";
+import {
+  evaluateDismissalFeedback,
+  evaluateProactivePolicy,
+  isWithinQuietHours,
+} from "@ailearn/shared/companion-proactive-policy";
 import { deliver } from "./delivery-service.ts";
 
 // PERF-WN: Intl.DateTimeFormat 构造带时区数据，开销可观且每次调用都重建。
 // 按 timezone 记忆化复用；时区来自账号设置（有限 IANA 集合），加容量上限
 // 防不可信输入导致 Map 无界增长。
-const QUIET_HOURS_FORMATTER_MAX = 128;
-const quietHoursFormatterCache = new Map<string, Intl.DateTimeFormat>();
-
-function getQuietHoursFormatter(timezone: string): Intl.DateTimeFormat {
-  const cached = quietHoursFormatterCache.get(timezone);
-  if (cached) return cached;
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: timezone,
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
-  if (quietHoursFormatterCache.size >= QUIET_HOURS_FORMATTER_MAX) {
-    // 最简容量守卫：超限时淘汰最先插入的项（Map 保持插入序）。
-    quietHoursFormatterCache.delete(quietHoursFormatterCache.keys().next().value as string);
-  }
-  quietHoursFormatterCache.set(timezone, formatter);
-  return formatter;
-}
-
-/**
- * 静默时段判定（方案 16 §10.2）：HH:MM（startLocal/endLocal）+ IANA 时区。
- * 时段按"本地钟面时间"比较，跨午夜（start > end）按环绕处理。
- * 时区解析失败时 fail closed 抑制（宁可少打扰，不可错打扰）。
- */
-export function isWithinQuietHours(
-  quietHours: { startLocal: string; endLocal: string; timezone: string },
-  now: Date,
-): boolean {
-  try {
-    const formatter = getQuietHoursFormatter(quietHours.timezone);
-    const parts = formatter.formatToParts(now);
-    const hour = Number(parts.find((part) => part.type === "hour")?.value ?? "0");
-    const minute = Number(parts.find((part) => part.type === "minute")?.value ?? "0");
-    if (!Number.isFinite(hour) || !Number.isFinite(minute)) return false;
-    const currentMinutes = hour * 60 + minute;
-    const parseClock = (value: string): number | null => {
-      const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
-      if (!match) return null;
-      const h = Number(match[1]);
-      const m = Number(match[2]);
-      if (h > 23 || m > 59) return null;
-      return h * 60 + m;
-    };
-    const start = parseClock(quietHours.startLocal);
-    const end = parseClock(quietHours.endLocal);
-    if (start === null || end === null) return false;
-    if (start === end) return true; // 全时段（如 00:00–00:00）
-    if (start < end) return currentMinutes >= start && currentMinutes < end;
-    // 跨午夜：current >= start 或 current < end
-    return currentMinutes >= start || currentMinutes < end;
-  } catch {
-    return false;
-  }
-}
-
 export interface ProactiveMemoryDeferInput {
   scope: { workspaceId: string; userId: string };
   runId: string;

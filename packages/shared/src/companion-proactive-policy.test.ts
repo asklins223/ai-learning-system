@@ -7,9 +7,11 @@ import { test } from "node:test";
 import {
   evaluateDismissalFeedback,
   evaluateProactivePolicy,
+  isWithinQuietHours,
   POLICY_LIMITS,
+  proactiveDailyLimit,
   type ProactivePolicyInput,
-} from "./proactive-policy.ts";
+} from "./companion-proactive-policy.ts";
 
 function base(): ProactivePolicyInput {
   return {
@@ -38,7 +40,7 @@ test("quiet/moderate 单日预算独立", () => {
       interventionLevel: "quiet",
       dailyShownTotal: POLICY_LIMITS.quietDailyLimit,
     }).reasonCode,
-    "quiet_budget_exhausted",
+    "daily_budget_exhausted",
   );
   // moderate 预算更高：quiet 满额在 moderate 下仍允许。
   assert.equal(
@@ -54,7 +56,7 @@ test("quiet/moderate 单日预算独立", () => {
       ...base(),
       dailyShownTotal: POLICY_LIMITS.moderateDailyLimit,
     }).reasonCode,
-    "quiet_budget_exhausted",
+    "daily_budget_exhausted",
   );
 });
 
@@ -113,4 +115,51 @@ test("反馈判定：dismiss 不足阈值或窗口为空 → 不沉默", () => {
 test("反馈判定：只看传入的已送达状态，未读状态由调用方过滤", () => {
   // 传入 queued/delivered 不是本函数的合同——调用方 SQL 只取 displayed/acted/dismissed。
   assert.equal(evaluateDismissalFeedback(["queued", "delivered", "dismissed"]).suppress, false);
+});
+
+test("安静档是「少而轻」，不是结构上永不为零（抱怨 #8）", () => {
+  // quietDailyLimit 曾是 0：设成安静之后，主动提醒在结构上永远不会发生，
+  // 而界面上并没有"关闭主动提醒"这个开关，只有一档写着"安静"。
+  assert.equal(POLICY_LIMITS.quietDailyLimit, 1);
+  const first = evaluateProactivePolicy({ ...base(), interventionLevel: "quiet" });
+  assert.deepEqual([first.allow, first.reasonCode], [true, "allowed"]);
+  const second = evaluateProactivePolicy({ ...base(), interventionLevel: "quiet", dailyShownTotal: 1 });
+  assert.deepEqual([second.allow, second.reasonCode], [false, "daily_budget_exhausted"]);
+  // 三档额度都从同一个映射取（worker 的念头管线也走它）。
+  assert.deepEqual(
+    (["quiet", "moderate", "active"] as const).map(proactiveDailyLimit),
+    [1, 3, 6],
+  );
+});
+
+test("静默时段：跨午夜环绕、24:00 归一、坏配置一律不打扰", () => {
+  const now = new Date("2026-09-18T18:30:00Z"); // UTC 18:30
+  assert.equal(isWithinQuietHours({ startLocal: "23:00", endLocal: "07:00", timezone: "UTC" }, now), false);
+  assert.equal(isWithinQuietHours({ startLocal: "17:00", endLocal: "20:00", timezone: "UTC" }, now), true);
+  // start === end 是全时段静默，不是"零时长窗口"
+  assert.equal(isWithinQuietHours({ startLocal: "00:00", endLocal: "00:00", timezone: "UTC" }, now), true);
+  // 时区非法 → fail closed（这条是统一的意义所在：api 那份曾经返回"不在静默时段"，
+  // 于是配置一坏就半夜照发）
+  assert.equal(isWithinQuietHours({ startLocal: "22:00", endLocal: "07:00", timezone: "Not/AZone" }, now), true);
+  // 钟面值越界同样按静默处理，而不是"当成没配"
+  assert.equal(isWithinQuietHours({ startLocal: "25:00", endLocal: "07:00", timezone: "UTC" }, now), true);
+  assert.equal(isWithinQuietHours({ startLocal: "22:00", endLocal: "07:60", timezone: "UTC" }, now), true);
+  // 24:00 与 00:00 同义
+  assert.equal(isWithinQuietHours({ startLocal: "24:00", endLocal: "07:00", timezone: "UTC" }, new Date("2026-09-18T02:00:00Z")), true);
+});
+
+test("本地钟面按账号时区判定，不是按 UTC", () => {
+  // 北京 22:30 = UTC 14:30：静默窗 22:00–07:00 必须命中（按 UTC 判会漏掉整晚）。
+  const utcAfternoon = new Date("2026-09-18T14:30:00Z");
+  assert.equal(isWithinQuietHours({ startLocal: "22:00", endLocal: "07:00", timezone: "Asia/Shanghai" }, utcAfternoon), true);
+  // 北京 09:30 = UTC 01:30：静默窗不该命中（按 UTC 判反而会说"在静默时段"）。
+  assert.equal(isWithinQuietHours({ startLocal: "22:00", endLocal: "07:00", timezone: "Asia/Shanghai" }, new Date("2026-09-18T01:30:00Z")), false);
+});
+
+test("反馈降权：最近 3 条里 dismiss ≥2 → 沉默（两条链路同一个规则）", () => {
+  assert.equal(evaluateDismissalFeedback(["dismissed", "dismissed", "acted"]).suppress, true);
+  assert.equal(evaluateDismissalFeedback(["dismissed", "acted", "acted"]).suppress, false);
+  assert.equal(evaluateDismissalFeedback([]).suppress, false);
+  // 窗口只看最近 3 条：更早的两次 dismiss 不该永久沉默
+  assert.equal(evaluateDismissalFeedback(["acted", "acted", "acted", "dismissed", "dismissed"]).suppress, false);
 });

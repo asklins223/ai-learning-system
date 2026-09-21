@@ -687,6 +687,24 @@ BEGIN
     GRANT EXECUTE ON FUNCTION public.ailearn_reclaim_stale_companion_proposals()
       TO ailearn_worker;
   END IF;
+  -- 0227/0231 念头批量生成入队 + 0232 孤儿 run 回收。两支都是 worker 侧定时器
+  -- 调用的 SECURITY DEFINER 函数，缺授权时**不会有任何用户可见报错**：前者让
+  -- assistant_thoughts 恒 0 行（"完全没感知到主动提醒"），后者让卡住的会话
+  -- 永远停在"正在思考"。
+  IF to_regprocedure('public.ailearn_enqueue_companion_thoughts()') IS NOT NULL THEN
+    GRANT EXECUTE ON FUNCTION public.ailearn_enqueue_companion_thoughts()
+      TO ailearn_worker;
+  END IF;
+  IF to_regprocedure('public.ailearn_reclaim_orphaned_companion_runs()') IS NOT NULL THEN
+    GRANT EXECUTE ON FUNCTION public.ailearn_reclaim_orphaned_companion_runs()
+      TO ailearn_worker;
+  END IF;
+  -- 0238：到点提醒认领。同样必须镜像，否则 worker 每分钟 tick 都 permission
+  -- denied，而它一条日志都不会暴露给用户——"她答应提醒我却没有"就这么静默着。
+  IF to_regprocedure('public.ailearn_fire_due_companion_reminders(integer)') IS NOT NULL THEN
+    GRANT EXECUTE ON FUNCTION public.ailearn_fire_due_companion_reminders(integer)
+      TO ailearn_worker;
+  END IF;
 
   -- 0174：pgvector 距离函数（记忆向量检索由 worker 执行；api 检索也需调用）。
   -- vector 和 halfvec 签名均需授权。

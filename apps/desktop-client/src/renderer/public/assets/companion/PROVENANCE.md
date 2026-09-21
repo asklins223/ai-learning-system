@@ -19,6 +19,28 @@ in `WindowLive2D` creates an always-on-top or out-of-window desktop-pet surface.
 The model manifest records `redistributionAllowed=false`. Do not publish or
 redistribute this asset package without a fresh license review.
 
+## DS鲸鱼娘 model (live2d-v3/whale)
+
+- Added 2026-09-20 by owner decision: the companion ships as a switchable form
+  (`WindowLive2DModelId`, see `window-live2d-contract.ts`). Three forms are
+  live: Mao PRO (`mao-pro`), Seethrough (`seethrough`) and DS鲸鱼娘 (`whale`).
+- Source: user-provided archive `DS鲸鱼娘/DS鼠控版` (DS 鼠控版 variant).
+- Author: B站 @氵六青（11272072）, shared for free. Author terms
+  (《使用须知.txt》): 商用直播 √、自印物料 √、禁止任何形式的盗用以及出售
+  (commercial streaming and self-printed merch allowed; theft/resale forbidden).
+  Recorded in `live2d-v3/whale/manifest.json` with `acceptanceRequired: true`
+  and `redistributionAllowed: false`.
+- Integration notes in `live2d-v3/whale/README.md`; SHA-256 hashes in the same
+  `manifest.json`.
+- 2026-09-20 (later that evening): the owner asked whether every motion had really
+  been wired. The first pass had shipped 1 of the author's 7 animations and 12 of
+  44 expressions; the runtime package now carries 5 motion groups and 30
+  expressions, including the costume/sticker parameters (glasses, stickers,
+  hearts, soul) that the earlier emotion-only selection had left out. What is
+  still excluded is recorded with a reason in `live2d-v3/whale/README.md`.
+- 2026-09-20: the owner made 大肥鱼 the companion's default form
+  (`DEFAULT_WINDOW_LIVE2D_MODEL_ID`); Mao and Seethrough remain switchable.
+
 ## Browser runtime
 
 - `vendor/pixi.min.js`: PixiJS 6.5.10 (MIT)
@@ -39,6 +61,16 @@ runtime files aligned with the SHA-256 hashes in the model manifest.
   desktop plan of 2026-09-19 requires dormant asset packages to be deleted
   rather than shipped. Restore it from design archives if ownership and
   redistribution rights are ever confirmed.
+- 2026-09-20 update (evening): the owner restored the missing texture
+  (`seethrough_output.4096/texture_00.png`, SHA-256 identical to the
+  2026-09-15 export record) and asked to ship Seethrough as the third form.
+  Re-integrated under `live2d-v2/seethrough/` with the richer motion set
+  (Idle/Blink/Nod/Shake/Think/Happy/Surprised/Sleepy) recovered from the
+  pre-removal prototype copy. License status is unchanged and still
+  development-only (`commercialReleaseAllowed=false`,
+  `redistributionAllowed=false`); a fresh license review is required before
+  any commercial release. See `live2d-v2/seethrough/README.md` and
+  `manifest.json`.
 - `live2d-v1/mao-pro/mao-half-idle-v1.png` was deleted together with the orb
   fallback (2026-09-16 Owner decision). Per that decision the companion has a
   single form (in-window Live2D); when the model cannot load the companion is

@@ -43,7 +43,7 @@ import { desktopTrustRoutes, resolveApiBindHost } from "./modules/desktop-trust/
 import { cleanupExpiredSessions } from "./modules/identity/service.ts";
 import { purgeSoftDeletedNotes } from "./modules/note/maintenance.ts";
 import { runLearningTtlMaintenance } from "./modules/learning-sessions/ttl-maintenance.ts";
-import { runLearningRunProcessingTick, closeStructuredSolutionSql } from "./modules/learning-runs/run-processing-tick.ts";
+import { runLearningRunProcessingTick, setLearningRunProcessingWaker, closeStructuredSolutionSql } from "./modules/learning-runs/run-processing-tick.ts";
 import { createGracefulShutdown } from "./lib/graceful-shutdown.ts";
 import {
   getMetricsText,
@@ -521,25 +521,46 @@ async function main() {
     const processingWorkerId = `run-proc:${crypto.randomUUID()}`;
     let processingIntervalMs = 10 * 1000;
     let processingFailedStreak = 0;
-    const scheduleProcessingTick = () => {
-      learningRunProcessingTimer = setTimeout(async () => {
-        try {
-          const result = await runLearningRunProcessingTick(processingWorkerId, 50);
-          if (result.processed > 0 || result.failed > 0) {
-            app.log.info({ ...result }, "learning run processing tick");
-          }
-          processingFailedStreak = 0;
-          processingIntervalMs = 10 * 1000;
-        } catch (err) {
-          processingFailedStreak += 1;
-          processingIntervalMs = Math.min(10 * 1000 * (2 ** processingFailedStreak), 60_000);
-          app.log.error({ err, nextRetryMs: processingIntervalMs }, "learning run processing tick failed");
+    let processingWakeRequested = false;
+
+    const runProcessingTickOnce = async (): Promise<void> => {
+      try {
+        const result = await runLearningRunProcessingTick(processingWorkerId, 50);
+        if (result.processed > 0 || result.failed > 0) {
+          app.log.info({ ...result }, "learning run processing tick");
         }
-        scheduleProcessingTick();
-      }, processingIntervalMs);
+        processingFailedStreak = 0;
+        processingIntervalMs = 10 * 1000;
+      } catch (err) {
+        processingFailedStreak += 1;
+        processingIntervalMs = Math.min(10 * 1000 * (2 ** processingFailedStreak), 60_000);
+        app.log.error({ err, nextRetryMs: processingIntervalMs }, "learning run processing tick failed");
+      }
+    };
+
+    const scheduleProcessingTick = (delayMs: number): void => {
+      if (learningRunProcessingTimer) clearTimeout(learningRunProcessingTimer);
+      learningRunProcessingTimer = setTimeout(() => {
+        learningRunProcessingTimer = undefined;
+        void runProcessingTickOnce().then(() => {
+          // 正在跑的这一轮里被喊过 → 不等节奏，立刻再来一轮。
+          scheduleProcessingTick(processingWakeRequested ? 0 : processingIntervalMs);
+          processingWakeRequested = false;
+        });
+      }, delayMs);
       learningRunProcessingTimer.unref();
     };
-    scheduleProcessingTick();
+
+    setLearningRunProcessingWaker(() => {
+      if (learningRunProcessingTimer) {
+        scheduleProcessingTick(0);
+        return;
+      }
+      // 一轮正在执行中，无法重排定时器；标记下来让这轮结束后立即续跑。
+      processingWakeRequested = true;
+    });
+    // 启动先跑一次，把停机期间攒下的命令接住。
+    scheduleProcessingTick(0);
   }
 }
 

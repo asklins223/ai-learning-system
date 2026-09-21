@@ -475,7 +475,7 @@ export function SearchSurface() {
               ? `无法读取目标状态：${filterFailure}`
               : weakOnly && objectiveTruncated && objectiveData
                 ? `目标较多，仅核对了最近 ${objectiveData.items.length} 条（共 ${objectiveData.total} 条），更早的目标可能未计入`
-                : "只保留服务端标记为待验证、需要巩固或需要修复的理解目标"}
+                : "只留下还没正式答过、有点生疏或上次答错的目标"}
             onClick={() => setWeakOnly(!weakOnly)}
           >
             证据不足{objectiveData ? ` ${weakCount}${objectiveTruncated ? "+" : ""}` : ""}
@@ -491,7 +491,7 @@ export function SearchSurface() {
         <div className="search-layout">
           <div className="search-index" ref={indexRef}>
             {!sessionReady && !sessionFailure ? (
-              <SurfaceDataState kind="loading" message="正在确认工作区" detail="搜索范围来自当前身份与服务端索引。" />
+              <SurfaceDataState kind="loading" message="正在确认工作区" detail="搜索的是这个空间已建好索引的内容。" />
             ) : null}
             {sessionFailure ? (
               <SurfaceDataState kind="error" message="搜索范围暂时不可用" detail={sessionFailure} onRetry={retry} />

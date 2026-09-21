@@ -43,13 +43,16 @@ async function seedIdentity(): Promise<void> {
       (${userA}, ${`mem-http-a-${prefix}@example.test`}, 'test-hash', 'owner'),
       (${userB}, ${`mem-http-b-${prefix}@example.test`}, 'test-hash', 'owner')
   `;
+  // 两个用户共处的空间必须是 collaborative：个人空间现在拒绝被分享
+  // （`createInvite` 对 personal 目标直接 409），夹具若绕过业务校验造出
+  // "第二成员写进别人 personal 空间"的行，测的就是一个产品上不可能存在的状态。
   await sql`
     INSERT INTO workspaces (id, name, owner_id, workspace_type)
-    VALUES (${workspaceId}, ${`mem-http-${prefix}`}, ${userA}, 'personal')
+    VALUES (${workspaceId}, ${`mem-http-${prefix}`}, ${userA}, 'collaborative')
   `;
   await sql`
     INSERT INTO workspace_members (workspace_id, user_id, role)
-    VALUES (${workspaceId}, ${userA}, 'owner'), (${workspaceId}, ${userB}, 'owner')
+    VALUES (${workspaceId}, ${userA}, 'owner'), (${workspaceId}, ${userB}, 'member')
   `;
 }
 
@@ -69,7 +72,15 @@ after(async () => {
   await revokeSession(tokenA).catch(() => {});
   await revokeSession(tokenB).catch(() => {});
   await app?.close();
-  await sql`DELETE FROM users WHERE id IN (${userA}, ${userB})`.catch(() => {});
+  // 顺序不能反：`workspaces.owner_id` 是 NO ACTION、`users.personal_workspace_id`
+  // 是 RESTRICT，所以不先删空间就删不掉用户。原先这里整条都挂着 `.catch(() => {})`，
+  // 删除失败被静默吞掉——dev 库里那批 `mem-http-*` 残留就是这么攒出来的。
+  await sql`UPDATE users SET personal_workspace_id = NULL WHERE id IN (${userA}, ${userB})`;
+  await sql`DELETE FROM workspace_members WHERE workspace_id = ${workspaceId}`;
+  await sql`DELETE FROM workspaces WHERE id = ${workspaceId}`;
+  await sql`DELETE FROM users WHERE id IN (${userA}, ${userB})`;
+  const leftover = await sql`SELECT count(*)::int AS n FROM workspaces WHERE id = ${workspaceId}`;
+  assert.equal(leftover[0].n, 0, `夹具残留了工作区 ${workspaceId}，teardown 顺序需要修`);
   await sql.end({ timeout: 5 }).catch(() => {});
   await closeDatabase().catch(() => {});
 });

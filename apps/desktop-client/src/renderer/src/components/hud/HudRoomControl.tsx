@@ -1,11 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronsRight, Gauge, House, Moon, Orbit, Settings2, Sun, UserRound, Volume2, VolumeX } from "lucide-react";
 import { useRoomStore } from "../../app/room-store";
+import { spaceRoleLabel } from "../../app/space-identity";
 import { publishGateInvalidation } from "../../app/gate-invalidation";
 import { resolveSceneMotionMode } from "../../scene/scene-motion";
 import { HudAccountMenu } from "./HudAccountMenu";
 import { useHudPageClasses } from "./use-hud-page";
-import { SPACE_MENU_OPEN_EVENT, takePendingSpaceMenuRequest } from "./space-menu-events";
+import {
+  SPACE_MENU_OPEN_EVENT,
+  requestSpaceSwitchReceipt,
+  takePendingSpaceMenuRequest,
+  takePendingSpaceSwitchReceipt,
+  SPACE_SWITCH_RECEIPT_EVENT,
+} from "./space-menu-events";
 
 /**
  * 图标层全部使用 lucide（与全应用其他 surface 同一图标语言），只有学习空间的
@@ -36,7 +43,7 @@ function SpaceSealIcon() {
  * opens 04B's `.home-menu` card. The motion-mode slot (mockup
  * 没有画它，但上一版灵动岛有) is restored so 动效等级和它的指示灯始终可触达.
  *
- * `readOnly` renders the pill already open (mockup 04A paints the decorative
+ * `decorative` renders the pill already open (mockup 04A paints the decorative
  * `controls()` on the first-entry paper; nothing behind it has a space to act
  * on, so there is nothing to collapse into).
  *
@@ -50,7 +57,12 @@ function SpaceSealIcon() {
 /** 药丸折叠动画 300ms，导航等它走完再发生，留一帧余量。 */
 const COLLAPSE_BEFORE_NAVIGATE_MS = 320;
 
-export function HudRoomControl({ readOnly = false }: { readonly readOnly?: boolean }) {
+export function HudRoomControl({ decorative = false }: { readonly decorative?: boolean }) {
+  /**
+   * `decorative` 是 04A 首次进入那张纸上的装饰态药丸（还没有空间可操作）。
+   * 它以前叫 `readOnly`，和「空间只读权限」同名——两件事撞在一个词上，
+   * 读代码的人会以为它在表达成员权限，而空间权限走的是 capability 投影。
+   */
   const invoke = useRoomStore((state) => state.invoke);
   const destination = useRoomStore((state) => state.destination);
   const surface = useRoomStore((state) => state.surface);
@@ -62,11 +74,18 @@ export function HudRoomControl({ readOnly = false }: { readonly readOnly?: boole
   const cycleMotionMode = useRoomStore((state) => state.cycleMotionMode);
   const setSettingsSection = useRoomStore((state) => state.setSettingsSection);
   const setHudPage = useRoomStore((state) => state.setHudPage);
+  /** 顶栏常驻空间胶囊的唯一数据源：门禁每次读到已验证会话都会发布。 */
+  const spaceIdentity = useRoomStore((state) => state.spaceIdentity);
   const onboardingOpen = useRoomStore((state) => state.onboardingOpen);
   const motionMode = resolveSceneMotionMode(motionModeRaw, useRoomStore((state) => state.reducedMotion));
   const [expanded, setExpanded] = useState(false);
   const [spaceMenuOpen, setSpaceMenuOpen] = useState(false);
   const [spaceNotice, setSpaceNotice] = useState<string | null>(null);
+  /**
+   * 切换成功回执。必须由这个常驻宿主持有：surface 自己的 state 活不过切换引起的
+   * 门禁重挂载（设置页原先 setNotice 之后同一 tick 就被卸载，提示从未出现过）。
+   */
+  const [switchReceipt, setSwitchReceipt] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -78,10 +97,10 @@ export function HudRoomControl({ readOnly = false }: { readonly readOnly?: boole
     if (navigateTimerRef.current !== undefined) window.clearTimeout(navigateTimerRef.current);
   }, []);
 
-  const isExpanded = readOnly || onboardingOpen || expanded;
+  const isExpanded = decorative || onboardingOpen || expanded;
 
   useEffect(() => {
-    if (readOnly) return undefined;
+    if (decorative) return undefined;
     // Same-commit requests (gate turns the room over with a failed invite)
     // dispatched before this listener existed; they are parked and consumed
     // here instead of being lost.
@@ -99,7 +118,26 @@ export function HudRoomControl({ readOnly = false }: { readonly readOnly?: boole
     if (parked) onRequest(new CustomEvent(SPACE_MENU_OPEN_EVENT, { detail: { notice: parked.notice } }));
     window.addEventListener(SPACE_MENU_OPEN_EVENT, onRequest);
     return () => window.removeEventListener(SPACE_MENU_OPEN_EVENT, onRequest);
-  }, [readOnly]);
+  }, [decorative]);
+
+  // 切换回执：药丸在切换引起的重挂载里取回停车值；若药丸没被卸载，则走 live 事件。
+  useEffect(() => {
+    const onReceipt = (event: Event) => {
+      const name = (event as CustomEvent<{ workspaceName?: unknown }>).detail?.workspaceName;
+      if (typeof name !== "string" || name.length === 0) return;
+      setSwitchReceipt(name);
+    };
+    const parked = takePendingSpaceSwitchReceipt();
+    if (parked) setSwitchReceipt(parked);
+    window.addEventListener(SPACE_SWITCH_RECEIPT_EVENT, onReceipt);
+    return () => window.removeEventListener(SPACE_SWITCH_RECEIPT_EVENT, onReceipt);
+  }, []);
+
+  useEffect(() => {
+    if (switchReceipt === null) return undefined;
+    const timer = window.setTimeout(() => setSwitchReceipt(null), 6_000);
+    return () => window.clearTimeout(timer);
+  }, [switchReceipt]);
 
   // The island's own collapse rule: any open surface or the onboarding overlay
   // takes it back down to the seal.
@@ -129,7 +167,7 @@ export function HudRoomControl({ readOnly = false }: { readonly readOnly?: boole
   useHudPageClasses();
 
   useEffect(() => {
-    if (!isExpanded || readOnly) return undefined;
+    if (!isExpanded || decorative) return undefined;
     const collapse = () => {
       setSpaceMenuOpen(false);
       setExpanded(false);
@@ -164,7 +202,7 @@ export function HudRoomControl({ readOnly = false }: { readonly readOnly?: boole
       window.removeEventListener("pointerdown", closeFromOutside, true);
       window.removeEventListener("keydown", closeOnEscape, true);
     };
-  }, [isExpanded, readOnly, spaceMenuOpen]);
+  }, [isExpanded, decorative, spaceMenuOpen]);
 
   const toggleExpanded = () => {
     if (isExpanded) {
@@ -204,6 +242,13 @@ export function HudRoomControl({ readOnly = false }: { readonly readOnly?: boole
     setExpanded(false);
   };
 
+  /** 胶囊两条路都做同一件事：展开药丸并把空间菜单打开。 */
+  const openSpaceMenu = () => {
+    setSpaceNotice(null);
+    setSpaceMenuOpen(true);
+    setExpanded(true);
+  };
+
   return (
     <>
       <div className="window-drag-region" aria-hidden="true" />
@@ -213,12 +258,38 @@ export function HudRoomControl({ readOnly = false }: { readonly readOnly?: boole
         role="group"
         aria-label="房间控制"
         data-expanded={isExpanded || undefined}
-        inert={readOnly || onboardingOpen || undefined}
+        inert={decorative || onboardingOpen || undefined}
       >
+        {/* 常驻空间胶囊。审查里「切换学习空间没有持续感知」的直接对策：药丸一折叠
+            就只剩一枚印章，屏幕上没有任何一处说明「我在哪个空间、我能不能改」。
+            它故意不带 inert={!isExpanded}——折叠态也必须可见可点；只读态写成文字，
+            不只靠颜色（a11y 合同：颜色不能是唯一载体）。 */}
+        <button
+          ref={spaceRef}
+          type="button"
+          className={spaceMenuOpen ? "room-control-space active" : "room-control-space"}
+          data-readonly={spaceIdentity?.role === "member" || undefined}
+          disabled={decorative}
+          aria-expanded={spaceMenuOpen}
+          aria-haspopup="true"
+          aria-label={spaceIdentity
+            ? `当前学习空间 ${spaceIdentity.name}，${spaceRoleLabel(spaceIdentity)}，打开空间菜单`
+            : "正在读取你当前的学习空间"}
+          title={spaceIdentity
+            ? `${spaceIdentity.name} · ${spaceRoleLabel(spaceIdentity)}`
+            : "学习空间"}
+          onClick={openSpaceMenu}
+        >
+          <span className="room-control-space__seal"><SpaceSealIcon /></span>
+          <span className="room-control-space__text">
+            <b>{spaceIdentity?.name ?? "正在读取空间"}</b>
+            <small>{spaceIdentity ? spaceRoleLabel(spaceIdentity) : "读取中…"}</small>
+          </span>
+        </button>
         <button
           type="button"
           className={destination === "room" ? "active" : undefined}
-          disabled={readOnly}
+          disabled={decorative}
           inert={!isExpanded || undefined}
           aria-label="返回理解书房"
           title="返回房间总览"
@@ -228,7 +299,7 @@ export function HudRoomControl({ readOnly = false }: { readonly readOnly?: boole
         </button>
         <button
           type="button"
-          disabled={readOnly}
+          disabled={decorative}
           inert={!isExpanded || undefined}
           aria-label={theme === "day" ? "切换到夜间书房" : "切换到日间书房"}
           title={theme === "day" ? "夜间书房" : "日间书房"}
@@ -241,7 +312,7 @@ export function HudRoomControl({ readOnly = false }: { readonly readOnly?: boole
         </button>
         <button
           type="button"
-          disabled={readOnly}
+          disabled={decorative}
           inert={!isExpanded || undefined}
           aria-label={masterMuted ? "取消总静音" : "开启总静音"}
           title={masterMuted ? "取消总静音" : "总静音"}
@@ -255,7 +326,7 @@ export function HudRoomControl({ readOnly = false }: { readonly readOnly?: boole
         <button
           type="button"
           className="room-control-motion"
-          disabled={readOnly}
+          disabled={decorative}
           inert={!isExpanded || undefined}
           aria-label={`当前${MOTION_MODE_LABEL[motionMode]}动效，切换动效模式`}
           title={`动效：${MOTION_MODE_LABEL[motionMode]}`}
@@ -268,7 +339,7 @@ export function HudRoomControl({ readOnly = false }: { readonly readOnly?: boole
         </button>
         <button
           type="button"
-          disabled={readOnly}
+          disabled={decorative}
           inert={!isExpanded || undefined}
           aria-label="打开设置中心"
           title="设置中心"
@@ -277,25 +348,8 @@ export function HudRoomControl({ readOnly = false }: { readonly readOnly?: boole
           <Settings2 aria-hidden="true" />
         </button>
         <button
-          ref={spaceRef}
           type="button"
-          disabled={readOnly}
-          inert={!isExpanded || undefined}
-          className={spaceMenuOpen ? "active" : undefined}
-          aria-label={spaceMenuOpen ? "收起学习空间菜单" : "打开学习空间菜单"}
-          aria-expanded={spaceMenuOpen}
-          aria-haspopup="true"
-          title="学习空间"
-          onClick={() => {
-            setSpaceNotice(null);
-            setSpaceMenuOpen((open) => !open);
-          }}
-        >
-          <SpaceSealIcon />
-        </button>
-        <button
-          type="button"
-          disabled={readOnly}
+          disabled={decorative}
           inert={!isExpanded || undefined}
           aria-label="打开账户中心"
           title="账户中心"
@@ -313,7 +367,7 @@ export function HudRoomControl({ readOnly = false }: { readonly readOnly?: boole
           aria-expanded={isExpanded}
           aria-label={isExpanded ? "收起房间控制" : "展开房间控制"}
           title={isExpanded ? "收起" : "房间控制"}
-          inert={readOnly || undefined}
+          inert={decorative || undefined}
           onClick={toggleExpanded}
         >
           {isExpanded
@@ -322,12 +376,14 @@ export function HudRoomControl({ readOnly = false }: { readonly readOnly?: boole
           <i className={`room-control-trigger__status room-control-trigger__status--${motionMode}`} aria-hidden="true" />
         </button>
       </div>
-      {!readOnly && isExpanded && spaceMenuOpen ? (
+      {!decorative && isExpanded && spaceMenuOpen ? (
         <div ref={menuRef} className="room-control-menu">
           <HudAccountMenu
             notice={spaceNotice}
-            onSwitched={() => {
+            onSwitched={(workspaceName) => {
               collapse();
+              // 先停车再失效：门禁重挂载后药丸可能还没挂上监听，停车保证它取得到。
+              requestSpaceSwitchReceipt(workspaceName);
               // The whole room is scoped to one verified workspace, so a switch
               // is a boundary change: reuse the gate's own invalidation path
               // rather than patching each surface's cursor by hand.
@@ -335,6 +391,11 @@ export function HudRoomControl({ readOnly = false }: { readonly readOnly?: boole
             }}
           />
         </div>
+      ) : null}
+      {switchReceipt !== null ? (
+        <p className="room-control-receipt" role="status">
+          已进入「{switchReceipt}」
+        </p>
       ) : null}
     </>
   );

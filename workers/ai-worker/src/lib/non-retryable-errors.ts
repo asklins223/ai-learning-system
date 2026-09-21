@@ -111,6 +111,25 @@ export class CompanionAgentBudgetExceededError extends Error {
 }
 
 /**
+ * 伴星记忆抽取的输出不可用（方案 29 §4.3）。
+ *
+ * 与 `AgentOutputError` 同类：模型没给出符合 schema 的 JSON，是**输出本身**的问题，
+ * 重投同一个 job 不会改变结果（handler 内部已经重试过一次采样）。
+ *
+ * 加这个类的直接动机：抽取器此前在解析失败时 `return` 而不抛错，于是
+ * `jobs.status` 记成 `succeeded`——242 个"成功"的抽取 job 写进了 **0** 行记忆，
+ * 整条写路径在监控上看起来完全健康。判 dead 才能让它可见。
+ */
+export class MemoryExtractOutputError extends Error {
+  readonly code = "MEMORY_EXTRACT_OUTPUT_INVALID" as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "MemoryExtractOutputError";
+  }
+}
+
+/**
  * Returns true if the error message indicates a condition that will not
  * resolve on retry (billing, auth, config errors).
  *
@@ -128,6 +147,9 @@ export function isNonRetryableError(error: unknown): boolean {
 
   // Agent 预算耗尽同理：run 级预算跨重投累计，重试不可能恢复。
   if (error instanceof CompanionAgentBudgetExceededError) return true;
+
+  // 记忆抽取输出不合规同理：内部已重试过一次采样，重投不会给出更好的输出。
+  if (error instanceof MemoryExtractOutputError) return true;
 
   // 2026-08-12+（15a 根因修复）：AI 同意/协议缺失（sendToExternal=false、
   // 未签署协议）——用户不操作设置重试必败，直接 dead 并让前端引导设置。

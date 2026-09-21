@@ -8,7 +8,16 @@ import type {
   WorkspaceSummaryV1,
 } from "@ailearn/shared/desktop-ipc-contracts";
 import { HudAccountMenu } from "./HudAccountMenu";
-import { SPACE_MENU_REFRESH_EVENT } from "./space-menu-events";
+import {
+  SPACE_MENU_REFRESH_EVENT,
+  takePendingSpaceSwitchReceipt,
+} from "./space-menu-events";
+import { subscribeGateInvalidation } from "../../app/gate-invalidation";
+import { useRoomStore } from "../../app/room-store";
+
+/** 组件通过监听器广播门禁失效，测试订阅一份来断言"创建即进入"真的重验了。 */
+const gateInvalidations: string[] = [];
+subscribeGateInvalidation((code) => { gateInvalidations.push(code); });
 
 /**
  * Holds the three behaviours the menu owes its rows: joining stays inside the
@@ -20,6 +29,9 @@ import { SPACE_MENU_REFRESH_EVENT } from "./space-menu-events";
 afterEach(() => {
   cleanup();
   Reflect.deleteProperty(window, "ailearn");
+  useRoomStore.setState({ activeRunId: null });
+  gateInvalidations.length = 0;
+  takePendingSpaceSwitchReceipt();
 });
 
 function ok<T>(data: T, workspaceEpoch?: number): GatewayResultV1<T> {
@@ -59,12 +71,119 @@ function installApi(api: unknown) {
   Object.defineProperty(window, "ailearn", { configurable: true, value: api });
 }
 
-async function renderMenu(props: { readonly onSwitched?: () => void } = {}) {
+async function renderMenu(props: { readonly onSwitched?: (workspaceName: string) => void } = {}) {
   render(<HudAccountMenu notice={null} {...props} />);
   await waitFor(() => expect(screen.getByRole("button", { name: /个人书房/ })).toBeTruthy());
 }
 
 describe("HudAccountMenu", () => {
+  it("每一行都报出身份：个人空间不再只写一个 Personal，成员写明只读", async () => {
+    installApi({
+      auth: { getState: vi.fn().mockResolvedValue(ok(session(CURRENT.workspaceId), 1)) },
+      workspace: {
+        list: vi.fn().mockResolvedValue(ok({
+          workspaces: [CURRENT, OTHER, { ...JOINED, role: "member" as const }],
+        }, 1)),
+      },
+    });
+    await renderMenu();
+
+    const personal = screen.getByRole("button", { name: /个人书房/ });
+    expect(personal.textContent).toContain("个人空间 · 所有者");
+    expect(personal.textContent).not.toContain("Personal");
+    expect(screen.getByRole("button", { name: /海岸研究室/ }).textContent).toContain("协作空间 · 所有者");
+    // 「只读」必须是文字：颜色不能是唯一载体，成员更要看得见自己不能改。
+    expect(screen.getByRole("button", { name: /山顶读书会/ }).textContent).toContain("成员 · 只读");
+  });
+
+  it("creates a collaborative space and enters it via the switch receipt path", async () => {
+    const createWorkspace = vi.fn().mockResolvedValue(ok({
+      version: 1, workspaceId: OTHER.workspaceId, name: "海岸研究室",
+    }, 1));
+    installApi({
+      auth: { getState: vi.fn().mockResolvedValue(ok(session(CURRENT.workspaceId), 1)) },
+      workspace: {
+        list: vi.fn().mockResolvedValue(ok({ workspaces: [CURRENT, OTHER] }, 1)),
+        create: createWorkspace,
+      },
+    });
+    render(<HudAccountMenu notice={null} onSwitched={() => undefined} />);
+    const nameField = await screen.findByLabelText("新协作空间名称");
+    fireEvent.change(nameField, { target: { value: "海岸研究室" } });
+    fireEvent.click(screen.getByRole("button", { name: "新建" }));
+
+    await waitFor(() => expect(createWorkspace).toHaveBeenCalledTimes(1));
+    // 主进程创建后会 switchWorkspace，所以这里必须按"换了空间"处理：停车回执 +
+    // 让门禁重验。若不重验，界面会继续用旧空间的 session 上下文发请求。
+    expect(takePendingSpaceSwitchReceipt()).toBe("海岸研究室");
+    expect(gateInvalidations).toContain("stale_workspace");
+  });
+
+  it("surfaces a rejected create instead of failing silently", async () => {
+    installApi({
+      auth: { getState: vi.fn().mockResolvedValue(ok(session(CURRENT.workspaceId), 1)) },
+      workspace: {
+        list: vi.fn().mockResolvedValue(ok({ workspaces: [CURRENT] }, 1)),
+        create: vi.fn().mockResolvedValue({
+          version: 1, ok: false, requestId: "r", correlationId: "c", schemaRevision: "s",
+          error: { code: "forbidden", safeMessageKey: "error.forbidden", retry: "never" },
+        }),
+      },
+    });
+    render(<HudAccountMenu notice={null} onSwitched={() => undefined} />);
+    const nameField = await screen.findByLabelText("新协作空间名称");
+    fireEvent.change(nameField, { target: { value: "不该成功的空间" } });
+    fireEvent.click(screen.getByRole("button", { name: "新建" }));
+
+    await waitFor(() => expect(screen.getByRole("status")).toBeTruthy());
+    expect(takePendingSpaceSwitchReceipt()).toBeNull();
+  });
+
+
+  it("asks twice before switching away from a running formal assessment", async () => {
+    // 切换会走门禁失效路径，主进程当场 failClosed 掉正式测评并拆流，store 里的
+    // activeRunId 直接被清空——一次点击就能让进行中的测评无声消失。
+    const onSwitched = vi.fn();
+    const switchWorkspace = vi.fn().mockResolvedValue(ok(session(OTHER.workspaceId), 2));
+    installApi({
+      auth: { getState: vi.fn().mockResolvedValue(ok(session(CURRENT.workspaceId), 1)) },
+      workspace: {
+        list: vi.fn().mockResolvedValue(ok({ workspaces: [CURRENT, OTHER] }, 1)),
+        switch: switchWorkspace,
+      },
+    });
+    useRoomStore.setState({ activeRunId: "11111111-9999-4999-8999-999999999999" });
+    render(<HudAccountMenu notice={null} onSwitched={onSwitched} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: /海岸研究室/ })).toBeTruthy());
+
+    const row = screen.getByRole("button", { name: /海岸研究室/ });
+    fireEvent.click(row);
+    expect(switchWorkspace).not.toHaveBeenCalled();
+    expect(onSwitched).not.toHaveBeenCalled();
+    expect(screen.getByText("再点确认")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /海岸研究室/ }));
+    await waitFor(() => expect(switchWorkspace).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onSwitched).toHaveBeenCalledWith("海岸研究室"));
+  });
+
+  it("switches on the first click when no assessment is running", async () => {
+    const switchWorkspace = vi.fn().mockResolvedValue(ok(session(OTHER.workspaceId), 2));
+    installApi({
+      auth: { getState: vi.fn().mockResolvedValue(ok(session(CURRENT.workspaceId), 1)) },
+      workspace: {
+        list: vi.fn().mockResolvedValue(ok({ workspaces: [CURRENT, OTHER] }, 1)),
+        switch: switchWorkspace,
+      },
+    });
+    useRoomStore.setState({ activeRunId: null });
+    render(<HudAccountMenu notice={null} onSwitched={() => undefined} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: /海岸研究室/ })).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: /海岸研究室/ }));
+    await waitFor(() => expect(switchWorkspace).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText("再点确认")).toBeNull();
+  });
   it("keeps the rows mounted while a background refresh is in flight", async () => {
     let releaseList: ((value: GatewayResultV1<{ workspaces: WorkspaceSummaryV1[] }>) => void) | undefined;
     installApi({

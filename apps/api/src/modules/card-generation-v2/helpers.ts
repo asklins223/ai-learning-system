@@ -15,6 +15,7 @@ import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
 import { noteVersions } from "@ailearn/shared/db-schema/note";
 import { cardGenerationRunStatusV2Schema, isCandidateReviewReadyV2 } from "@ailearn/shared/card-generation-v2-contracts";
 import { projectCardGenerationRecoveryV1 } from "./desktop-projection.ts";
+import type { CardGenerationProgressV1 } from "@ailearn/shared/card-generation-desktop-contracts";
 // 2026-08-24（AI 设计审查 §4.4 第二批）：ServiceError 继承 shared 纯逻辑层的
 // CardGenerationPipelineErrorV2——seal/binding-plan 纯函数抛出 shared 类，
 // API 错误边界通过同一继承链识别 code/statusCode。
@@ -108,7 +109,57 @@ export async function checkSourceOutdated(
   return latestVersions[0].id !== runNoteVersionId;
 }
 
-export async function serializeRunPublic(row: typeof cardGenerationRunsV2.$inferSelect, tx?: ApiTransaction) {
+/**
+ * 一次生成的逐候选进度聚合（2026-09-20 实走复盘 #2）。
+ *
+ * `run.status` 到 `authoring` 就停住不动，候选是一张张写出来的，所以进度必须回到
+ * 候选表上数。取每个 candidate 的**最新修订**再分组——一次生成里同一候选会被改写
+ * 多次（rewrite 路径），按行数会虚高。
+ */
+export async function readGenerationProgressV2(
+  tx: ApiTransaction,
+  workspaceId: string,
+  runId: string,
+  currentPlanVersion: number,
+): Promise<CardGenerationProgressV1> {
+  const progress: CardGenerationProgressV1 = {
+    plannedCards: 0, authored: 0, gatePassed: 0, gateFailed: 0,
+  };
+  if (currentPlanVersion > 0) {
+    const planRows = await tx.execute(sql`
+      SELECT result ->> 'recommendedCardCount' AS planned_cards
+      FROM public.card_generation_plans_v2
+      WHERE workspace_id = ${workspaceId} AND run_id = ${runId} AND plan_version = ${currentPlanVersion}
+      LIMIT 1
+    `);
+    const planned = Number((planRows[0] as { planned_cards?: string | null } | undefined)?.planned_cards);
+    if (Number.isSafeInteger(planned) && planned >= 0) progress.plannedCards = planned;
+  }
+  const stateRows = await tx.execute(sql`
+    SELECT quality_state, COUNT(*)::int AS n
+    FROM (
+      SELECT DISTINCT ON (candidate_id) quality_state
+      FROM public.card_generation_candidates_v2
+      WHERE workspace_id = ${workspaceId} AND run_id = ${runId}
+      ORDER BY candidate_id, revision DESC
+    ) latest
+    GROUP BY quality_state
+  `);
+  const counts = new Map<string, number>();
+  for (const row of stateRows as unknown as Array<{ quality_state: string; n: number }>) {
+    counts.set(row.quality_state, row.n);
+  }
+  progress.gatePassed = counts.get("passed") ?? 0;
+  progress.gateFailed = counts.get("failed") ?? 0;
+  progress.authored = [...counts.values()].reduce((sum, count) => sum + count, 0);
+  return progress;
+}
+
+export async function serializeRunPublic(
+  row: typeof cardGenerationRunsV2.$inferSelect,
+  tx?: ApiTransaction,
+  progress: CardGenerationProgressV1 | null = null,
+) {
   let sourceOutdated = false;
   if (tx) {
     try {
@@ -133,6 +184,7 @@ export async function serializeRunPublic(row: typeof cardGenerationRunsV2.$infer
     currentPlanVersion: row.currentPlanVersion,
     reviewDraftRevision: row.reviewDraftRevision,
     sourceOutdated,
+    progress,
     recovery: projectCardGenerationRecoveryV1({
       runId: row.id,
       noteId: row.noteId,

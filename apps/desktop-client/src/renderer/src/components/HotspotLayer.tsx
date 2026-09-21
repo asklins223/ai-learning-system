@@ -117,7 +117,7 @@ export function HotspotLayer() {
 
   const openReview = () => {
     if (routes.has("review.queue")) invoke("review");
-    else unavailable("复习台尚未开放", "入口已经保留，当前桌面合同还没有签发可用路由。");
+    else unavailable("复习台尚未开放", "入口先留着，这一版还没有接上可用的页面。");
   };
 
   return (

@@ -305,6 +305,32 @@ describe("note/service listNotes", () => {
     assert.equal(result.items[0]?.currentVersionId, "v1");
   });
 
+  it("列表带上正文首图，一版只取 ordinal 最小的那块", async () => {
+    // 复盘 #17：以前列表什么都不带，"哪篇笔记里有图"只能挨篇点开。
+    const now = new Date();
+    const notes = [
+      { id: "note-1", title: "有图", titleSource: "manual" as const, createdAt: now, updatedAt: now, currentVersionId: "v1", workspaceId: WS_ID, createdBy: USER_ID },
+      { id: "note-2", title: "没图", titleSource: "manual" as const, createdAt: now, updatedAt: now, currentVersionId: "v2", workspaceId: WS_ID, createdBy: USER_ID },
+    ];
+    // mock 的 select 队列按调用顺序取值：笔记行 → count → 图片块（服务端已按
+    // version_id, ordinal 排好，所以这里就按"每版第一块在前"给）。
+    const mock = createMockExecutor({
+      selectResult: [
+        notes,
+        [{ count: 2 }],
+        [
+          { versionId: "v1", content: "![装置](/api/uploads/a.png)" },
+          { versionId: "v1", content: "![第二张](/api/uploads/b.png)" },
+        ],
+      ],
+    });
+
+    const result = await listNotes(mock, WS_ID, { limit: 10 });
+
+    assert.equal(result.items[0]?.firstImageBlock, "![装置](/api/uploads/a.png)");
+    assert.equal(result.items[1]?.firstImageBlock, null, "没有图片块的要显式回 null");
+  });
+
   it("结果数等于 limit 时不猜测存在下一页", async () => {
     const now = new Date();
     const notes = Array.from({ length: 3 }, (_, i) => ({

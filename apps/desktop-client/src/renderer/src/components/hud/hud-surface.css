@@ -60,6 +60,14 @@
   pointer-events: none;
 }
 
+/* 观测台目前只有一套获批底图；日间以暖色天光层区分时段，避免主题切换
+   只改变外围 chrome 而主场景完全不动。 */
+.desktop-app[data-theme="day"] .task-surface--companion-center::after {
+  background:
+    radial-gradient(circle at 30% 18%, rgba(255, 221, 158, 0.22), transparent 34%),
+    linear-gradient(180deg, rgba(224, 177, 111, 0.14), rgba(25, 16, 11, 0.04) 54%, rgba(25, 16, 11, 0.12));
+}
+
 .desktop-app[data-theme="night"] .task-surface--source-library,
 .desktop-app[data-theme="night"] .task-surface--source-detail,
 .desktop-app[data-theme="night"] .task-surface--search { background-image: url("/assets/approved-v3/environments/library-night-v1.png"); }
@@ -203,14 +211,16 @@
 }
 
 /* 伴星缩放不是纯视觉设置：角色的可见占地会跟着变化，任务版心必须消费运行时
-   发布的座位预算。默认值保持 100% 时的既有几何，只有放大后才额外让位。 */
-.desktop-app.hud-surface:not(.companion-absent):not(.comp-left):not(.page-19) .content {
+   发布的座位预算。默认值保持 100% 时的既有几何，只有放大后才额外让位。
+   :not(.page-19):not(.page-20)：两页都是全出血星图（inset:0），chrome 由页面
+   自己的浮层仪表让位（insets / seat-gutter），版心不再收缩。 */
+.desktop-app.hud-surface:not(.companion-absent):not(.comp-left):not(.page-19):not(.page-20) .content {
   right: var(--companion-seat-right, 245px);
 }
-.desktop-app.hud-surface.comp-left:not(.companion-absent):not(.page-19) .content {
+.desktop-app.hud-surface.comp-left:not(.companion-absent):not(.page-19):not(.page-20) .content {
   left: var(--companion-seat-left, 365px);
 }
-.desktop-app.hud-surface.nav-collapsed.comp-left:not(.companion-absent):not(.page-19) .content {
+.desktop-app.hud-surface.nav-collapsed.comp-left:not(.companion-absent):not(.page-19):not(.page-20) .content {
   left: var(--companion-seat-left-collapsed, 335px);
 }
 
@@ -224,28 +234,28 @@
   left: var(--companion-seat-left-collapsed, 335px);
 }
 /* 右侧座位页缺席：恢复 88px。:not(.drawer-open) 让聊天抽屉的 405px/205px
-   预留继续优先；:not(.page-19) 让星图的全出血版心（inset:0）不受影响。 */
-.desktop-app.hud-surface.companion-absent:not(.drawer-open):not(.page-19) .content {
+   预留继续优先；:not(.page-19):not(.page-20) 让两张星图的全出血版心不受影响。 */
+.desktop-app.hud-surface.companion-absent:not(.drawer-open):not(.page-19):not(.page-20) .content {
   right: 88px;
 }
 /* 左侧座位页（11 目标详情 / 15 复习队列）缺席：撤销 365px 左预留，回到 V3.1
    基线 128px（hud-pages.css 的 `.hud-surface .content{left:128px}`）。
-   :not(.page-19)：星图是全出血版心，座位让位走它自己的 seat-gutter。 */
-.desktop-app.hud-surface.comp-left.companion-absent:not(.page-19) .content {
+   :not(.page-19):not(.page-20)：星图是全出血版心，座位让位走它自己的 seat-gutter。 */
+.desktop-app.hud-surface.comp-left.companion-absent:not(.page-19):not(.page-20) .content {
   left: 128px;
 }
 /* 折叠栏把左基线从 128px 收到 92px，左侧座位页缺席同样回到折叠基线。 */
-.desktop-app.hud-surface.nav-collapsed.comp-left.companion-absent:not(.page-19) .content {
+.desktop-app.hud-surface.nav-collapsed.comp-left.companion-absent:not(.page-19):not(.page-20) .content {
   left: 92px;
 }
 @media (max-width: 760px) {
-  .desktop-app.hud-surface:not(.companion-absent):not(.comp-left):not(.page-19) .content {
+  .desktop-app.hud-surface:not(.companion-absent):not(.comp-left):not(.page-19):not(.page-20) .content {
     right: var(--companion-seat-right-compact, 124px);
   }
-  .desktop-app.hud-surface.comp-left:not(.companion-absent):not(.page-19) .content {
+  .desktop-app.hud-surface.comp-left:not(.companion-absent):not(.page-19):not(.page-20) .content {
     left: var(--companion-seat-left-compact, 194px);
   }
-  .desktop-app.hud-surface.nav-collapsed.comp-left:not(.companion-absent):not(.page-19) .content {
+  .desktop-app.hud-surface.nav-collapsed.comp-left:not(.companion-absent):not(.page-19):not(.page-20) .content {
     left: var(--companion-seat-left-collapsed-compact, 178px);
   }
   .desktop-app.hud-surface:not(.companion-absent):not(.comp-left) .approved-surface__content {
@@ -257,13 +267,13 @@
   .desktop-app.hud-surface[data-directory-rail="collapsed"].comp-left:not(.companion-absent) .approved-surface__content {
     left: var(--companion-seat-left-collapsed-compact, 178px);
   }
-  .desktop-app.hud-surface.companion-absent:not(.drawer-open):not(.page-19) .content {
+  .desktop-app.hud-surface.companion-absent:not(.drawer-open):not(.page-19):not(.page-20) .content {
     right: 44px;
   }
-  .desktop-app.hud-surface.comp-left.companion-absent:not(.page-19) .content {
+  .desktop-app.hud-surface.comp-left.companion-absent:not(.page-19):not(.page-20) .content {
     left: 64px;
   }
-  .desktop-app.hud-surface.nav-collapsed.comp-left.companion-absent:not(.page-19) .content {
+  .desktop-app.hud-surface.nav-collapsed.comp-left.companion-absent:not(.page-19):not(.page-20) .content {
     left: 46px;
   }
 }
@@ -1679,8 +1689,8 @@
 
 /* 上一版灵动岛的质感：槽位默认降档色，悬停提亮，按压有明显的缩放+高亮反馈。 */
 .hud-surface .room-control > button:hover { background: rgba(255, 255, 255, 0.1); }
-.hud-surface .room-control > button:not(.room-control-trigger):hover { color: #fff9f1; }
-.hud-surface .room-control > button:not(.room-control-trigger):active {
+.hud-surface .room-control > button:not(.room-control-trigger):not(.room-control-space):hover { color: #fff9f1; }
+.hud-surface .room-control > button:not(.room-control-trigger):not(.room-control-space):active {
   color: #fff9f1;
   background: rgba(255, 255, 255, 0.16);
   /* 展开位移动画完成后槽位在 translateX(0)，按压态必须写全 transform。 */
@@ -1717,6 +1727,23 @@
   max-height: min(560px, calc(100vh - 96px));
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+
+/* 切换成功回执。它挂在药丸这一层而不是任何 surface 里：切换会重挂载整棵房间，
+   surface 自己的 state 活不过那一次重挂载。皮肤与药丸同源，避免被读成第三个浮层。 */
+.hud-surface .room-control-receipt {
+  position: absolute;
+  z-index: 30;
+  top: 78px;
+  right: 25px;
+  margin: 0;
+  padding: 7px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  background: rgba(41, 29, 22, 0.88);
+  box-shadow: var(--hud-shadow-small);
+  color: #fff9e9;
+  font-size: 13px;
 }
 
 /* The mockup writes the row as a `<div>`; as a real button it needs the UA's
@@ -1887,7 +1914,7 @@
 
 /* The slots ride the same morph: sealed away while collapsed, in 65ms behind
    the skin once it is. */
-.hud-surface .room-control > button:not(.room-control-trigger) {
+.hud-surface .room-control > button:not(.room-control-trigger):not(.room-control-space) {
   position: relative;
   color: rgba(255, 246, 234, 0.72);
   opacity: 0;
@@ -1896,7 +1923,7 @@
   transition: opacity 150ms ease-out, transform 240ms cubic-bezier(0.22, 1, 0.36, 1), background-color 140ms var(--hud-ease-out), color 140ms ease;
 }
 
-.hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger) {
+.hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger):not(.room-control-space) {
   opacity: 1;
   transform: translateX(0);
   /* 折叠规则把槽位设成了点击透明；展开时必须恢复，否则整排槽位
@@ -1909,7 +1936,7 @@
 }
 
 /* 按下的瞬间走更快的通道：90ms 落到按压态，松手回弹走基础 240ms。 */
-.hud-surface .room-control > button:not(.room-control-trigger):active {
+.hud-surface .room-control > button:not(.room-control-trigger):not(.room-control-space):active {
   transform: translateX(0) scale(0.9);
   transition-property: opacity, transform, background-color, color;
   transition-duration: 90ms;
@@ -1918,17 +1945,109 @@
 
 /* 展开波浪：图标按槽位次序错峰落位（animation 不参与 transition，
    不会拖慢悬停/按压反馈）。 */
-.hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger) svg {
+/* 常驻空间胶囊：它是「我在哪个空间、我能不能改」的唯一常驻答案，所以不属于药丸
+   的折叠集合——上面所有 `> button:not(.room-control-trigger)` 规则都同时排除它，
+   改一处就够，不在这里再补一份 opacity/pointer-events 的副本（那样两处会互相打架，
+   实测 1440 视口下就有一条 @media 里的同类规则把覆盖赢回去）。
+   胶囊自己带底，不依赖药丸皮肤（折叠时皮肤是隐藏的）。 */
+.hud-surface .room-control > button.room-control-space {
+  display: inline-flex;
+  width: auto;
+  max-width: 224px;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  padding: 0 13px 0 9px;
+  border: 1px solid rgba(255, 244, 226, 0.22);
+  border-radius: 999px;
+  background: rgba(41, 29, 22, 0.86);
+  box-shadow: var(--hud-shadow-small);
+  color: rgba(255, 246, 234, 0.92);
+}
+
+.hud-surface .room-control > button.room-control-space:hover {
+  background: rgba(52, 37, 27, 0.92);
+}
+
+.hud-surface .room-control > button.room-control-space.active {
+  border-color: rgba(255, 241, 168, 0.5);
+  background: rgba(255, 241, 168, 0.14);
+}
+
+.hud-surface .room-control-space__seal {
+  display: grid;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  color: rgba(255, 231, 178, 0.9);
+}
+
+.hud-surface .room-control-space__seal > svg {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+}
+
+.hud-surface .room-control-space__text {
+  display: grid;
+  min-width: 0;
+  line-height: 1.18;
+  text-align: left;
+}
+
+.hud-surface .room-control-space__text b {
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hud-surface .room-control-space__text small {
+  font-size: 8.5px;
+  opacity: 0.74;
+}
+
+/* 只读态转冷色，但角色文字始终在——a11y 合同要求颜色不能是唯一载体。 */
+.hud-surface .room-control > button.room-control-space[data-readonly="true"] {
+  border-color: rgba(159, 192, 216, 0.34);
+  color: #dfe9f2;
+}
+
+.hud-surface .room-control > button.room-control-space[data-readonly="true"] .room-control-space__seal {
+  color: #9fc0d8;
+}
+
+/* 「放进共享空间即视为可外发」的明示条：三个入口共用一条样式，措辞共用一个组件。
+   故意不用告警色——它不是错误，是一个需要被看见的决定。 */
+.hud-surface .space-sharing-notice {
+  margin: 8px 0 0;
+  padding: 7px 10px;
+  border-left: 3px solid rgba(255, 231, 178, 0.55);
+  border-radius: 0 10px 10px 0;
+  background: rgba(255, 247, 220, 0.09);
+  color: rgba(255, 246, 234, 0.8);
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.hud-surface .space-sharing-notice b {
+  color: #fff1a8;
+  font-weight: 700;
+}
+
+.hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger):not(.room-control-space) svg {
   animation: hud-slot-icon-in 240ms cubic-bezier(0.23, 1, 0.32, 1) backwards;
 }
 
-.hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger):nth-child(2) svg { animation-delay: 65ms; }
-.hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger):nth-child(3) svg { animation-delay: 81ms; }
-.hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger):nth-child(4) svg { animation-delay: 97ms; }
-.hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger):nth-child(5) svg { animation-delay: 113ms; }
-.hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger):nth-child(6) svg { animation-delay: 129ms; }
-.hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger):nth-child(7) svg { animation-delay: 145ms; }
-.hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger):nth-child(8) svg { animation-delay: 161ms; }
+.hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger):not(.room-control-space):nth-child(2) svg { animation-delay: 65ms; }
+.hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger):not(.room-control-space):nth-child(3) svg { animation-delay: 81ms; }
+.hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger):not(.room-control-space):nth-child(4) svg { animation-delay: 97ms; }
+.hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger):not(.room-control-space):nth-child(5) svg { animation-delay: 113ms; }
+.hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger):not(.room-control-space):nth-child(6) svg { animation-delay: 129ms; }
+.hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger):not(.room-control-space):nth-child(7) svg { animation-delay: 145ms; }
+.hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger):not(.room-control-space):nth-child(8) svg { animation-delay: 161ms; }
 
 @keyframes hud-slot-icon-in {
   from { opacity: 0; transform: translateX(6px) scale(0.8); }
@@ -1971,13 +2090,13 @@
 @media (prefers-reduced-motion: reduce) {
   .hud-surface .room-control::before,
   .hud-surface .room-control .room-control-trigger,
-  .hud-surface .room-control > button:not(.room-control-trigger) {
+  .hud-surface .room-control > button:not(.room-control-trigger):not(.room-control-space) {
     transition-duration: 1ms;
     transition-delay: 0ms;
   }
 
   /* 位移类动画全部撤掉；换图标只留瞬时切换。 */
-  .hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger) svg,
+  .hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger):not(.room-control-space) svg,
   .hud-surface .room-control .room-control-icon-swap {
     animation: none;
   }
@@ -2298,170 +2417,344 @@
   .hud-surface .notebook { overflow-x: hidden; }
 }
 
-/* Companion centre V2 — persistent workbench + real relation universe. */
-.hud-surface[data-hud-page="20"] .content {
+/* Companion centre V3.1 — 无界记忆星图 + 深色玻璃工作台。
+   页 20 与页 19 同一机制：canvas 全出血铺满整窗，记忆星图不再是有界卡片，
+   没有任何自绘底色——透出 observatory 夜景；星体沿用理解星图的深夜三色
+   （青/金/薄荷）。全部浮层仪表与卡片采用「带奶白外边框的深色玻璃」配方，
+   与 mockup 页 08 的 .companion-room 面板同一族：深夜蓝半透明 +
+   backdrop-filter + 奶白外框 + 内嵌白描边，卡片是白玻璃浮层。
+   布局网格（全出血）：
+   ┌ task-title 薄荷章 ┊ 标题+搜索+筛选玻璃盘 (map-hud) ┈┈┈ room 岛 ┐
+   │ 工作台玻璃   ┊ ┄┄┄┄┄┄┄┄ 星 空（无界） ┄┄┄┄┄┄┄ 节点索引玻璃 │
+   │ (左悬浮)     ┊ ┄┄┄┄┄┄┄┄ 星 空 ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┈┈┈┈┈┈ │
+   └ 返回书房 ┊ 图例 ┉┉┉┉┉┉┉┉┉┉┉┉ 选中条/缩放控件 ┈ 伴星右座 ┘ */
+
+/* 版心全出血。座位让位规则已在文件头部用 :not(.page-20) 豁免。 */
+.hud-surface.page-20 .content,
+.hud-surface.nav-collapsed.page-20 .content {
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
   overflow: hidden;
 }
 
 .hud-surface .companion-center {
-  --companion-ink: #35291f;
-  --companion-soft: #715f50;
-  --companion-paper: rgba(255, 247, 226, 0.96);
-  --companion-paper-quiet: rgba(255, 247, 226, 0.82);
-  --companion-line: rgba(87, 67, 49, 0.2);
-  --companion-accent: #287687;
-  --companion-accent-strong: #185868;
-  --companion-danger: #a24434;
-  --companion-map-deep: #071827;
+  /* 画布调色板：与 .hud-surface .universe-page 同值（深夜三色）。 */
+  --universe-envelope-a: rgba(121, 206, 220, 0.19);
+  --universe-envelope-b: rgba(233, 198, 111, 0.1);
+  --universe-label: #fff3df;
+  --universe-label-muted: rgba(214, 235, 235, 0.88);
+  --universe-label-backdrop: rgba(8, 24, 39, 0.96);
+  --universe-edge: rgba(121, 206, 220, 0.78);
+  --universe-edge-glow: #79cedc;
+  --universe-source: #e9c66f;
+  --universe-note: #8fc7a7;
+  --universe-card: #ffe4a3;
+  --universe-key-point: #79cedc;
+  --universe-orbit: rgba(121, 206, 220, 0.34);
+  --universe-evidence-track: rgba(121, 206, 220, 0.2);
+  --universe-selected: #ffe4a3;
+  --universe-state-active: #79cedc;
+  --universe-state-pinned: #ffe4a3;
+  --universe-state-candidate: #a89782;
+  --universe-state-linked: #8fc7a7;
+  --universe-state-orphaned: #df7657;
+  --universe-state-misunderstood: #df7657;
+  --universe-state-due: #e9c66f;
+  --universe-state-understood: #8fc7a7;
+  --universe-state-reviewed: #9fc28a;
+  --universe-state-seen: #79cedc;
+  --universe-state-unseen: #a89782;
+  /* 缩放控件（canvas 根内）的落位：让开伴星右座条带。 */
+  --companion-seat-strip-right: 300px;
+  --companion-universe-bar-bottom: 22px;
+  --universe-shell-right: var(--companion-seat-strip-right);
+  --universe-bar-bottom: var(--companion-universe-bar-bottom);
+  /* 工作台落位是布局变量：标题玻璃盘、图例的左缘随它一起算，永不脱节。 */
+  --companion-bench-left: 96px;
+  --companion-bench-gap: 20px;
+  --companion-bench-w: clamp(300px, 26vw, 372px);
+  /* 工作台在资料分区会扩成整页主体；内容仍要有可读宽度，否则一栏表单被摊成 1000px。 */
+  --companion-content-measure: 860px;
+  /* 深色玻璃公共配方（mockup .companion-room 同族）。 */
+  --companion-glass-ink: #ecf2e9;
+  --companion-glass-soft: #a9c2c7;
+  --companion-glass-faint: #8ba6ad;
+  --companion-plate-border: 3px solid rgba(255, 252, 235, 0.62);
+  --companion-plate-shadow: 0 18px 38px rgba(1, 12, 25, 0.42), inset 0 0 0 2px rgba(255, 255, 255, 0.05);
+  --companion-glass: rgba(11, 33, 48, 0.85);
+  --companion-glass-blur: blur(20px) saturate(1.18);
+  --companion-card-glass: rgba(255, 255, 255, 0.07);
+  --companion-card-border: 1.5px solid rgba(255, 252, 235, 0.3);
+  --companion-card-shadow: 0 6px 18px rgba(1, 12, 25, 0.3);
+  /* 圆角三档：签（chip）< 卡（card）< 盘（plate）。同角色元素只用所属那一档。 */
+  --companion-radius-chip: 11px 14px 10px 13px;
+  --companion-radius-card: 14px 18px 13px 16px;
+  --companion-radius-plate: 19px 24px 17px 21px;
+  /* 间距刻度（4 的倍数）：一档一个角色，不再逐处手写 px。 */
+  --companion-gap-inline: 5px;
+  --companion-gap-row: 8px;
+  --companion-gap-block: 12px;
+  --companion-pad-card: 12px 14px;
+  --companion-pad-row: 10px 12px;
+  --companion-pad-panel: 14px 16px 18px;
+  /* 工作台三条横向带（标题、页签、面板）共用的左右内缩：三者对齐到同一条竖线。 */
+  --companion-pad-panel-inline: 16px;
+  --companion-pad-veil: 24px;
+  /* 字号刻度：micro 用于元信息，body 用于控件与正文，title/section/page 用于标题。 */
+  --companion-font-micro: 11px;
+  --companion-font-body: 12px;
+  --companion-font-title: 13px;
+  --companion-font-section: 15px;
+  --companion-font-panel: 16px;
+  --companion-font-page: 21px;
+  /* 浮层堆叠序：从星空到菜单一路向上，同区不取等值，避免靠 DOM 顺序决胜。 */
+  --companion-z-bench: 30;
+  --companion-z-legend: 31;
+  --companion-z-index: 32;
+  --companion-z-hud: 33;
+  --companion-z-selection: 34;
+  --companion-z-veil: 35;
+  --companion-z-menu: 40;
+  --companion-z-compact: 42;
   position: absolute;
   inset: 0;
+  min-width: 0;
+  min-height: 0;
+  color: var(--companion-glass-ink);
+}
+
+.hud-surface .companion-compact-mode { display: none; }
+
+.hud-surface .companion-map-canvas {
+  position: absolute;
+  inset: 0;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ── 状态遮罩（载入 / 失败 / 空筛选）：一张居中深色玻璃卡 ── */
+.hud-surface .companion-map-veil {
+  position: absolute;
+  inset: 0;
+  z-index: var(--companion-z-veil);
   display: grid;
-  grid-template-columns: clamp(320px, 35vw, 400px) minmax(0, 1fr);
-  gap: 12px;
-  min-width: 0;
-  min-height: 0;
-  color: var(--companion-ink);
-  font-family: "Noto Sans SC Variable", "Noto Sans SC", "PingFang SC", sans-serif;
+  place-items: center;
+  padding: var(--companion-pad-veil);
+  pointer-events: none;
 }
 
-.hud-surface .companion-workbench,
-.hud-surface .companion-map {
-  min-width: 0;
+.hud-surface .companion-map-veil .companion-section-state {
+  pointer-events: auto;
+  max-width: min(420px, 84%);
+  padding: 22px 26px;
+  border: var(--companion-plate-border);
+  border-radius: var(--companion-radius-plate);
+  background: var(--companion-glass);
+  backdrop-filter: var(--companion-glass-blur);
+  -webkit-backdrop-filter: var(--companion-glass-blur);
+  box-shadow: var(--companion-plate-shadow);
+  color: var(--companion-glass-ink);
   min-height: 0;
-  border: 1px solid var(--companion-line);
-  border-radius: 14px;
-  box-shadow: 0 14px 34px rgba(31, 19, 10, 0.2);
 }
 
+/* ══ 左侧悬浮工作台：深色玻璃 folio ══════════════════════════════════ */
 .hud-surface .companion-workbench {
+  position: absolute;
+  z-index: var(--companion-z-bench);
+  left: var(--companion-bench-left);
+  top: 100px;
+  bottom: 82px;
+  width: var(--companion-bench-w);
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
-  background: var(--companion-paper);
+  border: 4px solid rgba(255, 252, 235, 0.7);
+  border-radius: 31px 42px 29px 38px / 35px 30px 43px 31px;
+  box-shadow: var(--companion-plate-shadow);
+  background: var(--companion-glass);
+  backdrop-filter: var(--companion-glass-blur);
+  -webkit-backdrop-filter: var(--companion-glass-blur);
 }
 
-.hud-surface .companion-workbench__header,
-.hud-surface .companion-map__header {
+.hud-surface .companion-workbench-header {
   display: flex;
-  min-width: 0;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--companion-gap-block);
+  padding: var(--companion-gap-block) var(--companion-gap-block) var(--companion-gap-row);
+  padding-inline: var(--companion-pad-panel-inline);
 }
 
-.hud-surface .companion-workbench__header {
-  padding: 16px 16px 12px;
-}
-
-.hud-surface .companion-workbench__header h2,
-.hud-surface .companion-map__header h2,
-.hud-surface .companion-panel-heading h3,
-.hud-surface .companion-persona-groups h3 {
+.hud-surface .companion-workbench-header h2 {
   margin: 0;
-  font-family: "Noto Serif SC", "Songti SC", serif;
-  color: inherit;
+  font: 680 var(--companion-font-page)/1.2 "Noto Serif SC", "Songti SC", serif;
+  color: #fff3df;
 }
 
-.hud-surface .companion-workbench__header h2 { font-size: 21px; line-height: 1.2; }
-.hud-surface .companion-workbench__header p,
-.hud-surface .companion-map__header p,
-.hud-surface .companion-panel-heading p,
-.hud-surface .companion-persona-groups section > p {
-  margin: 5px 0 0;
-  color: var(--companion-soft);
-  font-size: 11px;
+.hud-surface .companion-workbench-header p {
+  margin: var(--companion-gap-inline) 0 0;
+  color: var(--companion-glass-soft);
+  font-size: var(--companion-font-micro);
   line-height: 1.55;
-}
-
-.hud-surface .companion-icon-button,
-.hud-surface .companion-center button,
-.hud-surface .companion-center select,
-.hud-surface .companion-center input,
-.hud-surface .companion-center textarea {
-  font: inherit;
 }
 
 .hud-surface .companion-icon-button {
   display: grid;
   flex: 0 0 auto;
-  width: 34px;
-  height: 34px;
+  width: 44px;
+  height: 44px;
   place-items: center;
-  border: 1px solid var(--companion-line);
-  border-radius: 10px;
-  background: rgba(255,255,255,0.48);
-  color: var(--companion-soft);
+  border: 1.5px solid rgba(255, 252, 235, 0.3);
+  border-radius: var(--companion-radius-chip);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--companion-glass-soft);
+  cursor: pointer;
+  transition: background-color 140ms var(--hud-ease-out), color 140ms var(--hud-ease-out);
 }
 
+.hud-surface .companion-icon-button:hover { background: rgba(255, 255, 255, 0.16); color: #fff3df; }
+
+/* 分区页签：夜纸小圆签，选中黄油底（mockup memory-tabs 同款）。
+   轨道上限 96px 而不是 1fr：工作台在资料分区会扩成整页主体，1fr 会把一枚
+   两字页签拉到 170px 宽；给上限后窄工作台仍填满、宽工作台按内容收拢，
+   而分隔线继续横贯整条工作台。 */
 .hud-surface .companion-tabs {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 2px;
-  padding: 0 12px 10px;
-  border-bottom: 1px solid var(--companion-line);
+  grid-template-columns: repeat(6, minmax(0, 96px));
+  gap: var(--companion-gap-inline);
+  padding: 0 var(--companion-pad-panel-inline) var(--companion-gap-row);
+  border-bottom: 1px solid rgba(255, 252, 235, 0.14);
 }
 
 .hud-surface .companion-tabs button {
   min-width: 0;
-  min-height: 34px;
+  min-height: 44px;
   border: 0;
-  border-radius: 9px;
+  border-radius: var(--companion-radius-chip);
   background: transparent;
-  color: var(--companion-soft);
-  font-size: 11px;
+  color: var(--companion-glass-soft);
+  font-size: var(--companion-font-body);
   cursor: pointer;
-  transition: background-color 160ms var(--hud-ease-out), color 160ms var(--hud-ease-out);
+  transition: background-color 160ms var(--hud-ease-out), color 160ms var(--hud-ease-out), box-shadow 160ms var(--hud-ease-out);
 }
 
+.hud-surface .companion-tabs button:hover { background: rgba(255, 255, 255, 0.08); color: #fff3df; }
+
 .hud-surface .companion-tabs button.is-active {
-  background: #294b50;
-  color: #fff8e9;
+  background: var(--hud-butter, #f3d678);
+  color: #49382b;
+  box-shadow: inset 0 0 0 1px rgba(96, 60, 35, 0.15), 0 5px 11px rgba(1, 12, 25, 0.35);
 }
 
 .hud-surface .companion-tab-panel {
   min-height: 0;
-  overflow: auto;
-  padding: 14px;
-  scrollbar-color: rgba(50, 89, 95, 0.45) transparent;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--companion-pad-panel);
   scrollbar-width: thin;
+  scrollbar-color: rgba(255, 252, 235, 0.28) transparent;
 }
 
-.hud-surface .companion-panel-stack { display: grid; align-content: start; gap: 12px; }
-.hud-surface .companion-panel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-.hud-surface .companion-heading-actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
-.hud-surface .companion-panel-heading h3,
-.hud-surface .companion-persona-groups h3 { font-size: 16px; }
+/* ── 工作台内控件（深色玻璃上的白玻璃浮层） ── */
+.hud-surface .companion-panel-stack { display: grid; align-content: start; gap: var(--companion-gap-block); }
+.hud-surface .companion-panel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--companion-gap-block); }
+.hud-surface .companion-heading-actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: var(--companion-gap-row); }
+.hud-surface .companion-heading-actions button { white-space: nowrap; }
+.hud-surface .companion-panel-heading > button { white-space: nowrap; }
+.hud-surface .companion-panel-heading h3 { margin: 0; font: 650 var(--companion-font-panel)/1.3 "Noto Serif SC", "Songti SC", serif; color: #fff3df; }
+.hud-surface .companion-panel-heading p { margin: var(--companion-gap-inline) 0 0; color: var(--companion-glass-soft); font-size: var(--companion-font-micro); line-height: 1.55; }
 
-.hud-surface .companion-center button {
-  min-height: 32px;
-  border: 1px solid var(--companion-line);
-  border-radius: 9px;
-  padding: 6px 10px;
-  background: rgba(255,255,255,0.5);
-  color: var(--companion-ink);
-  font-size: 11px;
+/* 基础按钮：白玻璃小签。primary/danger 叠加变体。 */
+.hud-surface .companion-workbench button,
+.hud-surface .companion-map-veil button,
+.hud-surface .companion-map-selection button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--companion-gap-inline);
+  min-height: 44px;
+  padding: var(--companion-gap-inline) var(--companion-gap-block);
+  border: 1.5px solid rgba(255, 252, 235, 0.3);
+  border-radius: var(--companion-radius-chip);
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--companion-glass-ink);
+  font-size: var(--companion-font-body);
   cursor: pointer;
-  transition: background-color 150ms var(--hud-ease-out), color 150ms var(--hud-ease-out), border-color 150ms var(--hud-ease-out), transform 150ms var(--hud-ease-out);
+  transition: background-color 140ms var(--hud-ease-out), border-color 140ms var(--hud-ease-out), transform 140ms var(--hud-ease-out), box-shadow 140ms var(--hud-ease-out);
 }
-.hud-surface .companion-center button.primary { border-color: #294b50; background: #294b50; color: #fff8e9; }
-.hud-surface .companion-center button.danger { border-color: var(--companion-danger); background: var(--companion-danger); color: #fff; }
-.hud-surface .companion-center button.danger-quiet { border-color: rgba(162,68,52,0.28); color: var(--companion-danger); }
-.hud-surface .companion-center button:disabled { cursor: not-allowed; opacity: 0.48; }
-.hud-surface .companion-center button:focus-visible,
-.hud-surface .companion-center input:focus-visible,
-.hud-surface .companion-center select:focus-visible,
-.hud-surface .companion-center textarea:focus-visible {
-  outline: 3px solid rgba(88, 174, 190, 0.42);
-  outline-offset: 2px;
+
+.hud-surface .companion-workbench button.primary,
+.hud-surface .companion-map-veil button.primary {
+  border-color: #ffd9a4;
+  background: linear-gradient(165deg, #f8b072, #eb8747);
+  color: #40230f;
+  font-weight: 750;
+  text-shadow: 0 1px rgba(255, 255, 255, 0.35);
+  box-shadow: 0 7px 18px rgba(236, 138, 74, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.4);
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .hud-surface .companion-center button:not(:disabled):hover { background: #fffdf5; border-color: rgba(40,118,135,0.42); }
-  .hud-surface .companion-center button.primary:not(:disabled):hover { background: var(--companion-accent-strong); color: #fff; transform: translateY(-1px); }
+  .hud-surface .companion-workbench button.primary:not(:disabled):hover {
+    background: linear-gradient(165deg, #ffbd82, #f39a58);
+    transform: translateY(-1px);
+  }
 }
 
-.hud-surface .companion-filter-row,
-.hud-surface .companion-map__filters,
+.hud-surface .companion-workbench button.danger {
+  border-color: rgba(223, 118, 87, 0.55);
+  background: rgba(223, 118, 87, 0.18);
+  color: #f4b7a2;
+}
+
+.hud-surface .companion-workbench button.danger-quiet {
+  border-color: rgba(223, 118, 87, 0.35);
+  background: transparent;
+  color: #f4b7a2;
+}
+
+.hud-surface .companion-workbench button:disabled,
+.hud-surface .companion-map-veil button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+  transform: none;
+  box-shadow: none;
+}
+
+.hud-surface .companion-workbench button svg { flex: 0 0 auto; }
+
+/* 输入类：夜纸上的白玻璃槽。 */
+.hud-surface .companion-workbench input,
+.hud-surface .companion-workbench textarea {
+  min-height: 44px;
+  border: 1.5px solid rgba(255, 252, 235, 0.25);
+  border-radius: var(--companion-radius-chip);
+  padding: var(--companion-gap-inline) var(--companion-gap-row);
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--companion-glass-ink);
+  font-size: var(--companion-font-body);
+}
+
+.hud-surface .companion-workbench textarea { line-height: 1.55; resize: vertical; }
+.hud-surface .companion-workbench input::placeholder,
+.hud-surface .companion-workbench textarea::placeholder { color: var(--companion-glass-faint); }
+
+.hud-surface .companion-workbench button:focus-visible,
+.hud-surface .companion-workbench input:focus-visible,
+.hud-surface .companion-workbench textarea:focus-visible,
+.hud-surface .companion-map-veil button:focus-visible,
+.hud-surface .companion-map-hud button:focus-visible,
+.hud-surface .companion-map-index button:focus-visible,
+.hud-surface .companion-map-selection button:focus-visible,
+.hud-surface .companion-search input:focus-visible,
+.hud-surface .companion-search button:focus-visible,
+.hud-surface .companion-select__menu:focus-visible {
+  outline: 3px solid rgba(131, 216, 231, 0.5);
+  outline-offset: 2px;
+}
+
+.hud-surface .companion-filter-group,
 .hud-surface .companion-action-row,
 .hud-surface .companion-segmented,
 .hud-surface .companion-date-nav,
@@ -2469,263 +2762,812 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 7px;
+  gap: var(--companion-gap-row);
 }
 
-.hud-surface .companion-center select,
-.hud-surface .companion-center input,
-.hud-surface .companion-center textarea {
-  min-height: 32px;
-  border: 1px solid var(--companion-line);
-  border-radius: 9px;
-  padding: 6px 9px;
-  background: rgba(255,255,255,0.66);
-  color: var(--companion-ink);
-  font-size: 11px;
+.hud-surface .companion-action-row { justify-content: flex-start; }
+
+/* ── 搜索槽：星图、记忆列表、连续对话共用同一只 ──────────────────────
+   三处曾经是三套写法（图标 left 10 / left 12、内联清除 / 外置提交、
+   高度 44 / 继承），同一功能三种长相。现在只有一档：图标压在槽内左缘，
+   右缘按「有没有清除按钮」给位，提交按钮才落到槽外。 */
+.hud-surface .companion-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--companion-gap-row);
+  color: var(--companion-glass-soft);
 }
 
-.hud-surface .companion-inline-form {
+.hud-surface .companion-search > svg:first-child {
+  position: absolute;
+  left: var(--companion-gap-block);
+  z-index: 1;
+  pointer-events: none;
+}
+
+.hud-surface .companion-search input {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  min-height: 44px;
+  border: 1.5px solid rgba(255, 252, 235, 0.25);
+  border-radius: var(--companion-radius-chip);
+  padding: var(--companion-gap-inline) var(--companion-gap-row) var(--companion-gap-inline) 34px;
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--companion-glass-ink);
+  font-size: var(--companion-font-body);
+}
+
+.hud-surface .companion-search input::placeholder { color: var(--companion-glass-faint); }
+.hud-surface .companion-search:has(.companion-search__clear) input { padding-right: 40px; }
+
+.hud-surface .companion-search .companion-search__clear {
+  position: absolute;
+  right: 4px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-  padding: 11px;
-  border-radius: 12px;
-  background: rgba(232, 218, 186, 0.5);
+  width: 36px;
+  height: 36px;
+  min-height: 0;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--companion-glass-soft);
+  cursor: pointer;
 }
-.hud-surface .companion-inline-form textarea { grid-column: 1 / -1; min-height: 74px; resize: vertical; line-height: 1.55; }
 
+.hud-surface .companion-search .companion-search__clear:hover { background: rgba(255, 255, 255, 0.12); color: #fff3df; }
+.hud-surface .companion-search > button:not(.companion-search__clear) { flex: 0 0 auto; }
+
+/* 筛选器分组：星图与记忆列表各有一套相近的筛选器，组首写明它管谁。 */
+.hud-surface .companion-filter-group > span {
+  flex: 0 0 auto;
+  color: var(--companion-glass-faint);
+  font-size: var(--companion-font-micro);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.hud-surface .companion-map-hud .companion-filter-group .companion-search { flex: 1 1 200px; min-width: 170px; }
+
+/* ── 白玻璃便签卡：手动添加 / 纠错 / 记忆详情 / 动态 / 投递 / 日记 ──────
+   同一角色（面板里的一张卡）共用一档内边距、一档圆角、一档组内间隙。 */
+.hud-surface .companion-inline-form,
 .hud-surface .companion-memory-detail,
 .hud-surface .companion-activity-card,
+.hud-surface .companion-delivery-card,
 .hud-surface .companion-diary-entry {
   display: grid;
-  gap: 9px;
-  border-radius: 13px;
-  padding: 13px;
-  background: rgba(224, 238, 226, 0.68);
+  align-content: start;
+  gap: var(--companion-gap-row);
+  padding: var(--companion-pad-card);
+  border-radius: var(--companion-radius-card);
+  box-shadow: var(--companion-card-shadow);
 }
-.hud-surface .companion-memory-detail > strong,
-.hud-surface .companion-diary-entry > strong { font: 650 13px/1.65 "Noto Serif SC", "Songti SC", serif; }
-.hud-surface .companion-memory-detail > small,
-.hud-surface .companion-diary-entry > small { color: var(--companion-soft); font-size: 11px; }
-.hud-surface .companion-memory-detail__meta { display: flex; flex-wrap: wrap; gap: 6px; }
-.hud-surface .companion-memory-detail__meta span { border-radius: 999px; padding: 3px 7px; background: rgba(255,255,255,0.58); color: var(--companion-soft); font-size: 11px; }
 
-.hud-surface .companion-record-list { display: grid; gap: 7px; }
+/* 表单里是「整块控件 + 按钮行」，必须单列铺开。 */
+.hud-surface .companion-inline-form {
+  grid-template-columns: minmax(0, 1fr);
+  border: 1.5px solid rgba(233, 198, 111, 0.4);
+  background: rgba(233, 198, 111, 0.1);
+}
+
+/* 记忆正文上限 200 字：编辑框要给得出可读的行数，不能只留一行。 */
+.hud-surface .companion-inline-form textarea { min-height: 96px; line-height: 1.7; }
+
+/* 记忆详情：薄荷玻璃便签。 */
+.hud-surface .companion-memory-detail {
+  border: 1.5px solid rgba(143, 199, 167, 0.38);
+  background: rgba(143, 199, 167, 0.12);
+}
+
+.hud-surface .companion-memory-detail > strong { font: 650 var(--companion-font-title)/1.65 "Noto Serif SC", "Songti SC", serif; color: #fff3df; }
+.hud-surface .companion-memory-detail > small { color: var(--companion-glass-soft); font-size: var(--companion-font-micro); }
+.hud-surface .companion-memory-detail__meta { display: flex; flex-wrap: wrap; gap: var(--companion-gap-row); }
+.hud-surface .companion-memory-detail__meta span {
+  border-radius: var(--companion-radius-chip);
+  padding: 3px var(--companion-gap-row);
+  background: var(--hud-butter, #f3d678);
+  color: #49382b;
+  font-size: var(--companion-font-micro);
+  font-weight: 700;
+}
+
+/* 记忆列表：一行一条的白玻璃签。类型 / 正文 / 时间三档字号，不再一起 11px。 */
+.hud-surface .companion-record-list { display: grid; gap: var(--companion-gap-row); }
 .hud-surface .companion-record-list > button {
   display: grid;
-  gap: 5px;
+  gap: var(--companion-gap-inline);
   width: 100%;
-  min-height: 0;
-  padding: 10px 11px;
+  min-height: 56px;
+  padding: var(--companion-pad-row);
   text-align: left;
+  align-items: start;
+  justify-content: stretch;
+  border: var(--companion-card-border);
+  border-radius: var(--companion-radius-chip);
+  background: var(--companion-card-glass);
+  box-shadow: var(--companion-card-shadow);
 }
-.hud-surface .companion-record-list > button.is-selected { border-color: rgba(40,118,135,0.7); background: rgba(219, 240, 240, 0.72); }
-.hud-surface .companion-record-list > button > span { display: flex; justify-content: space-between; gap: 8px; color: var(--companion-soft); font-size: 11px; }
-.hud-surface .companion-record-list > button i { font-style: normal; }
-.hud-surface .companion-record-list > button > strong { font-size: 11px; line-height: 1.55; }
-.hud-surface .companion-record-list > button > small { color: var(--companion-soft); font-size: 11px; }
-
-.hud-surface .companion-section-state { display: grid; place-content: center; justify-items: start; gap: 7px; min-height: 112px; color: var(--companion-soft); }
-.hud-surface .companion-section-state strong { color: inherit; font-size: 12px; }
-.hud-surface .companion-section-state span { max-width: 56ch; font-size: 11px; line-height: 1.55; }
-.hud-surface .companion-section-state button { display: inline-flex; align-items: center; gap: 6px; }
-.hud-surface .companion-error { margin: 0; border-radius: 10px; padding: 8px 10px; background: rgba(162,68,52,0.1); color: #8a3024; font-size: 11px; line-height: 1.5; }
-.hud-surface .companion-notice { margin: 0; border-radius: 10px; padding: 8px 10px; background: rgba(40,118,135,0.1); color: #245260; font-size: 11px; line-height: 1.5; }
-
-.hud-surface .companion-search-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 7px;
+.hud-surface .companion-record-list > button > span { display: flex; justify-content: space-between; gap: var(--companion-gap-row); color: var(--companion-glass-soft); font-size: var(--companion-font-micro); }
+.hud-surface .companion-record-list > button > span b { color: #e9c66f; font-weight: 750; }
+.hud-surface .companion-record-list > button > span i { font-style: normal; }
+.hud-surface .companion-record-list > button > strong { font-size: var(--companion-font-body); line-height: 1.55; color: var(--companion-glass-ink); }
+.hud-surface .companion-record-list > button > small { color: var(--companion-glass-faint); font-size: var(--companion-font-micro); }
+.hud-surface .companion-record-list > button:hover { background: rgba(255, 255, 255, 0.13); border-color: rgba(255, 252, 235, 0.5); }
+.hud-surface .companion-record-list > button.is-selected {
+  border-color: rgba(255, 228, 163, 0.55);
+  background: rgba(255, 228, 163, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(255, 228, 163, 0.2), 0 4px 10px rgba(1, 12, 25, 0.3);
 }
-.hud-surface .companion-search-row input { width: 100%; }
+.hud-surface .companion-record-list > button.is-selected > strong { color: #ffe4a3; }
+.hud-surface .companion-empty-with-action { display: grid; justify-items: start; gap: var(--companion-gap-row); }
+.hud-surface .companion-empty-with-action .companion-section-state { min-height: 72px; }
+
+/* 状态 / 错误 / 通知条。 */
+.hud-surface .companion-section-state { display: grid; place-content: center; justify-items: start; gap: var(--companion-gap-row); min-height: 96px; color: var(--companion-glass-soft); }
+.hud-surface .companion-section-state strong { color: var(--companion-glass-ink); font-size: var(--companion-font-body); }
+.hud-surface .companion-section-state span { max-width: 56ch; font-size: var(--companion-font-micro); line-height: 1.55; }
+.hud-surface .companion-error { margin: 0; border-radius: var(--companion-radius-chip); padding: var(--companion-gap-row) var(--companion-gap-row) var(--companion-gap-row) var(--companion-gap-block); background: rgba(223, 118, 87, 0.16); color: #f4b7a2; font-size: var(--companion-font-micro); line-height: 1.5; }
+.hud-surface .companion-notice { margin: 0; border-radius: var(--companion-radius-chip); padding: var(--companion-gap-row) var(--companion-gap-row) var(--companion-gap-row) var(--companion-gap-block); background: rgba(143, 199, 167, 0.14); color: #b5d6bd; font-size: var(--companion-font-micro); line-height: 1.5; }
+.hud-surface .companion-result-status { margin: 0; color: var(--companion-glass-soft); font-size: var(--companion-font-body); }
+.hud-surface .companion-result-status:empty { display: none; }
+
+/* 对话面板。 */
 .hud-surface .companion-load-more { justify-self: center; }
-.hud-surface .companion-history { display: grid; gap: 8px; }
-.hud-surface .companion-history article { display: grid; gap: 5px; max-width: 94%; border-radius: 12px; padding: 10px 11px; background: rgba(255,255,255,0.62); }
-.hud-surface .companion-history article.is-user { justify-self: end; background: rgba(204, 230, 228, 0.7); }
-.hud-surface .companion-history article > span { display: flex; justify-content: space-between; gap: 10px; color: var(--companion-soft); font-size: 11px; }
-.hud-surface .companion-history article p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; line-height: 1.6; }
-.hud-surface .companion-history article small { color: #8a4939; font-size: 11px; }
+.hud-surface .companion-thread { display: grid; gap: var(--companion-gap-row); justify-items: start; }
+/* 两侧都要按内容收拢：曾经只有 .is-user 设了 justify-self，助手气泡于是被
+   grid 拉伸到 max-width，一行「你好」也会摊成整条 800px 的横幅。 */
+.hud-surface .companion-thread article {
+  display: grid;
+  gap: var(--companion-gap-inline);
+  width: fit-content;
+  max-width: min(100%, 620px);
+  padding: var(--companion-pad-row);
+  border: var(--companion-card-border);
+  border-radius: 14px 17px 4px 16px;
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: var(--companion-card-shadow);
+}
+.hud-surface .companion-thread article.is-user {
+  justify-self: end;
+  border-radius: 17px 14px 16px 4px;
+  border-color: rgba(143, 199, 167, 0.4);
+  background: rgba(143, 199, 167, 0.14);
+}
+.hud-surface .companion-thread article > span { display: flex; justify-content: space-between; gap: var(--companion-gap-row); color: var(--companion-glass-soft); font-size: var(--companion-font-micro); }
+.hud-surface .companion-thread article > span b { color: #e9c66f; font-weight: 750; }
+.hud-surface .companion-thread article p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; line-height: 1.6; color: var(--companion-glass-ink); }
+.hud-surface .companion-thread article small { color: #f4b7a2; font-size: 11px; }
 
-.hud-surface .companion-activity-card { grid-template-columns: auto minmax(0, 1fr); align-items: start; }
-.hud-surface .companion-activity-card > button,
-.hud-surface .companion-activity-card > .companion-action-row { grid-column: 1 / -1; justify-self: start; }
-.hud-surface .companion-activity-card p { margin: 4px 0 0; color: var(--companion-soft); font-size: 11px; line-height: 1.55; }
-.hud-surface .companion-activity-feed { display: grid; gap: 8px; }
-.hud-surface .companion-activity-feed h4 { margin: 2px 0 0; font: 650 13px/1.35 "Noto Serif SC", "Songti SC", serif; }
-.hud-surface .companion-delivery-card { display: grid; gap: 8px; border: 1px solid var(--companion-line); border-radius: 11px; padding: 10px; background: rgba(255,255,255,0.5); }
-.hud-surface .companion-delivery-card > div:first-child { display: grid; gap: 4px; }
-.hud-surface .companion-delivery-card small { color: var(--companion-soft); font-size: 11px; }
+/* ── 面板内的分组标题：一律 h4 + 同一档字号，不再一处 13px 一处 15px ── */
+.hud-surface .companion-activity-feed > h4,
+.hud-surface .companion-persona-groups > section > h4,
+.hud-surface .companion-data-groups > section > h4 {
+  margin: 0;
+  font: 650 var(--companion-font-section)/1.3 "Noto Serif SC", "Songti SC", serif;
+  color: #fff3df;
+}
+
+/* 动态面板。 */
+.hud-surface .companion-activity-feed { display: grid; align-content: start; gap: var(--companion-gap-row); }
+.hud-surface .companion-activity-card { border: var(--companion-card-border); background: var(--companion-card-glass); }
+/* 卡片里的动作按内容收拢：grid 默认拉伸会让「继续学习」摊成整行宽的按钮，
+   而同一屏的投递卡里「查看 / 忽略」却是内容宽——同一控件两种尺寸。 */
+.hud-surface .companion-activity-card > button { justify-self: start; }
+.hud-surface .companion-activity-card.is-journey { border-color: rgba(121, 206, 220, 0.4); background: rgba(121, 206, 220, 0.1); }
+.hud-surface .companion-activity-card > svg { color: #e9c66f; }
+.hud-surface .companion-activity-card strong { font: 650 var(--companion-font-body)/1.5 "Noto Serif SC", "Songti SC", serif; color: #fff3df; }
+.hud-surface .companion-activity-card p { margin: 0; color: var(--companion-glass-soft); font-size: var(--companion-font-micro); line-height: 1.55; }
+.hud-surface .companion-activity-card small { color: var(--companion-glass-soft); font-size: var(--companion-font-micro); }
+.hud-surface .companion-delivery-card { border: var(--companion-card-border); background: var(--companion-card-glass); }
+.hud-surface .companion-delivery-card > div:first-child { display: grid; gap: var(--companion-gap-inline); }
+.hud-surface .companion-delivery-card strong { font-size: var(--companion-font-body); color: var(--companion-glass-ink); }
+.hud-surface .companion-delivery-card small { color: var(--companion-glass-soft); font-size: var(--companion-font-micro); }
+/* 已处理 / 已忽略 / 已失效的投递收在折叠组里：它们与待处理项同列同色时，
+   一屏四条几乎相同的「刚才的学习已完成」会让用户找不到真正要处理的那条。 */
+.hud-surface .companion-delivery-group { display: grid; gap: var(--companion-gap-row); }
+.hud-surface .companion-delivery-group > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--companion-gap-row);
+  min-height: 44px;
+  color: var(--companion-glass-soft);
+  font-size: var(--companion-font-micro);
+  cursor: pointer;
+  list-style: none;
+}
+.hud-surface .companion-delivery-group > summary::-webkit-details-marker { display: none; }
+.hud-surface .companion-delivery-group > summary::after { content: "展开"; color: var(--companion-glass-faint); }
+.hud-surface .companion-delivery-group[open] > summary::after { content: "收起"; }
+.hud-surface .companion-delivery-group > summary:hover { color: #fff3df; }
+.hud-surface .companion-delivery-group > div { display: grid; gap: var(--companion-gap-row); }
 .hud-surface .companion-delivery-card.is-acted,
-.hud-surface .companion-delivery-card.is-dismissed { opacity: 0.72; }
-.hud-surface .companion-date-nav { justify-content: space-between; }
-.hud-surface .companion-date-nav button { display: inline-flex; align-items: center; gap: 4px; }
-.hud-surface .companion-day-strip { display: grid; grid-template-columns: repeat(5, 1fr); }
-.hud-surface .companion-day-strip button.is-active { background: #294b50; color: #fff; }
-.hud-surface .companion-diary-entry dl,
-.hud-surface .companion-diagnostics { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 6px; margin: 0; }
+.hud-surface .companion-delivery-card.is-dismissed,
+.hud-surface .companion-delivery-card.is-expired { opacity: 0.66; }
+
+/* 日记面板。 */
+/* 日期导航是一组，不是一条被 space-between 拉散的横幅：工作台扩宽后
+   「今天」会孤零零飘在 860px 正中间，两侧按钮像另一个模块。 */
+.hud-surface .companion-date-nav { justify-content: center; }
+.hud-surface .companion-date-nav strong { min-width: 88px; text-align: center; font: 650 var(--companion-font-title)/1.3 "Noto Serif SC", "Songti SC", serif; color: #fff3df; }
+/* 日期条：横向滑动模块（滚动吸附）。轨道按内容给宽，扩宽后不再一人 170px。 */
+.hud-surface .companion-day-strip { justify-content: center; gap: var(--companion-gap-row); flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x proximity; scrollbar-width: none; padding-bottom: 2px; }
+.hud-surface .companion-day-strip button { flex: 1 0 64px; max-width: 96px; scroll-snap-align: start; }
+.hud-surface .companion-day-strip button.is-active {
+  background: var(--hud-butter, #f3d678);
+  color: #49382b;
+  box-shadow: inset 0 0 0 1px rgba(96, 60, 35, 0.15);
+}
+.hud-surface .companion-diary-entry { border: var(--companion-card-border); background: var(--companion-card-glass); }
+.hud-surface .companion-diary-entry > strong { font: 650 var(--companion-font-title)/1.65 "Noto Serif SC", "Songti SC", serif; color: #fff3df; }
+.hud-surface .companion-diary-entry > small { color: var(--companion-glass-soft); font-size: var(--companion-font-micro); }
+.hud-surface .companion-diary-entry dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--companion-gap-row); margin: 0; }
+.hud-surface .companion-diary-entry dt, .hud-surface .companion-diary-entry dd { margin: 0; }
+
+/* 事实/诊断共用的键值小格：同一角色只有一档长相。 */
 .hud-surface .companion-diary-entry dl div,
-.hud-surface .companion-diagnostics div { display: flex; justify-content: space-between; gap: 8px; border-radius: 8px; padding: 6px 8px; background: rgba(255,255,255,0.5); font-size: 11px; }
+.hud-surface .companion-diagnostics div {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--companion-gap-row);
+  border: 1px solid rgba(255, 252, 235, 0.16);
+  border-radius: var(--companion-radius-chip);
+  padding: 6px var(--companion-gap-row);
+  background: rgba(255, 255, 255, 0.05);
+  font-size: var(--companion-font-micro);
+}
 .hud-surface .companion-diary-entry dt,
 .hud-surface .companion-diary-entry dd,
 .hud-surface .companion-diagnostics dt,
 .hud-surface .companion-diagnostics dd { margin: 0; }
 
-.hud-surface .companion-persona-groups > section { display: grid; gap: 9px; padding-bottom: 15px; border-bottom: 1px solid var(--companion-line); }
-.hud-surface .companion-persona-groups > section:last-child { border-bottom: 0; }
-.hud-surface .companion-choice-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 7px; }
-.hud-surface .companion-choice-grid button { display: grid; gap: 5px; text-align: left; }
-.hud-surface .companion-choice-grid button span { color: var(--companion-soft); font-size: 11px; line-height: 1.45; }
-.hud-surface .companion-choice-grid button.is-selected,
-.hud-surface .companion-segmented button.is-selected { border-color: rgba(40,118,135,0.65); background: rgba(204,230,228,0.7); }
-.hud-surface .companion-segmented { display: grid; grid-template-columns: repeat(3, 1fr); }
+/* 人格 / 数据面板：分组一律是同一张卡（曾经只有人格有卡、数据没有）。 */
+.hud-surface .companion-persona-groups > section,
+.hud-surface .companion-data-groups > section {
+  display: grid;
+  align-content: start;
+  gap: var(--companion-gap-row);
+  min-width: 0;
+  padding: var(--companion-pad-card);
+  border: var(--companion-card-border);
+  border-radius: var(--companion-radius-card);
+  background: var(--companion-card-glass);
+}
+.hud-surface .companion-persona-groups section > p,
+.hud-surface .companion-data-groups section > p {
+  margin: 0;
+  color: var(--companion-glass-soft);
+  font-size: var(--companion-font-micro);
+  line-height: 1.55;
+}
+/* 面板标题与提示条永远横跨整行，不能掉进多列网格的某一格里。 */
+.hud-surface .companion-tab-panel > .companion-panel-stack > .companion-panel-heading,
+.hud-surface .companion-tab-panel > .companion-panel-stack > .companion-error,
+.hud-surface .companion-tab-panel > .companion-panel-stack > .companion-notice { grid-column: 1 / -1; }
+/* 危险区沿用分组卡形状，只用描边色声明自己是危险区。 */
+.hud-surface .companion-danger-zone { border-color: rgba(223, 118, 87, 0.4); background: rgba(223, 118, 87, 0.06); }
+
+/* 人格预设：按可用宽度自动排布。曾经的横向 scroll-snap 轮播在只有两枚
+   预设时必然出现「半张卡被裁掉 + 一条没有东西可滚的滚动条」。 */
+.hud-surface .companion-choice-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: var(--companion-gap-row);
+}
+.hud-surface .companion-choice-grid button {
+  display: grid;
+  gap: var(--companion-gap-inline);
+  min-width: 0;
+  text-align: left;
+  align-items: start;
+  justify-content: stretch;
+  border: var(--companion-card-border);
+  border-radius: var(--companion-radius-chip);
+  background: var(--companion-card-glass);
+  box-shadow: var(--companion-card-shadow);
+}
+.hud-surface .companion-choice-grid button strong { font-size: var(--companion-font-body); color: var(--companion-glass-ink); }
+.hud-surface .companion-choice-grid button span { color: var(--companion-glass-soft); font-size: var(--companion-font-micro); line-height: 1.45; }
+.hud-surface .companion-choice-grid button.is-selected {
+  border-color: rgba(255, 228, 163, 0.55);
+  background: rgba(255, 228, 163, 0.14);
+}
+.hud-surface .companion-choice-grid button.is-selected strong { color: #ffe4a3; }
+.hud-surface .companion-segmented { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.hud-surface .companion-segmented button.is-selected {
+  border-color: rgba(255, 228, 163, 0.55);
+  background: rgba(255, 228, 163, 0.14);
+  color: #ffe4a3;
+}
+/* 行式条目（边界开关 / 数据动作 / 危险动作）：同一张三列网格，共用一档间隙。 */
 .hud-surface .companion-boundaries,
-.hud-surface .companion-data-actions { display: grid; gap: 7px; }
+.hud-surface .companion-data-actions { display: grid; gap: var(--companion-gap-row); }
 .hud-surface .companion-boundaries > button,
 .hud-surface .companion-data-actions > button,
-.hud-surface .companion-danger-action { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 9px; text-align: left; }
-.hud-surface .companion-boundaries > button span,
-.hud-surface .companion-data-actions > button span,
-.hud-surface .companion-danger-action > span { display: grid; gap: 3px; }
+.hud-surface .companion-danger-action {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--companion-gap-row);
+  text-align: left;
+}
+.hud-surface .companion-boundaries > button > span,
+.hud-surface .companion-data-actions > button > span,
+.hud-surface .companion-danger-action > span { display: grid; gap: var(--companion-gap-inline); }
+.hud-surface .companion-boundaries strong,
+.hud-surface .companion-data-actions strong,
+.hud-surface .companion-danger-action strong { font-size: var(--companion-font-body); color: var(--companion-glass-ink); }
 .hud-surface .companion-boundaries small,
 .hud-surface .companion-data-actions small,
-.hud-surface .companion-danger-action small { color: var(--companion-soft); font-size: 11px; line-height: 1.45; }
-.hud-surface .companion-boundaries i { min-width: 28px; border-radius: 999px; padding: 4px 7px; background: rgba(0,0,0,0.06); text-align: center; font-style: normal; font-size: 11px; }
-.hud-surface .companion-boundaries button[aria-checked="true"] i { background: #294b50; color: #fff; }
-.hud-surface .companion-danger-action { border-radius: 10px; padding: 9px 10px; background: rgba(162,68,52,0.07); }
-.hud-surface .companion-danger-action > div { display: flex; flex-wrap: wrap; gap: 5px; }
-.hud-surface .companion-conflict-group { display: grid; gap: 6px; border: 1px solid rgba(190,134,62,0.25); border-radius: 10px; padding: 9px; background: rgba(255,241,205,0.38); }
-.hud-surface .companion-conflict-group > strong { color: #76531f; font-size: 11px; }
-.hud-surface .companion-conflict-group > button { display: flex; min-height: 38px; align-items: center; justify-content: space-between; gap: 9px; text-align: left; }
-.hud-surface .companion-conflict-group > button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.hud-surface .companion-conflict-group > button small { flex: 0 0 auto; color: #287687; }
-
-.hud-surface .companion-map {
-  --color-text: #fff3df;
-  --color-evidence: #79cedc;
-  --color-warning: #e9c66f;
-  --color-highlight: #ffe4a3;
-  --color-running: #8fc7a7;
-  --color-danger: #df7657;
-  --color-success: #9fc28a;
-  --color-text-tertiary: #a89782;
-  --color-focus-ring: #83d8e7;
-  --universe-void-deep: #081827;
-  --universe-surface: rgba(13,35,49,0.94);
-  --universe-surface-raised: #163348;
-  --universe-ink: #fff3df;
-  --universe-muted: rgba(214,235,235,0.88);
-  --universe-faint: rgba(190,216,220,0.76);
-  --universe-line: rgba(121,206,220,0.2);
-  --universe-line-strong: rgba(121,206,220,0.38);
-  --universe-shadow: rgba(2,8,14,0.62);
-  --universe-envelope-a: rgba(121,206,220,0.19);
-  --universe-envelope-b: rgba(233,198,111,0.1);
-  --universe-label: #fff3df;
-  --universe-label-muted: rgba(214,235,235,0.88);
-  --universe-label-backdrop: rgba(8,24,39,0.96);
-  --universe-edge: rgba(121,206,220,0.78);
-  --universe-edge-glow: #79cedc;
-  --universe-source: #e9c66f;
-  --universe-note: #8fc7a7;
-  --universe-card: #ffe4a3;
-  --universe-key-point: #79cedc;
-  --universe-orbit: rgba(121,206,220,0.34);
-  --universe-evidence-track: rgba(121,206,220,0.2);
-  --universe-selected: #ffe4a3;
-  --universe-state-active: #79cedc;
-  --universe-state-pinned: #ffe4a3;
-  --universe-state-candidate: #a89782;
-  --universe-state-linked: #8fc7a7;
-  --universe-state-orphaned: #df7657;
-  --universe-shell-right: 12px;
-  --universe-bar-bottom: 12px;
-  --universe-motion-feedback: 120ms;
-  --universe-motion-panel: 180ms;
-  --ease-standard: cubic-bezier(.22,1,.36,1);
+.hud-surface .companion-danger-action small { color: var(--companion-glass-soft); font-size: var(--companion-font-micro); line-height: 1.45; }
+/* 边界开关：设置中心 HudSwitch 同款 rocker（滑块），非文字 pill。 */
+.hud-surface .companion-switch {
   position: relative;
-  display: grid;
-  grid-template-rows: auto auto minmax(0,1fr);
-  overflow: hidden;
-  background: rgba(7,24,39,0.93);
-  color: #fff3df;
+  flex: 0 0 auto;
+  width: 46px;
+  height: 26px;
+  border: 1.5px solid rgba(255, 252, 235, 0.28);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  transition: background-color 160ms var(--hud-ease-out), border-color 160ms var(--hud-ease-out);
 }
 
-.hud-surface .companion-map__header { z-index: 24; padding: 14px 16px 8px; }
-.hud-surface .companion-map__header h2 { font-size: 18px; }
-.hud-surface .companion-map__header p { color: rgba(214,235,235,0.78); }
-.hud-surface .companion-map__header > span { flex: 0 0 auto; margin-top: 3px; color: rgba(214,235,235,0.82); font-size: 11px; }
-.hud-surface .companion-map__filters { z-index: 24; flex-wrap: nowrap; padding: 0 14px 10px; }
-.hud-surface .companion-map__filters label { display: grid; grid-template-columns: auto minmax(0,1fr) auto; flex: 1 1 220px; min-width: 150px; align-items: center; gap: 6px; border: 1px solid var(--universe-line); border-radius: 9px; padding: 0 8px; background: rgba(8,24,39,0.78); }
-.hud-surface .companion-map__filters label input { width: 100%; border: 0; padding-inline: 0; background: transparent; color: #fff3df; }
-.hud-surface .companion-map__filters label input:focus-visible { outline: 0; }
-.hud-surface .companion-map__filters label button { min-width: 32px; border: 0; padding: 0; background: transparent; color: #fff3df; }
-.hud-surface .companion-map__filters select { min-width: 92px; border-color: var(--universe-line); background: #163348; color: #fff3df; }
-.hud-surface .companion-map__canvas { position: relative; min-height: 0; overflow: hidden; }
-.hud-surface .companion-map__canvas .universe-canvas-root { position: absolute; inset: 0; }
-.hud-surface .companion-map__canvas .companion-section-state { height: 100%; place-items: center; text-align: center; color: rgba(214,235,235,0.82); }
-.hud-surface .companion-map .universe-canvas-controls { right: 12px; bottom: 12px; }
-.hud-surface .companion-map .universe-canvas-control { min-height: 44px; border-radius: 0; padding: 0; color: #fff3df; }
-.hud-surface .companion-map__legend { position: absolute; z-index: 25; bottom: 14px; left: 14px; display: flex; flex-wrap: wrap; max-width: calc(100% - 250px); gap: 8px 12px; border-radius: 10px; padding: 7px 9px; background: rgba(8,24,39,0.84); color: rgba(214,235,235,0.88); font-size: 11px; }
-.hud-surface .companion-map__legend span { display: inline-flex; align-items: center; gap: 5px; }
-.hud-surface .companion-map__legend i { width: 8px; height: 8px; border-radius: 50%; background: #79cedc; }
-.hud-surface .companion-map__legend .is-pinned i { background: #ffe4a3; }
-.hud-surface .companion-map__legend .is-entity i { background: #8fc7a7; }
-.hud-surface .companion-map__legend .is-orphan i { border: 1px dashed #df7657; background: transparent; }
-.hud-surface .companion-map__index { position: absolute; z-index: 22; top: 102px; right: 12px; display: grid; gap: 4px; width: min(188px, 28%); max-height: calc(100% - 180px); overflow: auto; padding: 5px; border-radius: 10px; background: rgba(8,24,39,0.74); scrollbar-width: thin; }
-.hud-surface .companion-map__index button { display: grid; grid-template-columns: auto minmax(0,1fr); min-height: 32px; align-items: center; gap: 6px; border-color: transparent; padding: 5px 7px; background: transparent; color: rgba(214,235,235,0.82); text-align: left; }
-.hud-surface .companion-map__index button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.hud-surface .companion-map__index button[aria-selected="true"] { border-color: rgba(255,228,163,0.48); background: rgba(255,228,163,0.12); color: #fff3df; }
-.hud-surface .companion-map__selection { position: absolute; z-index: 26; right: 14px; bottom: 66px; display: flex; max-width: min(360px, calc(100% - 28px)); align-items: center; gap: 12px; border: 1px solid var(--universe-line); border-radius: 12px; padding: 10px 11px; background: rgba(13,35,49,0.96); box-shadow: 0 12px 30px rgba(0,0,0,0.34); }
-.hud-surface .companion-map__selection > div { display: grid; flex: 1 1 auto; min-width: 0; gap: 3px; }
-.hud-surface .companion-map__selection strong,
-.hud-surface .companion-map__selection span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.hud-surface .companion-map__selection span { color: rgba(214,235,235,0.76); font-size: 11px; }
-.hud-surface .companion-map__selection button { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; border-color: var(--universe-line-strong); background: #245260; color: #fff; }
+.hud-surface .companion-switch i {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #f3e2c0;
+  box-shadow: 0 2px 6px rgba(1, 12, 25, 0.45);
+  transition: transform 160ms var(--hud-ease-out);
+}
+
+.hud-surface .companion-switch[data-on] {
+  border-color: rgba(255, 252, 235, 0.45);
+  background: var(--hud-green, #66816a);
+}
+
+.hud-surface .companion-switch[data-on] i { transform: translateX(20px); }
+.hud-surface .companion-danger-action { border: 1.5px solid rgba(223, 118, 87, 0.4); border-radius: var(--companion-radius-card); padding: var(--companion-pad-card); background: rgba(223, 118, 87, 0.1); box-shadow: var(--companion-card-shadow); }
+.hud-surface .companion-danger-action > div { display: flex; flex-wrap: wrap; gap: var(--companion-gap-inline); }
+.hud-surface .companion-conflict-group { display: grid; gap: var(--companion-gap-row); border: 1.5px solid rgba(233, 198, 111, 0.4); border-radius: var(--companion-radius-card); padding: var(--companion-pad-card); background: rgba(233, 198, 111, 0.09); box-shadow: var(--companion-card-shadow); }
+.hud-surface .companion-conflict-group > strong { color: #e9c66f; font-size: var(--companion-font-micro); }
+.hud-surface .companion-conflict-group > button { display: flex; min-height: 44px; align-items: center; justify-content: space-between; gap: var(--companion-gap-row); text-align: left; }
+.hud-surface .companion-conflict-group > button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--companion-glass-ink); }
+.hud-surface .companion-conflict-group > button small { flex: 0 0 auto; color: #b5d6bd; }
+.hud-surface .companion-diagnostics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--companion-gap-row); margin: 0; }
+
+/* ── 自定义下拉（CompanionSelect）：白玻璃触发 + 夜玻璃菜单，绝无系统控件 ── */
+.hud-surface .companion-select { position: relative; display: inline-flex; min-width: 0; }
+.hud-surface .companion-select__trigger {
+  display: inline-flex;
+  min-width: 0;
+  min-height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--companion-gap-row);
+  padding: var(--companion-gap-inline) var(--companion-gap-row);
+  border: 1.5px solid rgba(255, 252, 235, 0.3);
+  border-radius: var(--companion-radius-chip);
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--companion-glass-ink);
+  font-size: var(--companion-font-body);
+  cursor: pointer;
+}
+.hud-surface .companion-select__trigger > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hud-surface .companion-select__trigger svg { flex: 0 0 auto; color: var(--companion-glass-soft); transition: transform 140ms var(--hud-ease-out); }
+.hud-surface .companion-select[data-open="true"] .companion-select__trigger svg { transform: rotate(180deg); }
+.hud-surface .companion-select[data-open="true"] .companion-select__trigger { background: rgba(255, 255, 255, 0.16); border-color: rgba(255, 252, 235, 0.5); }
+
+.hud-surface .companion-select__menu {
+  position: absolute;
+  z-index: var(--companion-z-menu);
+  top: calc(100% + var(--companion-gap-inline));
+  left: 0;
+  min-width: max(100%, 168px);
+  max-height: 264px;
+  overflow-y: auto;
+  margin: 0;
+  padding: var(--companion-gap-inline);
+  list-style: none;
+  border: var(--companion-plate-border);
+  border-radius: var(--companion-radius-card);
+  background: rgba(11, 33, 48, 0.94);
+  backdrop-filter: blur(18px) saturate(1.15);
+  -webkit-backdrop-filter: blur(18px) saturate(1.15);
+  box-shadow: var(--companion-plate-shadow);
+  scrollbar-width: thin;
+}
+.hud-surface .companion-select[data-flip="up"] .companion-select__menu { top: auto; bottom: calc(100% + var(--companion-gap-inline)); }
+.hud-surface .companion-select__option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  width: 100%;
+  min-height: 44px;
+  align-items: center;
+  gap: var(--companion-gap-row);
+  border: 0;
+  border-radius: var(--companion-radius-chip);
+  padding: var(--companion-gap-inline) var(--companion-gap-row);
+  background: transparent;
+  color: var(--companion-glass-ink);
+  font-size: var(--companion-font-body);
+  text-align: left;
+  cursor: pointer;
+}
+.hud-surface .companion-select__option > i { width: 13px; }
+.hud-surface .companion-select__option > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hud-surface .companion-select__option.is-active { background: rgba(255, 255, 255, 0.09); }
+.hud-surface .companion-select__option.is-selected {
+  background: var(--hud-butter, #f3d678);
+  color: #49382b;
+  box-shadow: inset 0 0 0 1px rgba(96, 60, 35, 0.15);
+}
+.hud-surface .companion-select__option.is-selected svg { color: #49382b; }
+.hud-surface .companion-select__option svg { color: #79cedc; }
+.hud-surface .companion-select.is-paper .companion-select__trigger {
+  border-color: rgba(233, 198, 111, 0.42);
+  background: rgba(233, 198, 111, 0.1);
+}
+
+/* ══ 星图浮层仪表（夜空上的深色玻璃盘） ══════════════════════════════ */
+
+/* 标题 + 搜索 + 筛选：顶部玻璃盘，左缘随工作台宽度联动。
+   --companion-bench-left 同时喂给工作台与本盘，窄屏只改一处。 */
+.hud-surface .companion-map-hud {
+  position: absolute;
+  z-index: var(--companion-z-hud);
+  top: var(--companion-gap-block);
+  left: calc(var(--companion-bench-left) + var(--companion-bench-w) + var(--companion-bench-gap));
+  right: var(--companion-seat-strip-right);
+  display: flex;
+  flex-direction: column;
+  gap: var(--companion-gap-row);
+  padding: var(--companion-pad-card);
+  border: var(--companion-plate-border);
+  border-radius: var(--companion-radius-plate);
+  background: var(--companion-glass);
+  backdrop-filter: var(--companion-glass-blur);
+  -webkit-backdrop-filter: var(--companion-glass-blur);
+  box-shadow: var(--companion-plate-shadow);
+  color: var(--companion-glass-ink);
+}
+
+.hud-surface .companion-map-headline { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--companion-gap-row) var(--companion-gap-block); }
+.hud-surface .companion-map-headline h2 { margin: 0; font: 680 var(--companion-font-panel)/1.25 "Noto Serif SC", "Songti SC", serif; color: #fff3df; }
+.hud-surface .companion-map-headline > span { flex: 0 0 auto; color: #e9c66f; font-size: var(--companion-font-micro); font-weight: 700; }
+.hud-surface .companion-map-headline p { flex-basis: 100%; margin: 0; color: var(--companion-glass-soft); font-size: var(--companion-font-micro); line-height: 1.55; }
+
+/* 星图工具条沿用 .companion-filter-group：搜索占满剩余行宽。 */
+
+/* 图例：左下小玻璃盘（避开左下返回书房胶囊），圆点保持画布三色。 */
+.hud-surface .companion-map-legend {
+  position: absolute;
+  z-index: var(--companion-z-legend);
+  left: calc(var(--companion-bench-left) + var(--companion-bench-w) + var(--companion-bench-gap));
+  bottom: var(--companion-universe-bar-bottom);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--companion-gap-row) var(--companion-gap-block);
+  max-width: min(340px, calc(100% - 700px));
+  padding: var(--companion-gap-row) var(--companion-gap-block);
+  border: var(--companion-plate-border);
+  border-radius: 23px 29px 20px 27px / 27px 21px 29px 22px;
+  background: var(--companion-glass);
+  backdrop-filter: var(--companion-glass-blur);
+  -webkit-backdrop-filter: var(--companion-glass-blur);
+  box-shadow: var(--companion-plate-shadow);
+  color: var(--companion-glass-ink);
+  font-size: 11px;
+}
+
+.hud-surface .companion-map-legend span { display: inline-flex; align-items: center; gap: 5px; color: rgba(214, 235, 235, 0.88); }
+.hud-surface .companion-map-legend i { width: 9px; height: 9px; border-radius: 50%; background: #79cedc; box-shadow: 0 0 0 1.5px rgba(255, 252, 235, 0.9), 0 0 0 2.5px rgba(48, 35, 26, 0.28); }
+.hud-surface .companion-map-legend .is-pinned i { background: #ffe4a3; }
+.hud-surface .companion-map-legend .is-entity i { background: #8fc7a7; }
+.hud-surface .companion-map-legend .is-orphan i { border: 1.5px dashed #df7657; background: transparent; }
+
+/* 节点索引：右上角常显玻璃盘（标题盘右侧、房间岛下方的空位——2026-09-20
+   用户指定）。多数据时限高滚动，宽度有下限，绝不无限拉长。 */
+.hud-surface .companion-map-index {
+  position: absolute;
+  z-index: var(--companion-z-index);
+  top: 84px;
+  right: 25px;
+  display: grid;
+  gap: var(--companion-gap-inline);
+  width: clamp(200px, 19vw, 236px);
+  min-width: 200px;
+  max-height: min(calc(100% - 250px), 470px);
+  overflow-y: auto;
+  padding: var(--companion-gap-row);
+  border: var(--companion-plate-border);
+  border-radius: var(--companion-radius-plate);
+  background: var(--companion-glass);
+  backdrop-filter: var(--companion-glass-blur);
+  -webkit-backdrop-filter: var(--companion-glass-blur);
+  box-shadow: var(--companion-plate-shadow);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 252, 235, 0.28) transparent;
+}
+
+.hud-surface .companion-map-index button {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  min-height: 44px;
+  align-items: center;
+  gap: var(--companion-gap-row);
+  border: 1.5px solid transparent;
+  border-radius: var(--companion-radius-chip);
+  padding: var(--companion-gap-inline) var(--companion-gap-row);
+  background: transparent;
+  color: rgba(214, 235, 235, 0.88);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 130ms var(--hud-ease-out), border-color 130ms var(--hud-ease-out);
+}
+
+.hud-surface .companion-map-index button svg { color: #79cedc; }
+.hud-surface .companion-map-index button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--companion-font-micro); }
+.hud-surface .companion-map-index button:hover { background: rgba(255, 255, 255, 0.09); }
+.hud-surface .companion-map-index button[aria-selected="true"] {
+  border-color: rgba(255, 228, 163, 0.48);
+  background: rgba(255, 228, 163, 0.14);
+  color: #ffe4a3;
+  box-shadow: inset 0 0 0 1px rgba(255, 228, 163, 0.12);
+}
+.hud-surface .companion-map-index button[aria-selected="true"] svg { color: #ffe4a3; }
+
+/* 选中实体条：缩放控件上方的确认条。 */
+.hud-surface .companion-map-selection {
+  position: absolute;
+  z-index: var(--companion-z-selection);
+  right: var(--companion-seat-strip-right);
+  bottom: 84px;
+  display: flex;
+  align-items: center;
+  gap: var(--companion-gap-block);
+  max-width: min(380px, calc(100vw - var(--companion-bench-left) - var(--companion-bench-w) - var(--companion-seat-strip-right) - 2 * var(--companion-bench-gap)));
+  padding: var(--companion-pad-row);
+  border: var(--companion-plate-border);
+  border-radius: var(--companion-radius-card);
+  background: rgba(11, 33, 48, 0.94);
+  backdrop-filter: var(--companion-glass-blur);
+  -webkit-backdrop-filter: var(--companion-glass-blur);
+  box-shadow: var(--companion-plate-shadow);
+  color: var(--companion-glass-ink);
+}
+
+.hud-surface .companion-map-selection > div { display: grid; flex: 1 1 auto; min-width: 0; gap: var(--companion-gap-inline); }
+.hud-surface .companion-map-selection strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 650 var(--companion-font-body)/1.4 "Noto Serif SC", "Songti SC", serif; color: #fff3df; }
+.hud-surface .companion-map-selection span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--companion-glass-soft); font-size: var(--companion-font-micro); }
+.hud-surface .companion-map-selection > span { flex: 0 0 auto; max-width: 150px; white-space: normal; color: var(--companion-glass-soft); font-size: var(--companion-font-micro); line-height: 1.45; }
+.hud-surface .companion-map-selection button { flex: 0 0 auto; border-color: rgba(121, 206, 220, 0.45); background: rgba(121, 206, 220, 0.14); color: #d8eef2; }
+
+/* 非记忆分区不再让星图抢占主层级：内容工作台扩展成主体，星图 chrome 从
+   视觉、交互和辅助技术树中一起收起。 */
+.hud-surface .companion-center:not([data-active-tab="memory"]) .companion-workbench {
+  right: var(--companion-seat-strip-right);
+  width: auto;
+}
+
+.hud-surface .companion-center:not([data-active-tab="memory"]) .companion-map-canvas,
+.hud-surface .companion-center:not([data-active-tab="memory"]) .companion-map-hud,
+.hud-surface .companion-center:not([data-active-tab="memory"]) .companion-map-legend,
+.hud-surface .companion-center:not([data-active-tab="memory"]) .companion-map-index,
+.hud-surface .companion-center:not([data-active-tab="memory"]) .companion-map-selection {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* 工作台横向扩展后，面板内容统一收在一条可读宽度里、并靠左对齐：
+   曾经只有对话与日记两个分区各自写了 `width: min(100%, 860px)`，
+   动态 / 人格 / 数据三个分区于是被摊到 1000px 宽。 */
+.hud-surface .companion-tab-panel > .companion-panel-stack {
+  max-width: var(--companion-content-measure);
+}
+
+.hud-surface .companion-center[data-active-tab="activity"] .companion-tab-panel > .companion-panel-stack {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+
+/* 「最近动态」是收件箱，不是与「继续学习」并列的第三类状态：
+   它满幅排在下面，历史项收进折叠组后不再把两列撑成参差高度。 */
+.hud-surface .companion-center[data-active-tab="activity"] .companion-panel-heading,
+.hud-surface .companion-center[data-active-tab="activity"] .companion-error,
+.hud-surface .companion-center[data-active-tab="activity"] .companion-activity-feed--inbox {
+  grid-column: 1 / -1;
+}
+
+.hud-surface .companion-center[data-active-tab="persona"] .companion-persona-groups {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+}
+
+.hud-surface .companion-center[data-active-tab="data"] .companion-data-groups {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+
+.hud-surface .companion-center[data-active-tab="data"] .companion-panel-heading,
+.hud-surface .companion-center[data-active-tab="data"] .companion-danger-zone {
+  grid-column: 1 / -1;
+}
+
+.hud-surface .companion-center[data-active-tab="data"] .companion-danger-zone .companion-data-actions {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+/* ── 响应式：只改布局变量，几何由变量派生，不再逐条重复同一组数字 ── */
+@media (max-width: 1100px) {
+  .hud-surface .companion-center {
+    --companion-bench-w: clamp(272px, 28vw, 330px);
+    --companion-seat-strip-right: 280px;
+  }
+  .hud-surface .companion-map-index { right: 25px; width: 200px; }
+  .hud-surface .companion-map-headline p { display: none; }
+}
 
 @media (max-width: 940px) {
-  .hud-surface .companion-center { grid-template-columns: 280px minmax(0, 1fr); gap: 8px; }
-  .hud-surface .companion-workbench__header p,
-  .hud-surface .companion-map__header p { display: none; }
-  .hud-surface .companion-map__filters select:nth-of-type(1) { display: none; }
-  .hud-surface .companion-map__index { width: 146px; }
+  .hud-surface .companion-center {
+    --companion-bench-w: 252px;
+    --companion-bench-left: 20px;
+    --companion-bench-gap: 14px;
+    --companion-seat-strip-right: 150px;
+  }
+  .hud-surface .companion-map-index { right: 20px; width: 190px; max-height: min(calc(100% - 210px), 380px); }
+  .hud-surface .companion-map-legend { max-width: calc(100% - 420px); }
+  .hud-surface .companion-workbench-header p { display: none; }
 }
 
-@media (max-width: 760px) {
-  .hud-surface .companion-center { grid-template-columns: 238px minmax(0, 1fr); gap: 6px; }
+@media (max-width: 760px), (max-height: 480px) {
+  .desktop-app.hud-surface.page-20 .task-title { display: none; }
+  .hud-surface .companion-center {
+    --companion-bench-w: auto;
+    --companion-bench-left: 56px;
+    --companion-seat-strip-right: 176px;
+    --companion-universe-bar-bottom: 58px;
+    /* 视图切换条带：top 10 + 44 触控高 + 8 内缩 + 6 描边 = 58，下缘落在 68。
+       工作台与星图盘都从它下面另起一条，不再压住它的描边。 */
+    --companion-compact-top: 74px;
+  }
+  .hud-surface .companion-compact-mode {
+    position: absolute;
+    z-index: var(--companion-z-compact);
+    top: 10px;
+    left: var(--companion-bench-left);
+    right: var(--companion-seat-strip-right);
+    display: flex;
+    min-height: 52px;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--companion-gap-row);
+    padding: 4px var(--companion-gap-inline) 4px var(--companion-gap-block);
+    border: var(--companion-plate-border);
+    border-radius: var(--companion-radius-card);
+    background: var(--companion-glass);
+    backdrop-filter: var(--companion-glass-blur);
+    -webkit-backdrop-filter: var(--companion-glass-blur);
+    box-shadow: var(--companion-plate-shadow);
+  }
+  .hud-surface .companion-compact-mode strong { min-width: 0; color: #fff3df; font: 650 var(--companion-font-title)/1.2 "Noto Serif SC", "Songti SC", serif; }
+  .hud-surface .companion-compact-mode > div { display: flex; gap: var(--companion-gap-inline); }
+  /* 视图切换是紧凑模式里唯一的顶层导航，触控目标与其他按钮同档（44px）。 */
+  .hud-surface .companion-compact-mode button {
+    display: inline-flex;
+    min-width: 44px;
+    min-height: 44px;
+    align-items: center;
+    justify-content: center;
+    gap: var(--companion-gap-inline);
+    border: 0;
+    border-radius: var(--companion-radius-chip);
+    padding: var(--companion-gap-inline) var(--companion-gap-row);
+    background: transparent;
+    color: var(--companion-glass-soft);
+    font-size: var(--companion-font-body);
+    cursor: pointer;
+  }
+  .hud-surface .companion-compact-mode button[aria-pressed="true"] { background: var(--hud-butter, #f3d678); color: #49382b; }
+  .hud-surface .companion-compact-mode button:disabled { cursor: not-allowed; opacity: 0.4; }
   .hud-surface .companion-workbench,
-  .hud-surface .companion-map { border-radius: 11px; }
-  .hud-surface .companion-workbench__header { padding: 9px 10px 7px; }
-  .hud-surface .companion-workbench__header h2 { font-size: 16px; }
-  .hud-surface .companion-tabs { gap: 1px; padding: 0 7px 6px; }
-  .hud-surface .companion-tabs button { min-height: 32px; padding: 4px 2px; font-size: 11px; }
-  .hud-surface .companion-tab-panel { padding: 8px; }
-  .hud-surface .companion-panel-stack { gap: 8px; }
+  .hud-surface .companion-center:not([data-active-tab="memory"]) .companion-workbench {
+    left: var(--companion-bench-left);
+    right: var(--companion-seat-strip-right);
+    top: var(--companion-compact-top);
+    bottom: var(--companion-universe-bar-bottom);
+    width: auto;
+    border-radius: 24px 32px 22px 28px / 27px 24px 33px 25px;
+  }
+  .hud-surface .companion-workbench-header { align-items: center; padding: var(--companion-gap-row) var(--companion-gap-block) var(--companion-gap-inline); }
+  .hud-surface .companion-workbench-header h2 { font-size: var(--companion-font-panel); }
+  .hud-surface .companion-workbench-header p { display: none; }
+  .hud-surface .companion-tabs { padding: 0 var(--companion-gap-row) var(--companion-gap-inline); }
+  .hud-surface .companion-tabs button { min-height: 44px; padding: var(--companion-gap-inline) 2px; font-size: var(--companion-font-micro); }
+  .hud-surface .companion-tab-panel { padding: var(--companion-gap-row) 9px var(--companion-gap-block); }
+  .hud-surface .companion-panel-stack { gap: var(--companion-gap-row); }
   .hud-surface .companion-panel-heading { display: grid; }
   .hud-surface .companion-heading-actions { justify-content: flex-start; }
   .hud-surface .companion-panel-heading p,
-  .hud-surface .companion-persona-groups section > p { display: none; }
-  .hud-surface .companion-panel-heading h3,
-  .hud-surface .companion-persona-groups h3 { font-size: 13px; }
-  .hud-surface .companion-choice-grid { grid-template-columns: 1fr; }
-  .hud-surface .companion-map__header { padding: 8px 9px 5px; }
-  .hud-surface .companion-map__header h2 { font-size: 13px; }
-  .hud-surface .companion-map__header > span { font-size: 11px; }
-  .hud-surface .companion-map__filters { padding: 0 8px 6px; }
-  .hud-surface .companion-map__filters select { display: none; }
-  .hud-surface .companion-map__index { top: 72px; right: 7px; width: 112px; max-height: calc(100% - 144px); }
-  .hud-surface .companion-map__legend { bottom: 8px; left: 8px; max-width: calc(100% - 144px); gap: 4px 7px; padding: 5px 7px; font-size: 11px; }
-  .hud-surface .companion-map .universe-canvas-controls { right: 7px; bottom: 7px; }
-  .hud-surface .companion-map .universe-canvas-control { width: 34px; height: 34px; min-height: 34px; }
-  .hud-surface .companion-map .universe-canvas-control-label { width: 44px; font-size: 11px; }
-  .hud-surface .companion-map__selection { right: 7px; bottom: 48px; max-width: calc(100% - 14px); padding: 7px 8px; }
+  .hud-surface .companion-persona-groups section > p,
+  .hud-surface .companion-data-groups section > p { display: none; }
+  .hud-surface .companion-panel-heading h3 { font-size: var(--companion-font-title); }
+  .hud-surface .companion-activity-feed > h4,
+  .hud-surface .companion-persona-groups > section > h4,
+  .hud-surface .companion-data-groups > section > h4 { font-size: var(--companion-font-title); }
+  .hud-surface .companion-persona-groups > section,
+  .hud-surface .companion-data-groups > section { padding: var(--companion-gap-row); }
+  .hud-surface .companion-center[data-compact-view="content"] .companion-map-canvas,
+  .hud-surface .companion-center[data-compact-view="content"] .companion-map-hud,
+  .hud-surface .companion-center[data-compact-view="content"] .companion-map-legend,
+  .hud-surface .companion-center[data-compact-view="content"] .companion-map-index,
+  .hud-surface .companion-center[data-compact-view="content"] .companion-map-selection,
+  .hud-surface .companion-center[data-compact-view="map"] .companion-workbench {
+    visibility: hidden;
+    pointer-events: none;
+  }
+  /* 紧凑下星图 chrome 与工作台共用同一条左右边界，二者由视图切换二选一。 */
+  .hud-surface .companion-map-hud {
+    top: var(--companion-compact-top);
+    left: var(--companion-bench-left);
+    right: var(--companion-seat-strip-right);
+    padding: var(--companion-gap-row);
+    gap: var(--companion-gap-row);
+  }
+  .hud-surface .companion-map-headline h2 { font-size: var(--companion-font-title); }
+  .hud-surface .companion-map-headline p { display: none; }
+  .hud-surface .companion-map-legend { display: none; }
+  .hud-surface .companion-map-index {
+    top: auto;
+    left: var(--companion-bench-left);
+    right: var(--companion-seat-strip-right);
+    bottom: var(--companion-universe-bar-bottom);
+    display: flex;
+    width: auto;
+    min-width: 0;
+    max-height: 56px;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+  .hud-surface .companion-map-index button { flex: 0 0 180px; }
+  .hud-surface .companion-map-selection {
+    left: var(--companion-bench-left);
+    right: var(--companion-seat-strip-right);
+    bottom: calc(var(--companion-universe-bar-bottom) + 62px);
+    max-width: none;
+    padding: var(--companion-gap-row) 9px;
+  }
+  .hud-surface .companion-map-selection > span { display: none; }
+  .hud-surface .companion-center[data-active-tab="activity"] .companion-tab-panel > .companion-panel-stack,
+  .hud-surface .companion-center[data-active-tab="persona"] .companion-persona-groups,
+  .hud-surface .companion-center[data-active-tab="data"] .companion-data-groups,
+  .hud-surface .companion-center[data-active-tab="data"] .companion-danger-zone .companion-data-actions { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .hud-surface .companion-workbench,
+  .hud-surface .companion-map-hud,
+  .hud-surface .companion-map-legend,
+  .hud-surface .companion-map-index,
+  .hud-surface .companion-map-selection,
+  .hud-surface .companion-map-veil .companion-section-state,
+  .hud-surface .companion-select__menu,
+  .hud-surface .companion-compact-mode { background: #0d2739; backdrop-filter: none; -webkit-backdrop-filter: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .hud-surface .companion-center button { transition-duration: 0.01ms; }
-  .hud-surface .companion-center button:hover { transform: none; }
+  .hud-surface .companion-center button,
+  .hud-surface .companion-select__trigger svg { transition-duration: 0.01ms; }
+  .hud-surface .companion-workbench button:hover,
+  .hud-surface .companion-map-veil button:hover,
+  .hud-surface .companion-map-selection button:hover { transform: none; }
 }
-
 /* ---------------------------------------------------------------------------
  * Note editor (mockup 09): the mockup's decorative toolbar becomes the real
  * Markdown commands the editor understands.
@@ -3337,8 +4179,9 @@
 .hud-surface .current-note .note-shelf-entries .button,
 .hud-surface .current-note .note-shelf-actions .button { position: static; }
 
-/* A note title is the way into its page — on the shelf, in the index, and in
-   the rename field that replaces it. */
+/* A note title is the way into its page in the index, and in the rename field
+   that replaces it. On the featured card the whole sheet opens instead, so the
+   title stays plain text. */
 .hud-surface .note-open {
   display: block;
   width: 100%;
@@ -3354,8 +4197,25 @@
 
 .hud-surface .note-open:hover strong { text-decoration: underline; text-underline-offset: 4px; }
 .hud-surface .note-open:focus-visible { outline: 2px solid rgba(57, 103, 132, 0.5); outline-offset: 3px; }
-.hud-surface .current-note h2 .note-open { font: inherit; }
-.hud-surface .current-note h2 .note-open:hover { text-decoration: underline; text-underline-offset: 6px; }
+
+/* 整张「继续写作」卡都可点：透明覆盖层铺满卡片，hover/焦点给卡片描一圈，
+   让人知道点哪里都算。它排在卡片第一个子元素，后面的动作区按 DOM 顺序
+   画在它上面，所以「全部笔记」「继续写」照常可点。 */
+.hud-surface .current-note__open {
+  position: absolute;
+  inset: 0;
+  padding: 0;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
+.hud-surface .current-note__open:hover,
+.hud-surface .current-note__open:focus-visible {
+  outline: 2px solid rgba(57, 103, 132, 0.5);
+  outline-offset: -6px;
+}
 
 /* The index is a four-row paper: search, filter, the scrolling list, the count.
    A definite height is what lets the list row be the one that scrolls instead
@@ -3762,22 +4622,6 @@
   flex-wrap: wrap;
   align-items: center;
 }
-.hud-surface .candidate-activation-choice {
-  display: inline-flex;
-  min-height: 38px;
-  align-items: center;
-  gap: 7px;
-  padding: 0 12px;
-  color: var(--hud-ink);
-  border: 2px solid var(--hud-line-strong);
-  border-radius: 17px 21px 16px 19px;
-  background: var(--hud-cream);
-  box-shadow: 0 5px 11px rgba(67, 43, 27, 0.16);
-  font-size: 10px;
-  font-weight: 750;
-  cursor: pointer;
-}
-.hud-surface .candidate-activation-choice input { accent-color: var(--hud-green); }
 
 .hud-surface .candidate-review-slip {
   display: flex;
@@ -3926,20 +4770,6 @@
   font-size: 9px;
 }
 .hud-surface .learning-run-clock b { font-size: 14px; font-variant-numeric: tabular-nums; }
-.hud-surface .learning-run-clock__track {
-  height: 6px;
-  margin-top: 8px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: rgba(255, 248, 232, 0.19);
-}
-.hud-surface .learning-run-clock__track i {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: var(--hud-butter);
-  transition: width 220ms var(--hud-ease-out);
-}
 .hud-surface .learning-run-hint {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -3960,6 +4790,89 @@
   border-radius: 16px 20px 15px 18px;
   background: var(--hud-butter);
   transform: rotate(-0.35deg);
+}
+
+/* 两级提示同框按序展示（复盘 #11：第二级不再另起一个按钮）。 */
+.hud-surface .learning-run-hint__levels {
+  margin: 0;
+  padding-left: 16px;
+  display: grid;
+  gap: 5px;
+}
+
+/* 评估等待面板（复盘 #6）：已等待时长与"你交上去的回答"都要在屏上。 */
+.hud-surface .learning-run-assessing__wait {
+  margin-left: auto;
+  font-size: 9px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+.hud-surface .learning-run-assessing__answer {
+  display: grid;
+  gap: 5px;
+  margin: 11px 0 0;
+  padding: 11px 13px;
+  color: rgba(255, 248, 232, 0.86);
+  border: 1px solid rgba(255, 248, 232, 0.22);
+  border-radius: 13px 16px 12px 15px;
+  background: rgba(255, 248, 232, 0.06);
+  font-size: 10px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.hud-surface .learning-run-assessing__answer .meta { font-size: 9px; }
+
+/* 没有可用麦克风时，切换按钮保留但禁用，原因写在旁边（复盘 #8）。 */
+.hud-surface .learning-run-switch-note {
+  flex-basis: 100%;
+  margin: 0;
+  color: rgba(255, 248, 232, 0.7);
+  font-size: 9px;
+  line-height: 1.55;
+}
+
+/* 语音复述作答（复盘 #8：这个交互此前根本没有输入组件）。 */
+.hud-surface .run-voice-input {
+  display: grid;
+  min-height: 0;
+  height: 100%;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 9px;
+}
+.hud-surface .run-voice-input__controls {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+.hud-surface .run-voice-input__controls .meta { font-size: 9px; }
+.hud-surface .run-voice-input__block,
+.hud-surface .run-voice-input__note {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 11px 14px 10px 13px;
+  font-size: 9px;
+  line-height: 1.55;
+}
+.hud-surface .run-voice-input__block {
+  color: #6a2f24;
+  border: 1px solid rgba(159, 60, 40, 0.4);
+  background: rgba(214, 122, 92, 0.16);
+}
+.hud-surface .run-voice-input__note {
+  color: rgba(255, 248, 232, 0.8);
+  border: 1px solid rgba(255, 248, 232, 0.2);
+  background: rgba(255, 248, 232, 0.06);
+}
+.hud-surface .run-voice-input__transcript {
+  display: block;
+  min-height: 0;
+  height: 100%;
+}
+.hud-surface .run-voice-input__transcript textarea {
+  width: 100%;
+  height: 100%;
+  resize: none;
 }
 
 .hud-surface .learning-run-stage {
@@ -4364,7 +5277,6 @@
   .hud-surface .candidate-study-card .answer-slip { gap: 3px; }
   .hud-surface .candidate-study-card .answer-slip small { font-size: 5px; }
   .hud-surface .candidate-study-card .answer-slip strong { font-size: 7px; }
-  .hud-surface .candidate-activation-choice { min-height: 20px; gap: 3px; padding: 0 6px; border-width: 1px; font-size: 5px; }
   .hud-surface .candidate-review-slip h3 { margin: 6px 0 5px; }
   .hud-surface .candidate-review-slip dl > div { gap: 5px; padding: 4px 0; }
   .hud-surface .candidate-review-slip__actions { gap: 4px; padding-top: 7px; }
@@ -4386,7 +5298,6 @@
   .hud-surface .learning-run-journey dd { font-size: 9px; }
   .hud-surface .learning-run-clock > div:first-child { gap: 5px; font-size: 9px; }
   .hud-surface .learning-run-clock b { font-size: 10px; }
-  .hud-surface .learning-run-clock__track { height: 3px; margin-top: 4px; }
   .hud-surface .learning-run-hint { gap: 4px; margin-top: 9px; padding-top: 7px; font-size: 9px; }
   .hud-surface .learning-run-hint svg { width: 12px; height: 12px; }
   .hud-surface .learning-run-hint--shown { margin-right: -2px; margin-left: -2px; padding: 6px; border-radius: 8px 10px 7px 9px; }

@@ -35,6 +35,7 @@
 import type {
   LearningCardCandidateRevisionV2,
   CanonicalAnswerV2,
+  CardStrategyV2,
 } from "../card-generation-v2-contracts.ts";
 import type { QualityIssue } from "./critic-service.ts";
 
@@ -321,6 +322,20 @@ export function evidenceSpanGate(
 }
 
 /**
+ * 「题面本来就要复述答案片段」的题型。
+ *
+ * `cloze` 的题面是一句挖掉一处的原句，`sequence` 的题面按设计列出各个步骤名称、
+ * 只要求学习者给出顺序。这两种题型下，单个 answer unit 逐字出现在正面是**正确**
+ * 形态，不是泄漏；沿用 12 连续字符的照抄判据会把它们整批 hard 掉（中文 12 字符
+ * 很容易命中），结果不是题型变多而是交付 0 张卡。
+ *
+ * 对这两类改用「整条答案单元被完整照搬」作为机械判据：填空没真的挖掉任何内容、
+ * 或步骤顺序被完整写出，才是可机械确定的泄漏。语义层面的过度泄漏仍归 Pedagogy
+ * Critic 裁决。
+ */
+const STRATEGIES_THAT_QUOTE_THEIR_ANSWER = new Set<CardStrategyV2>(["cloze", "sequence"]);
+
+/**
  * §13.1 front leakage：按 answer unit 判定（不是整段重叠）。
  *
  * 只有当 front（cue+prompt）与某个 answer unit 的**关键片段**高度重合时才判
@@ -336,12 +351,12 @@ export function frontLeakageGate(
   const units = collectAnswerUnitsWithId(candidate.objective.canonicalAnswer);
 
   for (const unit of units) {
-    // hard 判定只保留「逐字照抄」这一机械事实（frontContainsVerbatimFragment）：
+    // hard 判定只保留「逐字照抄」这一机械事实（frontLeaksAnswerVerbatimV2）：
     // 标点压缩后连续 12 字符一致是语言无关的字符同一性，不是中文启发式，
     // 假阳面可控。改写式泄漏（换词复述、近义改写）是语义问题，归 Pedagogy
     // Critic 的冻结 code `front_leaks_answer` 硬裁决——本 gate 不再用表面
-    // 特征判定语义问题。
-    if (frontContainsVerbatimFragment(frontText, unit.text)) {
+    // 特征判定语义问题。题型决定判定尺度（见 STRATEGIES_THAT_QUOTE_THEIR_ANSWER）。
+    if (frontLeaksAnswerVerbatimV2(frontText, unit.text, candidate.presentation.strategy)) {
       issues.push({
         code: "front_leaks_answer",
         severity: "hard",
@@ -369,26 +384,44 @@ export function frontLeakageGate(
 }
 
 /**
- * §13.1 front 泄题 hard 判定：逐字照抄检测（§4.5 认识论分工版）。
+ * 「整条答案单元被完整照搬进题面」的机械判定，供 `cloze` / `sequence` 使用。
+ *
+ * 与 {@link frontLeaksAnswerVerbatimV2} 同一套压缩规则，但只有**整段**命中才判：
+ * 填空题没真的挖掉内容、顺序题把完整序列写进题面，才是可机械确定的泄漏。
+ * 压缩后不足 4 字符的单元不判（过短片段的包含关系没有判定价值）。
+ */
+function frontRepeatsAnswerVerbatimInFull(frontText: string, answerText: string): boolean {
+  const compact = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}=]+/gu, "");
+  const front = compact(frontText);
+  const unit = compact(answerText);
+  if (!front || unit.length < 4) return false;
+  return front.includes(unit);
+}
+
+/**
+ * §13.1 front 泄题 hard 判定的公开入口：正面文本是否逐字照抄了答案文本。
  *
  * 双方文本先做小写 + 压缩全部非字母/数字/等号字符（中英文标点差异不再
  * 影响匹配），然后在压缩后的 front 中滑动查找答案的任意 12 字符连续片段；
  * 答案压缩后不足 12 字符时退化为整段包含检测（≥8 字符才判；短答案难以
  * 可靠判定，保守放行）。
- */
-function frontContainsVerbatimFragment(frontText: string, unitRawText: string): boolean {
-  return frontLeaksAnswerVerbatimV2(frontText, unitRawText);
-}
-
-/**
- * 泄题机械判定的公开入口：正面文本是否逐字照抄了答案文本。
  *
- * 与 frontLeakageGate 同一套压缩规则（小写 + 压缩全部非字母/数字/等号字符），
- * 供发布侧（卡片激活、正面编辑）复用 —— 生成闸门与发布闸门必须判定一致，
- * 否则会出现「gate 拦得住、发布放得行」的缝（2026-09-18 复盘：库中 34 张
- * 已发布卡正面即答案，正是这条缝）。
+ * 与 frontLeakageGate 同一套压缩规则，供发布侧（卡片激活、正面编辑）复用 ——
+ * 生成闸门与发布闸门必须判定一致，否则会出现「gate 拦得住、发布放得行」的缝
+ * （2026-09-18 复盘：库中 34 张已发布卡正面即答案，正是这条缝）。
+ *
+ * `strategy` 是必填的：判定尺度按题型不同（见
+ * {@link STRATEGIES_THAT_QUOTE_THEIR_ANSWER}），三处调用点若不一起传题型，
+ * 就会出现「生成放行、激活否决」的新缝。
  */
-export function frontLeaksAnswerVerbatimV2(frontText: string, answerText: string): boolean {
+export function frontLeaksAnswerVerbatimV2(
+  frontText: string,
+  answerText: string,
+  strategy: CardStrategyV2,
+): boolean {
+  if (STRATEGIES_THAT_QUOTE_THEIR_ANSWER.has(strategy)) {
+    return frontRepeatsAnswerVerbatimInFull(frontText, answerText);
+  }
   const compact = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}=]+/gu, "");
   const front = compact(frontText);
   const unit = compact(answerText);

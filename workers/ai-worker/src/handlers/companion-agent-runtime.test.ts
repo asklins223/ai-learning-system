@@ -2,7 +2,7 @@
  * Companion Agent 运行时单测（方案《将 AI 伴星升级为可扩展 Agent》§1/§2/§3/§4）。
  *
  * 覆盖运行时里不依赖 DB 的决策面——这些正是方案验收清单里"必须失败关闭"的部分：
- * - Skill 解析：只从用户启用的 Skill 中选，且选择确定；
+ * - 工具面：每轮全给、只按权限档过滤（技能层已删，不再有"这轮选中了什么"）；
  * - 工具与权限：只读权限禁止一切写工具，guided/full 仍保留高危确认；
  * - provider 工具调用标识：越界 id/name 必须被阻止（不得进入审计表或 SSE）。
  */
@@ -10,99 +10,20 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   canUseCompanionAgentTool,
-  COMPANION_AGENT_MAX_STEPS,
-  getCompanionAgentSkill,
   getCompanionAgentTool,
-  resolveCompanionAgentTools,
+  resolveAllCompanionAgentTools,
   validateCompanionAgentToolArguments,
 } from "@ailearn/shared";
-import type { ReadContext } from "./companion-dialogue-store.ts";
 import {
   boundedToolCallIdentity,
   runStreamingAgentStep,
   safeArgumentsHash,
-  selectSkill,
 } from "./companion-agent-runtime.ts";
 import { CompanionStreamStoppedError } from "./companion-dialogue-stream.ts";
 import type { AIProvider } from "../lib/ai-provider.ts";
 
-const ALL_SKILLS = [
-  "learning-context",
-  "learning-tutor",
-  "learning-planner",
-  "companion-memory",
-  "companion-navigation",
-];
-
-/** selectSkill 只读 pageContext 与 userText，其余字段与选择无关。 */
-function readContext(overrides: Partial<ReadContext>): ReadContext {
-  return {
-    runId: "11111111-1111-4111-8111-111111111111",
-    conversationId: "22222222-2222-4222-8222-222222222222",
-    userId: "33333333-3333-4333-8333-333333333333",
-    userMessageId: "44444444-4444-4444-8444-444444444444",
-    generation: 1,
-    runStatus: "accepted",
-    accountEpoch: 0,
-    pageContext: null,
-    groundedTutorContext: null,
-    userText: "",
-    recentMessages: [],
-    activeMemories: [],
-    petProfile: null,
-    nextMessageSeq: 1,
-    nextEventSeq: 1,
-    ...overrides,
-  };
-}
-
-test("Skill 解析：grounded tutor 页面固定选 learning-tutor", () => {
-  const skill = selectSkill(
-    readContext({
-      pageContext: { pageKind: "learning_run", requestedCapability: "grounded_tutor" },
-      userText: "随便聊聊",
-    }),
-    { enabledSkillIds: ALL_SKILLS },
-  );
-  assert.equal(skill?.id, "learning-tutor");
-});
-
-test("Skill 解析：触发词命中优先，按得分与 id 稳定排序", () => {
-  const skill = selectSkill(
-    readContext({ userText: "帮我开始学习吧" }),
-    { enabledSkillIds: ALL_SKILLS },
-  );
-  assert.equal(skill?.id, "learning-planner");
-
-  // 同分时按 skill id 升序，保证同一输入永远选同一个 Skill
-  const again = selectSkill(
-    readContext({ userText: "帮我开始学习吧" }),
-    { enabledSkillIds: ALL_SKILLS },
-  );
-  assert.equal(again?.id, skill?.id);
-});
-
-test("Skill 解析：用户停用的 Skill 永不被选中", () => {
-  // learning-planner 的触发词命中，但用户只启用了 companion-memory
-  const skill = selectSkill(
-    readContext({ userText: "帮我开始学习吧" }),
-    { enabledSkillIds: ["companion-memory"] },
-  );
-  assert.notEqual(skill?.id, "learning-planner");
-  assert.ok(skill === null || skill.id === "companion-memory");
-
-  // 全部停用 → 无 Skill（工具列表为空，退化为单步闲聊）
-  assert.equal(selectSkill(readContext({ userText: "帮我开始学习吧" }), { enabledSkillIds: [] }), null);
-});
-
-test("Skill 解析：无页面上下文且无触发词 → null（普通闲聊单步完成）", () => {
-  assert.equal(selectSkill(readContext({ userText: "你好呀" }), { enabledSkillIds: ALL_SKILLS }), null);
-});
-
 test("工具解析：只读权限下不存在任何写工具", () => {
-  const planner = getCompanionAgentSkill("learning-planner");
-  assert.ok(planner, "learning-planner 必须注册");
-  const readOnlyTools = resolveCompanionAgentTools([planner], "read_only");
+  const readOnlyTools = resolveAllCompanionAgentTools("read_only");
   assert.ok(readOnlyTools.length > 0, "只读权限仍应保留读取工具");
   for (const definition of readOnlyTools) {
     assert.equal(definition.riskClass, "read", `${definition.name} 不应出现在只读权限中`);
@@ -113,28 +34,35 @@ test("工具解析：只读权限下不存在任何写工具", () => {
     const definition = getCompanionAgentTool(name);
     assert.ok(definition);
     assert.equal(canUseCompanionAgentTool("read_only", definition).allowed, false, `${name} 必须被只读权限阻止`);
-    assert.equal(resolveCompanionAgentTools([planner], "read_only").some((d) => d.name === name), false);
+    assert.equal(readOnlyTools.some((d) => d.name === name), false);
   }
 });
 
 test("工具解析：guided 自动执行可逆低风险，其余写操作一律确认", () => {
-  const planner = getCompanionAgentSkill("learning-planner");
-  assert.ok(planner);
-  const tools = resolveCompanionAgentTools([planner], "guided");
+  const tools = resolveAllCompanionAgentTools("guided");
   assert.ok(tools.length > 0);
   for (const definition of tools) {
     const auth = canUseCompanionAgentTool("guided", definition);
     assert.equal(auth.allowed, true);
-    if (definition.riskClass === "read") {
-      assert.equal(auth.requiresConfirmation, false, `${definition.name}（读取）不应要求确认`);
-    } else {
-      assert.equal(auth.requiresConfirmation, true, `${definition.name}（写）在 guided 下必须确认`);
-    }
+    // 读取永不确认；约定类写入（提醒）是用户亲口要过的、可逆且不改学习状态，
+    // guided 下也直接执行；其余写操作一律先出提案。
+    const autoExecutes = definition.riskClass === "read"
+      || (definition.riskClass === "reversible_low" && !definition.requiresConfirmation);
+    assert.equal(
+      auth.requiresConfirmation,
+      !autoExecutes,
+      `${definition.name}（${definition.riskClass}）在 guided 下的确认要求不符`,
+    );
   }
-  // 唯一的 reversible_low 工具（图谱聚焦）在 guided 下免确认
-  const focus = getCompanionAgentTool("companion_focus_graph");
-  assert.ok(focus);
-  assert.equal(canUseCompanionAgentTool("guided", focus).requiresConfirmation, false);
+  // 图谱聚焦与提醒的建/撤是 planner+navigation 里的免确认可逆低风险工具
+  for (const name of ["companion_focus_graph", "companion_schedule_reminder", "companion_cancel_reminder"]) {
+    const definition = getCompanionAgentTool(name);
+    assert.ok(definition, `${name} 必须存在`);
+    assert.equal(canUseCompanionAgentTool("guided", definition).requiresConfirmation, false, name);
+  }
+  // 提醒必须是可查可撤的：只有 schedule 没有 list/cancel 的话，用户说"不用提醒了"
+  // 就只能等它自己响。
+  assert.ok(getCompanionAgentTool("companion_list_reminders")?.riskClass === "read");
 });
 
 test("工具解析：full 权限 = 用户预授权，只有不可逆动作仍需确认", () => {
@@ -194,21 +122,6 @@ test("工具参数 hash：确定性且对异常 payload 不抛错", () => {
   assert.equal(safeArgumentsHash(circular).length, 64);
 });
 
-test("Skill 清单自身满足预算上限", () => {
-  for (const id of ALL_SKILLS) {
-    const skill = getCompanionAgentSkill(id);
-    assert.ok(skill, `${id} 必须注册`);
-    assert.ok(skill.maxSteps >= 1 && skill.maxSteps <= COMPANION_AGENT_MAX_STEPS);
-    // 白名单里的工具必须真实注册，且反向声明包含本 Skill
-    for (const toolName of skill.toolNames) {
-      const definition = getCompanionAgentTool(toolName);
-      assert.ok(definition, `${id} 白名单引用了未注册工具 ${toolName}`);
-      assert.ok(definition.skillIds.includes(id), `${toolName} 未声明属于 ${id}`);
-    }
-  }
-});
-
-// ─── 单步流式执行的中止语义（2026-09-19 观察项修复；④-b 起覆盖每一步） ────
 //
 // runStreamingAgentStep 不依赖 DB（provider/onProviderDelta 全注入），这里锁住
 // 三条路径：正常完成、交付管线"说停"（返回 false）、交付管线**抛错**（落库事务
@@ -316,7 +229,7 @@ test("流式单步（④-b）：带工具的一步把 tool_calls 一并带回，
   // 然后什么都没发生"。
   const deltas = ["好，", "这就带你过去。"];
   const { provider } = streamingStubProvider(deltas, [
-    { id: "call_1", name: "companion_open_review", arguments: {} },
+    { id: "call_1", name: "companion_open_page", arguments: {} },
   ]);
   const seen: string[] = [];
   const result = await runStreamingAgentStep({
@@ -330,7 +243,7 @@ test("流式单步（④-b）：带工具的一步把 tool_calls 一并带回，
     },
   });
   assert.equal(result.content, "好，这就带你过去。");
-  assert.deepEqual(result.toolCalls, [{ id: "call_1", name: "companion_open_review", arguments: {} }]);
+  assert.deepEqual(result.toolCalls, [{ id: "call_1", name: "companion_open_page", arguments: {} }]);
   assert.equal(result.finishReason, "tool_calls");
   assert.deepEqual(seen, ["好，", "这就带你过去。"]);
 });
@@ -408,4 +321,96 @@ test("流式单步：交付管线抛错（落库异常）→ 同样立即中断�
   // 后续增量不再进入 provider 读取循环。
   assert.equal(state.aborted, true, "底层请求必须被中断");
   assert.ok(state.emitted < deltas.length, "不得继续消费剩余增量");
+});
+
+// ─── 坍缩闸（2026-09-20）：holdUntilChars ───────────────────────────────
+// 实机四条连续轮次落库 `现在是`(3)/`今天`(2)/`最近`(2)/`你`(1)，全是流式，
+// 而退化闸要求 `!stepEmitted`——吐过字就永远不成立，所以一次都没拦住。
+// hold 的语义就是让"这一步到底有没有下发"重新变成可成立的条件。
+
+test("坍缩闸：整步未达阈值时一个字都不下发，onTextEmitted 不触发", async () => {
+  const { provider } = streamingStubProvider(["嘿", "嘿嘿"]);
+  const seen: string[] = [];
+  let emitted = false;
+  const result = await runStreamingAgentStep({
+    provider,
+    stepRequest: STREAM_STEP_REQUEST as never,
+    ctxSignal: new AbortController().signal,
+    timeoutMs: 5_000,
+    holdUntilChars: 12,
+    onTextEmitted: () => { emitted = true; },
+    onProviderDelta: async (delta: string) => { seen.push(delta); return true; },
+  });
+  assert.deepEqual(seen, [], "短于阈值的整步不得下发任何字符");
+  assert.equal(emitted, false, "stepEmitted 必须保持 false，退化闸才有重跑的机会");
+  // 但正文本身不能丢——它由调用方经整段补写路径交付。
+  assert.equal(result.content, "嘿嘿嘿");
+});
+
+test("坍缩闸：跨过阈值时把攒住的文本一次性按序放行，之后直通", async () => {
+  const { provider } = streamingStubProvider(["今天", "学了", "18分钟", "，很稳啊"]);
+  const seen: string[] = [];
+  let emitted = false;
+  const result = await runStreamingAgentStep({
+    provider,
+    stepRequest: STREAM_STEP_REQUEST as never,
+    ctxSignal: new AbortController().signal,
+    timeoutMs: 5_000,
+    holdUntilChars: 8,
+    onTextEmitted: () => { emitted = true; },
+    onProviderDelta: async (delta: string) => { seen.push(delta); return true; },
+  });
+  // 已下发原文必须是最终正文的前缀——放行帧是攒住的整段，不是最后一个增量。
+  assert.deepEqual(seen, ["今天学了18分钟", "，很稳啊"]);
+  const finalText = typeof result.content === "string" ? result.content : "";
+  assert.ok(finalText.length > 0 && finalText.startsWith(seen.join("")), "下发内容必须是最终正文的前缀");
+  assert.equal(emitted, true);
+});
+
+test("坍缩闸：分段符只贴在真正放行的第一帧前面，不重复", async () => {
+  const { provider } = streamingStubProvider(["第一段", "第二段", "第三段"]);
+  const seen: string[] = [];
+  await runStreamingAgentStep({
+    provider,
+    stepRequest: STREAM_STEP_REQUEST as never,
+    ctxSignal: new AbortController().signal,
+    timeoutMs: 5_000,
+    separatorBefore: "\n\n",
+    holdUntilChars: 5,
+    onProviderDelta: async (delta: string) => { seen.push(delta); return true; },
+  });
+  assert.equal(seen[0], "\n\n第一段第二段", "放行帧是攒住的整段，不是最后一个增量");
+  assert.equal(seen.filter((chunk) => chunk.includes("\n\n")).length, 1, "分隔符只能出现一次");
+});
+
+// ─── 扁平工具面（方案 29 §4.1）：能力不再被关键词路由关掉 ─────────────────
+// 回归的正是那个 90.7% 的读数：`selectSkill()` 没命中 → 空工具面 → 单步，
+// "读记忆 / 看系统状态 / 跳转"根本没出现在她面前。
+
+test("扁平工具面：guided/full 档下写工具与读工具同时在列，与用户说了什么无关", () => {
+  const guided = resolveAllCompanionAgentTools("guided").map((d) => d.name);
+  const full = resolveAllCompanionAgentTools("full").map((d) => d.name);
+  // 曾经这些只存在于特定技能里：不选中的技能 = 拿不到的能力。
+  for (const name of ["companion_save_memory", "companion_open_page", "companion_start_learning"]) {
+    assert.ok(guided.includes(name), `guided 必须能看到 ${name}`);
+    assert.ok(full.includes(name), `full 必须能看到 ${name}`);
+  }
+  // 跨技能的组合现在可能了（以前一轮只能拿到一个技能的子集）。
+  assert.ok(guided.includes("companion_read_context") && guided.includes("companion_search_notes"),
+    "上下文与系统查询工具必须同时可用");
+  // 抱怨 #5/#6 的那一面：看笔记、看数据、看队列、跳到页面，任何一轮都在。
+  for (const name of [
+    "companion_search_notes", "companion_read_note", "companion_open_note", "companion_open_page",
+    "companion_get_learning_stats", "companion_list_task_queue", "companion_list_due_reviews",
+    "companion_schedule_reminder", "companion_list_reminders", "companion_cancel_reminder",
+  ]) {
+    assert.ok(guided.includes(name), `guided 必须能看到 ${name}`);
+  }
+});
+
+test("扁平工具面：read_only 档仍然只剩读工具（权限边界不因常开而放松）", () => {
+  const readOnly = resolveAllCompanionAgentTools("read_only");
+  assert.ok(readOnly.length > 0, "read_only 下仍要有读工具");
+  assert.ok(readOnly.every((d) => d.riskClass === "read"),
+    "read_only 绝不能出现任何写/动作工具");
 });

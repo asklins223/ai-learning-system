@@ -8,7 +8,7 @@ import {
   workspaces,
 } from "@ailearn/shared/db-schema/identity";
 import { sessions } from "@ailearn/shared/db-schema/session";
-import { onboardingStates } from "@ailearn/shared/db-schema/identity";
+import { onboardingStates, userAiSettings } from "@ailearn/shared/db-schema/identity";
 import { notes, sources } from "@ailearn/shared/db-schema/note";
 import { evidenceSnapshotsV2 } from "@ailearn/shared/db-schema/card-generation-v2";
 import {
@@ -93,6 +93,33 @@ export async function createInvite(
   const [row] = await withWorkspaceTransaction(
     { workspaceId, userId: createdBy },
     async (tx) => {
+      // 个人空间不能被分享。此前生产代码没有创建协作空间的入口，邀请只能指向某人
+      // 的个人空间、把加入者的成员行写进一行 workspace_type='personal' 的数据里；
+      // 现在协作空间有自己的创建路径，个人空间因此恢复成严格单人——批次 4 的协同
+      // 门控与「member 只读」判据都要靠这个保证才成立。
+      // 放在同一事务内：校验与插入之间不能有别的事务塞进类型变更。
+      const target = await tx
+        .select({ workspaceType: workspaces.workspaceType })
+        .from(workspaces)
+        .where(eq(workspaces.id, workspaceId))
+        .limit(1);
+      if (target.length === 0) {
+        throw new DomainError({
+          name: "InviteTargetMissing",
+          code: "workspace_not_found",
+          message: "工作区不存在",
+          statusCode: 404,
+        });
+      }
+      if (target[0].workspaceType !== "collaborative") {
+        throw new DomainError({
+          name: "InviteTargetNotShareable",
+          code: "personal_workspace_not_shareable",
+          message: "个人空间不能分享，请先创建协作空间",
+          statusCode: 409,
+        });
+      }
+
       return tx
         .insert(inviteCodes)
         .values({
@@ -601,10 +628,15 @@ async function deriveOnboardingSnapshot(
 ): Promise<DerivedOnboardingSnapshot> {
   // N#7-12：5 个派生查询相互无数据依赖，并行化（原来串行 5 次往返）。
   // 该函数在 markOnboardingStep 的 FOR UPDATE 持有期内调用，并行化缩短写锁持有时间。
-  const [workspace, firstContent, firstNote, firstCard] = await Promise.all([
-    tx.query.workspaces.findFirst({
-      where: eq(workspaces.id, workspaceId),
-    }),
+  const [aiSettings, firstContent, firstNote, firstCard] = await Promise.all([
+    // ai_consent 步骤的事实源从"空间的同意"改成"本人的同意"（0237）。
+    // 本事务由 withWorkspaceTransaction 开，`app.user_id` 已设置，所以这张启用了
+    // RLS 的表能正常读到自己的行。
+    tx
+      .select({ consentAt: userAiSettings.consentAt, consentVersion: userAiSettings.consentVersion })
+      .from(userAiSettings)
+      .where(eq(userAiSettings.userId, userId))
+      .limit(1),
     tx
       .select({ id: sources.id })
       .from(sources)
@@ -640,7 +672,7 @@ async function deriveOnboardingSnapshot(
   const usesExternalProvider = effectiveProvider !== "mock";
 
   const steps: Record<string, boolean> = {
-    ai_consent: !usesExternalProvider || Boolean(workspace?.aiConsentAt && workspace.aiConsentVersion),
+    ai_consent: !usesExternalProvider || Boolean(aiSettings[0]?.consentAt && aiSettings[0]?.consentVersion),
     first_content: firstContent.length > 0,
     first_note: firstNote.length > 0,
     first_card: firstCard.length > 0,
