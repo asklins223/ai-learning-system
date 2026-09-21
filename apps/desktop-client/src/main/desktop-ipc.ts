@@ -82,12 +82,21 @@ import {
   inviteListResultV1Schema,
   markdownImportResultV1Schema,
   memberListResultV1Schema,
+  NOTE_DOC_FRAME_MAX_BASE64_CHARS,
+  noteDocStateResultV1Schema,
+  noteDocWriteResultV1Schema,
+  noteDocPresenceResultV1Schema,
+  type NoteDocWriteResultV1,
   renameWorkspaceResultV1Schema,
   createWorkspaceResultV1Schema,
   searchDriftResultV1Schema,
   searchReindexResultV1Schema,
   type DesktopRouteKindM2,
 } from "@ailearn/shared/desktop-ipc-contracts";
+import {
+  NOTE_DOC_PRESENCE_MAX_CHARS,
+  type NoteDocWatchHandle,
+} from "./note-doc-transport.ts";
 import { mainPageContextInputV2Schema } from "@ailearn/shared/companion-bridge-contracts";
 import {
   desktopSourceListPageSchema,
@@ -497,6 +506,34 @@ const noteSaveInputSchema = z.strictObject({
   noteId: uuidSchema,
   request: desktopNoteSaveRequestV1Schema,
 });
+// ─── 笔记协同（批次 4.3）────────────────────────────────────────────
+const noteDocStateInputSchema = z.strictObject({
+  ...m1InputBase,
+  noteId: uuidSchema,
+});
+/**
+ * 写入的正门。有连接就并进那条连接的文档（同一份 CRDT 状态，多个窗口共用），
+ * 没有连接（personal 空间、只读成员、或还没订阅上）就走一次性 HTTP 上送。
+ * 界面只需要记一条规则：改了就发这里。
+ */
+const noteDocApplyUpdateInputSchema = z.strictObject({
+  ...m1InputBase,
+  commandId: commandIdSchema,
+  noteId: uuidSchema,
+  // 上限与下行帧共用同一个常量：两侧各写一个数，迟早一边放行一边拒收。
+  update: z.string().min(1).max(NOTE_DOC_FRAME_MAX_BASE64_CHARS),
+});
+const noteDocPresenceInputSchema = z.strictObject({
+  ...m1InputBase,
+  noteId: uuidSchema,
+  // 空串 = 我离开了这篇。上限与主进程里的 awareness 检查同一个数。
+  state: z.string().max(NOTE_DOC_PRESENCE_MAX_CHARS),
+});
+/** 一条笔记的活连接；`workspaceEpoch` 用来在切空间时识别"这条已经不作数"。 */
+type NoteDocStreamEntry = {
+  handle: NoteDocWatchHandle;
+  workspaceEpoch: number;
+};
 const cardGenerationStartInputSchema = z.strictObject({
   ...m1InputBase,
   commandId: commandIdSchema,
@@ -912,6 +949,16 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
   const cardGenerationStreams = new Map<string, () => void>();
   /** 伴星会话事件流：conversationId → 停止函数（每个会话至多一条）。 */
   const companionChatStreams = new Map<string, () => void>();
+  /**
+   * 笔记协同流：noteId → 该笔记的连接句柄（每篇至多一条，多个窗口共用）。
+   *
+   * 与 SSE 那几条不同，这里存的不是"停止函数"而是句柄：界面上行的增量要交给**同一条**
+   * 连接的文档，才能与订阅者共用一份 CRDT 状态。
+   */
+  const noteDocStreams = new Map<string, NoteDocStreamEntry>();
+  /** 门控判据（决定 7b）：当前空间的类型与本人角色，由 `rememberSession` 实时更新。 */
+  let activeWorkspaceKind: "personal" | "collaborative" | null = null;
+  let activeWorkspaceRole: "owner" | "member" | null = null;
   let stopCompanionAccountEvents: (() => void) | null = null;
   let stopCompanionInboxEvents: (() => void) | null = null;
   /**
@@ -1059,6 +1106,13 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     }
   };
 
+  /** 退订/关窗后回收：没有订阅者的那条笔记连接不作数留着。 */
+  const reconcileNoteDocStreams = (): void => {
+    for (const noteId of [...noteDocStreams.keys()]) {
+      if (!hasNoteDocSubscription(noteId)) stopNoteDocStream(noteId);
+    }
+  };
+
   const releaseSubscriptionsForWindow = (window: BrowserWindow): void => {
     // Window destruction is a hard sensitivity boundary. Do not let a
     // main-owned formal-assessment state survive the renderer that held the
@@ -1068,6 +1122,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     if (!hasLearningRunSubscription()) stopLearningRunStreams();
     if (!hasCardGenerationSubscription()) stopCardGenerationStreams();
     if (!hasCompanionChatSubscription()) stopCompanionChatStreams();
+    reconcileNoteDocStreams();
     stopCompanionLifecycle();
   };
 
@@ -1179,11 +1234,58 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     }).catch(() => undefined);
   };
 
+  /**
+   * 笔记协同的建连与门控（决定 7b）。
+   *
+   * 只在「协作空间 + 本人可写」时建那条 WS。两类不建连的场景不是"没有写入路径"，
+   * 只是"没有实时传输"：
+   *  - personal 空间：改一处走 `noteDocUpload` 一次性上送，离线时排队、重连后按序重发
+   *    （服务端为此专门有幂等用例，重发不会算成第二次写入）；
+   *  - collaborative 的只读成员：本来就不能写，正文走既有读路径。
+   * 判据的**唯一**来源仍是服务端；这里只是决定要不要占一条长连接。
+   */
+  const noteDocStreamAllowed = (): boolean => activeWorkspaceKind === "collaborative" && activeWorkspaceRole === "owner";
+
+  const hasNoteDocSubscription = (noteId: string): boolean => {
+    for (const subscription of subscriptions.values()) {
+      if (subscription.topic.kind === "noteDoc" && subscription.topic.noteId === noteId) return true;
+    }
+    return false;
+  };
+
+  const stopNoteDocStream = (noteId: string): void => {
+    const entry = noteDocStreams.get(noteId);
+    if (!entry) return;
+    noteDocStreams.delete(noteId);
+    entry.handle.stop();
+  };
+
+  const stopNoteDocStreams = (): void => {
+    for (const noteId of [...noteDocStreams.keys()]) stopNoteDocStream(noteId);
+  };
+
+  const ensureNoteDocStream = (noteId: string): void => {
+    if (!noteDocStreamAllowed() || !hasNoteDocSubscription(noteId) || noteDocStreams.has(noteId)) return;
+    const streamWorkspaceEpoch = activeWorkspaceEpoch;
+    void gateway.watchNoteDocument(noteId, ({ noteId: _framedByGateway, ...event }) => {
+      if (streamWorkspaceEpoch !== activeWorkspaceEpoch) return;
+      emit("noteDoc", { kind: "note_doc_event", noteId, event }, activeWorkspaceEpoch);
+    }).then((handle) => {
+      // 建连期间可能已经退订、切了空间或改了角色——那条连接不属于这里了。
+      if (!hasNoteDocSubscription(noteId) || !noteDocStreamAllowed() || streamWorkspaceEpoch !== activeWorkspaceEpoch) {
+        handle.stop();
+        return;
+      }
+      noteDocStreams.set(noteId, { handle, workspaceEpoch: streamWorkspaceEpoch });
+    }).catch(() => undefined);
+  };
+
   const subscriptionMatchesPayload = (topic: SubscriptionTopicM2, topicKind: SubscriptionTopicM2["kind"], payload: M2SubscriptionEvent): boolean => {
     if (topic.kind !== topicKind) return false;
     if (topic.kind === "learningRun") return payload.kind === "learning_run_changed" && topic.runId === payload.runId;
     if (topic.kind === "cardGeneration") return payload.kind === "card_generation_changed" && topic.runId === payload.runId;
     if (topic.kind === "companionChat") return payload.kind === "companion_chat_event" && topic.conversationId === payload.conversationId;
+    if (topic.kind === "noteDoc") return payload.kind === "note_doc_event" && topic.noteId === payload.noteId;
     return true;
   };
 
@@ -1209,10 +1311,22 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
       formalAssessmentGuard.failClosed("disconnected");
       activeSubjectId = null;
       activeWorkspaceId = null;
+      activeWorkspaceKind = null;
+      activeWorkspaceRole = null;
+      // 判据一消失，所有协同连接都要退掉：留着一条属于上一个空间的连接，
+      // 就是"切了空间还在收别人的正文"。
+      stopNoteDocStreams();
       return;
     }
     activeSubjectId = session.user.userId;
     activeWorkspaceId = session.workspace.workspaceId;
+    const kindChanged = activeWorkspaceKind !== session.workspace.workspaceType
+      || activeWorkspaceRole !== session.workspace.role;
+    activeWorkspaceKind = session.workspace.workspaceType;
+    activeWorkspaceRole = session.workspace.role;
+    // 换空间或角色变了（member↔owner）：门控判据变了，旧连接不作数。界面上还有
+    // 打开着的笔记时会重新订阅，届时按新判据决定建不建。
+    if (kindChanged) stopNoteDocStreams();
   };
 
   const syncFormalGuard = (snapshot: unknown): void => {
@@ -2270,7 +2384,41 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     return receipt;
   }, undefined, noteSaveReceiptV1Schema);
 
-  installHandler(DESKTOP_IPC_CHANNELS.noteCardGenerationStart, cardGenerationStartInputSchema, options, async (_event, _window, input) => {
+  // ─── 笔记协同（批次 4.3）──────────────────────────────────────────
+  installHandler(DESKTOP_IPC_CHANNELS.noteDocState, noteDocStateInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "note.detail");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    // 编辑起点必须来自服务端那份编码：用 note.detail 的 blocks 自己拼一棵文档树，
+    // 与库里那份没有共同祖先，两边一改就复制块。
+    return await gateway.getNoteDocState(input.noteId, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, noteDocStateResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.noteDocApplyUpdate, noteDocApplyUpdateInputSchema, options, async (_event, _window, input): Promise<NoteDocWriteResultV1> => {
+    requireM2Route(contract, "note.detail");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    const stream = noteDocStreams.get(input.noteId);
+    if (stream && stream.workspaceEpoch === activeWorkspaceEpoch) {
+      // ack 用 commandId：同机另一个窗口要收到这一帧，发的那个窗口收到也无妨
+      // （CRDT 上是一次空操作）。
+      stream.handle.applyLocalUpdate(input.update, input.commandId);
+      return { via: "stream", revision: null };
+    }
+    // 没有连接不等于不能写：personal 空间与离线重连的队列都从这里出去。
+    // 可写性的判据仍然只在服务端那一处（`requireOwner`），这里不重复判。
+    const receipt = await gateway.uploadNoteDocUpdate(input.noteId, input.update, input.meta.requestId);
+    return { via: "uploaded", revision: receipt.revision };
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, noteDocWriteResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.noteDocPresence, noteDocPresenceInputSchema, options, (_event, _window, input) => {
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    const stream = noteDocStreams.get(input.noteId);
+    if (!stream || stream.workspaceEpoch !== activeWorkspaceEpoch) return { shared: false as const };
+    stream.handle.setPresence(input.state);
+    return { shared: true as const };
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, noteDocPresenceResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.noteCardGenerationStart, cardGenerationStartInputSchema, options,
+    async (_event, _window, input) => {
     requireM2Route(contract, "note.detail");
     assertEpoch(input.meta, activeWorkspaceEpoch);
     await requireActionCapability("card_generation.start", input.meta.requestId);
@@ -2416,6 +2564,9 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
       // 按 runId/generation 过滤，不会把历史帧渲染成本轮回复。
       ensureCompanionChatStream(input.topic.conversationId, input.topic.eventCursor ?? 0);
     }
+    if (input.topic.kind === "noteDoc") {
+      ensureNoteDocStream(input.topic.noteId);
+    }
     return { subscriptionId };
   }, undefined, subscriptionOutputSchema);
 
@@ -2425,6 +2576,8 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     subscriptions.delete(input.subscriptionId);
     if (!hasLearningRunSubscription()) stopLearningRunStreams();
     if (!hasCardGenerationSubscription()) stopCardGenerationStreams();
+    // 一篇笔记可能被多个窗口同时订阅，所以不能"有一条退订就关连接"。
+    reconcileNoteDocStreams();
     if (subscription.topic.kind === "companionChat" && !hasCompanionChatSubscription(subscription.topic.conversationId)) {
       stopCompanionChatStream(subscription.topic.conversationId);
     }

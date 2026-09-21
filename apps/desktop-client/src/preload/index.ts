@@ -251,6 +251,13 @@ const desktopApi: AILearnDesktopApiM2 = {
     restore: (input) => invoke(DESKTOP_IPC_CHANNELS.noteRestore, input),
     get: (input) => invoke(DESKTOP_IPC_CHANNELS.noteGet, input),
     save: (input) => invoke(DESKTOP_IPC_CHANNELS.noteSave, input),
+    // 协同正文：渲染进程不能直连 WS（沙箱 + CSP + onBeforeRequest），所以起点、写入和
+    // presence 都走这里，实时下行是 `subscriptions` 上 kind=noteDoc 的事件。
+    doc: {
+      state: (input) => invoke(DESKTOP_IPC_CHANNELS.noteDocState, input),
+      applyUpdate: (input) => invoke(DESKTOP_IPC_CHANNELS.noteDocApplyUpdate, input),
+      presence: (input) => invoke(DESKTOP_IPC_CHANNELS.noteDocPresence, input),
+    },
     versions: (input) => invoke(DESKTOP_IPC_CHANNELS.noteVersions, input),
     restoreVersion: (input) => invoke(DESKTOP_IPC_CHANNELS.noteVersionRestore, input),
     // 编辑器里的图写进对象存储。渲染层不持有令牌也够不到 API 源，只交出字节，

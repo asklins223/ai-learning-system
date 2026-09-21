@@ -70,7 +70,20 @@ import {
   type WorkspaceSummaryV1,
   windowStateSnapshotV1Schema,
   workspaceAiSettingsV1Schema,
+  noteDocStateResultV1Schema,
+  noteDocUploadResultV1Schema,
+  type NoteDocStateResultV1,
+  type NoteDocStreamEventV1,
+  type NoteDocUploadResultV1,
 } from "@ailearn/shared/desktop-ipc-contracts";
+import {
+  NOTE_DOC_PREFIX,
+  defaultNoteDocTransport,
+  noteDocStreamUrl,
+  toNoteDocStreamEvent,
+  type NoteDocTransport,
+  type NoteDocWatchHandle,
+} from "./note-doc-transport.ts";
 import {
   getLearningRunResultResponseV2Schema,
   learningRunTargetRevealV2Schema,
@@ -619,6 +632,7 @@ export class DesktopGateway {
   private companionBridgeRenewTimer: ReturnType<typeof setInterval> | null = null;
   private companionBridgeGeneration = 0;
   private readonly credentials: SessionCredentialStore | null;
+  private readonly noteDocTransport: NoteDocTransport;
   /** How the current credential is held; reported to the renderer as truth. */
   private credentialPersistence: "memory" | "safe_storage" = "memory";
   private credentialRestored = false;
@@ -633,9 +647,17 @@ export class DesktopGateway {
 
   constructor(
     private readonly env: NodeJS.ProcessEnv = process.env,
-    options: { credentials?: SessionCredentialStore | null } = {},
+    options: {
+      credentials?: SessionCredentialStore | null;
+      /**
+       * 协同传输的实现。默认用真的 Hocuspocus provider；测试里换成假的，才能断言
+       * "该不该建这条连接"（门控）与"帧怎么转发"，而不是去连一个真服务端。
+       */
+      noteDocTransport?: NoteDocTransport;
+    } = {},
   ) {
     this.credentials = options.credentials ?? null;
+    this.noteDocTransport = options.noteDocTransport ?? defaultNoteDocTransport;
     const result = readConfiguration(env);
     const configuredTrustOrigin = result.ok && result.value.config.mode === "local_loopback"
       ? result.value.config.apiOrigin
@@ -3701,6 +3723,100 @@ export class DesktopGateway {
     };
     void run();
     return stop;
+  }
+
+  /**
+   * 打开一篇笔记的协同连接（批次 4.3）。
+   *
+   * 三条约束在这里收口：
+   *  - **URL 只由配置派生**（`noteDocStreamUrl`），界面传不进目标地址；
+   *  - token 只在这条进程里，渲染进程看到的永远是 base64 帧；
+   *  - 该不该建这条连接**不由本方法决定**：门控（personal 不建、只读成员不建）在
+   *    `desktop-ipc.ts` 的订阅路径上判，因为那里才有当前空间的类型与角色。
+   *
+   * 返回的 handle 是长生命周期对象：`stop()` 之后任何回调都不再触发（provider 已销毁），
+   * 所以调用方不必自己防"关完之后迟到的帧"。
+   */
+  async watchNoteDocument(
+    noteId: string,
+    onEvent: (event: { noteId: string } & NoteDocStreamEventV1) => void | Promise<void>,
+    requestId?: string,
+  ): Promise<NoteDocWatchHandle> {
+    await this.ensureConnected(requestId);
+    const configuration = this.configuration;
+    if (!configuration) throw new DesktopGatewayFailure("configuration_error", "user_action");
+    if (!this.token) throw new DesktopGatewayFailure("auth_required", "user_action");
+    const safeNoteId = this.safeUuid(noteId);
+    let url: string;
+    try {
+      url = noteDocStreamUrl(configuration.config.apiOrigin);
+    } catch {
+      throw new DesktopGatewayFailure("configuration_error", "user_action");
+    }
+    let stopped = false;
+    const handle = this.noteDocTransport({
+      url,
+      documentName: `${NOTE_DOC_PREFIX}${safeNoteId}`,
+      token: this.token,
+      onEvent: (event) => {
+        // stop() 之后迟到的帧必须丢掉：渲染层此刻可能已经换到另一篇笔记甚至另一个空间。
+        if (stopped) return;
+        const wire = toNoteDocStreamEvent(event);
+        if (!wire) return;
+        void onEvent({ noteId: safeNoteId, ...wire });
+      },
+    });
+    return {
+      applyLocalUpdate: (update, ack) => {
+        if (stopped) return;
+        handle.applyLocalUpdate(update, ack);
+      },
+      currentState: () => (stopped ? "" : handle.currentState()),
+      setPresence: (state) => {
+        if (stopped) return;
+        handle.setPresence(state);
+      },
+      stop: () => {
+        if (stopped) return;
+        stopped = true;
+        handle.close();
+      },
+    };
+  }
+
+  /** 编辑起点：与服务端同源的那份 Y.Doc 编码。界面不能拿 blocks 自己拼一棵文档树。 */
+  async getNoteDocState(noteId: string, requestId?: string): Promise<NoteDocStateResultV1> {
+    await this.ensureConnected(requestId);
+    const safeNoteId = this.safeUuid(noteId);
+    const result = await this.request(`/v2/notes/${safeNoteId}/doc-state`, { method: "GET" }, true, true, requestId);
+    const parsed = noteDocStateResultV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  /**
+   * 一次性上送增量（personal 空间与离线队列重连用）。
+   *
+   * 不需要幂等键：把同一条 update 再应用一次是 Yjs 层面的空操作（服务端为此专门有一条
+   * 用例），所以重发天然安全，多余的 key 反而多一套要对齐的状态。
+   */
+  async uploadNoteDocUpdate(
+    noteId: string,
+    update: string,
+    requestId?: string,
+  ): Promise<NoteDocUploadResultV1> {
+    await this.ensureConnected(requestId);
+    const safeNoteId = this.safeUuid(noteId);
+    const result = await this.request(
+      `/v2/notes/${safeNoteId}/doc-update`,
+      { method: "POST", body: JSON.stringify({ update }) },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = noteDocUploadResultV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
   }
 
   async startLearningRun(request: DesktopCreateLearningRunV2Request, commandId: string, requestId?: string): Promise<z.infer<typeof learningRunPublicSnapshotV2Schema>> {

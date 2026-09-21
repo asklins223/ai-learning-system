@@ -306,6 +306,13 @@ export const DESKTOP_IPC_CHANNELS = {
   understandingGetTopology: "ailearn.v1.understanding.getTopology",
   searchGlobal: "ailearn.v1.search.global",
   noteSave: "ailearn.v1.note.save",
+  // 批次 4.3：笔记协同。渲染进程不能直连 WS（sandbox + CSP + onBeforeRequest 三层
+  // 硬拦截），所以下行是一条订阅事件、上行是一次性通道。
+  // 只有 `noteDocApplyUpdate` 一个写入口：有长连接就并进那份文档，没有就走 HTTP 上送，
+  // 判据在 `note_doc_write_result_v1.via` 里如实回报——分成两个口就是两套可能走偏的路径。
+  noteDocState: "ailearn.v1.note.doc.state",
+  noteDocApplyUpdate: "ailearn.v1.note.doc.applyUpdate",
+  noteDocPresence: "ailearn.v1.note.doc.presence",
   noteCardGenerationStart: "ailearn.v1.note.cardGeneration.start",
   noteCardGenerationGetRun: "ailearn.v1.note.cardGeneration.getRun",
   noteCardGenerationGetCandidates: "ailearn.v1.note.cardGeneration.getCandidates",
@@ -1336,6 +1343,72 @@ export const companionChatStreamEventV1Schema = z.strictObject({
 });
 export type CompanionChatStreamEventV1 = z.infer<typeof companionChatStreamEventV1Schema>;
 
+/**
+ * 笔记协同的下行帧（批次 4.3）。
+ *
+ * `update` 是 base64 的 yjs update。**必须带尺寸上限**：`strictObject` 只挡多余字段，
+ * 挡不住一条几 MB 的正文穿过 IPC（主进程要为它做一次结构化克隆，渲染进程再解一遍）。
+ * 上限与主进程 `note-doc-transport.ts` 用的是同一个常量，两边不能各写一个数。
+ */
+export const NOTE_DOC_FRAME_MAX_BASE64_CHARS = 4 * 1024 * 1024;
+
+export const noteDocStreamEventV1Schema = z.discriminatedUnion("type", [
+  z.strictObject({ type: z.literal("update"), update: z.string().min(1).max(NOTE_DOC_FRAME_MAX_BASE64_CHARS) }),
+  z.strictObject({
+    type: z.literal("status"),
+    status: z.enum(["connecting", "connected", "authenticated", "disconnected", "failed"]),
+    // 只读判据来自服务端的 `Authenticated("readonly")`，不是本机推断——界面把编辑器
+    // 禁成只读就以这个字段为准。
+    authorizedScope: z.enum(["read-write", "readonly"]).optional(),
+    reason: z.enum(["permission_denied", "oversize", "invalid_update", "connection_lost"]).optional(),
+  }),
+  z.strictObject({
+    type: z.literal("presence"),
+    // awareness 状态由界面自定义，这里只保证是对象；clientId 是本机 Yjs 的 client id。
+    states: z.array(z.strictObject({ clientId: z.number().int().nonnegative(), state: z.record(z.unknown()) })).max(64),
+  }),
+]);
+export type NoteDocStreamEventV1 = z.infer<typeof noteDocStreamEventV1Schema>;
+
+export const noteDocEventPayloadSchema = z.strictObject({
+  kind: z.literal("note_doc_event"),
+  noteId: uuidSchema,
+  event: noteDocStreamEventV1Schema,
+});
+export type NoteDocEventPayloadV1 = z.infer<typeof noteDocEventPayloadSchema>;
+
+/** 编辑起点：一篇笔记当前那份可直接喂给 Y.Doc 的编码。 */
+export const noteDocStateResultV1Schema = z.strictObject({
+  update: z.string().min(1).max(NOTE_DOC_FRAME_MAX_BASE64_CHARS),
+  revision: nonNegativeIntSchema,
+  /** true = 这篇建得比 0244 早，返回的是从行里补齐后重新编码的一份。 */
+  backfilled: z.boolean(),
+});
+export type NoteDocStateResultV1 = z.infer<typeof noteDocStateResultV1Schema>;
+
+/** 一次性上送（personal 空间与离线队列重连）的回执。 */
+export const noteDocUploadResultV1Schema = z.strictObject({
+  revision: nonNegativeIntSchema,
+});
+export type NoteDocUploadResultV1 = z.infer<typeof noteDocUploadResultV1Schema>;
+
+/**
+ * 写入回执。`via` 不是给界面看的装饰：personal 空间没有长连接，写走 HTTP，
+ * 让界面知道"这次是哪条路"，才不会在断连时把两件事混成一个错误。
+ */
+export const noteDocWriteResultV1Schema = z.strictObject({
+  via: z.enum(["stream", "uploaded"]),
+  /** 只有 uploaded 才有：服务端那份快照的 revision。 */
+  revision: nonNegativeIntSchema.nullable(),
+});
+export type NoteDocWriteResultV1 = z.infer<typeof noteDocWriteResultV1Schema>;
+
+/** presence 只在有连接时才有意义；没连接时如实说"没共享"。 */
+export const noteDocPresenceResultV1Schema = z.strictObject({
+  shared: z.boolean(),
+});
+export type NoteDocPresenceResultV1 = z.infer<typeof noteDocPresenceResultV1Schema>;
+
 /** Renderer-safe bridge state. Broker-owned ids and hydrated entity data stay in main. */
 export const companionBridgeStateV1Schema = z.strictObject({
   version: z.literal(1),
@@ -1361,6 +1434,7 @@ export const gatewayEventPayloadM2Schema = z.union([
     conversationId: uuidSchema,
     event: companionChatStreamEventV1Schema,
   }),
+  noteDocEventPayloadSchema,
 ]);
 export type GatewayEventPayloadM2 = z.infer<typeof gatewayEventPayloadM2Schema>;
 
@@ -1376,6 +1450,7 @@ export const gatewayEventPayloadSchema = z.union([
   }),
   z.strictObject({ kind: z.literal("companion_delivery_changed"), conversationId: uuidSchema, cursor: cursorSchema }),
   z.strictObject({ kind: z.literal("domain_job_changed"), jobId: uuidSchema, revision: nonNegativeIntSchema }),
+  noteDocEventPayloadSchema,
 ]);
 export type GatewayEventPayloadV1 = z.infer<typeof gatewayEventPayloadSchema>;
 
@@ -1388,7 +1463,7 @@ export const gatewayEventSchema = z
     workspaceEpoch: nonNegativeIntSchema,
     cursor: cursorSchema,
     eventRevision: nonNegativeIntSchema,
-    kind: z.enum(["connection_changed", "snapshot_invalidated", "learning_run_changed", "card_generation_changed", "companion_chat_event", "companion_activity_changed", "companion_delivery_changed", "domain_job_changed"]),
+    kind: z.enum(["connection_changed", "snapshot_invalidated", "learning_run_changed", "card_generation_changed", "companion_chat_event", "companion_activity_changed", "companion_delivery_changed", "domain_job_changed", "note_doc_event"]),
     schemaRevision: nonEmptyStringSchema,
     data: gatewayEventPayloadSchema,
   })
@@ -1433,6 +1508,14 @@ const companionChatSubscriptionTopicSchema = z.strictObject({
   conversationId: uuidSchema,
   eventCursor: nonNegativeIntSchema.optional(),
 });
+/**
+ * 一篇笔记的协同订阅（批次 4.3）。主进程按 noteId 建/退 WS 连接：同一篇笔记在多个窗口
+ * 打开只建一条连接，最后一个订阅者退订才关。
+ */
+const noteDocSubscriptionTopicSchema = z.strictObject({
+  kind: z.literal("noteDoc"),
+  noteId: uuidSchema,
+});
 
 export const subscriptionTopicM1Schema = z.discriminatedUnion("kind", [
   runtimeSubscriptionTopicSchema,
@@ -1456,6 +1539,7 @@ export const subscriptionTopicM2Schema = z.discriminatedUnion("kind", [
   learningRunSubscriptionTopicSchema,
   cardGenerationSubscriptionTopicSchema,
   companionChatSubscriptionTopicSchema,
+  noteDocSubscriptionTopicSchema,
 ]);
 export type SubscriptionTopicM2 = z.infer<typeof subscriptionTopicM2Schema>;
 
@@ -1846,6 +1930,25 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
     delete(input: { meta: RequestMetaV1; noteId: Uuid }): Promise<GatewayResultV1<DesktopNoteMutationResult>>;
     restore(input: { meta: RequestMetaV1; noteId: Uuid }): Promise<GatewayResultV1<DesktopNoteMutationResult>>;
     get(input: { meta: RequestMetaV1; noteId: Uuid }): Promise<GatewayResultV1<z.infer<typeof noteDetailV1Schema>>>;
+    /**
+     * 协同正文（批次 4.3）。渲染进程不直连 WS：`state` 取编辑起点，`applyUpdate` 是唯一
+     * 写入口（有长连接就并进那份文档，没有就走 HTTP，`via` 如实回报），实时下行走
+     * `subscriptions.subscribe({kind:"noteDoc", noteId})` 的事件。
+     */
+    readonly doc: {
+      state(input: { meta: RequestMetaV1; noteId: Uuid }): Promise<GatewayResultV1<NoteDocStateResultV1>>;
+      applyUpdate(input: {
+        meta: RequestMetaV1;
+        commandId: string;
+        noteId: Uuid;
+        update: string;
+      }): Promise<GatewayResultV1<z.infer<typeof noteDocWriteResultV1Schema>>>;
+      presence(input: {
+        meta: RequestMetaV1;
+        noteId: Uuid;
+        state: string;
+      }): Promise<GatewayResultV1<z.infer<typeof noteDocPresenceResultV1Schema>>>;
+    };
     versions(input: {
       meta: RequestMetaV1;
       noteId: Uuid;
