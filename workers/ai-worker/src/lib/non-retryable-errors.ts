@@ -130,6 +130,22 @@ export class MemoryExtractOutputError extends Error {
 }
 
 /**
+ * 桌宠日记的输出不是一篇日记（用户抱怨「日记跟系统统计数据有什么区别」的收口）。
+ *
+ * 与 `MemoryExtractOutputError` 同理：日记正文由模型写，重采样已在 handler 内部
+ * 做过一次（「你在报数。重写」），第二次还不合规就不会更好了——重投只是再烧一次钱。
+ * 判 dead 才能让它可见：静默写一行 failed 会被读成"今天没数据"。
+ */
+export class DailyDiaryOutputError extends Error {
+  readonly code = "COMPANION_DAILY_DIARY_OUTPUT_INVALID" as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "DailyDiaryOutputError";
+  }
+}
+
+/**
  * Returns true if the error message indicates a condition that will not
  * resolve on retry (billing, auth, config errors).
  *
@@ -150,6 +166,9 @@ export function isNonRetryableError(error: unknown): boolean {
 
   // 记忆抽取输出不合规同理：内部已重试过一次采样，重投不会给出更好的输出。
   if (error instanceof MemoryExtractOutputError) return true;
+
+  // 日记正文不合规同理（报数 / 空到不像日记），重投只是重复计费。
+  if (error instanceof DailyDiaryOutputError) return true;
 
   // 2026-08-12+（15a 根因修复）：AI 同意/协议缺失（sendToExternal=false、
   // 未签署协议）——用户不操作设置重试必败，直接 dead 并让前端引导设置。

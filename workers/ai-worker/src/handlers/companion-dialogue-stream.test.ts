@@ -71,17 +71,43 @@ describe("stableVisibleCut", () => {
 });
 
 describe("projectCompanionVisible", () => {
-  it("净化后的稳定前缀：markdown 已剥离，且仍是最终文本的前缀", () => {
+  it("净化后的稳定前缀：markdown 原样保留（§4.8），且仍是最终文本的前缀", () => {
     const raw = "**你好**，慢慢来。\n";
     const projection = projectCompanionVisible(raw);
     assert.equal(projection.kind, "visible");
     if (projection.kind !== "visible") return;
-    assert.equal(projection.text, "你好，慢慢来。");
+    assert.equal(projection.text, "**你好**，慢慢来。");
     assert.ok(sanitizeCompanionVisibleText(raw.trim()).startsWith(projection.text));
   });
 
-  it("长度超限 → rejected（增量校验先于任何对外写入）", () => {
-    const projection = projectCompanionVisible("甲".repeat(20_001));
+  /**
+   * 供应商把自己的分词控制符吐进内容里时（实机 2026-09-21 探针打到视觉槽位：
+   * `<|begin_of_box|>1<|end_of_box|>`）。
+   *
+   * 这里钉的是**终态正文这一侧**的单调：`writeTail` 用"已下发长度"当切片基准
+   * （`delta_stream_diverged` 就是靠它判的），所以每一拍的净化结果必须是最终
+   * 净化结果的前缀。未闭合的 `<|…` 若被发出去而最终又没有了，这个性质就破——
+   * 那是一条标记换一次整轮失败。（流式那一侧还叠加 `stableVisibleCut` 的压行，
+   * 拿它和最终正文比是错的，端到端看上面那条 writeTail 用例。）
+   */
+  it("控制符分批到达时，每一拍的净化结果仍是终态正文的前缀", () => {
+    const chunks = ["今天", "<|", "begin_", "of_box|>", "一起学", "点东西", "。<|end_", "of_box|>"];
+    let accumulated = "";
+    let previous = "";
+    for (const chunk of chunks) {
+      accumulated += chunk;
+      const committed = sanitizeCompanionVisibleText(accumulated);
+      assert.ok(
+        committed.startsWith(previous),
+        `第 ${chunk} 拍破坏净化侧的单调：${JSON.stringify(previous)} → ${JSON.stringify(committed)}`,
+      );
+      assert.ok(!committed.includes("<|"), `控制符进了终态正文：${JSON.stringify(committed)}`);
+      previous = committed;
+    }
+    assert.equal(previous, "今天一起学点东西。");
+  });
+
+  it("长度超限 → rejected（增量校验先于任何对外写入）", () => {    const projection = projectCompanionVisible("甲".repeat(20_001));
     assert.deepEqual(projection, { kind: "rejected", reason: "output_too_long" });
   });
 
@@ -144,8 +170,36 @@ describe("createCompanionStreamDelivery（节流 + 拼接，不重不漏）", ()
     assert.equal(delivery.deliveredChars(), "第一句。第二句。第三句。".length);
   });
 
-  it("writeTail 把全文差值补齐（终态文本比稳定前缀长）", async () => {
-    const { delivery, written } = deliveryWithRecorder({ flushChars: 10_000, flushIntervalMs: 60_000 });
+  /**
+   * 端到端一版，按生产真实顺序：`onRawDelta…` → `finish()` → `writeTail(终态正文)`。
+   *
+   * 为什么必须走到 writeTail 才算数：标记里的 `_` 让整行变成"不稳定"，`finish()` 只
+   * 交回已下发的稳定前缀（实测就是"今天"），剩下的字全靠这一次 tail 补齐。
+   * 而如果**只剥已闭合的标记、不扣未闭合的尾巴**，第 2 拍就会把 `<|` 发出去，
+   * 终态正文里又没有它 → 已下发不再是终态的前缀 → 生产在这里判
+   * `delta_stream_diverged`，**整轮失败**（一个标记换来一次报错）。
+   * 这条用例钉住的就是那两步合起来才成立的前缀单调。
+   */
+  it("供应商控制符：客户端收到的整串没有标记，也不丢正文", async () => {
+    const { delivery, written } = deliveryWithRecorder({ flushChars: 4, flushIntervalMs: 0 });
+    const rawChunks = ["今天", "<|", "begin_", "of_box|>", "一起学", "点东西。"];
+    for (const piece of rawChunks) {
+      assert.equal(await delivery.onRawDelta(piece), true);
+    }
+    const raw = rawChunks.join("");
+    const finalText = sanitizeCompanionVisibleText(raw);
+    assert.equal(finalText, "今天一起学点东西。", "终态正文里标记必须被剥掉，正文一个字不丢");
+    const finished = await delivery.finish();
+    assert.equal(finished.ok, true);
+    assert.equal(written.join("").length, delivery.deliveredChars());
+    assert.ok(await delivery.writeTail(finalText), "补齐尾巴的这一步不许判定发散");
+
+    const clientText = written.join("");
+    assert.ok(!clientText.includes("<|"), `下发里混进了控制标记：${JSON.stringify(clientText)}`);
+    assert.equal(clientText, finalText, "客户端最终看到的整串要逐字等于终态正文");
+  });
+
+  it("writeTail 把全文差值补齐（终态文本比稳定前缀长）", async () => {    const { delivery, written } = deliveryWithRecorder({ flushChars: 10_000, flushIntervalMs: 60_000 });
     await delivery.onRawDelta("你好，我是伴星。");
     const finished = await delivery.finish();
     assert.equal(finished.ok, true);

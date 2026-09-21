@@ -10,11 +10,15 @@ import {
   COMPANION_AGENT_MAX_STEPS,
   COMPANION_AGENT_TOOL_TIMEOUT_MS,
   companionAgentSettingsV1Schema,
+  allowedMainRouteV2Schema,
   getCompanionAgentTool,
+  isVisionGatedCompanionTool,
   resolveAllCompanionAgentTools,
   validateCompanionAgentToolArguments,
   type CompanionAgentBudgetSnapshotV1,
   type CompanionAgentPermissionLevel,
+  type CompanionAgentToolExecutionConstraints,
+  type CompanionContentBlockV1,
   type CompanionAgentToolDefinitionV1,
   type AgentTurnRequest,
   type AgentTurnResult,
@@ -26,7 +30,14 @@ import { createCompanionEnvelopeDecoder } from "./companion-dialogue-envelope.ts
 import { CompanionStreamStoppedError } from "./companion-dialogue-stream.ts";
 import { withWorkerWorkspaceTransaction } from "../db.ts";
 import { ageLabel, tzSubquery } from "./companion-here-and-now.ts";
-import { createEmbeddingProvider } from "../lib/ai-provider.ts";
+import { createEmbeddingProvider, createProvider } from "../lib/ai-provider.ts";
+import {
+  AIDataPolicyDeniedError,
+  createGovernedProvider,
+  resolveAIGovernanceContext,
+  resolveProviderForTask,
+} from "../lib/governance.ts";
+import { getObjectBytes } from "../lib/object-storage.ts";
 import {
   retrieveCompanionMemories,
   type EmbeddingProviderLike,
@@ -39,7 +50,7 @@ import { ProviderRequestError } from "../lib/provider-request-error.ts";
 import type { AIProvider } from "../lib/ai-provider.ts";
 import type { CompanionDialogueHandlerContext, ReadContext } from "./companion-dialogue-store.ts";
 import { insertStreamEvent } from "./companion-dialogue-store.ts";
-import { parsePageContext, looksTruncatedReply, looksLikeUnfulfilledActionNarration, looksLikeActionRequest, unverifiedNumericClaims, keepRecomputedBlocks, TRUNCATED_REPLY_MIN_CHARS } from "./companion-dialogue-content.ts";
+import { parsePageContext, looksTruncatedReply, looksLikeUnfulfilledActionNarration, looksLikeActionRequest, unverifiedNumericClaims, claimsLookupThatNeverRan, claimsNothingDueAgainstFacts, keepRecomputedBlocks, stripProviderControlTokens, TRUNCATED_REPLY_MIN_CHARS } from "./companion-dialogue-content.ts";
 import { proposedLearningActionPayloadV1Schema } from "@ailearn/shared";
 import type { ProviderReasoningHandle } from "@ailearn/shared";
 
@@ -74,8 +85,12 @@ const TOOL_FAILURE_SAFE_SUMMARY = "工具执行失败，请稍后再试";
  *
  * delta 批量回放（每批 50ms 节流）+ TTS 段下发 + 终态事务 + 关系更新都必须在
  * handler abort 前完成；run 预算因此取 handler 超时 - 本余量。
+ *
+ * 导出仅为可测：这条"lease > handler > run > 单次工具"的阶梯历史上靠手工改数值
+ * 维持协调，一处改动没跟上就是静默失效（run 被 handler 抢杀、用户什么都没收到）。
+ * 现在由 `__tests__/handler-timeout-config.test.ts` 把它钉成断言。
  */
-const AGENT_PERSISTENCE_MARGIN_MS = 15_000;
+export const AGENT_PERSISTENCE_MARGIN_MS = 15_000;
 
 /**
  * 终答步攒够这么多字符才开始下发（见 `runStreamingAgentStep.holdUntilChars`）。
@@ -95,13 +110,18 @@ const FINAL_ANSWER_HOLD_CHARS = 12;
 const AGENT_LOOP_MAX_STEPS = 4;
 
 export type CompanionAgentLoopResult =
-  | { status: "completed"; text: string; memoryRefs: unknown[] }
+  | { status: "completed"; text: string; blocks: CompanionContentBlockV1[]; memoryRefs: unknown[] }
   | { status: "waiting_for_confirmation"; proposalId: string; memoryRefs: unknown[] };
 
 interface AgentEventContext {
   ctx: CompanionDialogueHandlerContext;
   read: ReadContext;
   expiresAt: string;
+  /**
+   * 服务端判定的执行约束，跟着工具执行走（下发面另外单独用它过滤，见 loop）。
+   * 放这里而不是逐层加参数：它是"这一轮的事实"，与 run/workspace 同生命周期。
+   */
+  constraints: CompanionAgentToolExecutionConstraints;
 }
 
 interface AgentToolExecutionResult {
@@ -109,6 +129,10 @@ interface AgentToolExecutionResult {
   safeSummary: string;
   resultRef?: string;
   route?: Record<string, unknown>;
+  /** 跳转块上给人看的那句（"打开《消防疏散》"）。缺省回落到工具描述。 */
+  routeLabel?: string;
+  /** 工具顺手带出的其它富块（读出来的原文 = quote）。与 route 生成的 nav 一起落进消息。 */
+  blocks?: CompanionContentBlockV1[];
 }
 
 interface AgentRunMeta {
@@ -318,6 +342,29 @@ async function finishStep(
 /** 读出来的笔记正文进模型上下文的硬上限（工具输出另有 maxOutputChars 闸门）。 */
 const NOTE_READ_MAX_CHARS = 3_000;
 
+/**
+ * 读图：原图字节上限。
+ *
+ * 上传侧允许 10MB，而一次视觉请求要把它 base64（≈×1.37）后整包发出去。不设这一层
+ * 的结果不是"慢一点"：手机拍的原图稳定把这一步推到超时，用户看到的是"她没反应"，
+ * 比一句"这张太大我看不了"坏得多。超过它就明确拒绝，不静默降分辨率（那会悄悄改变
+ * 她看到的内容，而小字正是图片里最值钱的部分）。
+ */
+const READ_IMAGE_MAX_RAW_BYTES = 2_000_000;
+
+/**
+ * 读图的独立工具预算。
+ *
+ * `COMPANION_AGENT_TOOL_TIMEOUT_MS`(10s) 是按"查一次库"定的；读图里嵌的是一次
+ * 完整的视觉模型往返（GLM-4.1V-Thinking-Flash 带思考，20–40s 是常态）。沿用 10s
+ * 不是"偶尔超时"而是**每轮必超时**，而她拿到的是 `ok:false` + 一句通用失败。
+ * 仍受 run deadline 夹住（取 min），不会把整轮拖爆。
+ */
+export const READ_IMAGE_TOOL_TIMEOUT_MS = 45_000;
+
+/** 政策拒绝时给她的那句话：说得出原因、也给得出出路，不出现内部术语。 */
+const VISION_EGRESS_DENIED_MESSAGE = "「允许发送图片内容」没有开启，图片留在本机，我看不到图里的内容";
+
 /** 无实体页面的中文名，只用于 safeSummary（它会进她的可见轨迹）。 */
 const PAGE_LABELS: Record<string, string> = {
   home: "首页",
@@ -341,6 +388,83 @@ interface NoteReadRow extends Record<string, unknown> {
   age_minutes: number;
   /** SQL 侧已 coalesce 成空串，这里不再允许 null。 */
   body: string;
+}
+
+/** 一张可被 `companion_read_image` / `companion_show_image` 取到的图。 */
+interface ImageAssetRow extends Record<string, unknown> {
+  id: string;
+  object_key: string;
+  mime_type: string;
+  byte_size: number;
+  width: number;
+  height: number;
+  note_title: string | null;
+}
+
+/**
+ * 按 assetId 或「noteId + 第几张」取一张图，并带回**这篇一共有几张**。
+ *
+ * 读图与显示图共用这一条查询，所以两边对"哪一张"的理解必须一致：
+ * `position` 与 `companion_read_note` 回传的 `imageAssetIds` 同一排序
+ * （created_at DESC, id），她拿着那个列表说"第 2 张"才真的是第 2 张。
+ *
+ * 两个 id 都可能是模型编的，所以取字节的唯一途径是**我们自己库里的行**：
+ * 查不到就没有 object_key，也就拼不出任何指向任意地址的请求。
+ *
+ * 总数单独查一条：取不到图时她要的是"这篇只有 5 张，没有第 8 张"，
+ * 而不是一句"找不到"——后者会让她下一轮继续猜。
+ */
+async function findNoteImageAsset(
+  event: AgentEventContext,
+  ref: { assetId: string | null; noteId: string | null; position: number },
+): Promise<{ asset: ImageAssetRow | null; noteTotal: number }> {
+  return withWorkerWorkspaceTransaction(
+    { workspaceId: event.ctx.workspaceId, userId: event.read.userId },
+    async (tx) => {
+      const rows = await tx.execute<ImageAssetRow>(ref.assetId
+        ? sql`
+            SELECT a.id::text AS id, a.object_key, a.mime_type, a.byte_size, a.width, a.height,
+                   n.title AS note_title
+            FROM note_image_assets a
+            LEFT JOIN notes n ON n.id = a.uploaded_for_note_id AND n.workspace_id = a.workspace_id
+            WHERE a.workspace_id = ${event.ctx.workspaceId}
+              AND a.status = 'ready' AND a.deleted_at IS NULL
+              AND a.id::text = ${ref.assetId}
+            LIMIT 1
+          `
+        : sql`
+            SELECT a.id::text AS id, a.object_key, a.mime_type, a.byte_size, a.width, a.height,
+                   n.title AS note_title
+            FROM note_image_assets a
+            LEFT JOIN notes n ON n.id = a.uploaded_for_note_id AND n.workspace_id = a.workspace_id
+            WHERE a.workspace_id = ${event.ctx.workspaceId}
+              AND a.uploaded_for_note_id::text = ${ref.noteId}
+              AND a.status = 'ready' AND a.deleted_at IS NULL
+            ORDER BY a.created_at DESC, a.id
+            LIMIT 1 OFFSET ${ref.position - 1}
+          `);
+      const asset = rows[0] ?? null;
+      // 只有"按 noteId 却没取到"时才需要总数（多半是 position 越界）。
+      const totals = !asset && ref.noteId
+        ? await tx.execute<{ n: string }>(sql`
+            SELECT count(*) AS n FROM note_image_assets a
+            WHERE a.workspace_id = ${event.ctx.workspaceId}
+              AND a.uploaded_for_note_id::text = ${ref.noteId}
+              AND a.status = 'ready' AND a.deleted_at IS NULL
+          `)
+        : [];
+      return { asset, noteTotal: Number(totals[0]?.n ?? 0) };
+    },
+  );
+}
+
+/** `SOURCE_IMAGE_UPLOAD_PREFIX` 的 worker 侧对应物：渲染层认的就是这个形状。 */
+const SITE_IMAGE_URL_PREFIX = "/api/uploads/";
+
+function missingImageMessage(assetId: string | null): string {
+  return assetId
+    ? "这张图在当前空间里找不到（assetId 只能来自 companion_read_note 返回的 imageAssetIds）"
+    : "那篇笔记里没有这张图（可能已经删了，也可能当初只是把图片地址写进了正文）";
 }
 
 interface LearningStatsRow extends Record<string, unknown> {
@@ -368,6 +492,15 @@ interface ActivityRow extends Record<string, unknown> {
 
 interface DueReviewRow extends Record<string, unknown> {
   schedule_id: string;
+  /**
+   * `review_schedules.subject_id`。名字骗人：这张表的 `subject_type` 被 CHECK 成 'card'，
+   * 但按方案 20 §29.4 的别名规则，**列里存的是 objectiveId**（实测量：23 个 subject_id
+   * 里 19 个命中 `learning_cards_v2.objective_id`，只有 4 个是 card_id）。
+   * `companion_open_card` 两个键都认，所以它可以往下传这个。
+   */
+  objective_id: string;
+  /** 该目标当前那张 active 卡；没有就是 null（她得能说"这条还没有卡"）。 */
+  card_id: string | null;
   title: string;
   overdue_hours: number;
 }
@@ -377,6 +510,12 @@ async function executeReadTool(
   definition: CompanionAgentToolDefinitionV1,
   args: Record<string, unknown>,
 ): Promise<AgentToolExecutionResult> {
+  // 外发政策门禁。工具面本来已经把受管工具摘掉了（见 resolveAllCompanionAgentTools），
+  // 这里再拦一次是因为**工具名是模型给的**：不复核就等于"下发面没列出来"这件事
+  // 只是运气好，而不是一个保证。判定只看服务端解析出的约束，不看模型自述。
+  if (isVisionGatedCompanionTool(definition.name) && event.constraints.visionEnabled !== true) {
+    throw new CompanionToolBlockedError(VISION_EGRESS_DENIED_MESSAGE);
+  }
   switch (definition.name) {
     case "companion_read_context": {
       const page = parsePageContext(event.read.pageContext);
@@ -517,19 +656,62 @@ async function executeReadTool(
       const card = await withWorkerWorkspaceTransaction(
         { workspaceId: event.ctx.workspaceId, userId: event.read.userId },
         async (tx) => {
-          const rows = await tx.execute<{ card_id: string; objective_id: string }>(sql`
-            SELECT card_id, objective_id FROM learning_cards_v2
-            WHERE card_id = ${cardId}
-              AND workspace_id = ${event.ctx.workspaceId}
+          const rows = await tx.execute<{
+            card_id: string; objective_id: string; cue: string | null;
+            prompt: string | null; summary: string | null; form: string | null;
+          }>(sql`
+            SELECT card_id, objective_id, left(front->>'cue', 300) AS cue,
+                   left(front->>'prompt', 280) AS prompt,
+                   left(public_summary, 300) AS summary, knowledge_form AS form
+            FROM learning_cards_v2
+            -- 到期列表递过来的那个 id 是 review_schedules.subject_id，而它按方案 20
+            -- §29.4 的别名规则**存的是 objectiveId**（subject_type 却叫 'card'）。
+            -- 只按 card_id 查的话她永远打不开：实测 23 个 subject_id 里 19 个是 objectiveId。
+            -- 两个键一次查掉，精确命中卡片时排前面。
+            WHERE workspace_id = ${event.ctx.workspaceId}
               AND lifecycle = 'active'
+              AND (card_id = ${cardId} OR objective_id = ${cardId})
+            ORDER BY (card_id = ${cardId}) DESC
             LIMIT 1
           `);
           return rows[0] ?? null;
         },
       );
       if (!card) throw new CompanionToolError("card not found in current workspace");
-      const route = { kind: "card", cardId, objectiveId: card.objective_id };
-      return { value: { route }, route, safeSummary: "已定位到学习卡片" };
+      const route = { kind: "card", cardId: card.card_id, objectiveId: card.objective_id };
+      const front = [card.cue, card.prompt].filter((part): part is string => Boolean(part?.trim())).join(" — ");
+      const cardTitle = (card.cue ?? "").trim();
+      return {
+        // 题面必须**同时**进 value：只进 blocks 的话，块渲染给用户看了，
+        // 她自己却看不见那段文字（实机 2026-09-21 Y 轮：card 块落库成功，
+        // 她紧接着说"题面的具体文字我这边读不到——卡片只是帮你定位打开了"）。
+        // 那不是谦虚，是事实：喂回给模型的 data 里当时只有 route。
+        value: {
+          route,
+          card: {
+            cardId: card.card_id,
+            front: front.slice(0, 600),
+            summary: card.summary,
+            knowledgeForm: card.form,
+          },
+        },
+        route,
+        routeLabel: cardTitle ? `打开卡片「${cardTitle}」` : "打开这张卡片",
+        // 卡片内容作为独立块带出（§4.8）：题面由服务端给，不让她转抄——转抄一遍
+        // 就成了"她复述的卡片"，用户分不清哪几个字是原文。
+        blocks: front.length > 0
+          ? [{
+              type: "card" as const,
+              // 用查回来的真 card_id：传进来的那个可能是 objectiveId（见上面的别名规则），
+              // 而块里的 cardId 是客户端跳转的落点，合同只校验"是不是 uuid"，不会替我认错。
+              cardId: card.card_id,
+              front: front.slice(0, 600),
+              summary: card.summary,
+              knowledgeForm: card.form,
+            }]
+          : [],
+        safeSummary: "已定位到学习卡片",
+      };
     }
     case "companion_search_notes": {
       const query = String(args.query).trim().slice(0, 120);
@@ -588,19 +770,187 @@ async function executeReadTool(
             GROUP BY n.id, n.title, n.updated_at
             LIMIT 1
           `);
-          return rows[0] ?? null;
+          const head = rows[0];
+          if (!head) return null;
+          // 图片 id 跟着正文一起给，理由与 recall_memory 的 memoryId 同一条：
+          // companion_read_image 的参数只能来自这里。不返回，她只能编一个 uuid，
+          // 然后每次"看这张图"都失败成"找不到图"。
+          //
+          // 数量与 id 列表是两件事：列表按 6 条截断（免得一次给她几十个 uuid），
+          // 而**张数必须是全量**。`count(*) OVER ()` 在同一条查询里拿到总数，
+          // 不用二次往返。实机 2026-09-21 就是这个区别：那篇有 13 张图，
+          // 用截断后的列表长度当张数会让她对用户说"有 6 张"。
+          const images = await tx.execute<{ id: string; total: string }>(sql`
+            SELECT a.id::text AS id, count(*) OVER () AS total
+            FROM note_image_assets a
+            WHERE a.workspace_id = ${event.ctx.workspaceId}
+              AND a.uploaded_for_note_id = ${noteId}::uuid
+              AND a.status = 'ready' AND a.deleted_at IS NULL
+            ORDER BY a.created_at DESC, a.id
+            LIMIT 6
+          `);
+          return {
+            ...head,
+            imageIds: images.map((row) => row.id),
+            imageTotal: Number(images[0]?.total ?? 0),
+          };
         },
       );
       if (!note) throw new CompanionToolError("note not found in current workspace");
       const body = note.body.slice(0, NOTE_READ_MAX_CHARS);
+      // 原文由服务端带出，不让模型转抄：她复述一遍就成了"引用"，而用户没法知道
+      // 哪几个字是她改写的。这一块就是她读到的那几行，标题与时间跟着走。
+      const quoted = body.slice(0, 1_200);
       return {
         value: {
+          // 图片事实排在正文之前。**这不是修 bug，是防一个还没咬到的坑**：工具结果整包
+          // 会被 `maxOutputChars`(4000) 截尾，而 body 上限 3000 字——这次实测 envelope 只有
+          // 3255 字（截断没发生，实机 2026-09-21 量过），换成一篇更长的正文或以后放宽
+          // NOTE_READ_MAX_CHARS 时，排在尾部的 imageCount/imageNote 就会静默消失。
+          // 至于那一轮她为什么先说"里面没有截图"：不是这里被截了，是那句根本在**读之前**
+          // 就说出口了（零工具步），拦住它的是 `claimsLookupThatNeverRan` 的完成宣称档。
+          imageCount: note.imageTotal,
+          ...(note.imageIds.length > 0 ? { imageAssetIds: note.imageIds } : {}),
+          // 有图却看不了时，先把"正文里没有图片标记 ≠ 这篇没有图"讲明（她读的是
+          // note_blocks，图是另一张表里的资源，所以她"照实读正文"仍会推出错误结论），
+          // 再给她出路。不这样写，她的下一句就是"我看看这张图"——而工具面上根本没有
+          // 那个工具（政策关着时不下发），答应一件做不到的事正是抱怨 #9 最难堪的形状。
+          ...(note.imageTotal > 0 && event.constraints.visionEnabled !== true
+            ? {
+                imageNote: `这篇另有 ${note.imageTotal} 张图，图不在正文里（正文没有图片标记不代表没有图）。`
+                  + "图片外发未开启，这些图看不了。用户问起就照实说，并告诉他设置里的「允许发送图片内容」开关；"
+                  + "不要说「我看看」，也不要凭标题猜图里有什么。",
+              }
+            : {}),
           title: note.title,
           updated: ageLabel(Number(note.age_minutes)),
           body,
           truncated: note.body.length > body.length,
         },
-        safeSummary: `已读出笔记《${note.title.slice(0, 24)}》（${body.length} 字）`,
+        blocks: quoted.length > 0
+          ? [{
+              type: "quote" as const,
+              label: `《${note.title.slice(0, 28)}》· ${ageLabel(Number(note.age_minutes))}`,
+              text: quoted + (body.length > quoted.length ? "…" : ""),
+            }]
+          : [],
+        safeSummary: `已读出笔记《${note.title.slice(0, 24)}》（${body.length} 字`
+          + `${note.imageTotal > 0 ? `，另附 ${note.imageTotal} 张图` : ""}）`,
+      };
+    }
+    case "companion_read_image": {
+      const assetId = typeof args.assetId === "string" && args.assetId ? args.assetId : null;
+      const noteId = typeof args.noteId === "string" && args.noteId ? args.noteId : null;
+      if (!assetId && !noteId) {
+        throw new CompanionToolError(
+          "看图要说是哪张：noteId（那张图所在的笔记）或 assetId（companion_read_note 返回的 imageAssetIds）",
+        );
+      }
+      const { asset } = await findNoteImageAsset(event, { assetId, noteId, position: 1 });
+      if (!asset) throw new CompanionToolError(missingImageMessage(assetId));
+      if (asset.byte_size > READ_IMAGE_MAX_RAW_BYTES) {
+        throw new CompanionToolError(
+          `这张图有 ${(asset.byte_size / 1_000_000).toFixed(1)}MB，太大发不出去，换张小一点的截图才看得了`,
+        );
+      }
+      const bytes = await getObjectBytes(asset.object_key, READ_IMAGE_MAX_RAW_BYTES);
+      const question = typeof args.question === "string" && args.question.trim()
+        ? args.question.trim().slice(0, 200)
+        : "图里写了什么、画了什么";
+      const govCtx = await resolveAIGovernanceContext(event.ctx.workspaceId, event.read.userId);
+      const visionRes = resolveProviderForTask(govCtx, "analyze_image");
+      const visionProvider = createGovernedProvider(
+        createProvider(visionRes.providerName, visionRes.providerConfig),
+        // 出网治理门在这里是**真的**门：多模态消息会被认成 image_content，政策
+        // 半路被改（这一轮开始时还开着、执行图的时候关了）也会在这一步被拦下。
+        govCtx,
+        event.ctx.workspaceId,
+        // jobId 是 ai_audit_log.job_id —— 与本 handler 其它审计行同一口径（job 的
+        // id，不是 run 的 id）。这一列当前没有外键，填错不会炸库，只会让成本/合规
+        // 记录按 job 聚合时对不上号。
+        { userId: event.read.userId, operation: "companion_read_image", jobId: event.ctx.id },
+      );
+      let result: Awaited<ReturnType<AIProvider["chatCompletion"]>>;
+      try {
+        result = await visionProvider.chatCompletion(
+          [
+            {
+              role: "system",
+              content: "你是看图的那双眼睛，替一个学习助手转述图里的内容。"
+                + "只说图上确实看得见的东西：文字按原文抄（公式、表格、代码用 markdown 保持结构），"
+                + "流程/结构类图先说清是什么再逐项列出。看不清、被截掉、图上没有的一律直说看不清，"
+                + "绝不猜、不用常识补、不编内容。直接说内容，不要开场白。",
+            },
+            {
+              role: "user",
+              content: [
+                { type: "text", text: `问题：${question}` },
+                {
+                  type: "image_url",
+                  image_url: { url: `data:${asset.mime_type};base64,${bytes.toString("base64")}`, detail: "high" },
+                },
+              ],
+            },
+          ],
+          { maxTokens: 1_500, temperature: 0.2, responseFormat: "text", model: visionProvider.visionModelId },
+          event.ctx.signal,
+        );
+      } catch (error) {
+        // 政策在这一轮进行中才被关闭（她开始时还能看，取字节的这几秒里用户拧了开关）：
+        // 治理层会直接拒发，这时给她同一句人话，而不是"工具执行失败，请稍后再试"。
+        if (error instanceof AIDataPolicyDeniedError) {
+          throw new CompanionToolBlockedError(VISION_EGRESS_DENIED_MESSAGE);
+        }
+        throw error;
+      }
+      // 供应商会把自己的分词控制符吐进内容里（实机 2026-09-21 探针：视觉槽位对
+      // "几种颜色"回答 `<|begin_of_box|>1<|end_of_box|>`）。这一段是**数据**——
+      // 她会把里面的字转述给用户、TTS 也会念，控制符留着就是"1"变成一串标记。
+      const description = stripProviderControlTokens(String(result.content ?? "")).trim();
+      if (!description) throw new CompanionToolError("看过这张图了，但没读出任何内容");
+      return {
+        value: {
+          question,
+          description: description.slice(0, 3_000),
+          size: `${asset.width}×${asset.height}`,
+          ...(asset.note_title ? { inNote: asset.note_title.slice(0, 40) } : {}),
+        },
+        safeSummary: `已看过那张图（${asset.width}×${asset.height}，${description.length} 字描述）`,
+      };
+    }
+    case "companion_show_image": {
+      const assetId = typeof args.assetId === "string" && args.assetId ? args.assetId : null;
+      const noteId = typeof args.noteId === "string" && args.noteId ? args.noteId : null;
+      const position = typeof args.position === "number" ? Math.min(20, Math.max(1, Math.floor(args.position))) : 1;
+      if (!assetId && !noteId) {
+        throw new CompanionToolError(
+          "要显示哪张图：noteId（配合 position 第几张）或 assetId（companion_read_note 返回的 imageAssetIds）",
+        );
+      }
+      // 这条**不读字节、不出境**，所以不受 sendImageContent 管：图片外发关着时，
+      // "把那张图给我看"照样办得成。把它错并到读图那档里，就是我最初设计读图时
+      // 差点做的事——一个开关关掉两件不同的能力。
+      const { asset, noteTotal } = await findNoteImageAsset(event, { assetId, noteId, position });
+      if (!asset) {
+        throw new CompanionToolError(
+          noteTotal > 0
+            ? `那篇笔记一共只有 ${noteTotal} 张图，没有第 ${position} 张`
+            : missingImageMessage(assetId),
+        );
+      }
+      const label = `${asset.note_title ? `《${asset.note_title.slice(0, 24)}》` : "那张图"} · 第 ${position} 张`;
+      return {
+        value: {
+          url: `${SITE_IMAGE_URL_PREFIX}${asset.object_key}`,
+          label,
+          size: `${asset.width}×${asset.height}`,
+        },
+        blocks: [{
+          type: "image" as const,
+          url: `${SITE_IMAGE_URL_PREFIX}${asset.object_key}`,
+          label: label.slice(0, 80),
+        }],
+        safeSummary: `已把那张图放到对话里（${asset.width}×${asset.height}）`,
       };
     }
     case "companion_open_note": {
@@ -618,14 +968,24 @@ async function executeReadTool(
       const note = (Array.isArray(found) ? found : [])[0];
       if (!note) throw new CompanionToolError("note not found in current workspace");
       const route = { kind: "note", noteId };
-      return { value: { route }, route, safeSummary: `已定位到笔记《${note.title.slice(0, 24)}》` };
+      return {
+        value: { route },
+        route,
+        routeLabel: `打开《${note.title.slice(0, 24)}》`,
+        safeSummary: `已定位到笔记《${note.title.slice(0, 24)}》`,
+      };
     }
     case "companion_open_page": {
       const page = String(args.page);
       // 与 allowedMainRouteV2Schema 对齐的无参页面；带实体的（note/card/learning_run）
       // 各有专门工具去做归属校验，这里不接受 id，避免"任意 UUID 构造导航 route"。
       const route = { kind: page };
-      return { value: { route }, route, safeSummary: `已定位到${PAGE_LABELS[page] ?? page}页面` };
+      return {
+        value: { route },
+        route,
+        routeLabel: `去${PAGE_LABELS[page] ?? page}`,
+        safeSummary: `已定位到${PAGE_LABELS[page] ?? page}页面`,
+      };
     }
     case "companion_get_learning_stats": {
       const stats = await withWorkerWorkspaceTransaction(
@@ -711,10 +1071,16 @@ async function executeReadTool(
         { workspaceId: event.ctx.workspaceId, userId: event.read.userId },
         async (tx) => tx.execute<DueReviewRow>(sql`
           SELECT s.id::text AS schedule_id,
-                 coalesce(nullif(c.front->>'cue', ''), '这张卡') AS title,
+                 s.subject_id::text AS objective_id,
+                 c.card_id::text AS card_id,
+                 coalesce(nullif(c.front->>'cue', ''), '这条复习还没有生成卡片') AS title,
                  (EXTRACT(EPOCH FROM (now() - coalesce(s.user_deferred_until, s.next_review_at))) / 3600)::int AS overdue_hours
           FROM review_schedules s
-          LEFT JOIN learning_cards_v2 c ON c.card_id = s.subject_id AND c.workspace_id = s.workspace_id
+          -- 按 objective_id 连：subject_id 里存的就是它（见 DueReviewRow 的注释）。
+          -- 以前连的是 c.card_id = s.subject_id，23 个 subject_id 里 19 个连不上，
+          -- 于是标题全成兜底文案，递给她去打不开的 id。
+          LEFT JOIN learning_cards_v2 c
+            ON c.objective_id = s.subject_id AND c.workspace_id = s.workspace_id AND c.lifecycle = 'active'
           WHERE s.workspace_id = ${event.ctx.workspaceId}
             AND s.user_id = ${event.read.userId}
             AND s.status = 'pending'
@@ -726,12 +1092,20 @@ async function executeReadTool(
       );
       const due = rows.map((row) => ({
         scheduleId: row.schedule_id,
+        // 只给她一个可以直接用的 id，并把"有没有卡"说出来：以前给的是 scheduleId
+        // （她拿不到卡片 id），后来给的其实是 objectiveId（open_card 只认 card_id，
+        // 永远 not_found）。现在 open_card 两个键都查，这里给哪个都不会炸，
+        // 但有卡时给 card 自己的 id，跳过去落点更准。
+        cardId: row.card_id ?? row.objective_id,
+        hasCard: row.card_id !== null,
         title: String(row.title).slice(0, 60),
         overdueHours: Math.max(0, Number(row.overdue_hours)),
       }));
       return {
         value: { dueReviews: due },
-        safeSummary: due.length > 0 ? `${due.length} 项复习已到期` : "目前没有到期的复习",
+        safeSummary: due.length > 0
+          ? `${due.length} 项复习已到期（其中 ${due.filter((item) => item.hasCard).length} 项有卡片）`
+          : "目前没有到期的复习",
       };
     }
     case "companion_focus_graph": {
@@ -757,7 +1131,12 @@ async function executeReadTool(
         keyPointId,
         lens: String(args.lens),
       };
-      return { value: { route }, route, safeSummary: "已聚焦知识图谱节点" };
+      return {
+        value: { route },
+        route,
+        routeLabel: "在星图里看这个知识点",
+        safeSummary: "已聚焦知识图谱节点",
+      };
     }
     case "companion_list_reminders": {
       // 回给用户本地钟面时间而不是 UTC ISO：她要照着这个数说"你答应我的事"。
@@ -790,6 +1169,23 @@ async function executeReadTool(
         safeSummary: reminders.length > 0
           ? `还有 ${reminders.length} 条待兑现的提醒`
           : "目前没有待兑现的提醒",
+      };
+    }
+    case "companion_render_diagram": {
+      // 呈现类：不查库、不写库，只是把她给的结构变成一块交给客户端（§4.8）。
+      // 参数已经过 zod 校验（2–8 步、长度上限），这里只做一次防御性截断。
+      const title = String(args.title).trim().slice(0, 60);
+      const steps = (args.steps as Array<{ label: string; detail?: string }>).slice(0, 8)
+        .map((step) => ({
+          label: String(step.label).trim().slice(0, 40),
+          ...(step.detail ? { detail: String(step.detail).trim().slice(0, 80) } : {}),
+        }))
+        .filter((step) => step.label.length > 0);
+      if (steps.length < 2) throw new CompanionToolError("流程图至少需要两个步骤");
+      return {
+        value: { title, steps },
+        blocks: [{ type: "diagram" as const, title, steps }],
+        safeSummary: `已画出 ${steps.length} 步流程图`,
       };
     }
     default:
@@ -1858,6 +2254,14 @@ export async function runCompanionAgentLoop(args: {
    * 还会用更啰嗦的档位覆盖用户自己的设定。缺省（没读到 pet_profiles）按活跃档。
    */
   activeness?: "quiet" | "moderate" | "active" | null;
+  /**
+   * 服务端判定的执行约束（目前只有 `visionEnabled` = 用户允许把图片外发）。
+   *
+   * 同一份约束管两件事：① 受政策管的工具**不下发**（看不见才不会答应之后看不了）；
+   * ② 执行前独立复核一次——工具名是模型给的，下发面拦不住一个硬要调的编造。
+   * 由调用方从治理上下文取，绝不信模型在参数里自述的授权。
+   */
+  toolConstraints: CompanionAgentToolExecutionConstraints;
   baseMessages: ChatMessage[];
   expiresAt: string;
   continuationProposalId?: string;
@@ -1875,7 +2279,12 @@ export async function runCompanionAgentLoop(args: {
   if (typeof args.provider.executeAgentTurn !== "function") {
     throw new Error("provider does not support companion agent turns");
   }
-  const event: AgentEventContext = { ctx: args.ctx, read: args.read, expiresAt: args.expiresAt };
+  const event: AgentEventContext = {
+    ctx: args.ctx,
+    read: args.read,
+    expiresAt: args.expiresAt,
+    constraints: args.toolConstraints,
+  };
   const attemptStartedAt = Date.now();
   const meta = await readRunMeta(event);
   if (!meta.globalEnabled || meta.currentAccountEpoch !== args.read.accountEpoch) {
@@ -1923,12 +2332,18 @@ export async function runCompanionAgentLoop(args: {
     // 超时预算收紧，见 deadlineAt。
     deadlineMs: COMPANION_AGENT_DEADLINE_MS,
   };
-  const definitions = resolveAllCompanionAgentTools(meta.permissionLevel);
+  const definitions = resolveAllCompanionAgentTools(meta.permissionLevel, event.constraints);
   const toolDefinitions = definitions.map((definition) => ({
     name: definition.name,
     description: definition.description,
     parameters: definition.parameters,
   }));
+  // steer 时要**点名**该调哪个工具：小模型对"你去调用工具"这种泛指不敏感，
+  // 对"调用 companion_search_notes"会照做（只列读类，且限 10 个免得提示比正文还长）。
+  const steerableReadTools = definitions
+    .filter((definition) => definition.riskClass === "read")
+    .map((definition) => definition.name)
+    .slice(0, 10);
   const providerCapabilities = args.provider.getCapabilities?.();
   const providerCapabilityFingerprint = sha256Utf8V1(canonicalJsonV1({
     capabilityFingerprint: providerCapabilities?.fingerprint ?? null,
@@ -1994,10 +2409,25 @@ export async function runCompanionAgentLoop(args: {
   const visibleSegments: string[] = [];
   /** 与 visibleSegments 一一对应：该段是否已经流式下发过（E 去重的安全性判据）。 */
   const visibleSegmentDelivered: boolean[] = [];
+  /** 本轮工具结果带出的富块（nav / quote…），随终态消息落进 `companion_messages.blocks`。 */
+  const richBlocks: CompanionContentBlockV1[] = [];
+  const richBlockKeys = new Set<string>();
+  const pushRichBlock = (block: CompanionContentBlockV1) => {
+    const key = canonicalJsonV1(block);
+    if (richBlockKeys.has(key)) return;
+    richBlockKeys.add(key);
+    richBlocks.push(block);
+  };
   /** 退化回复闸每轮至多触发一次（2026-09-19 深夜，tokenrhythm 退化窗口实测）。 */
   let degenerateRetried = false;
   /** "让她做件事却没落地"闸每轮至多一次：补一步就够，不把她逼成循环。 */
   let actionSteered = false;
+  /**
+   * "她说查过了、其实没查"单独一条额度（下面闸的注释说为什么不能共用）。
+   */
+  let lookupClaimSteered = false;
+  /** steer 之后紧跟的那一步换哪个 provider（见下面 stepProvider 的选取）。 */
+  let steerSwapToFallback = false;
   /**
    * "短到不成一句"的那条线跟着**用户配置的活跃度**走（方案 29 §9.17，抱怨 #2）：
    * 设成"安静"的人要的就是「在的。」这种三个字的答案，还按活跃档的 6 字拦，
@@ -2076,6 +2506,23 @@ export async function runCompanionAgentLoop(args: {
       temperature: finalAnswerOnly ? 0.9 : 0.4,
     };
     const stepId = await persistStep(event, stepCount, auditHash(stepRequest));
+    // 这一步交给哪个 provider：默认主档；刚被"她说查过而没查"的闸 steer 过的那一步
+    // 换成**另一个模型**（companion_fallback 槽）。指名道姓让她去调工具都换不来一次
+    // 真实调用（实机 2026-09-21 两次：steer 之后回"这次真的用工具查过了，两个词各搜了
+    // 一遍"，tools 仍是 0），缺的不是指令而是听得懂指令的模型——再说第三遍只是多烧一步。
+    const stepProvider = steerSwapToFallback
+      && typeof args.fallbackProvider?.executeAgentTurn === "function"
+      ? args.fallbackProvider
+      : args.provider;
+    steerSwapToFallback = false;
+    if (stepProvider !== args.provider) {
+      // 兜底槽此前从未真机触发过（§9.6）。不记这一行就分不清"换了模型还是不查"
+      // 与"根本没换成"——这两种结论要做的下一件事完全相反。
+      logger.warn(
+        { runId: args.read.runId, stepCount, modelId: stepProvider.modelId },
+        "companion agent steered step runs on the cross-model fallback provider",
+      );
+    }
     /** 本步是否已经下发过文本（重试判据，每步重置）。 */
     let stepEmitted = false;
     let result;
@@ -2094,23 +2541,32 @@ export async function runCompanionAgentLoop(args: {
        *   未声明的实现（如 opencode_go）那一步仍走整段取回。
        */
       const canStreamThisStep = Boolean(args.onProviderDelta)
-        && typeof args.provider.chatCompletionStream === "function"
-        && (finalAnswerOnly || args.provider.chatCompletionStreamToolCalls === true);
+        && typeof stepProvider.chatCompletionStream === "function"
+        && (finalAnswerOnly || stepProvider.chatCompletionStreamToolCalls === true);
       if (canStreamThisStep) {
         // 每一步都走真实流式：增量实时交给交付管线（净化 + 校验 + 落库 + SSE 下发）。
         // 分段符与最终正文的拼接口径必须一致（非首段 "\n\n"），否则已下发前缀
         // 与最终正文会分叉——见 joinVisibleSegmentsDeduped。
         const attemptStream = (): Promise<AgentTurnResult> =>
           runStreamingAgentStep({
-            provider: args.provider,
+            provider: stepProvider,
             stepRequest,
             ctxSignal: args.ctx.signal,
             timeoutMs: providerCallTimeout,
             onProviderDelta: args.onProviderDelta!,
             separatorBefore: visibleSegments.length > 0 ? VISIBLE_SEGMENT_SEPARATOR : "",
-            // 只有终答步需要攒：工具步那句"我先看看你的笔记"本来就该立刻出现，
-            // 它是"她在动手"的反馈，不是待评估的答复正文。
-            holdUntilChars: finalAnswerOnly ? FINAL_ANSWER_HOLD_CHARS : 0,
+            // 每一步都攒批，不只终答步。`finalAnswerOnly` 是 `stepCount >= maxSteps`，
+            // 也就是"只有被强制收尾的那一步"才算终答——而她**直接答话**（不调工具）
+            // 是第 1 步，那时 hold=0，字当场流出去、stepEmitted 置位，
+            // 退化闸的 `!stepEmitted` 就永远不成立。实机 2026-09-21 两条三字输入
+            // （"小猫？"→"嗯？"、"嘿嘿嘿"→"嗯，我在。"）各带 2 条 delta、
+            // 3 小时内 `walking the repair ladder` 日志 0 次，就是这么漏过去的。
+            // 代价写在这里，别让下一个人以为是疏忽：**工具步那句开场白也会被攒住**，
+            // 短于 12 字的"我先看看你的笔记"不再逐字出现，而是随整段一起补发。
+            // 换来的是坍缩闸可达——按用户口径（"说的太短了"是抱怨 #1），这个方向值。
+            // 攒批不影响正确性：没下发过的内容仍由 writeTail 在终态补发，
+            // "已下发是最终正文的前缀"这条不变量照旧成立。
+            holdUntilChars: FINAL_ANSWER_HOLD_CHARS,
             onTextEmitted: () => { stepEmitted = true; },
           });
         /**
@@ -2128,7 +2584,7 @@ export async function runCompanionAgentLoop(args: {
           && Date.now() < deadlineAt;
         const runBuffered = (): Promise<AgentTurnResult> =>
           runWithAbortBudget(
-            (signal) => args.provider.executeAgentTurn!(stepRequest, signal),
+            (signal) => stepProvider.executeAgentTurn!(stepRequest, signal),
             args.ctx.signal,
             Math.min(providerCallTimeout, Math.max(1, deadlineAt - Date.now())),
           );
@@ -2171,7 +2627,7 @@ export async function runCompanionAgentLoop(args: {
         }
       } else {
         result = await runWithAbortBudget(
-          (signal) => args.provider.executeAgentTurn!(stepRequest, signal),
+          (signal) => stepProvider.executeAgentTurn!(stepRequest, signal),
           args.ctx.signal,
           providerCallTimeout,
         );
@@ -2202,7 +2658,7 @@ export async function runCompanionAgentLoop(args: {
       );
       try {
         result = await runWithAbortBudget(
-          (signal) => args.provider.executeAgentTurn!(
+          (signal) => stepProvider.executeAgentTurn!(
             { ...stepRequest, maxTokens: retryMaxTokens },
             signal,
           ),
@@ -2303,20 +2759,43 @@ export async function runCompanionAgentLoop(args: {
     //      中文不标时态，冒领没有可靠措辞判据，所以从**输入侧**判：用户明确在要一个
     //      只有工具能完成的动作，而整轮零工具调用；
     //   ③ 编数型——"本周你学了 23 分钟"（真值 60），上下文里根本没有这个数。
-    const said = String(result.content ?? "");
+    // 必须显式写 `: string`：`said → lookupClaim → steerSwapToFallback → stepProvider → result → said`
+    // 是一圈真实的类型推断回路（steer 之后那一步换哪个模型，取决于这一步说了什么）。
+    // 少这个注解，tsc 报 TS7022/TS18046 一长串，而看起来最无辜的改法都会"莫名"炸掉整个文件。
+    const said: string = String(result.content ?? "");
     const unverifiedClaims = unverifiedNumericClaims(said, contextText);
+    // "到期列表现在是空的"不报任何数字，上面那条看不见；它是一句可证伪的假阴性，
+    // 直接对着环境块里服务端算出的那个数判（同一个 steer 额度、同一条 nudge：
+    // 指出该调哪个工具，比指责她没调有用）。
+    const nothingDueClaim = claimsNothingDueAgainstFacts(said, contextText);
+    const lookupClaim = claimsLookupThatNeverRan(said) || nothingDueClaim;
+    // 两条**独立**的一次性额度（实机 2026-09-21 连着三轮 V 场景）：共用一条时，
+    // 额度被第 1 步那句引言（"我换个词再搜一次"，命中 action-request）先花掉，
+    // 第 2 步才讲出"两个词都搜过了，笔记库里没有这篇"——而这条才是真正不能交付的：
+    // 承诺只是没做事，这句是把可证伪的**假阴性**当结论说出去（那篇笔记在库里，3 个正文块）。
+    const shapeSteer = !actionSteered
+      && (userAskedForAction
+        || unverifiedClaims.length > 0
+        || looksLikeUnfulfilledActionNarration(said));
+    const lookupSteer = !lookupClaimSteered && lookupClaim;
     if (
       calls.length === 0
-      && !actionSteered
       && toolCallCount === 0
       && !finalAnswerOnly
       && stepCount < budget.maxSteps
       && Date.now() < deadlineAt
-      && (userAskedForAction
-        || unverifiedClaims.length > 0
-        || looksLikeUnfulfilledActionNarration(said))
+      && (shapeSteer || lookupSteer)
     ) {
-      actionSteered = true;
+      if (shapeSteer) actionSteered = true;
+      lookupClaimSteered = true;
+      // 「说查过而没查」和「让她做事却没做」这两类，补的那一步都换兜底模型：
+      // 指名道姓要求她调用工具都换不来一次真实调用（实机 2026-09-21 两次），
+      // 这是模型档的问题，多说一遍同样的话只会多烧一步。
+      // 后者今天新增：实测同一句「有哪张卡到期了？打开第一张」连跑两轮，
+      // action-request 的 steer 都触发了，同档第二次仍然 tools=0，
+      // 还回了一句"到期列表现在是空的"（库里 25 条 pending 到期）——
+      // 不换模型时，这一步只是让她把同一个谎再说一遍。
+      steerSwapToFallback = lookupClaim || userAskedForAction;
       // 空的一步（provider 退化时会一个字都不给）不写进正文，也不回灌空的
       // assistant 消息——那会在拼接里留下一个孤立的空段。
       if (said.trim().length > 0) {
@@ -2330,9 +2809,17 @@ export async function runCompanionAgentLoop(args: {
           ? `（系统提示：你报了 ${unverifiedClaims.slice(0, 4).join("、")} 这些数字，`
             + "但这一轮你没有调用任何工具，给定的上下文里也没有这些数字。"
             + "要么现在调用对应的工具查真实数字，要么不要说具体数值。）"
-          : "（系统提示：你还没有调用任何工具，所以那件事一件也没有发生。"
-            + "要么在这一轮调用合适的工具再回答，要么直接回答用户；"
-            + "不要说已经做过，也不要只说你要去做。）",
+          : lookupClaim
+            // 对她"我查过/没查到"的冒称，**指出该调哪个工具**比指责她没调有用：
+            // 实机 2026-09-21 第一版只说"你没有调用任何工具"，她回得更起劲——
+            // "这次真的用工具查过了：两个词各搜了一遍"（tools 仍是 0）。
+            // 否认被当成了需要辩护的指控，而不是需要纠正的遗漏。
+            ? `（系统提示：你还没有真的查过。现在就调用下面这些工具之一：`
+              + `${steerableReadTools.join("、")}；`
+              + "查完按真实结果回答；工具返回空就照实说没查到，不要替工具编结论。）"
+            : "（系统提示：你还没有调用任何工具，所以那件事一件也没有发生。"
+              + "要么在这一轮调用合适的工具再回答，要么直接回答用户；"
+              + "不要说已经做过，也不要只说你要去做。）",
       });
       await finishStep(event, stepId, "succeeded", sha256Utf8V1(said));
       await updateRunMeta(event, { stepCount, toolCallCount, elapsedMsDelta: elapsedDelta() });
@@ -2343,6 +2830,7 @@ export async function runCompanionAgentLoop(args: {
           chars: said.trim().length,
           claims: unverifiedClaims.slice(0, 4),
           by: unverifiedClaims.length > 0 ? "unverified-numbers"
+            : lookupClaim ? (nothingDueClaim ? "claimed-nothing-due" : "claimed-lookup")
             : userAskedForAction ? "action-request" : "promise-shape",
         },
         "companion agent answered an action request without calling any tool; steering one more step",
@@ -2411,7 +2899,7 @@ export async function runCompanionAgentLoop(args: {
       }
       await finishStep(event, stepId, "succeeded", sha256Utf8V1(text));
       await updateRunMeta(event, { stepCount, toolCallCount, elapsedMsDelta: elapsedDelta() });
-      return { status: "completed", text, memoryRefs: [] };
+      return { status: "completed", text, blocks: richBlocks, memoryRefs: [] };
     }
     if (calls.length > COMPANION_AGENT_MAX_TOOL_CALLS_PER_STEP) {
       await finishStep(event, stepId, "failed", undefined, "AGENT_TOOL_CALL_LIMIT");
@@ -2599,7 +3087,14 @@ export async function runCompanionAgentLoop(args: {
         execution = await runWithAbortBudget(
           () => executeTool(event, definition, { id: call.id, arguments: parsedArgs.data }, fence),
           args.ctx.signal,
-          Math.min(COMPANION_AGENT_TOOL_TIMEOUT_MS, remainingMs),
+          // 读图里嵌的是一次视觉模型往返，10s 的通用工具预算对它来说必然超时；
+          // 其余工具查一次库就返回，45s 只是把尾延迟留给真正需要它的那一个。
+          Math.min(
+            definition.name === "companion_read_image"
+              ? READ_IMAGE_TOOL_TIMEOUT_MS
+              : COMPANION_AGENT_TOOL_TIMEOUT_MS,
+            remainingMs,
+          ),
           (lateError) => {
             // 迟到 settle 此前被静默吞掉（无任何可观测信号）。只记日志，
             // 不回写状态：此刻审计行已按超时终结。
@@ -2644,6 +3139,26 @@ export async function runCompanionAgentLoop(args: {
         await updateRunMeta(event, { stepCount, toolCallCount, elapsedMsDelta: elapsedDelta(), status: "waiting_for_confirmation", waitingProposalId: execution.proposalId });
         return { status: "waiting_for_confirmation", proposalId: execution.proposalId, memoryRefs: [] };
       }
+      // 富载荷进消息流（方案 29 §4.8，抱怨 #5「连跳到某个笔记都做不到」的收尾）：
+      // 她打开/跳转到的落点以前只活在 agent.tool 事件和一行游离在正文之外的 chip 里，
+      // 事件有 TTL、chip 不落在正文顺序中，于是回看时"她带我去看的那篇笔记"根本不存在。
+      // route 仍然过一遍主进程白名单：它是服务端构造的，但"构造得对"不该靠约定。
+      if (execution.route) {
+        const parsedRoute = allowedMainRouteV2Schema.safeParse(execution.route);
+        if (parsedRoute.success) {
+          pushRichBlock({
+            type: "nav",
+            label: (execution.routeLabel ?? definition.description).slice(0, 80),
+            route: parsedRoute.data,
+          });
+        } else {
+          logger.warn(
+            { runId: args.read.runId, tool: definition.name },
+            "companion agent produced a route outside the allowed main-route schema; nav block dropped",
+          );
+        }
+      }
+      for (const block of execution.blocks ?? []) pushRichBlock(block);
       messages.push({
         role: "tool",
         toolCallId: call.id,

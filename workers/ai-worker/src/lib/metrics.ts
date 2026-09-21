@@ -122,6 +122,20 @@ export const companionSummaryTotal = new Counter({
 });
 
 /**
+ * 桌宠日记生成结果计数器。
+ *
+ * 标签就是 `companion_daily_summaries.failure_reason` 那四个取值加 `generated`：
+ * 日记改成由她按人格写之后，"没有日记"有三种成因且只有一种该重试，
+ * 光看 jobs.status 分不出"没同意"和"模型挂了"。
+ */
+export const companionDiaryTotal = new Counter({
+  name: "ailearn_companion_diary_total",
+  help: "Companion daily diary generation results",
+  labelNames: ["result"] as const,
+  registers: [registry],
+});
+
+/**
  * 启动一个轻量 HTTP 服务器暴露 /metrics 端点。
  * Prometheus scraper 通过此端口拉取 Worker 指标。
  *

@@ -27,7 +27,10 @@ import { qwenTtsSynthesizeStreamForUser, QwenTtsError } from "./voice-providers/
 import { loadTtsEngineConfig } from "./voice-providers/tts-config.ts";
 import { synthesizeTtsBytes } from "./voice-providers/tts-engine.ts";
 import { companionTtsStreamRequestV1Schema } from "@ailearn/shared";
-import { companionVoiceSpeakSegmentRequestV2Schema } from "@ailearn/shared/companion-voice-contracts";
+import {
+  companionVoicePlaybackOutcomeRequestV1Schema,
+  companionVoiceSpeakSegmentRequestV2Schema,
+} from "@ailearn/shared/companion-voice-contracts";
 import { siliconFlowTranscribe, SiliconFlowAsrError } from "./voice-providers/siliconflow-asr.ts";
 import {
   COMPANION_RATE_LIMITS,
@@ -44,6 +47,7 @@ function rateLimitVoice(reply: { code(statusCode: number): { send(body: unknown)
 }
 import {
   synthesizeCompanionTtsSegment,
+  recordCompanionTtsPlaybackOutcome,
   transcribeCompanionDialogueAudio,
 } from "./companion-voice-service.ts";
 
@@ -281,7 +285,7 @@ export async function voiceRoutes(app: FastifyInstance) {
             queueKey: `${session.workspaceId}:${session.userId}`,
             onQwenFallback: (error) => req.log.warn({ err: error, ordinal: parsed.data.ordinal }, "qwen tts failed; falling back to edge-tts"),
           });
-          return { audio: r.audio };
+          return { audio: r.audio, engine: r.engine };
         },
       });
       if (result.statusCode !== 200) {
@@ -322,6 +326,45 @@ export async function voiceRoutes(app: FastifyInstance) {
       }
       throw err;
     }
+  });
+
+  // POST /voice/tts/playback-outcome：客户端把"这一段到底播没播成"送回 0246 那张表。
+  //
+  // 为什么单独一个端点而不是塞进 /voice/tts 的响应：合成请求那一侧永远不知道自己被
+  // 等超时了没有（客户端的截止先到时，服务端还在合成），而"她经常没声音"要能回答，
+  // 缺的正是这一句。上报失败不影响朗读（客户端只 fire-and-forget），但结果体仍要按
+  // 合同返回——客户端拿它判定这一段的账有没有记上。
+  app.post("/voice/tts/playback-outcome", { preHandler: [requireSession] }, async (req, reply) => {
+    // 判定方向别写反：这个 helper 在**功能开着**时返回 false。写成 `!helper()` 的
+    // 话处理器会在任何校验之前 `return;`，而 Fastify 把"返回 undefined"当成
+    // **200 空响应**——实机就是这样静默吞掉了每一条上报，表里一行都没有，接口却全绿。
+    if (rejectDisabledCompanionVoice(reply, "COMPANION_VOICE_DIALOGUE_V1_ENABLED")) return;
+    const parsed = companionVoicePlaybackOutcomeRequestV1Schema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: "INVALID_REQUEST", code: "INVALID_REQUEST",
+        message: parsed.error.issues.map((i) => i.path.join(".")).join(","),
+      });
+    }
+    const session = req.session!;
+    // 与合成同一配额：一段一条，重试多出来的那几条本来也该被同一扇门挡住。
+    if (!rateLimitVoice(reply, req.id, `${session.workspaceId}:${session.userId}:tts`, COMPANION_RATE_LIMITS.ttsPerMinute.limit, COMPANION_RATE_LIMITS.ttsPerMinute.windowMs)) return;
+    await recordCompanionTtsPlaybackOutcome({
+      workspaceId: session.workspaceId,
+      userId: session.userId,
+      ref: {
+        conversationId: parsed.data.conversationId,
+        runId: parsed.data.runId,
+        generation: parsed.data.generation,
+        ordinal: parsed.data.ordinal,
+        segmentId: parsed.data.segmentId,
+      },
+      // 只传 reason：outcome 的映射在 service 里一处完成（两个字段都由客户端报，
+      // 就会造出 reason/outcome 互相矛盾的行）。
+      reason: parsed.data.reason,
+      durationMs: parsed.data.durationMs,
+    });
+    return reply.code(200).send({ version: 1, recorded: true });
   });
 
   // POST /voice/transcribe：ASR（救火 6b——multipart 音频上传 → SiliconFlow 识别）。

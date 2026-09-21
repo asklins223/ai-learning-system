@@ -2466,7 +2466,7 @@ async function critiqueAndFinalizeCandidates(
 
 // ─── 公共加载器（regenerate/replan 复用）──────────────────────────────────
 
-async function loadV2RunInputs(tx: WorkerTransaction, workspaceId: string, runId: string) {
+export async function loadV2RunInputs(tx: WorkerTransaction, workspaceId: string, runId: string) {
   // FOR UPDATE 行锁：loadV2RunInputs 仅在 withWorkerWorkspaceTransaction（真实事务）
   // 内被 regenerate/replan/recheck 调用，事务内持锁可串行化同 run 的并发 job，
   // 防止 read-then-modify 的 TOCTOU 竞态（W2）。
@@ -2845,7 +2845,7 @@ async function processReplanSetJob(job: PendingOutboxJob, signal?: AbortSignal):
 
 // ─── 候选行 → 对象构建（regenerate/recheck 复用）──────────────────────────
 
-function candidateRowToObject(
+export function candidateRowToObject(
   row: Record<string, unknown>,
   runId: string,
 ): LearningCardCandidateRevisionV2 {
@@ -3009,7 +3009,7 @@ async function processRecheckCandidateJob(job: PendingOutboxJob, signal?: AbortS
  * 对失败候选做局部 repair：调 author provider 重写 → 新 immutable revision。
  * 返回新 revision 的 candidate 对象，由调用方决定重跑 gates。
  */
-async function boundedRepairCandidate(
+export async function boundedRepairCandidate(
   tx: WorkerTransaction,
   input: {
     runId: string;

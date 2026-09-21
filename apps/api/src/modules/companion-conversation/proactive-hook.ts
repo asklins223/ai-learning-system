@@ -10,9 +10,7 @@ import type { ApiTransaction } from "../../db/client.ts";
 import { resolveAssessmentCriticConfig } from "../../lib/assessment-critic-config.ts";
 import { sql } from "drizzle-orm";
 import {
-  evaluateDismissalFeedback,
-  evaluateProactivePolicy,
-  isWithinQuietHours,
+  evaluateTriggeredPush,
 } from "@ailearn/shared/companion-proactive-policy";
 import { deliver } from "./delivery-service.ts";
 
@@ -232,94 +230,26 @@ export async function hookProactiveOnRunCompleted(
   },
   now: Date = new Date(),
 ): Promise<ProactiveMemoryDeferInput | null> {
-  // P8 最小：读取账户真实偏好（介入强度 + 静默时段，方案 16 §10.2/§10.3）；
-  // DND/offline 读取账户 presence。四组只读查询相互独立——并行发出，
-  // 避免在结算路径上串行 4 个 DB 往返（PERF round-5）。
+  // 这是**触发式**主动输出：用户刚跑完一个学习运行，"要继续吗"正是他在等的东西。
+  // 所以这里不读静默时段、作答状态、24h 计数、最近展示时间、反馈窗口——那五道闸管的
+  // 是"她自己想开口"的节奏（用户 2026-09-21 的口径：触发式不进频率限制）。
+  // 只剩两条：账号级总开关，和设备明确不在（气泡进收件箱，人回来照样看得见）。
   const { userCompanionAccountState } = await import("@ailearn/shared/db-schema/companion");
   const { eq } = await import("drizzle-orm");
-  const [accountRows, pageRows, shownRows, lastRows, feedbackRows] = await Promise.all([
-    tx
-      .select({
-        presence: userCompanionAccountState.presence,
-        globalEnabled: userCompanionAccountState.globalEnabled,
-        interventionLevel: userCompanionAccountState.interventionLevel,
-        quietHours: userCompanionAccountState.quietHours,
-      })
-      .from(userCompanionAccountState)
-      .where(eq(userCompanionAccountState.userId, scope.userId))
-      .limit(1),
-    // 正式作答/处理中抑制（§6.5/§9.5/§20.2 Gate）：读最近未过期页面 context
-    // （Player 在 formal_answer 期间每 10s 续租，未过期即当前状态）。
-    tx.execute<{ interaction_state: string }>(sql`
-      SELECT interaction_state FROM assistant_page_contexts
-      WHERE workspace_id = ${scope.workspaceId} AND user_id = ${scope.userId}
-        AND revoked_at IS NULL AND expires_at > now()
-      ORDER BY updated_at DESC LIMIT 1
-    `),
-    // 频率预算（§10.2 真实执行）：24h 主动 delivery 计数。
-    // dedupeKey（run.completed:<runId>）每次全新，cooldown 只看最近主动 delivery。
-    tx.execute<{ n: string }>(sql`
-      SELECT count(*)::int AS n FROM assistant_deliveries
-      WHERE workspace_id = ${scope.workspaceId} AND user_id = ${scope.userId}
-        AND kind = 'system_event'
-        AND created_at > now() - interval '24 hours'
-    `),
-    // 最近一次展示时间。
-    tx.execute<{ created_at: Date }>(sql`
-      SELECT created_at FROM assistant_deliveries
-      WHERE workspace_id = ${scope.workspaceId} AND user_id = ${scope.userId}
-        AND kind = 'system_event'
-      ORDER BY created_at DESC LIMIT 1
-    `),
-    // 展示反馈（念头管线切片①，2026-09-18）：最近送达过用户的 delivery 状态
-    //（未读的 queued/delivered 不构成反馈）。
-    tx.execute<{ state: string }>(sql`
-      SELECT state FROM assistant_deliveries
-      WHERE workspace_id = ${scope.workspaceId} AND user_id = ${scope.userId}
-        AND kind = 'system_event'
-        AND state IN ('displayed', 'acted', 'dismissed')
-        AND created_at > now() - interval '24 hours'
-      ORDER BY created_at DESC LIMIT 3
-    `),
-  ]);
+  const accountRows = await tx
+    .select({
+      presence: userCompanionAccountState.presence,
+      globalEnabled: userCompanionAccountState.globalEnabled,
+    })
+    .from(userCompanionAccountState)
+    .where(eq(userCompanionAccountState.userId, scope.userId))
+    .limit(1);
   const presence = accountRows[0]?.presence as { presence?: "online" | "dnd" | "offline" } | null;
   const availability = presence?.presence ?? "online";
   if (accountRows[0] && accountRows[0].globalEnabled === false) {
     return null; // 全局关闭：不打扰。
   }
-  // 静默时段（账号级；按 IANA 时区计算本地时间）：时段内抑制全部主动 cue。
-  const quietHours = accountRows[0]?.quietHours;
-  if (quietHours && isWithinQuietHours(quietHours, now)) {
-    return null;
-  }
-  // 展示反馈进生成（被忽略→降权）：最近 3 条送达的主动提示里 dismiss ≥2 → 本轮沉默。
-  const feedbackStates = (Array.isArray(feedbackRows) ? feedbackRows : []).map((row) => row.state);
-  if (evaluateDismissalFeedback(feedbackStates).suppress) {
-    return null;
-  }
-  const interventionLevel = accountRows[0]?.interventionLevel ?? "moderate";
-
-  const pageState = pageRows[0]?.interaction_state;
-  const formalAnswerInProgress = pageState === "formal_answer" || pageState === "processing";
-
-  const dailyShownTotal = Number(shownRows[0]?.n ?? 0);
-  const msSinceLastShown = lastRows[0]
-    ? now.getTime() - new Date(lastRows[0].created_at).getTime()
-    : null;
-
-  const decision = evaluateProactivePolicy({
-    availability,
-    interventionLevel,
-    formalAnswerInProgress,
-    msSinceLastShown,
-    // run.completed 每次新 dedupeKey：同 key 冷却不适用（dedupe 语义保留给
-    // 可重复事件），频率预算由 dailyShownTotal + msSinceLastShown 承担。
-    recentShownCount: 0,
-    dailyShownTotal,
-    expired: false,
-    now: now.getTime(),
-  });
-  if (!decision.allow) return null;
+  if (!evaluateTriggeredPush({ availability, expired: false }).allow) return null;
 
   // 22 方案 §9.7/§11.5：个性化主动文案。
   // 在事务内只读取记忆快照（不调 LLM，避免钉住连接）；

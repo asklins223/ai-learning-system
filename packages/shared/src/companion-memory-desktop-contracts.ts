@@ -14,7 +14,12 @@
  */
 
 import { z } from "zod";
-import { companionContentBlockV1Schema } from "./companion-conversation-contracts.ts";
+import {
+  companionContentBlockV1Schema,
+  companionImageBlockV1Schema,
+  companionQuoteBlockV1Schema,
+  companionTextBlockV1Schema,
+} from "./companion-conversation-contracts.ts";
 
 // ─── 记忆条目（§3.3 memory-routes.ts 的 MemoryItemV2）────────────────────
 
@@ -137,34 +142,36 @@ export type CompanionMemoryStarMapV2 = z.infer<typeof companionMemoryStarMapV2Sc
 // ─── 桌宠日记（§15.3 daily-summary-routes.ts）───────────────────────────
 
 /**
- * Worker 的确定性模板只写这 12 个计数（companion-daily-summary.ts），但
- * facts 列是 jsonb，历史行可能带旧键。这里按"可选计数"解析，页面只渲染
- * 真正拿到的键，不补零、不编造。
+ * 日记只有她自己写的那一段话。当天计数（`companion_daily_summaries.facts`）**不再上线**：
+ * 用户 2026-09-21 的裁决是"这跟系统统计数据有什么区别"，而 facts 仍要写进 DB，
+ * 因为 `companion-thought.ts` 靠 `learningRunsCreated/Completed` 算连续学习天数。
  */
-export const companionDailyFactsV1Schema = z.strictObject({
-  notesCreated: z.number().int().min(0).optional(),
-  notesUpdated: z.number().int().min(0).optional(),
-  cardsCreated: z.number().int().min(0).optional(),
-  sourcesCreated: z.number().int().min(0).optional(),
-  jobsCreated: z.number().int().min(0).optional(),
-  jobsCompleted: z.number().int().min(0).optional(),
-  learningRunsCreated: z.number().int().min(0).optional(),
-  learningRunsCompleted: z.number().int().min(0).optional(),
-  pageContexts: z.number().int().min(0).optional(),
-  conversationMessages: z.number().int().min(0).optional(),
-  userMessages: z.number().int().min(0).optional(),
-  assistantMessages: z.number().int().min(0).optional(),
-});
-export type CompanionDailyFactsV1 = z.infer<typeof companionDailyFactsV1Schema>;
-
-export const companionDailyHighlightV1Schema = z.strictObject({
-  role: z.enum(["user", "assistant"]),
-  text: z.string().max(200),
-});
-export type CompanionDailyHighlightV1 = z.infer<typeof companionDailyHighlightV1Schema>;
+export const companionDailyFailureReasonV1Schema = z.enum([
+  "consent_required",
+  "model_unavailable",
+  "diary_output_invalid",
+]);
+export type CompanionDailyFailureReasonV1 = z.infer<typeof companionDailyFailureReasonV1Schema>;
 
 /** 日记日期用用户本地日历日（YYYY-MM-DD），不是 UTC 时间戳。 */
 export const companionDailyDateV1Schema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+
+/**
+ * 日记正文的块（0252）。成员 schema 直接引用对话那三个，不抄第二份。
+ *
+ * 只收 `text`/`quote`/`image`：日记是"她写的那一天"，不是操作流，
+ * 所以 `nav`/`action_ref`/`card` 这些带对话语义的块不进这一页。
+ * 以后放开音频/视频时，在这里加一个成员就接得上——渲染层按 type 分发。
+ *
+ * `text.emotion`（驱动 Live2D 表情那个字段）对日记无意义，但**不在此处剔除**：
+ * 剔除就等于复制一份 text schema，两份会在长度上限变化时分叉。生成器从不写它。
+ */
+export const companionDailyBlockV1Schema = z.discriminatedUnion("type", [
+  companionTextBlockV1Schema,
+  companionQuoteBlockV1Schema,
+  companionImageBlockV1Schema,
+]);
+export type CompanionDailyBlockV1 = z.infer<typeof companionDailyBlockV1Schema>;
 
 export const companionDailySummaryV1Schema = z.strictObject({
   version: z.literal(1),
@@ -172,9 +179,14 @@ export const companionDailySummaryV1Schema = z.strictObject({
   date: companionDailyDateV1Schema.nullable(),
   status: z.enum(["generated", "not_generated", "failed"]),
   generatedAt: isoTimestampSchema.nullable(),
-  summary: z.string().max(500),
-  facts: companionDailyFactsV1Schema,
-  conversationHighlights: z.array(companionDailyHighlightV1Schema).max(8),
+  /** status=failed 的成因；generated / not_generated 恒为 null。 */
+  failureReason: companionDailyFailureReasonV1Schema.nullable(),
+  /**
+   * 正文块序列。0252 之前的历史行 DB 里 `blocks='[]'`，只读路由把它投影成
+   * 单个 text 块（内容来自当时的 `summary`），所以这里永远非空——
+   * 渲染层不需要为"旧日子没有块"写分支。
+   */
+  blocks: z.array(companionDailyBlockV1Schema).max(24),
   /** 该日日记派生出的记忆条目（可能是候选，等确认）。 */
   memory: z.strictObject({
     memoryItemId: z.string().uuid(),

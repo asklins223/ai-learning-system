@@ -18,6 +18,32 @@ export const COMPANION_AGENT_MAX_TOOL_CALLS = 12;
 export const COMPANION_AGENT_DEADLINE_MS = 120_000;
 export const COMPANION_AGENT_TOOL_TIMEOUT_MS = 10_000;
 
+/**
+ * 受"图片可以外发"这条政策管的能力档工具。
+ *
+ * 与权限档无关（读图在 read_only 下也是读），管的是**数据出境**：一张截图里可能
+ * 有人脸、门牌、别人的屏幕，所以 `dataPolicy.sendImageContent=false` 时这些工具
+ * **根本不下发**——她看不见就不会调，也就不会先答应再看不了。执行层独立再拦一次
+ * （见 CompanionAgentToolExecutionConstraints），因为工具名是模型给的。
+ */
+export const VISION_GATED_COMPANION_TOOL_NAMES: readonly string[] = Object.freeze([
+  "companion_read_image",
+]);
+
+export function isVisionGatedCompanionTool(toolName: string): boolean {
+  return VISION_GATED_COMPANION_TOOL_NAMES.includes(toolName);
+}
+
+/**
+ * 一轮工具执行的环境约束（权限档之外的那一类：数据能出到哪里）。
+ *
+ * 只放**必须由服务端判定**的项。她的 `question`/`noteId` 是模型给的，不算约束。
+ */
+export interface CompanionAgentToolExecutionConstraints {
+  /** 用户是否允许把图片发给外部模型（`dataPolicy.sendImageContent`）。 */
+  visionEnabled?: boolean;
+}
+
 export const companionAgentPermissionLevelSchema = z.enum([
   "read_only",
   "guided",

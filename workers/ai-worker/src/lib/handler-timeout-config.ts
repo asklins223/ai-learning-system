@@ -30,8 +30,11 @@ const DEFAULT_TIMEOUTS: Record<string, number> = {
   // 单次 LLM 调用 + 确定性落库，与 HEAD 的 companion_dialogue(60s) 同级。
   companion_memory_extract: 60_000,
   companion_summarizer: 60_000,
-  // 当前是确定性模板（无 LLM 调用），30s 足够；给足只是防 DB 抖动。
-  companion_daily_summary: 30_000,
+  // 桌宠日记正文由模型写（2026-09-21 从确定性模板改过来），一次 job 最多两次采样。
+  // 实测（dev，ai_audit_log.duration_ms，10 次成功调用）：5.3–20.2s，典型 8–14s。
+  // 90s = provider 预算 75s/次，够装下四次"最慢那次"，所以重采样不会被本地 abort 掐死；
+  // 30s（旧值）则会让第一次调用就被切——那是纯模板时代的数。
+  companion_daily_summary: 90_000,
   // 最重的一个：最多 200 次 embed + 每行 2 条写语句（BATCH_LIMIT=200）。
   // 取 clamp 上限（LEASE_TIMEOUT_MS - 10s），是 lease 约束下能给的唯一选择。
   companion_memory_embedding_rebuild: 110_000,

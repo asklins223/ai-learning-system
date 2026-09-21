@@ -16,6 +16,7 @@ import {
   characterCueIntentV1Schema,
 } from "./companion-character-contracts.ts";
 import { companionAgentToolEventV1Schema } from "./companion-agent-contracts.ts";
+import { sourceImageObjectKeyFromUrl } from "./source-image-contracts.ts";
 import { createLearningRunV2RequestSchema } from "./learning-target-v2-contracts.ts";
 
 // ─── 基础 ────────────────────────────────────────────────────────────────
@@ -52,14 +53,60 @@ export type CompanionConversationV1 = z.infer<typeof companionConversationV1Sche
 
 // ─── Content blocks（§3.2） ───────────────────────────────────────────────
 
+/**
+ * 单个块的 schema 各自命名导出：桌宠日记（0252）只收 `text`/`quote`/`image`
+ * 三种，它必须**引用**这里的定义而不是再抄一份——抄的那份会在
+ * "图片 url 只收站内 /api/uploads/"这类校验规则变化时悄悄落后。
+ */
+export const companionTextBlockV1Schema = z.object({
+  type: z.literal("text"),
+  text: z.string().min(1).max(20_000),
+  // 语气层情绪（2026-09-18）：worker 确定性语气分类的落库形态，
+  // 渲染层据此驱动 Live2D 表情。可选，历史消息没有该字段。
+  emotion: characterCueEmotionV1Schema.optional(),
+}).strict();
+
+/**
+ * 她读出来的那段原文（方案 29 §4.8，抱怨 #10「只能输出纯文本」）。
+ *
+ * 为什么由服务端而不是模型给：`companion_read_note` 已经取到了正文，
+ * 让模型把这几百字**再抄一遍**既慢又必然改写——用户看到的"引用"就不是原文。
+ * 服务端直接带出这一块，她的正文只负责说"我读到了什么、意味着什么"。
+ * 桌宠日记（0252）同一条规矩：她给引用编号，原文由服务端带。
+ */
+export const companionQuoteBlockV1Schema = z.object({
+  type: z.literal("quote"),
+  label: z.string().min(1).max(80),
+  text: z.string().min(1).max(2_000),
+}).strict();
+
+/**
+ * 她把某张图**摆到对话里**（方案 29 §4.8 里 B6 剩下的那一块，抱怨 #9 的另一半）。
+ *
+ * 与 `companion_read_image` 是两件不同的事：读图要把字节发给视觉模型（受
+ * `sendImageContent` 管，政策关着时工具根本不下发）；这一块只是让本机显示一张
+ * **她自己库里**的图，一个字节都不出境。所以用户说"把那张图给我看"时，即使
+ * 图片外发关着，她也做得成。
+ *
+ * `url` 的校验刻意复用渲染层那同一个函数（`sourceImageObjectKeyFromUrl`）：
+ * "合同收得下"与"显示得出"必须是同一件事，否则会出现一条能落库却永远显示不出来的块。
+ * 而它只能由**服务端**从 `note_image_assets` 的行拼出来——模型给不出这个字段，
+ * 也就给不出一个指向站外地址的 img src。
+ */
+export const companionImageBlockV1Schema = z.object({
+  type: z.literal("image"),
+  url: z.string().max(2_000).refine(
+    (value) => sourceImageObjectKeyFromUrl(value) !== null,
+    { message: "only site-internal /api/uploads/ image urls are displayable" },
+  ),
+  /** 图注：她说的是哪一张（`《笔记标题》· 第 2 张`）。渲染在图下面。 */
+  label: z.string().min(1).max(80),
+  /** 无障碍替代文字；缺省时渲染层回落到 label。 */
+  alt: z.string().min(1).max(120).optional(),
+}).strict();
+
 export const companionContentBlockV1Schema = z.discriminatedUnion("type", [
-  z.object({
-    type: z.literal("text"),
-    text: z.string().min(1).max(20_000),
-    // 语气层情绪（2026-09-18）：worker 确定性语气分类的落库形态，
-    // 渲染层据此驱动 Live2D 表情。可选，历史消息没有该字段。
-    emotion: characterCueEmotionV1Schema.optional(),
-  }).strict(),
+  companionTextBlockV1Schema,
   z.object({
     type: z.literal("code"),
     language: z.string().min(1).max(40).optional(),
@@ -83,6 +130,61 @@ export const companionContentBlockV1Schema = z.discriminatedUnion("type", [
     type: z.literal("action_ref"),
     proposalId: z.string().uuid(),
   }).strict(),
+  /**
+   * 跳转落点**进消息流**（方案 29 §4.8，抱怨 #5「连跳到某个笔记都做不到」的收尾）。
+   *
+   * 以前 route 只活在 `agent.tool` SSE 事件与一个游离在消息之外的 chip 行里：
+   * 事件有 TTL、chip 不落在正文顺序里，于是"她带我去看的那篇笔记"在回看时**根本不存在**。
+   * 现在 she 打开什么，就在那句话下面留一个可点、可重放的落点。
+   *
+   * `route` 直接复用主进程那份白名单 schema（`allowedMainRouteV2Schema`），
+   * 不再抄第二份"客户端能跳哪儿"的清单——两份清单必然分叉。
+   */
+  z.object({
+    type: z.literal("nav"),
+    label: z.string().min(1).max(80),
+    route: allowedMainRouteV2Schema,
+  }).strict(),
+  /**
+   * 她读出来的那段原文（方案 29 §4.8，抱怨 #10「只能输出纯文本」）。
+   *
+   * 为什么由服务端而不是模型给：`companion_read_note` 已经取到了正文，
+   * 让模型把这几百字**再抄一遍**既慢又必然改写——用户看到的"引用"就不是原文。
+   * 服务端直接带出这一块，她的正文只负责说"我读到了什么、意味着什么"。
+   */
+  companionQuoteBlockV1Schema,
+  /**
+   * 步骤/流程（方案 29 §4.8）。收的是**结构化输入**（`companion_render_diagram`），
+   * 不是让模型用文字"画"——她用字符画箭头时，客户端只能当纯文本换行显示，
+   * 手机上还会折行错乱。
+   *
+   * 只做"竖向步骤流"这一种版式：条目数与字段长度都收紧，渲染层不需要布局引擎，
+   * 也不会因为模型给出 40 步而把消息列撑爆。
+   */
+  z.object({
+    type: z.literal("diagram"),
+    title: z.string().min(1).max(60),
+    steps: z.array(z.object({
+      label: z.string().min(1).max(40),
+      detail: z.string().max(80).optional(),
+    }).strict()).min(2).max(8),
+  }).strict(),
+  /**
+   * 她打开的那张卡片**内容**（§4.8）。`nav` 块只回答"跳去哪"，这块回答"这张卡写着什么"——
+   * 由 `companion_open_card` 服务端带出，同样不让模型转抄题面。
+   *
+   * 字段按 `learning_cards_v2` 真实有的东西来：题面（front.cue/prompt）、
+   * 这张卡在考什么（public_summary）、知识形态。**没有"答案"字段**——
+   * 回忆卡的正文里本来就不存标准答案，编一个出来比缺一个字段更糟。
+   */
+  z.object({
+    type: z.literal("card"),
+    cardId: z.string().uuid(),
+    front: z.string().min(1).max(600),
+    summary: z.string().max(600).nullable(),
+    knowledgeForm: z.string().max(40).nullable(),
+  }).strict(),
+  companionImageBlockV1Schema,
 ]);
 
 export type CompanionContentBlockV1 = z.infer<typeof companionContentBlockV1Schema>;

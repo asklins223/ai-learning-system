@@ -348,6 +348,7 @@ export async function runCompanionDialogue(
           userId: run.user_id,
           conversationId: run.conversation_id,
           pageContext: run.page_context,
+          userText,
         }));
         return {
           runId: run.id,
@@ -667,6 +668,9 @@ export async function runCompanionDialogue(
       fallbackProvider,
       // 活跃度决定退化闸的字数线（方案 29 §9.17）：不传就等于忽略用户的设置。
       activeness: read.petProfile?.activeness ?? null,
+      // 图片能不能出境是**账号级政策**，不是她这一轮可以自己争取的东西：
+      // 关着的时候读图工具既不下发也不会执行，她看不见就不会答应去看。
+      toolConstraints: { visionEnabled: govCtx.policy.sendImageContent === true },
       baseMessages: messages,
       expiresAt,
       continuationProposalId,
@@ -820,7 +824,13 @@ export async function runCompanionDialogue(
   const assistantMessageId = randomUUID();
   // 情绪接表情（2026-09-18）：语气层分类结果随消息落库，渲染层据此驱动 Live2D。
   const replyEmotion = resolveReplyToneEmotion(assistantText);
-  const blocks = [{ type: "text", text: assistantText, emotion: replyEmotion }];
+  // 工具带出的跳转块跟在正文之后（方案 29 §4.8）。正文仍是**第一个块**：
+  // 按 `blocks[0].text` 取正文的老读法（含下一轮装配 prompt）不受影响，
+  // 而 `textOfCompanionBlocks` 只认 text/code/citation，nav 不会污染模型上下文。
+  const blocks = [
+    { type: "text", text: assistantText, emotion: replyEmotion },
+    ...agentResult.blocks.slice(0, 31),
+  ];
   const contentSha256 = sha256Utf8V1(canonicalJsonV1(blocks));
   const textSha256 = sha256Utf8V1(assistantText);
   try {

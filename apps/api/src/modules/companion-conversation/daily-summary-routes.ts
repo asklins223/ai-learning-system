@@ -65,9 +65,8 @@ export async function dailySummaryRoutes(app: FastifyInstance) {
           date: parsed?.success ? parsed.data : null,
           status: "not_generated",
           generatedAt: null,
-          summary: "",
-          facts: {},
-          conversationHighlights: [],
+          failureReason: null,
+          blocks: [],
           memory: null,
         });
       }
@@ -87,14 +86,20 @@ export async function dailySummaryRoutes(app: FastifyInstance) {
         return row ? { memoryItemId: row.id, candidate: row.candidate } : null;
       });
 
+      // 0252 之前的历史行只有 `summary`（`blocks='[]'`）。在这里投影成一个 text 块，
+      // 而不是让渲染层为"旧日子没有块"写分支——用户裁定旧日子不重写，但它们照常显示。
+      const storedBlocks = Array.isArray(result.blocks) ? result.blocks : [];
+      const blocks = storedBlocks.length > 0
+        ? storedBlocks
+        : result.summary ? [{ type: "text", text: result.summary }] : [];
+
       return reply.header("Cache-Control", "no-store").send({
         version: 1,
         date: result.date,
         status: result.status,
         generatedAt: result.generatedAt.toISOString(),
-        summary: result.summary,
-        facts: result.facts,
-        conversationHighlights: result.highlights,
+        failureReason: result.failureReason,
+        blocks,
         memory,
       });
     },

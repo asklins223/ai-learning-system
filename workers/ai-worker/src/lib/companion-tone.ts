@@ -24,6 +24,7 @@
 
 import { createHash } from "node:crypto";
 import { classifyCompanionReplyEmotion, type CharacterCueEmotionV1 } from "@ailearn/shared";
+import { purifyVoiceText } from "./tts-segments.ts";
 import {
   extractVoiceEmotion,
   stripUnknownVoiceExpressionTags,
@@ -92,7 +93,10 @@ export function applyDeterministicToneToSegments(
 ): ToneSegmentInput[] {
   const tag = injectTags ? (EMOTION_TONE_TAGS[replyEmotion] ?? "") : "";
   return segments.map((s) => {
-    const cleaned = stripUnknownVoiceExpressionTags(s.text);
+    // 可见正文从 0246/B6b 起**保留 markdown**（由渲染层排版），朗读文本必须另走一份：
+    // 不然 TTS 会把"两个星号""井号"念出来。`purifyVoiceText` 就是这条 speakable 投影
+    // （剥标题/列表/强调/行内代码与代码块/URL，保留可读正文）。
+    const cleaned = purifyVoiceText(stripUnknownVoiceExpressionTags(s.text));
     // 段内已有任何已知标签（控制类或富语言类）→ 不叠加，避免双标签。
     // 已知标签在净化后仍保留，故只看净化后文本；净化前后有变化不代表
     // 原文带的是已知标签（可能只是被剥掉的幻觉标签）。

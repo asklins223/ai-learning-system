@@ -37,7 +37,10 @@ const URL_PATTERN = /https?:\/\/[^\s，。！？；,.!?;]+/g;
 // 只剥离“行首标记/成对强调/链接语法”，不误删正文中的半角括号、连字符、
 // 方括号等普通字符（如 “第3-4题 (b)”、“[重要]” 需原样朗读）。
 const MARKDOWN_LINK_PATTERN = /\[([^\]]*)\]\([^)]*\)/g;
-const MARKDOWN_LINE_MARKERS = /^[#>*]{1,6}\s+|^\s*[-+]\s+|^\s*\|/gm;
+// 有序列表标记也要剥：可见正文从 §4.8 起保留 markdown，实机落库的朗读段里出现过
+// 单独一段 `4.`——TTS 会把它念成"四点"。`1.5 米` 这种不会被误伤（数字后必须紧跟
+// `.`/`)` 再加空白才算列表项）。
+const MARKDOWN_LINE_MARKERS = /^[#>*]{1,6}\s+|^\s*[-+]\s+|^\s*\d+[.)]\s+|^\s*\|/gm;
 const MARKDOWN_EMPHASIS_PATTERN = /\*\*|__|~~/g;
 
 /** 净化可见文本：去掉代码块/行内代码、URL、markdown 语法后压缩空白。 */

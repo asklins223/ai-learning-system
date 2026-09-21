@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   canUseCompanionAgentTool,
   companionAgentToolEventV1Schema,
+  isVisionGatedCompanionTool,
 } from "./companion-agent-contracts.ts";
 import {
   COMPANION_AGENT_TOOL_DEFINITIONS,
@@ -47,9 +48,38 @@ test("扁平工具面 fail closed：read_only 只剩读工具，未知档位不�
     "guided 必须比 read_only 多出写工具",
   );
   assert.deepEqual(
-    resolveAllCompanionAgentTools("full").map((definition) => definition.name),
+    resolveAllCompanionAgentTools("full", { visionEnabled: true }).map((definition) => definition.name),
     COMPANION_AGENT_TOOL_DEFINITIONS.map((definition) => definition.name),
-    "full 档就是整个注册表",
+    "权限到顶 + 图片可外发时，full 档就是整个注册表",
+  );
+  assert.ok(
+    !resolveAllCompanionAgentTools("full").map((d) => d.name).includes("companion_read_image"),
+    "权限档位管的是「她能改什么」，不该顺手把图片送出门——政策没开时 full 也拿不到读图工具",
+  );
+});
+
+test("图片外发政策管的是「看不看得见」，不是「调不调得动」", () => {
+  // 政策关着时工具**从工具面里消失**。这是抱怨 #9（"我看看这张图"然后什么都没有）
+  // 的根治点：看不见的工具不会被答应，也就没有一句做不到的话落进历史。
+  const withoutConsent = resolveAllCompanionAgentTools("full").map((d) => d.name);
+  const withConsent = resolveAllCompanionAgentTools("full", { visionEnabled: true }).map((d) => d.name);
+  assert.ok(!withoutConsent.includes("companion_read_image"));
+  assert.ok(withConsent.includes("companion_read_image"));
+  assert.equal(
+    withConsent.filter((name) => name !== "companion_read_image").join(","),
+    withoutConsent.join(","),
+    "开图片外发只多出读图这一个工具，其余工具面不得跟着抖",
+  );
+  // read_only + 政策开着：两条过滤线各自独立，谁都不会替谁放宽。
+  assert.ok(
+    resolveAllCompanionAgentTools("read_only", { visionEnabled: true })
+      .every((definition) => definition.riskClass === "read"),
+  );
+  assert.deepEqual(
+    COMPANION_AGENT_TOOL_DEFINITIONS.filter((d) => isVisionGatedCompanionTool(d.name))
+      .map((d) => d.name),
+    ["companion_read_image"],
+    "受图片外发管的能力档工具就这一个；再加受管工具时必须登记进同一张表",
   );
 });
 

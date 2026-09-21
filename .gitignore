@@ -42,6 +42,8 @@ scripts/*.mjs
 !scripts/companion-quality-report.py
 !scripts/companion-turn-e2e-verify.py
 !scripts/companion-inbox-sse-probe.py
+# 槽位健康探针是常驻工具（退化是 provider 侧的，会随时回来），不是临时探针。
+!scripts/companion-provider-health.mjs
 apps/web/preview-ui.mjs
 
 # Documentation artifacts (keep source, ignore generated)

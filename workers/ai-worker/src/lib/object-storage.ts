@@ -4,7 +4,7 @@
  * 用于 URL 来源解析时下载页面内嵌图片并上传到 MinIO，
  * 使图片可通过 /api/uploads/{objectKey} 访问。
  */
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { logger } from "./logger.ts";
 
@@ -95,4 +95,31 @@ export async function uploadSourceImage(
   await getClient().send(command);
   logger.debug({ objectKey, size: body.length }, "source image uploaded to storage");
   return objectKey;
+}
+
+/**
+ * 读回一个对象（伴星读图工具用）。
+ *
+ * `maxBytes` 是**必须的**，不是可选的谨慎：视觉 provider 按 base64 计费/限时，
+ * 一张手机原图 8MB 会让这一步稳定超时，用户只看到"她没反应"。
+ * objectKey 来自我们自己库里的行，不接用户输入；仍然挡一手路径穿越。
+ */
+export async function getObjectBytes(objectKey: string, maxBytes = 4_000_000): Promise<Buffer> {
+  if (!objectKey || objectKey.includes("..")) {
+    throw new Error("invalid object key");
+  }
+  const response = await getClient().send(new GetObjectCommand({
+    Bucket: getBucket(),
+    Key: objectKey,
+  }));
+  const stream = response.Body as AsyncIterable<Uint8Array> | undefined;
+  if (!stream) throw new Error(`object ${objectKey} returned no body`);
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of stream) {
+    total += chunk.length;
+    if (total > maxBytes) throw new Error(`object ${objectKey} exceeds ${maxBytes} bytes`);
+    chunks.push(Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
 }

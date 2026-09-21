@@ -290,6 +290,22 @@ BEGIN
     'companion_agent_steps',
     'companion_agent_tool_calls',
     'user_companion_account_state',
+    -- 0238：到点提醒表。`<here_and_now>` 里"下一条提醒"要读它，schedule/cancel
+    -- 两个工具要写它。缺 SELECT 的表现不是报错给用户，而是她**看不见自己许的约**。
+    'companion_reminders',
+    -- 主动念头表。worker 每一轮都要读它（今日已送达几条、最近的去重向量），
+    -- 也要写它（落候选、定稿文本/embedding、candidate→delivered/suppressed 状态）。
+    -- 缺权限的表现不是"气泡少一条"，而是 **companion_thought job 三次重试全 dead**
+    -- （permission denied 归 operational_error）——主动链在受限角色下整条静默停摆。
+    -- 实机 2026-09-21：owner 工作区连着三个调度点 dead，`last_error` 全是
+    -- `permission denied for table assistant_thoughts`，而 dev 库这张表此前
+    -- 只对 api/migrator 授权。
+    'assistant_thoughts',
+    -- 0237：账号级 AI 同意与数据外发政策。`governance.ts` 现在每轮都要读它来决定
+    -- 能不能出网；缺 SELECT 时 worker 不是"降级"，而是**所有 companion job 直接 dead**
+    -- （permission denied 被归成 operational_error）。这张表在 roles.sql 里原本零覆盖，
+    -- 是在重建容器权限后才暴露出来的——迁移里的 GRANT 会被下面的 REVOKE ALL 抹掉。
+    'user_ai_settings',
     -- companion 处理器读取学习上下文与页面上下文（daily summary / grounded run）。
     'learning_runs',
     'learning_tasks',
@@ -375,6 +391,17 @@ BEGIN
   END IF;
   IF to_regclass('public.companion_stream_events') IS NOT NULL THEN
     GRANT INSERT, UPDATE ON TABLE public.companion_stream_events TO ailearn_worker;
+  END IF;
+  -- 0238：她答应下来的提醒。worker 要写（schedule_reminder / 到点兑现）也要改
+  -- （cancel/missed），但不删行——fired 的提醒是"她说过做到"的凭据。
+  IF to_regclass('public.companion_reminders') IS NOT NULL THEN
+    GRANT INSERT, UPDATE ON TABLE public.companion_reminders TO ailearn_worker;
+  END IF;
+  -- 主动念头：SELECT 在上面的读集合里，这里补写侧。INSERT=落候选，
+  -- UPDATE=定稿文本/embedding 与 candidate→delivered/suppressed 的状态机。
+  -- 不给 DELETE：念头历史是"她说过什么"的凭据，过期行由 api 侧的 TTL 任务处理。
+  IF to_regclass('public.assistant_thoughts') IS NOT NULL THEN
+    GRANT INSERT, UPDATE ON TABLE public.assistant_thoughts TO ailearn_worker;
   END IF;
   -- Agent 方案 §5：高风险工具由 **worker** 冻结确认 proposal（旧链路由 API 创建，
   -- 因此这里此前只有 UPDATE）。缺 INSERT 会让所有需确认的写工具在受限角色下
@@ -993,6 +1020,13 @@ BEGIN
       ('companion_agent_tool_calls', true, true, true, false),
       -- Agent run 元数据（epoch / permission / agent_settings）只读。
       ('user_companion_account_state', true, false, false, false),
+      -- 0238：到点提醒。读（"下一条提醒"进 `<here_and_now>`）+ 写 + 改状态，不删行。
+      ('companion_reminders', true, true, true, false),
+      -- 主动念头：读（今日已送达条数、去重用的近期 embedding）+ 写候选 + 改状态/定稿。
+      -- 缺任何一项都不是"少一条气泡"，而是 companion_thought job 全 dead。
+      ('assistant_thoughts', true, true, true, false),
+      -- 0237：AI 同意/数据政策，worker 只读（签署与修改是 api 侧的事）。
+      ('user_ai_settings', true, false, false, false),
       -- companion 处理器的学习上下文读取面。
       ('learning_runs', true, false, false, false),
       ('learning_tasks', true, false, false, false),
@@ -1228,6 +1262,16 @@ BEGIN
     -- 0217：失效 companion 确认的定时兜底回收。
     AND p.oid IS DISTINCT FROM
       to_regprocedure('public.ailearn_reclaim_stale_companion_proposals()')
+    -- 0227/0232/0238：上面 granted 的三支 worker 定时器函数必须同时出现在这份
+    -- "预期权限"清单里。它们是**两份清单**：只加 GRANT 而忘了这里，role-bootstrap
+    -- 会在下一次 `docker compose up` 时 exit 3，而 api 因为 depends_on 直接起不来——
+    -- 容器一直活着的话这个洞完全看不见（实机 2026-09-21 就是这样埋下的）。
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_enqueue_companion_thoughts()')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_reclaim_orphaned_companion_runs()')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_fire_due_companion_reminders(integer)')
     AND p.oid IS DISTINCT FROM
       to_regprocedure('public.cosine_distance(vector,vector)')
     AND p.oid IS DISTINCT FROM

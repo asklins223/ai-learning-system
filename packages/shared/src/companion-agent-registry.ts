@@ -2,8 +2,10 @@ import { z } from "zod";
 import {
   COMPANION_AGENT_CONTRACT_VERSION,
   companionAgentToolDefinitionV1Schema,
+  isVisionGatedCompanionTool,
   type CompanionAgentPermissionLevel,
   type CompanionAgentToolDefinitionV1,
+  type CompanionAgentToolExecutionConstraints,
 } from "./companion-agent-contracts.ts";
 
 const emptyParameters = {
@@ -64,10 +66,10 @@ const REGISTERED_TOOLS: readonly RegisteredTool[] = [
   tool("companion_read_note", "读出一篇笔记的正文内容（截断到几千字）。要引用、总结或核对用户写过什么时必须先读，不要凭标题猜内容。", "read", false, { type: "object", properties: { noteId: { type: "string", format: "uuid" } }, required: ["noteId"], additionalProperties: false }, z.object({ noteId: uuid }).strict()),
   tool("companion_open_note", "跳到用户的一篇笔记（在应用里打开它）。", "read", false, { type: "object", properties: { noteId: { type: "string", format: "uuid" } }, required: ["noteId"], additionalProperties: false }, z.object({ noteId: uuid }).strict()),
   tool("companion_open_page", "跳到应用里的某个页面。用户说「打开复习」「去看看星图」时调用。", "read", false, { type: "object", properties: { page: { type: "string", enum: ["home", "today", "review", "star_map", "conversation", "source", "settings"] } }, required: ["page"], additionalProperties: false }, z.object({ page: z.enum(["home", "today", "review", "star_map", "conversation", "source", "settings"]) }).strict()),
-  tool("companion_get_learning_stats", "读取学习数据统计：今天/本周学了多久、到期复习数、活跃卡片数、笔记数等（与首页同一口径）。用户问「我今天学了多少」时调用。", "read", false, emptyParameters, emptyArguments),
+  tool("companion_get_learning_stats", "读取学习数据统计：今天/本周学了多久、到期复习数、活跃卡片数、笔记数等（与首页同一口径）。**只在用户问自己学了多久/进度如何时调用**；她跟你打招呼、闲聊、或只是接着上一个话题时不要调，也不要把这些数字主动报给用户。", "read", false, emptyParameters, emptyArguments),
   tool("companion_list_task_queue", "列出当前学习运行里排着的任务（含进度和第几步）。用户问「我接下来要做什么」「还有什么任务」时调用。", "read", false, emptyParameters, emptyArguments),
   tool("companion_list_due_reviews", "列出到期（或快到期）的复习卡，带卡片标题和到期时间。用户问「有什么要复习的」时调用。", "read", false, { type: "object", properties: { limit: { type: "integer", minimum: 1, maximum: 20 } }, additionalProperties: false }, z.object({ limit: z.number().int().min(1).max(20).optional() }).strict()),
-  tool("companion_open_card", "打开一个已存在的学习卡片。", "read", false, { type: "object", properties: { cardId: { type: "string", minLength: 1, maxLength: 120 } }, required: ["cardId"], additionalProperties: false }, z.object({ cardId: uuid }).strict()),
+  tool("companion_open_card", "打开一个已存在的学习卡片。cardId 直接用到期复习列表给的那个 id 就行。", "read", false, { type: "object", properties: { cardId: { type: "string", minLength: 1, maxLength: 120 } }, required: ["cardId"], additionalProperties: false }, z.object({ cardId: uuid }).strict()),
   tool("companion_focus_graph", "聚焦知识图谱中的节点。", "reversible_low", false, { type: "object", properties: { keyPointId: { type: "string", minLength: 1, maxLength: 120 }, lens: { type: "string", enum: ["current_target", "evidence", "provenance", "issues"] } }, required: ["keyPointId", "lens"], additionalProperties: false }, z.object({ keyPointId: uuid, lens: z.enum(["current_target", "evidence", "provenance", "issues"]) }).strict()),
   tool("companion_start_learning", "开始一个新的学习运行。", "consequential", true, emptyParameters, emptyArguments),
   tool("companion_resume_learning", "恢复当前学习运行。", "consequential", true, emptyParameters, emptyArguments),
@@ -97,6 +99,22 @@ const REGISTERED_TOOLS: readonly RegisteredTool[] = [
   tool("companion_forget_memory", "删掉一条记忆。用户明确说「忘掉这条」「别记着」时调用；先 recall 拿到 memoryId 再删，不要凭印象猜 id。", "reversible_low", false, { type: "object", properties: { memoryId: { type: "string", format: "uuid" } }, required: ["memoryId"], additionalProperties: false }, z.object({ memoryId: uuid }).strict()),
   tool("companion_list_recent_activity", "列出用户最近在系统里做过什么：写或改过的笔记、完成的复习、新增的卡片、到点兑现的提醒。用户问「我最近在忙什么」时调用。", "read", false, { type: "object", properties: { days: { type: "integer", minimum: 1, maximum: 30 } }, additionalProperties: false }, z.object({ days: z.number().int().min(1).max(30).optional() }).strict()),
   tool("companion_set_boundary", "调整伴星的行为边界：是否可以玩趣、是否催学习、是否带语音情绪标签、口头禅。用户说「别催我学习」时调用。", "reversible_low", false, { type: "object", properties: { allowPlayful: { type: "boolean" }, allowNudgeLearning: { type: "boolean" }, allowVoiceTags: { type: "boolean" }, catchphrase: { type: "string", minLength: 1, maxLength: 30 } }, additionalProperties: false }, z.object({ allowPlayful: z.boolean().optional(), allowNudgeLearning: z.boolean().optional(), allowVoiceTags: z.boolean().optional(), catchphrase: z.string().min(1).max(30).optional() }).strict()),
+  // 呈现类工具（方案 29 §4.8，抱怨 #10「只能输出纯文本」）。它不读也不写数据，只是把
+  // 结构交给客户端排版，所以 riskClass=read：任何权限档都给，永不弹确认。
+  // 为什么不让模型直接"用文字画流程图"：字符画在消息列里会折行错乱，而且
+  // 朗读文本会把箭头念出来；结构化之后渲染层画得稳，TTS 也只念步骤本身。
+  tool("companion_render_diagram", "把一组步骤/流程画成竖向流程图交给客户端显示。用户让你「列出步骤」「讲清流程」「画个图说明先后顺序」时用；2 到 8 步，每步一个短标题，可选一句补充。", "read", false, { type: "object", properties: { title: { type: "string", minLength: 1, maxLength: 60 }, steps: { type: "array", minItems: 2, maxItems: 8, items: { type: "object", properties: { label: { type: "string", minLength: 1, maxLength: 40 }, detail: { type: "string", maxLength: 80 } }, required: ["label"], additionalProperties: false } } }, required: ["title", "steps"], additionalProperties: false }, z.object({ title: z.string().min(1).max(60), steps: z.array(z.object({ label: z.string().min(1).max(40), detail: z.string().max(80).optional() }).strict()).min(2).max(8) }).strict()),
+  // 读图（抱怨 #9）。`riskClass=read` 但**受数据外发政策里的 sendImageContent 管**：
+  // 图片比文字敏感（可能拍到人脸、门牌、别人的屏幕），所以政策关着时这个工具
+  // **从工具面里摘掉**——看不见就不会答应，也就不会有"我看看这张图"然后什么都没有。
+  // 参数只收我们自己库里的 id，不收 URL——收 URL 等于让模型拿她的凭证去访问任意地址。
+  tool("companion_read_image", "看图并说出图里的内容（截图里的公式、表格、流程图、页面文字）。用户问「我笔记里那张图」「这张截图写了什么」时调用；先用 noteId（那张图所在的笔记）或 assetId（companion_read_note 返回的图片 id）指定是哪张。", "read", false, { type: "object", properties: { noteId: { type: "string", format: "uuid" }, assetId: { type: "string", format: "uuid" }, question: { type: "string", minLength: 1, maxLength: 200 } }, additionalProperties: false }, z.object({ noteId: uuid.optional(), assetId: uuid.optional(), question: z.string().min(1).max(200).optional() }).strict()),
+  // 显示图片与读图是**两条不同的能力**（方案 29 §4.8 剩下的那块，抱怨 #9 的另一半）：
+  // 读图要把字节发给视觉模型，受 sendImageContent 管；把用户自己库里的图摆到对话里
+  // 只是本机显示，一个字节都不出境。所以图片外发关着时，"给我看那张图"仍然做得成——
+  // 这一句必须写进描述，否则她会把自己"看不了图"的限制误套到"给你看"上，
+  // 明明能办的事也回答"我看不了"。
+  tool("companion_show_image", "把用户自己库里的某张图显示到对话里（只在本机显示，不发给任何模型，也不需要图片外发开关）。用户说「把那张图给我看」「那张截图长什么样」时调用；用 noteId 配合第几张（position 从 1 起）或直接给 assetId。", "read", false, { type: "object", properties: { noteId: { type: "string", format: "uuid" }, assetId: { type: "string", format: "uuid" }, position: { type: "integer", minimum: 1, maximum: 20 } }, additionalProperties: false }, z.object({ noteId: uuid.optional(), assetId: uuid.optional(), position: z.number().int().min(1).max(20).optional() }).strict()),
 ];
 
 export const COMPANION_AGENT_TOOL_DEFINITIONS: readonly CompanionAgentToolDefinitionV1[] =
@@ -111,7 +129,7 @@ const ARGUMENT_SCHEMAS = new Map<string, z.ZodType<Record<string, unknown>>>(
 );
 
 /**
- * 扁平工具面（方案 29 §4.1）：**每轮全部提供，只按权限档过滤**。
+ * 扁平工具面（方案 29 §4.1）：**每轮全部提供，只按权限档与外发约束过滤**。
  *
  * 这是取代 `selectSkill()` 的那一刀。原先工具面 = 关键词命中的那**一个**技能的
  * `toolNames`，没命中就是空工具面 + 单步——基线实测 90.7% 的轮次一个工具都没有，
@@ -119,13 +137,19 @@ const ARGUMENT_SCHEMAS = new Map<string, z.ZodType<Record<string, unknown>>>(
  *
  * 权限三档（`read_only`/`guided`/`full`）是真正的安全边界，保留：它只**过滤**工具，
  * 从不参与"这一轮能看见什么"的发现过程。
+ *
+ * `constraints` 是第二类过滤，管的不是"她能改什么"而是"数据能出到哪里"：政策没批准
+ * 外发图片时读图工具**不下发**。看不见才不会先答应再看不了——这是抱怨 #9 里"她说
+ * 我看看这张图，然后什么都没有"的根治点，执行层的复核只是兜底。
  */
 export function resolveAllCompanionAgentTools(
   permission: CompanionAgentPermissionLevel,
+  constraints: CompanionAgentToolExecutionConstraints = {},
 ): CompanionAgentToolDefinitionV1[] {
-  return COMPANION_AGENT_TOOL_DEFINITIONS.filter(
-    (definition) => permission !== "read_only" || definition.riskClass === "read",
-  );
+  return COMPANION_AGENT_TOOL_DEFINITIONS.filter((definition) => {
+    if (isVisionGatedCompanionTool(definition.name) && constraints.visionEnabled !== true) return false;
+    return permission !== "read_only" || definition.riskClass === "read";
+  });
 }
 
 export function getCompanionAgentTool(toolName: string): CompanionAgentToolDefinitionV1 | null {

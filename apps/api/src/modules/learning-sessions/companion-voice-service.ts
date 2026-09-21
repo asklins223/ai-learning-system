@@ -13,7 +13,12 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { sha256Utf8V1 } from "@ailearn/shared/content-hash";
 import { companionVoiceSegmentReadyPayloadV2Schema } from "@ailearn/shared/companion-conversation-contracts";
+import {
+  COMPANION_TTS_PLAYBACK_REASON_TO_OUTCOME,
+  type CompanionTtsPlaybackReason,
+} from "@ailearn/shared/companion-voice-contracts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
+import { logger } from "../../lib/logger.ts";
 import { CompanionConversationError } from "../companion-conversation/turn-service.ts";
 import { probeAudioDurationMs } from "./ffprobe.ts";
 
@@ -136,7 +141,7 @@ export interface CompanionTtsSegmentRef {
 }
 
 export interface TtsSynthesizeFn {
-  (text: string, voice: string): Promise<{ audio: Uint8Array | Buffer }>;
+  (text: string, voice: string): Promise<{ audio: Uint8Array | Buffer; engine?: "qwen" | "edge" }>;
 }
 
 export async function synthesizeCompanionTtsSegment(args: {
@@ -146,6 +151,41 @@ export async function synthesizeCompanionTtsSegment(args: {
   synthesize: TtsSynthesizeFn;
   voice?: string;
 }): Promise<{ statusCode: number; audio?: Uint8Array; error?: { code: string; message: string } }> {
+  const startedAt = Date.now();
+  /**
+   * 逐段落一条合成结果（0246，方案 29 §4.9）。**审计永远不能影响音频**：写不进去
+   * 只 warn，不抛、不改返回值。
+   *
+   * 这张表要回答的是以前只能靠用户复述的问题——"她经常没声音"到底是
+   * 没生成事件、被拒（回合已取消/合同不符）、还是引擎失败，各占多少、等了多久。
+   */
+  const recordOutcome = async (
+    outcome: "ok" | "rejected" | "failed",
+    extra: { errorCode?: string; engine?: string; bytes?: number } = {},
+  ): Promise<void> => {
+    try {
+      await withWorkspaceTransaction(
+        { workspaceId: args.workspaceId, userId: args.userId },
+        async (tx) => {
+          await tx.execute(sql`
+            INSERT INTO companion_tts_outcomes
+              (workspace_id, user_id, conversation_id, run_id, segment_id, ordinal,
+               outcome, error_code, engine, duration_ms, bytes)
+            VALUES
+              (${args.workspaceId}, ${args.userId}, ${args.ref.conversationId}, ${args.ref.runId},
+               ${args.ref.segmentId}, ${args.ref.ordinal}, ${outcome},
+               ${extra.errorCode ? extra.errorCode.slice(0, 80) : null},
+               ${extra.engine ?? null}, ${Date.now() - startedAt}, ${extra.bytes ?? null})
+          `);
+        },
+      );
+    } catch (error) {
+      logger.warn(
+        { err: error, runId: args.ref.runId, ordinal: args.ref.ordinal },
+        "companion tts outcome could not be recorded; audio path unaffected",
+      );
+    }
+  };
   // 第一阶段：事务内只做只读校验并取回文本（快路径，不持有长事务）。
   const staged = await withWorkspaceTransaction(
     { workspaceId: args.workspaceId, userId: args.userId },
@@ -203,11 +243,26 @@ export async function synthesizeCompanionTtsSegment(args: {
     },
   );
   if ("error" in staged) {
+    await recordOutcome("rejected", { errorCode: staged.error.code });
     return staged;
   }
   // 第二阶段：事务外合成（edge-tts 外部 HTTP，默认 30s 超时）——避免在
   // DB 事务内同步调用外部服务导致长事务、连接池耗尽与锁放大。
-  const result = await args.synthesize(staged.text, args.voice ?? "zh-CN-XiaoxiaoNeural");
+  //
+  // 引擎失败以前**直接往外抛**：companion 分支的路由没有 try/catch，于是客户端
+  // 收到的是 500 而不是可降级的 TTS_FAILED（普通朗读分支有这个 catch），
+  // 表现为"她突然不出声"且没有任何原因。现在按 §4.9 的 fail-open 收在这里：
+  // 记一条 failed、返回 502 + 静态文案，客户端照既有逻辑降级纯文字。
+  let synthesized: { audio: Uint8Array | Buffer; engine?: "qwen" | "edge" };
+  try {
+    synthesized = await args.synthesize(staged.text, args.voice ?? "zh-CN-XiaoxiaoNeural");
+  } catch (error) {
+    await recordOutcome("failed", {
+      errorCode: error instanceof Error ? error.constructor.name : "unknown",
+    });
+    logger.warn({ err: error, runId: args.ref.runId, ordinal: args.ref.ordinal }, "companion tts synthesis failed");
+    return { statusCode: 502, error: { code: "TTS_FAILED", message: "语音合成失败（降级纯文字）" } };
+  }
   // A user/system cancellation can win while the provider is synthesizing.
   // Re-check immediately before returning bytes so a late TTS response cannot
   // be played after the run has become cancelled/superseded.
@@ -221,10 +276,60 @@ export async function synthesizeCompanionTtsSegment(args: {
     },
   );
   if (finalStatus !== "running" && finalStatus !== "succeeded") {
+    await recordOutcome("rejected", { errorCode: "TURN_CANCELLED" });
     return {
       statusCode: 409,
       error: { code: "TURN_CANCELLED", message: "run is no longer playable" },
     };
   }
-  return { statusCode: 200, audio: result.audio };
+  await recordOutcome("ok", {
+    engine: synthesized.engine,
+    bytes: synthesized.audio.byteLength,
+  });
+  return { statusCode: 200, audio: synthesized.audio };
+}
+
+/**
+ * 客户端播完（或没能播）一段之后回来的那一句（0247）。
+ *
+ * 为什么值得单开一条写路径：`stage='synth'` 那一半能证明的边界就是"字节交给了客户端"。
+ * 而"她经常没声音"里的两类只有客户端知道——字节到了但等太久被跳过、以及解码/播放
+ * 失败。以前这两个原因在渲染进程里记着却没有任何地方收。
+ *
+ * **上报永远不能影响朗读**：调用方 fire-and-forget，这里不抛错、不重试，写不进去只 warn。
+ * 也不校验 segmentId 是否真存在：那要多一次 DB 往返去保护一张只描述用户自己行为的表，
+ * 而 RLS 的 WITH CHECK 已经把行锁死在"本人的 workspace + user"里，最坏情况是他给自己的
+ * 统计注水。
+ */
+export async function recordCompanionTtsPlaybackOutcome(args: {
+  workspaceId: string;
+  userId: string;
+  ref: CompanionTtsSegmentRef;
+  reason: CompanionTtsPlaybackReason;
+  durationMs?: number;
+}): Promise<void> {
+  const outcome = COMPANION_TTS_PLAYBACK_REASON_TO_OUTCOME[args.reason];
+  try {
+    await withWorkspaceTransaction(
+      { workspaceId: args.workspaceId, userId: args.userId },
+      async (tx) => {
+        await tx.execute(sql`
+          INSERT INTO companion_tts_outcomes
+            (workspace_id, user_id, conversation_id, run_id, segment_id, ordinal,
+             outcome, error_code, duration_ms, stage)
+          VALUES
+            (${args.workspaceId}, ${args.userId}, ${args.ref.conversationId}, ${args.ref.runId},
+             ${args.ref.segmentId}, ${args.ref.ordinal}, ${outcome},
+             ${args.reason}, ${args.durationMs ?? null}, 'playback')
+          -- 弱网重试/页面刷新后补报会重发同一段；"这一段播过"不该变成三条。
+          ON CONFLICT (run_id, segment_id) WHERE stage = 'playback' DO NOTHING
+        `);
+      },
+    );
+  } catch (error) {
+    logger.warn(
+      { err: error, runId: args.ref.runId, ordinal: args.ref.ordinal },
+      "companion playback outcome could not be recorded; speech path unaffected",
+    );
+  }
 }

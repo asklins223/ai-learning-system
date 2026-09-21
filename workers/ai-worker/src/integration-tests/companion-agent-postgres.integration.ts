@@ -342,6 +342,9 @@ async function seedConfirmedProposal(
 
 function continuationEvent(ws: string, uid: string, f: Fixture) {
   return {
+    // 这些用例只验句柄的写读往返，不执行任何受外发政策管的工具；给一个
+    // 什么都不放开的约束集，让"漏传约束"在类型上就暴露，而不是运行期 undefined。
+    constraints: {},
     ctx: {
       id: randomUUID(),
       payload: {},

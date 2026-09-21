@@ -75,6 +75,7 @@ async function seedConversation(): Promise<{
       await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
       await tx`SELECT set_config('app.user_id', ${userId}, true)`;
       await tx`DELETE FROM companion_proactive_deliveries WHERE conversation_id = ${conversationId}`;
+      await tx`DELETE FROM companion_tts_outcomes WHERE conversation_id = ${conversationId}`;
       await tx`DELETE FROM companion_stream_events WHERE conversation_id = ${conversationId}`;
       await tx`DELETE FROM companion_turn_runs WHERE conversation_id = ${conversationId}`;
       await tx`DELETE FROM companion_messages WHERE conversation_id = ${conversationId}`;
@@ -780,7 +781,15 @@ test("P3 §11.3：Companion TTS 合成（strict ref 重读 event）", async () =
                 type, payload, expires_at)
                VALUES (${conversationId}, 100, ${workspaceId}, ${userId}, ${runId}, ${gen}, 0,
                        'voice.segment.ready',
-                       ${{ segmentId, ordinal: 1, text, textSha256 } as never},
+                       ${{
+                         // 这一段 seed 以前是 V1 形状（text/textSha256），而服务重读时
+                         // 按 V2 strict 合同校验 → 直接 409 UNSUPPORTED_CONTRACT，
+                         // 于是这条用例其实一直在测"被拒"，从没走到合成那一步。
+                         version: 2, segmentId, ordinal: 1,
+                         displayText: text, displayStart: 0, displayEnd: text.length,
+                         synthesisText: text, synthesisTextSha256: textSha256,
+                         cue: { version: 1, intent: "explain", emotion: "neutral", intensity: 0.5 },
+                       } as never},
                        ${new Date(Date.now() + 3_600_000).toISOString()})`;
     });
 
@@ -793,12 +802,43 @@ test("P3 §11.3：Companion TTS 合成（strict ref 重读 event）", async () =
       ref: { conversationId, runId, generation: gen, ordinal: 1, segmentId },
       synthesize: async (t) => {
         synthesizedText = t;
-        return { audio: Buffer.from("MP3-DATA") };
+        return { audio: Buffer.from("MP3-DATA"), engine: "qwen" as const };
       },
     });
     assert.equal(ok.statusCode, 200);
     assert.equal(synthesizedText, text);
     assert.equal(Buffer.from(ok.audio as Uint8Array).toString(), "MP3-DATA");
+
+    // 引擎失败：以前往外抛 → companion 分支的路由没有 try/catch → 客户端拿到 500，
+    // 表现为"她突然不出声"且没有任何原因。现在必须是可降级的 502 + 一条 failed 记录。
+    const failed = await synthesizeCompanionTtsSegment({
+      workspaceId, userId,
+      ref: { conversationId, runId, generation: gen, ordinal: 1, segmentId },
+      synthesize: async () => {
+        throw new Error("edge-tts 500 BrokenPipeError");
+      },
+    });
+    assert.equal(failed.statusCode, 502);
+    assert.equal(failed.error?.code, "TTS_FAILED");
+
+    // 逐段结果必须留痕（0246）：ok 带引擎与字节数，failed 带错误分类。
+    // "她经常没声音"从今往后是一个能查的数，而不是用户的复述。
+    const outcomes = await sql.begin(async (tx) => {
+      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
+      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
+      return await tx`
+        SELECT outcome, coalesce(error_code, '') AS error_code, coalesce(engine, '') AS engine,
+               coalesce(bytes, -1) AS bytes
+        FROM companion_tts_outcomes WHERE run_id = ${runId} ORDER BY ordinal, created_at
+      `;
+    }) as Array<{ outcome: string; error_code: string; engine: string; bytes: number }>;
+    const okRow = outcomes.find((row) => row.outcome === "ok");
+    assert.ok(okRow, "成功的合成要留下一行 ok");
+    assert.equal(okRow.engine, "qwen");
+    assert.equal(okRow.bytes, 8);
+    const failedRow = outcomes.find((row) => row.outcome === "failed");
+    assert.ok(failedRow, "引擎失败要留下一行 failed");
+    assert.equal(failedRow.error_code, "Error");
 
     // segmentId 不匹配 → 400
     const bad = await synthesizeCompanionTtsSegment({
@@ -829,6 +869,84 @@ test("P3 §11.3：Companion TTS 合成（strict ref 重读 event）", async () =
     });
     assert.equal(cancelled.statusCode, 409);
     assert.equal(cancelled.error?.code, "TURN_CANCELLED");
+  } finally {
+    await cleanup();
+  }
+});
+
+/**
+ * 0247：客户端播没播成，服务端要知道（抱怨 #4「语音经常没声音」的下半场）。
+ *
+ * 固定的是三件事：① 播放结局落在 stage='playback'，与合成的那一半分得开
+ * （两阶段的 duration_ms 不同义，混在一起算分位数就是假数）；② 同一段重发只有一条
+ * （弱网重试/刷新补报不该把"播过"变成三条）；③ 同一段的 synth 行与 playback 行**必须
+ * 能共存**——唯一索引是 partial 的，写错成全局唯一会让合成记录把播放记录挤掉。
+ */
+test("0247 TTS 播放结局上报：分阶段、幂等、与合成行共存", async () => {
+  const { workspaceId, userId, conversationId, cleanup } = await seedConversation();
+  const runId = randomUUID();
+  const segmentId = "c".repeat(64);
+  const readRows = async () => (await sql.begin(async (tx) => {
+    await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
+    await tx`SELECT set_config('app.user_id', ${userId}, true)`;
+    return await tx`
+      SELECT stage, outcome, coalesce(error_code,'') AS error_code, ordinal, duration_ms
+      FROM companion_tts_outcomes WHERE run_id = ${runId} ORDER BY stage, ordinal, created_at
+    `;
+  })) as Array<{ stage: string; outcome: string; error_code: string; ordinal: number; duration_ms: number | null }>;
+
+  try {
+    await sql.begin(async (tx) => {
+      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
+      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
+      const userMsgId = randomUUID();
+      await tx`INSERT INTO companion_messages
+               (id, conversation_id, workspace_id, user_id, role, seq, run_id, kind, blocks, content_sha256)
+               VALUES (${userMsgId}, ${conversationId}, ${workspaceId}, ${userId}, 'user', 1, ${runId}, 'text',
+                       ${[{ type: "text", text: "问题" }] as never}, ${"0".repeat(64)})`;
+      await tx`INSERT INTO companion_turn_runs
+               (id, conversation_id, workspace_id, user_id, user_message_id, status, generation,
+                idempotency_key_hash, request_body_hash, started_at)
+               VALUES (${runId}, ${conversationId}, ${workspaceId}, ${userId}, ${userMsgId}, 'succeeded',
+                       1, ${"0".repeat(64)}, ${"0".repeat(64)}, ${new Date().toISOString()})`;
+      // 服务端那一半先有一行（等价于 synthesizeCompanionTtsSegment 落的 ok）。
+      await tx`INSERT INTO companion_tts_outcomes
+               (workspace_id, user_id, conversation_id, run_id, segment_id, ordinal, outcome,
+                engine, duration_ms, bytes, stage)
+               VALUES (${workspaceId}, ${userId}, ${conversationId}, ${runId}, ${segmentId}, 1,
+                       'ok', 'qwen', 780, 4096, 'synth')`;
+    });
+
+    const { recordCompanionTtsPlaybackOutcome } = await import("../modules/learning-sessions/companion-voice-service.ts");
+    const ref = { conversationId, runId, generation: 1, ordinal: 1, segmentId };
+
+    await recordCompanionTtsPlaybackOutcome({ workspaceId, userId, ref, reason: "played", durationMs: 1200 });
+    // 同一段重发（这次说没播出）——必须被幂等索引吞掉，不能让一行变两行。
+    await recordCompanionTtsPlaybackOutcome({ workspaceId, userId, ref, reason: "deadline", durationMs: 4000 });
+    // 另一段超时 → 独立一行
+    await recordCompanionTtsPlaybackOutcome({
+      workspaceId, userId, reason: "deadline", durationMs: 3200,
+      ref: { ...ref, ordinal: 2, segmentId: "d".repeat(64) },
+    });
+
+    const rows = await readRows();
+    const synth = rows.filter((row) => row.stage === "synth");
+    const playback = rows.filter((row) => row.stage === "playback");
+    assert.equal(synth.length, 1, "合成那一半不受上报影响");
+    assert.equal(playback.length, 2, "两段各一条：重发的那次被 partial 唯一索引吞掉");
+    assert.equal(playback[0].outcome, "ok", "第一次上报才是这段的结局（不被后来的重发覆盖）");
+    assert.equal(playback[0].error_code, "played");
+    assert.equal(playback[0].duration_ms, 1200);
+    assert.equal(playback[1].outcome, "failed");
+    assert.equal(playback[1].error_code, "deadline");
+    assert.equal(playback[1].ordinal, 2);
+
+    // 上报写不进去时绝不影响朗读：user_id 外键失败（插入必然被拒）要静默吞掉，
+    // 不抛、不冒泡到调用方——这条链路的失败模式只能是"少一行统计"。
+    await recordCompanionTtsPlaybackOutcome({
+      workspaceId, userId: "00000000-0000-0000-0000-000000000000", ref, reason: "played",
+    });
+    assert.equal((await readRows()).filter((row) => row.stage === "playback").length, 2);
   } finally {
     await cleanup();
   }

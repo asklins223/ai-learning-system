@@ -20,7 +20,8 @@ import { readCompanionThoughtJobPayload } from "@ailearn/shared";
 import {
   evaluateDismissalFeedback,
   isWithinQuietHours,
-  proactiveDailyLimit,
+  proactiveCadenceMs,
+  routineCadenceBlocked,
   type CompanionInterventionLevelV1,
 } from "@ailearn/shared/companion-proactive-policy";
 import { logger } from "../lib/logger.ts";
@@ -34,7 +35,11 @@ import {
 import { createProvider, withThinkingDisabled } from "../lib/ai-provider.ts";
 import { runWithAbortBudget } from "../lib/handler-timeout.ts";
 import { resolveProviderCallTimeout } from "../lib/handler-timeout-config.ts";
-import { looksLikeJsonEnvelope, unwrapCompanionJsonEnvelope } from "./companion-dialogue-content.ts";
+import {
+  containsCompanionInternalToken,
+  looksLikeJsonEnvelope,
+  unwrapCompanionJsonEnvelope,
+} from "./companion-dialogue-content.ts";
 import { enqueueSystemEventDelivery } from "./companion-delivery-write.ts";
 import { loadHereAndNow, renderHereAndNow } from "./companion-here-and-now.ts";
 import type { JobPayload } from "./index.ts";
@@ -61,6 +66,17 @@ export interface ThoughtMaterial {
   readonly readyReviews: number;
   /** 未来 12 小时内到期（含被用户推到期初）的复习条数。 */
   readonly dueSoonReviews: number;
+  /**
+   * 到期 / 将到期那两张卡**具体是哪一张**（卡片正面的提示语，最多三条）。
+   *
+   * 计数只该待在系统数据里，不该冒充她说的话——用户 2026-09-21 对着"新增学习卡 4 张；
+   * 收录资料 1 份…"那句的原话是"这跟系统统计数据有什么区别？"。所以主动气泡从
+   * "有 4 条复习到期了"改成「牛顿第二定律的比例关系」那张卡到点了：
+   * **说不出是哪一张，就宁可不提**（没有实体时这两条规则直接不产候选，
+   * 而不是退回成计数句）。
+   */
+  readonly dueReviewTitles: readonly string[];
+  readonly soonDueTitles: readonly string[];
   readonly streakDays: number;
   readonly daysSinceLastLearning: number | null;
   readonly familiarity: number;
@@ -70,8 +86,19 @@ export interface ThoughtMaterial {
   readonly catchphrase: string | null;
   /** 最近 7 天说过的公开文案（delivery + 念头），语义去重用。 */
   readonly recentlySaid: readonly string[];
-  /** 最近 24h 已送达的念头数（日预算）。 */
-  readonly deliveredToday: number;
+  /**
+   * 距上一次**例行主动开口**多少毫秒；从没开过为 null。
+   *
+   * 这是节奏的唯一输入（间隔按 `intervention_level` 取，见 shared 的
+   * `PROACTIVE_CADENCE_MS`）。以前这里是一"最近 24h 被看见过的念头数"，
+   * 配一个"一天 N 条"的额度——额度是错的控件，2026-09-21 删掉，理由写在
+   * `companion-proactive-policy.ts` 的注释里。
+   *
+   * 量的是"说过"而不是"被看过"：两条气泡挤在 20 分钟内出现，无论用户看没看见都是吵。
+   * 间隔最长 3 小时，所以一条没被看见的念头最多把她压住一个间隔，不会再出现
+   * "三条僵尸占满一整天"那种事（§9.58）。
+   */
+  readonly msSinceLastRoutineCue: number | null;
   /** 最近 7 天已表达念头的 embedding（语义去重用）。 */
   readonly recentThoughtEmbeddings: readonly (readonly number[])[];
   /** 最近送达的 delivery 状态（新→旧，仅 displayed/acted/dismissed）。 */
@@ -86,7 +113,7 @@ export interface ThoughtMaterial {
    */
   readonly storedCandidates: ReadonlyMap<string, string>;
   /**
-   * 环境事实块（here_and_now 渲染结果：本地时刻、今日学习量、最近笔记…）。
+   * 环境事实块（here_and_now 渲染结果：本地时刻、正在学的东西、到期数、最近笔记）。
    * 念头的素材不能只有"到期复习/连续天数/熟悉度"三个数——用户 30 天没跑正式
    * 学习时这三项全为 0/空，模型无从下笔，于是整条管线静默产不出候选。
    */
@@ -102,9 +129,10 @@ export const THOUGHT_LIMITS = {
   maxExpressionChars: 80,
   /** 每次调度最多表达的念头数（沉默默认：多数候选默默过期）。 */
   maxDeliveredPerRun: 1,
-  // 单日额度不在这里写死：它来自 proactiveDailyLimit(intervention_level)，
-  // 与 API 的 proactive-hook 同源。两处各写一份时，同一个"安静一点"
-  // 在两条链路上会得到两个预算（§9.19）。
+  // 这里没有任何"一天几条"的额度：例行主动的节奏是**间隔**，
+  // 来自 shared 的 PROACTIVE_CADENCE_MS(intervention_level)，与 API 的
+  // proactive-hook 同源。两处各写一份时，同一个"安静一点"在两条链路上
+  // 会得到两个节奏（§9.19）。
   /** embedding 相似度超过该值视为重复（cosine，1 - 余弦距离）。 */
   embeddingDuplicateThreshold: 0.85,
   /** 字符 bigram Jaccard 超过该值视为重复（embedding 不可用时的降级）。 */
@@ -130,26 +158,26 @@ export const THOUGHT_LIMITS = {
  */
 export function buildDeterministicThoughts(material: ThoughtMaterial): ThoughtCandidate[] {
   const out: ThoughtCandidate[] = [];
-  if (material.readyReviews > 0 && material.allowNudgeLearning) {
+  if (material.readyReviews > 0 && material.allowNudgeLearning && material.dueReviewTitles[0]) {
     if (!material.blockedDedupeKeys.has(`review_due:${material.today}`)) {
       out.push({
         source: "review_due",
         topic: "review_due",
         dedupeKey: `review_due:${material.today}`,
-        text: `有 ${material.readyReviews} 条复习到期了，趁记忆还热，要过一遍吗？`,
+        text: `「${material.dueReviewTitles[0]}」那张卡到点了，趁记忆还热，要不要过一遍？`,
         urgency: 70,
         familiarityRequired: 0.1,
         grounding: [],
       });
     }
   }
-  if (material.dueSoonReviews > 0 && material.allowNudgeLearning) {
+  if (material.dueSoonReviews > 0 && material.allowNudgeLearning && material.soonDueTitles[0]) {
     if (!material.blockedDedupeKeys.has(`review_due_soon:${material.today}`)) {
       out.push({
         source: "review_due",
         topic: "review_due_soon",
         dedupeKey: `review_due_soon:${material.today}`,
-        text: `接下来 12 小时里有 ${material.dueSoonReviews} 条复习要到期，要不要提前扫一眼？`,
+        text: `「${material.soonDueTitles[0]}」快到时间了，要不要提前扫一眼？`,
         urgency: 55,
         familiarityRequired: 0.1,
         grounding: [],
@@ -162,7 +190,7 @@ export function buildDeterministicThoughts(material: ThoughtMaterial): ThoughtCa
         source: "streak",
         topic: "streak",
         dedupeKey: `streak:${material.today}`,
-        text: `连续 ${material.streakDays} 天都有学习，这份节奏值得记一笔。`,
+        text: "这几天你一直没断过，这份节奏值得记一笔。",
         urgency: 30,
         familiarityRequired: 0.15,
         grounding: [],
@@ -190,8 +218,49 @@ export function buildDeterministicThoughts(material: ThoughtMaterial): ThoughtCa
   return out;
 }
 
+/**
+ * 一个数字是不是"凭空多出来的"。
+ *
+ * 允许集是**服务端交给模型的那份事实**（`facts` + 材料里那几个计数 + 今天日期），
+ * 也就是 prompt 里已经说过的那批数。归一化只去掉前导零（`09` ≡ `9`，日期与"连续第
+ * 09 天"这类写法要对得上），不做子串匹配——子串会让 `26`/`20` 从年份 `2026` 里
+ * "合法"出来，那正是这道闸要拦的东西。
+ *
+ * 两个调用点，两种允许集：**LLM 现编的候选**在 `parseThoughtCandidates` 里比这份事实
+ * （那时还没有"原句"可参照）；**改写已有候选**只比候选原句自己——原句要么来自服务端
+ * 模板（数字是 `material.dueSoonReviews` 这类算出来的），要么已经被前一道闸放行。
+ * 两步合起来才封住：库里实测 `grounding` 对数字型候选恒为 `[]`（那条"12 小时里有 25
+ * 条复习要到期"就是 `[]`），所以"必须命中实体名"对这类句子整条形同虚设，
+ * 模型想把 25 改成 3 也没人管——而这句话**全部内容就是那个数**。
+ *
+ * 取舍与对话链路相反，这里可以严：命不中只是丢掉这个变体、回落到模板原句，
+ * **代价是少一点花样，不是没有气泡**；那边拒绝等于用户拿不到回答，所以只能宽。
+ */
+function normalizeNumericToken(value: string): string {
+  return value.replace(/^0+(?=\d)/, "");
+}
+
+function numericTokens(text: string): Set<string> {
+  const out = new Set<string>();
+  for (const match of text.matchAll(/\d+(?:\.\d+)?/g)) out.add(normalizeNumericToken(match[0]));
+  return out;
+}
+
+export function introducesUnverifiedNumbers(text: string, allowedSource: string): boolean {
+  if (allowedSource.length === 0) return false;
+  const allowed = numericTokens(allowedSource);
+  for (const token of numericTokens(text)) {
+    if (!allowed.has(token)) return true;
+  }
+  return false;
+}
+
 /** LLM 批量产念头（可选路径）：解析 JSON 数组，逐条消毒，失败返回空。 */
-export function parseThoughtCandidates(raw: string, today: string): ThoughtCandidate[] {
+export function parseThoughtCandidates(
+  raw: string,
+  today: string,
+  allowedNumbersSource = "",
+): ThoughtCandidate[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -209,7 +278,18 @@ export function parseThoughtCandidates(raw: string, today: string): ThoughtCandi
     // 念头文本会直接念给用户听，同样不能是 JSON 信封（见 companion-dialogue-content）。
     const text = unwrapCompanionJsonEnvelope(raw).trim();
     if (text.length === 0 || text.length > THOUGHT_LIMITS.maxTextChars) continue;
-    if (containsInternalToken(text) || looksLikeJsonEnvelope(text)) continue;
+    if (containsCompanionInternalToken(text) || looksLikeJsonEnvelope(text)) continue;
+    // **凭空数字在产出的这一步就丢**，不等到播报：播报前的改写校验拿"候选自己"当
+    // 允许集（那是给改写用的），所以 LLM 现编的数字只有在这里才有人管。
+    // prompt 里写着"不要把上面任何一条数字原样念出来"（那才是我们想要的表达），
+    // 但一句没有执行的叮嘱等于没有——和 §9.24 那条"不许编数字"的 prompt 一样。
+    if (introducesUnverifiedNumbers(text, `${today}\n${allowedNumbersSource}`)) {
+      logger.warn(
+        { topic: record.topic, text: text.slice(0, 60) },
+        "companion thought candidate dropped: states a number the server never gave it",
+      );
+      continue;
+    }
     const urgency = typeof record.urgency === "number" && Number.isFinite(record.urgency)
       ? Math.min(100, Math.max(0, Math.round(record.urgency)))
       : 25;
@@ -229,10 +309,7 @@ export function parseThoughtCandidates(raw: string, today: string): ThoughtCandi
   return out;
 }
 
-/** 内部 token 泄露检测（与 api validateCompanionOutput 同类语义）。 */
-export function containsInternalToken(text: string): boolean {
-  return /(companion-persona-v\d+|character\.cue|"cue"|reason\s*id|tool\s*param|promptVersion|"route"\s*:|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.test(text);
-}
+
 
 function bigrams(text: string): Set<string> {
   const normalized = text.replace(/\s+/g, "");
@@ -299,19 +376,38 @@ export function isDuplicateThought(
 }
 
 
-/** 表达校验（切片③）：长度 / 内部 token 泄露 / grounding 命中。 */
+/**
+ * "数字 + 统计量词"这一种形状。与抽取器里 `isVolatileStatisticMemory` 用的是同一个
+ * 判别式（那边防的是统计进长期记忆，这边防的是统计进气泡），量词表刻意不含"以内/每"
+ * 这类用户自己说出口的偏好（"每次练习约 10 分钟"是她的话，不是系统读数）。
+ */
+const STATISTIC_QUANTITY_TEST = /\d+(?:\.\d+)?\s*(分钟|小时|天|周|张|篇|项|次|条|题|%)/;
+
+export function readsOutStatistics(text: string): boolean {
+  return STATISTIC_QUANTITY_TEST.test(text);
+}
+
+/** 表达校验（切片③）：长度 / 内部 token 泄露 / grounding 命中 / 改写不许改数字。 */
 export function validateThoughtExpression(
   text: string,
   grounding: readonly ThoughtGrounding[],
+  allowedSource = "",
 ): boolean {
   const trimmed = text.trim();
   if (trimmed.length === 0 || trimmed.length > THOUGHT_LIMITS.maxExpressionChars) return false;
-  if (containsInternalToken(trimmed)) return false;
+  if (containsCompanionInternalToken(trimmed)) return false;
+  // 统计形状（数字 + 量词）不进气泡：实机 2026-09-21 探针跑出来的 LLM 候选原句是
+  // "明天九点记得复习消防路线哦。今晚这42分钟学得很扎实…"——
+  // 那个 42 分钟**是环境块里的真值**，所以 `introducesUnverifiedNumbers` 放它过了，
+  // 但它仍然是系统读数，不是她开口的方式（用户口径：不报数字）。
+  // 数字只允许留在**名字里**（《IndexTTS 2.5》、第 3 章），所以判的是形状不是数值。
+  if (readsOutStatistics(trimmed)) return false;
   // grounding 非空时必须命中至少一个实体名——"不许说不存在的事"。
   if (grounding.length > 0) {
     const hit = grounding.some((entity) => entity.name.length > 0 && trimmed.includes(entity.name));
     if (!hit) return false;
   }
+  if (allowedSource.length > 0 && introducesUnverifiedNumbers(trimmed, allowedSource)) return false;
   return true;
 }
 
@@ -319,9 +415,10 @@ export function validateThoughtExpression(
 export function selectThoughtExpression(
   candidates: readonly string[],
   grounding: readonly ThoughtGrounding[],
+  allowedSource = "",
 ): string | null {
   for (const candidate of candidates) {
-    if (validateThoughtExpression(candidate, grounding)) return candidate.trim();
+    if (validateThoughtExpression(candidate, grounding, allowedSource)) return candidate.trim();
   }
   return null;
 }
@@ -381,6 +478,9 @@ export function splitActiveThoughts(
 interface MaterialRow extends Record<string, unknown> {
   ready_reviews: number;
   due_soon_reviews: number;
+  /** 到期/将到期的**具体是哪两张卡**（卡片正面提示语，各最多三条）。 */
+  due_titles: string[] | null;
+  soon_titles: string[] | null;
   familiarity: number;
   speaking_style: string | null;
   personality_tags: string[] | null;
@@ -388,7 +488,7 @@ interface MaterialRow extends Record<string, unknown> {
   catchphrase: string | null;
   pet_name: string | null;
   days_since_last_learning: number | null;
-  delivered_today: number;
+  ms_since_last_cue: number | null;
 }
 
 export async function runCompanionThought(job: JobPayload): Promise<void> {
@@ -423,11 +523,49 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
           WHERE workspace_id = ${job.workspaceId} AND user_id = ${userId} LIMIT 1) AS pet_name,
         (SELECT extract(day FROM now() - max(created_at))::int FROM learning_runs
           WHERE workspace_id = ${job.workspaceId} AND user_id = ${userId}) AS days_since_last_learning,
-        (SELECT count(*)::int FROM assistant_thoughts
+        -- 上一次例行主动开口距今多少毫秒。delivered 与 spent 都算（spent = 用户点开过，
+        -- 更是"她说过话了"）。只回看 6 小时：最长间隔是 3 小时，再老的读数用不上，
+        -- 也别为了一个用不上的数去扫全表。
+        (SELECT (extract(epoch FROM now() - max(delivered_at)) * 1000)::int
+           FROM assistant_thoughts
           WHERE workspace_id = ${job.workspaceId} AND user_id = ${userId}
-          AND status = 'delivered' AND delivered_at > now() - interval '24 hours') AS delivered_today
+            AND status IN ('delivered', 'spent')
+            AND delivered_at > now() - interval '6 hours') AS ms_since_last_cue
     `);
     const row = ((Array.isArray(rows) ? rows : [])[0] ?? {}) as Partial<MaterialRow>;
+
+    // 「是哪一张」而不是「有几条」：主动气泡要能点出一个具体对象，
+    // 否则宁可不提（计数句是系统统计，不是她说的话）。
+    // 连的是 `c.objective_id = s.subject_id`——`review_schedules.subject_type='card'`
+    // 只是历史别名，列里存的是 objectiveId（方案 29 §9.48）。
+    const titleRows = await tx.execute<Pick<MaterialRow, "due_titles" | "soon_titles">>(sql`
+      SELECT
+        (SELECT coalesce(array_agg(t.cue), '{}') FROM (
+          SELECT nullif(btrim(c.front->>'cue'), '') AS cue
+          FROM review_schedules s
+          JOIN learning_cards_v2 c
+            ON c.objective_id = s.subject_id AND c.workspace_id = s.workspace_id
+           AND c.lifecycle = 'active'
+          WHERE s.workspace_id = ${job.workspaceId} AND s.user_id = ${userId}
+            AND s.status = 'pending' AND s.next_review_at <= now()
+            AND (s.user_deferred_until IS NULL OR s.user_deferred_until <= now())
+            AND nullif(btrim(c.front->>'cue'), '') IS NOT NULL
+          ORDER BY s.next_review_at LIMIT 3) t) AS due_titles,
+        (SELECT coalesce(array_agg(t.cue), '{}') FROM (
+          SELECT nullif(btrim(c.front->>'cue'), '') AS cue
+          FROM review_schedules s
+          JOIN learning_cards_v2 c
+            ON c.objective_id = s.subject_id AND c.workspace_id = s.workspace_id
+           AND c.lifecycle = 'active'
+          WHERE s.workspace_id = ${job.workspaceId} AND s.user_id = ${userId}
+            AND s.status = 'pending'
+            AND coalesce(s.user_deferred_until, s.next_review_at) > now()
+            AND coalesce(s.user_deferred_until, s.next_review_at) <= now() + interval '12 hours'
+            AND nullif(btrim(c.front->>'cue'), '') IS NOT NULL
+          ORDER BY coalesce(s.user_deferred_until, s.next_review_at) LIMIT 3) t) AS soon_titles
+    `);
+    const titleRow = ((Array.isArray(titleRows) ? titleRows : [])[0] ?? {}) as
+      Partial<Pick<MaterialRow, "due_titles" | "soon_titles">>;
 
     const recentSaidRows = await tx.execute<{ text: string }>(sql`
       SELECT text FROM (
@@ -507,6 +645,8 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
     return {
       today,
       readyReviews: Number(row.ready_reviews ?? 0),
+      dueReviewTitles: (titleRow.due_titles ?? []).map((value) => String(value)).slice(0, 3),
+      soonDueTitles: (titleRow.soon_titles ?? []).map((value) => String(value)).slice(0, 3),
       dueSoonReviews: Number(row.due_soon_reviews ?? 0),
       streakDays,
       daysSinceLastLearning: row.days_since_last_learning != null ? Number(row.days_since_last_learning) : null,
@@ -515,7 +655,7 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
       allowNudgeLearning: boundaries.allowNudgeLearning !== false,
       allowPlayful: boundaries.allowPlayful !== false,
       catchphrase: typeof row.catchphrase === "string" ? row.catchphrase : null,
-      deliveredToday: Number(row.delivered_today ?? 0),
+      msSinceLastRoutineCue: row.ms_since_last_cue == null ? null : Number(row.ms_since_last_cue),
       recentlySaid: (Array.isArray(recentSaidRows) ? recentSaidRows : [])
         .map((entry) => String(entry.text ?? ""))
         .filter((text) => text.length > 0),
@@ -543,13 +683,27 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
   };
 
   // ── 时机决策：沉默是默认 ─────────────────────────────────────────────
-  // 1) 静默时段（fail closed）；2) 反馈降权；3) 日预算。
+  // 1) 静默时段（fail closed）；2) 反馈降权；3) 节奏（按偏好的最小间隔）。
+  // 三条都排在**任何模型调用之前**。以前第 3 条是一个"一天 N 条"的额度，而且写在
+  // 候选生成之后——于是"今天已经说满"的那些调度照样白烧一次 LLM 才闭嘴。
   if (quietHours && isWithinQuietHours(quietHours, new Date())) {
     finish("silent", { reason: "quiet_hours" });
     return;
   }
   if (evaluateDismissalFeedback(thoughtMaterial.recentDeliveryStates).suppress) {
     finish("silent", { reason: "dismissal_feedback" });
+    return;
+  }
+  if (routineCadenceBlocked({
+    interventionLevel,
+    msSinceLastCue: thoughtMaterial.msSinceLastRoutineCue,
+  })) {
+    finish("silent", {
+      reason: "cadence",
+      interventionLevel,
+      msSinceLastRoutineCue: thoughtMaterial.msSinceLastRoutineCue,
+      cadenceMs: proactiveCadenceMs(interventionLevel),
+    });
     return;
   }
 
@@ -592,7 +746,13 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
         resolveProviderCallTimeout("companion_thought"),
       );
       const content = typeof (raw as { content?: unknown })?.content === "string" ? (raw as { content: string }).content : "";
-      candidates = [...candidates, ...parseThoughtCandidates(content, thoughtMaterial.today)];
+      candidates = [...candidates, ...parseThoughtCandidates(
+        content,
+        thoughtMaterial.today,
+        // 只有**服务端真的交给模型**的那些数可以出现在念头里。
+        `${thoughtMaterial.facts ?? ""}
+到期复习 ${thoughtMaterial.readyReviews}；12 小时内到期 ${thoughtMaterial.dueSoonReviews}；连续学习 ${thoughtMaterial.streakDays}；熟悉度 ${thoughtMaterial.familiarity.toFixed(2)}`,
+      )];
     } catch (err) {
       logger.warn({ jobId: job.id, err: err instanceof Error ? err.message : String(err) }, "companion thought llm batch failed; deterministic only");
     }
@@ -647,20 +807,9 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
     });
   }
 
-  // 日预算（沉默默认）：额度按 intervention_level 取，与 proactive-hook 同源。
-  // 冷却不需要在这里再判一次：念头调度按 2 小时桶入队，任何两档冷却都已过去。
-  const dailyLimit = proactiveDailyLimit(interventionLevel);
-  if (thoughtMaterial.deliveredToday >= dailyLimit) {
-    finish("silent", {
-      reason: "daily_budget",
-      interventionLevel,
-      deliveredToday: thoughtMaterial.deliveredToday,
-      dailyLimit,
-      candidatesStored: eligible.length,
-    });
-    return;
-  }
-
+  // 节奏已经在阶段 1 之前判过了（`cadence`），这里没有第二道额度：
+  // 一次调度最多送 `maxDeliveredPerRun` 条，同一件事由 dedupeKey 挡着。
+  //
   // 表达升级（切片③）：多候选挑一 + grounding 校验，模板兜底。
   let embeddingProvider: Awaited<ReturnType<typeof createEmbeddingProvider>> = null;
   try {
@@ -699,10 +848,28 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
       const variants = Array.isArray(parsed?.variants)
         ? parsed.variants.filter((value): value is string => typeof value === "string")
         : [];
-      const picked = selectThoughtExpression(variants, candidate.grounding);
+      const picked = selectThoughtExpression(variants, candidate.grounding, candidate.text);
       if (picked) expression = picked;
     } catch (err) {
       logger.warn({ jobId: job.id, err: err instanceof Error ? err.message : String(err) }, "companion thought expression llm failed; template fallback");
+    }
+
+    // 送达前最后一道：定稿句子仍然是"数字 + 量词"的读数，这条就不送。
+    // 必须在这里判，不能只靠 `validateThoughtExpression`：那条管的是**改写**，
+    // 而改写被拒时兜底就是候选原句本身（上面那句 `?? candidate.text`），
+    // 实机 2026-09-21 的"今晚这42分钟学得很扎实"正是从这条缝里过去的。
+    if (readsOutStatistics(expression)) {
+      logger.info(
+        { jobId: job.id, topic: candidate.topic },
+        "companion thought dropped as statistics read-out",
+      );
+      await withJobTransaction(job, async (tx) => {
+        await tx.execute(sql`
+          UPDATE assistant_thoughts SET status = 'suppressed', updated_at = now()
+          WHERE id = ${thoughtId}
+        `);
+      });
+      continue;
     }
 
     // 语义去重（切片①）：embedding 优先，bigram 降级。

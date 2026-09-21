@@ -4,14 +4,29 @@
  * 确定性策略批准主动提示；模型只负责在批准后生成表达。账号可用状态与
  * 介入强度是两个独立枚举。本模块只做判定（不读模型输出）。
  *
- * 放在 shared 而不是 api 的模块里，因为**判定主动输出额度的是两个进程**：
+ * 放在 shared 而不是 api 的模块里，因为**判定主动节奏的是两个进程**：
  * API 的 proactive-hook，和 worker 的念头管线（companion-thought.ts）。
  * 以前两边各有一份预算（api 3/6、worker 固定 2），quiet 档在 api 侧结构性为 0，
- * 在 worker 侧却照样能送——同一个"安静一点"得到两套结果。预算必须只有一个来源。
+ * 在 worker 侧却照样能送——同一个"安静一点"得到两套结果。节奏必须只有一个来源。
+ *
+ * 2026-09-21 的口径改动：**"一天 N 条"这个控件被删掉**，只留"按偏好定间隔"，
+ * 并把推送分成 routine / triggered 两类——触发式（用户先约好的提醒、
+ * 他正在等的学习完成）不进任何频率限制。理由见 PROACTIVE_CADENCE_MS 的注释。
  */
 
 export type CompanionAvailabilityV1 = "online" | "dnd" | "offline";
 export type CompanionInterventionLevelV1 = "quiet" | "moderate" | "active";
+
+/**
+ * 两种主动输出，只有一种是"频率"的对象：
+ *
+ * - **routine** 她自己想开口（到期复习、连续天数、冷启动、模型念头）。这类才有
+ *   "多久说一次"的问题，节奏由 `intervention_level` 决定。
+ * - **triggered** 用户先要过的（0238 的到点提醒）或正在等的（学习运行完成）。
+ *   这类**不进任何频率限制**：一条 09:00 的提醒如果被"她今天话说多了"压掉，
+ *   用户得到的是"提醒不准"，而不是"她很有分寸"。
+ */
+export type ProactivePushKind = "routine" | "triggered";
 
 export interface ProactivePolicyInput {
   availability: CompanionAvailabilityV1;
@@ -22,10 +37,10 @@ export interface ProactivePolicyInput {
   msSinceLastShown: number | null;
   /** 该 dedupeKey 在冷却窗口内已展示次数。 */
   recentShownCount: number;
-  /** 同用户今日主动提示总数。 */
-  dailyShownTotal: number;
   /** 提示是否已过期（now > expiresAt）。 */
   expired: boolean;
+  /** 这次推送是哪一类；缺省按 routine（宁可少说，不可吞掉用户约好的东西）。 */
+  kind?: ProactivePushKind;
   now: number;
 }
 
@@ -35,7 +50,6 @@ export interface ProactivePolicyDecision {
     | "allowed"
     | "dnd"
     | "offline"
-    | "daily_budget_exhausted"
     | "formal_answer_in_progress"
     | "cooldown"
     | "dedupe_recent"
@@ -43,55 +57,79 @@ export interface ProactivePolicyDecision {
 }
 
 export const POLICY_LIMITS = {
-  /**
-   * quiet 级别单日主动提示上限。**曾经是 0**（方案 16 §10.2 写"安静=不主动"）。
-   *
-   * 0 不是"安静"，是"关掉"：用户设成安静之后，主动提醒这件事在结构上永远不会发生，
-   * 于是"她从不主动提醒"（抱怨 #8）在安静档下不是 bug 而是必然——而界面上并没有
-   * "关闭主动提醒"这个开关，只有一档写着"安静"。安静应该是**少而轻**，所以是 1：
-   * 一天最多一条，且必须是真值得开口的内容（预算之外仍受冷却/去重/反馈降权约束）。
-   * 真要完全关闭，用账号级 `globalEnabled`（界面上有）。
-   */
-  quietDailyLimit: 1,
-  /** moderate 级别单日主动提示上限。 */
-  moderateDailyLimit: 3,
-  /** active 级别单日主动提示上限。 */
-  activeDailyLimit: 6,
-  /** moderate 最少间隔（30 分钟）。 */
-  moderateCooldownMs: 30 * 60 * 1000,
-  /** active 最少间隔（15 分钟）。 */
-  activeCooldownMs: 15 * 60 * 1000,
   /** 冷却窗口内同 key 最大展示次数。 */
   dedupeWindowLimit: 2,
 } as const;
 
 /**
- * 单日主动提示额度。**唯一的映射处**：API 的 proactive-hook 与 worker 的念头管线
- * 都从这里取值，否则同一个"安静一点"在两条链路上得到两个预算。
+ * 例行主动的最小间隔——**唯一的映射处**（用户 2026-09-21 的口径：
+ * "不要给我限制，按用户偏好设置推送频率即可"）。
+ *
+ * 这里以前是三个"单日额度"（quiet 1 / moderate 3 / active 6）。额度是错的控件：
+ * 它不回答"什么时候说"，只回答"说到几条就闭嘴"，于是三档的体感差别是
+ * "一天三条 vs 一天六条"，而不是"话多话少"。更糟的是它**会整天静音**——
+ * 实测 2026-09-21 13:20 那三条被从没展示过的僵尸念头占满，她连续 21 小时没出声，
+ * 而所有上游健康检查都是绿的（§9.58）。
+ *
+ * 间隔才是"少而轻 vs 多而密"：安静档 3 小时一次（醒着的时间一天约 4–5 次机会），
+ * 适度 90 分钟，活跃 30 分钟。上限由"有没有值得说的话"决定（候选去重、
+ * 同一件事一天只提一次、每次调度最多送一条），不是由计数器决定。
  */
-export function proactiveDailyLimit(level: CompanionInterventionLevelV1): number {
-  if (level === "quiet") return POLICY_LIMITS.quietDailyLimit;
-  if (level === "active") return POLICY_LIMITS.activeDailyLimit;
-  return POLICY_LIMITS.moderateDailyLimit;
+export const PROACTIVE_CADENCE_MS: Readonly<Record<CompanionInterventionLevelV1, number>> =
+  Object.freeze({
+    quiet: 3 * 60 * 60 * 1000,
+    moderate: 90 * 60 * 1000,
+    active: 30 * 60 * 1000,
+  });
+
+export function proactiveCadenceMs(level: CompanionInterventionLevelV1): number {
+  return PROACTIVE_CADENCE_MS[level];
+}
+
+/**
+ * 例行主动的间隔判定。API 的 proactive-hook 与 worker 的念头管线**共用这一条**：
+ * 两边各写一份时，同一个"安静一点"在两条链路上会得到两个节奏（§9.58 之前就是这样，
+ * 一边 3/6 一边固定 2）。
+ */
+export function routineCadenceBlocked(input: {
+  interventionLevel: CompanionInterventionLevelV1;
+  /** 距上一次例行主动开口的毫秒数；从没开过口为 null。 */
+  msSinceLastCue: number | null;
+}): boolean {
+  return input.msSinceLastCue !== null
+    && input.msSinceLastCue < proactiveCadenceMs(input.interventionLevel);
+}
+
+/**
+ * 触发式推送的判定（学习运行完成、到点提醒……用户先要过或正在等的东西）。
+ *
+ * 单独开一个入口而不是给 `evaluateProactivePolicy` 传一堆"反正不看"的字段：
+ * 它要回答的只有"现在能不能给这个人看"，间隔/作答/静默时段/去重都不属于它。
+ * 设备明确不在（dnd/offline）仍然挡——气泡进收件箱，人回来照样看得见。
+ */
+export function evaluateTriggeredPush(input: {
+  availability: CompanionAvailabilityV1;
+  expired: boolean;
+}): ProactivePolicyDecision {
+  if (input.availability === "dnd") return { allow: false, reasonCode: "dnd" };
+  if (input.availability === "offline") return { allow: false, reasonCode: "offline" };
+  if (input.expired) return { allow: false, reasonCode: "expired" };
+  return { allow: true, reasonCode: "allowed" };
 }
 
 /** 确定性主动策略（§10.2 的允许边界；不读模型输出）。 */
 export function evaluateProactivePolicy(input: ProactivePolicyInput): ProactivePolicyDecision {
+  if ((input.kind ?? "routine") === "triggered") {
+    return evaluateTriggeredPush({ availability: input.availability, expired: input.expired });
+  }
   if (input.availability === "dnd") return { allow: false, reasonCode: "dnd" };
   if (input.availability === "offline") return { allow: false, reasonCode: "offline" };
-  if (input.formalAnswerInProgress) return { allow: false, reasonCode: "formal_answer_in_progress" };
   if (input.expired) return { allow: false, reasonCode: "expired" };
-  const dailyLimit = proactiveDailyLimit(input.interventionLevel);
-  if (input.dailyShownTotal >= dailyLimit) {
-    return { allow: false, reasonCode: "daily_budget_exhausted" };
-  }
-  const cooldownMs = input.interventionLevel === "active"
-    ? POLICY_LIMITS.activeCooldownMs
-    : POLICY_LIMITS.moderateCooldownMs;
-  if (
-    input.msSinceLastShown !== null
-    && input.msSinceLastShown < cooldownMs
-  ) {
+  if (input.formalAnswerInProgress) return { allow: false, reasonCode: "formal_answer_in_progress" };
+  if (routineCadenceBlocked({
+    interventionLevel: input.interventionLevel,
+    msSinceLastCue: input.msSinceLastShown,
+  })) {
     return { allow: false, reasonCode: "cooldown" };
   }
   if (input.recentShownCount >= POLICY_LIMITS.dedupeWindowLimit) {

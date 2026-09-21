@@ -142,9 +142,12 @@ export const companionDailySummaries = pgTable(
     date: text("date").notNull(), // YYYY-MM-DD 用户本地日期
     timezone: text("timezone").notNull(),
     facts: jsonb("facts").$type<Record<string, unknown>>().notNull(),
-    highlights: jsonb("highlights").$type<unknown[]>().notNull().default(sql`'[]'::jsonb`),
+    /** 日记正文的块序列（0252）；[] = 历史行，读取时从 summary 投影。 */
+    blocks: jsonb("blocks").$type<unknown[]>().notNull().default(sql`'[]'::jsonb`),
     summary: text("summary").notNull().default(""),
     status: text("status").notNull().default("generated"), // generated | failed
+    /** status=failed 的成因；generated 行必须为 NULL（0250）。 */
+    failureReason: text("failure_reason"),
     revision: integer("revision").notNull().default(1),
     generatedAt: timestamp("generated_at", { withTimezone: true }).defaultNow().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),

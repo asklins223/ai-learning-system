@@ -30,6 +30,15 @@ test("净化：保留正文半角括号/连字符，只剥离 markdown 语法", 
   assert.equal(p.includes("https"), false, "URL 剥离");
 });
 
+test("净化：有序列表标记不进朗读文本（实机落过一段单独的 `4.`）", () => {
+  const p = purifyVoiceText("疏散四步：\n1. 关燃气\n2. 带应急包\n3. 走安全通道\n4. 到集合点");
+  assert.equal(p.includes("4."), false, "有序列表符号剥离");
+  assert.ok(p.includes("关燃气") && p.includes("到集合点"), "条目正文保留");
+  // `1.5 米` 这类正文不能被误伤：数字后必须紧跟 `.`/`)` 且再接空白才算列表项
+  assert.ok(purifyVoiceText("绳子长 1.5 米。").includes("1.5 米"), "小数保留");
+  assert.ok(purifyVoiceText("2026 年计划。").includes("2026 年计划"), "年份保留");
+});
+
 test("切句：按。！？切分后贪心合并相邻句，ordinal 递增，textSha256 64 hex", () => {
   // 2026-08-12：段落间隔优化——相邻句子贪心合并到目标段长（≤120 字符）。
   // 三句短句应合并为 1-2 段（旧行为每句一段=3 段，段间独立 TTS 请求造成

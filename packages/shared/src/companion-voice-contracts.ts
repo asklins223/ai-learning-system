@@ -44,6 +44,63 @@ export const companionVoiceSpeakSegmentRequestV2Schema = z.strictObject({
 });
 export type CompanionVoiceSpeakSegmentRequestV2 = z.infer<typeof companionVoiceSpeakSegmentRequestV2Schema>;
 
+/**
+ * 一段音频在客户端那一侧的结局（0247）。
+ *
+ * 只报**原因**，不报 outcome：`outcome` 由服务端按这张表映射（客户端同时报两个字段
+ * 只会造出 `reason=deadline, outcome=ok` 这种自相矛盾的行，而报表正是靠这些行回答
+ * "她没声音"是哪一种）。
+ *
+ * 取值域只有三个，且每一个都对应渲染进程里一条真实分支：播完了、等到超时被跳过、
+ * 取段这一步本身就失败。**没有**为"以后可能观察到"的情形预留取值。
+ * 用户打断（新一轮开始）不在这里：那是正常行为，不是故障，记进同一张表只会让
+ * "失败率"随用户打字速度浮动。
+ */
+export const COMPANION_TTS_PLAYBACK_REASONS = [
+  "played",       // 播完了
+  "deadline",     // 字节在路上，但首段/段间截止先到 → 这段被跳过
+  "synth_failed", // 取段/合成请求本身失败（网络、502、解不出音频）
+] as const;
+export type CompanionTtsPlaybackReason = (typeof COMPANION_TTS_PLAYBACK_REASONS)[number];
+
+/** reason → `companion_tts_outcomes.outcome`（沿用 0246 的词表，不新增取值）。 */
+export const COMPANION_TTS_PLAYBACK_REASON_TO_OUTCOME: Record<
+  CompanionTtsPlaybackReason,
+  "ok" | "rejected" | "failed"
+> = {
+  played: "ok",
+  deadline: "failed",
+  synth_failed: "failed",
+};
+
+export const companionVoicePlaybackOutcomeRequestV1Schema = z.strictObject({
+  version: z.literal(1),
+  conversationId: z.string().uuid(),
+  runId: z.string().uuid(),
+  generation: z.number().int().positive(),
+  ordinal: z.number().int().min(1).max(200),
+  segmentId: z.string().regex(/^[a-f0-9]{64}$/),
+  reason: z.enum(COMPANION_TTS_PLAYBACK_REASONS),
+  /** 从发起取段到这段有结局的耗时；`played` 时就是"听完这一段一共等了多久"。 */
+  durationMs: z.number().int().min(0).max(600_000).optional(),
+});
+export type CompanionVoicePlaybackOutcomeRequestV1 = z.infer<
+  typeof companionVoicePlaybackOutcomeRequestV1Schema
+>;
+
+/**
+ * 上报的回执。`recorded` 说的是"**这次请求被接受了**"，不是"那一段播好了"——
+ * 后者在请求里。同一段重发会被幂等索引吞掉，仍然回 recorded=true：从客户端的视角
+ * 这两次都是"我已经把这段的结局告诉你了"，没有需要它处理的差别。
+ */
+export const companionVoicePlaybackOutcomeResultV1Schema = z.strictObject({
+  version: z.literal(1),
+  recorded: z.boolean(),
+});
+export type CompanionVoicePlaybackOutcomeResultV1 = z.infer<
+  typeof companionVoicePlaybackOutcomeResultV1Schema
+>;
+
 // ─── 语音转文本（`companion.voice.transcribe`，2026-09-18 接线） ─────────────
 //
 // 渲染层已完成本地录音（getUserMedia + AudioWorklet → 16kHz 单声道 WAV），

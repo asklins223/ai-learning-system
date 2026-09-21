@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { applyDeterministicToneToSegments } from "../lib/companion-tone.ts";
 import {
   COMPANION_HOST_PROTOCOL_V5,
   COMPANION_PERSONA_V5_PROMPT_ID,
@@ -17,6 +19,10 @@ import {
   looksLikeUnfulfilledActionNarration,
   looksLikeActionRequest,
   unverifiedNumericClaims,
+  claimsLookupThatNeverRan,
+  claimsNothingDueAgainstFacts,
+  companionOutputRejectionReason,
+  containsCompanionInternalToken,
   keepRecomputedBlocks,
   TRUNCATED_REPLY_MIN_CHARS,
   sanitizeCompanionVisibleText,
@@ -325,26 +331,38 @@ test("prompt id 常量与 shared 一致", () => {
   assert.equal(COMPANION_PERSONA_V5_PROMPT_ID, "companion-persona-v5");
 });
 
-test("15c：validateCompanionOutput 剥离 markdown（标题/加粗/列表/链接）", () => {
+test("§4.8：markdown 留在可见正文里，交给渲染层排版", () => {
   const r = validateCompanionOutput(
-    "### 学习伴星功能\n\n**语音对话**：支持实时语音。\n\n- 功能一\n- 功能二\n\n[链接](https://x.com) 结尾。",
+    "### 学习伴星功能\n\n**语音对话**：支持实时语音。\n\n- 功能一\n- 功能二\n\n`I=U/R` 结尾。",
   );
   assert.equal(r.ok, true);
   if (!r.ok) return;
-  assert.ok(!r.text.includes("###"), "标题标记已剥离");
-  assert.ok(!r.text.includes("**"), "加粗标记已剥离");
-  assert.ok(r.text.includes("语音对话"), "加粗内容保留");
-  assert.ok(!r.text.includes("[链接](https://x.com)"), "链接语法已剥离");
-  assert.ok(r.text.includes("链接"), "链接文本保留");
-  assert.ok(r.text.includes("· 功能一"), "列表转 · 符号");
+  // 以前这里把标题/加粗/列表全剥平，"她只能输出纯文本"是系统单方面规定的：
+  // 讲步骤、公式、代码时结构被抹掉，读起来是一坨。现在结构原样留下。
+  assert.ok(r.text.includes("### 学习伴星功能"), "标题标记交给渲染层");
+  assert.ok(r.text.includes("**语音对话**"), "加粗留在正文");
+  assert.ok(r.text.includes("- 功能一"), "列表符号不再被改成 ·");
+  assert.ok(r.text.includes("`I=U/R`"), "行内代码留在正文");
+  // 语气/事件标签仍然照旧剥掉——那不是排版，是语气层的合同。
+  const tagged = validateCompanionOutput("[empathetic]先歇会儿。");
+  assert.ok(tagged.ok);
+  if (tagged.ok) assert.ok(!tagged.text.includes("[empathetic]"), "标签不进可见正文");
 });
 
-test("15c：validateCompanionOutput 剥离代码块标记", () => {
-  const r = validateCompanionOutput("```ts\nconst a = 1;\n```\n后续正文。");
-  assert.equal(r.ok, true);
-  if (!r.ok) return;
-  assert.ok(!r.text.includes("```"), "代码块标记已剥离");
-  assert.ok(r.text.includes("const a = 1;"), "代码内容保留");
+test("§4.8：朗读文本走 speakable 投影，星号与代码块不会被念出来", () => {
+  const source = "**先关燃气**，公式是 `I=U/R`。\n\n```ts\nconst a = 1;\n```\n";
+  const segments = [{
+    ordinal: 1,
+    text: source,
+    textSha256: createHash("sha256").update(source, "utf8").digest("hex"),
+  }];
+  const toned = applyDeterministicToneToSegments(segments, "neutral");
+  assert.ok(!toned[0].text.includes("**"), "加粗标记不进朗读文本");
+  assert.ok(!toned[0].text.includes("```"), "代码块不进朗读文本");
+  assert.ok(!toned[0].text.includes("`"), "行内代码标记不进朗读文本");
+  assert.ok(toned[0].text.includes("先关燃气"), "正文内容保留");
+  // 可见正文与朗读文本自此**分叉**，这正是双文本管线的目的。
+  assert.ok(toned[0].text !== source);
 });
 
 test('JSON 信封：unwrapCompanionJsonEnvelope 剥离 {"response": …} 形状（2026-09-18 上游修复）', () => {
@@ -483,11 +501,11 @@ test("可见文本净化：剥掉标签后不留孤立标点（2026-09-19 实机
 
 // ─── 环境快照与历史消毒（2026-09-20 方案 29 §4.1 / 坍缩闸配套）───────────
 
-test("hereAndNow 注入 <here_and_now> 数据块并带边界声明", () => {
+test("hereAndNow 注入 <here_and_now> 数据块并点名它的用法", () => {
   const block = [
     "<here_and_now>",
     "现在：2026-09-20 19:17 周日（晚上）",
-    "今日已学 18 分钟，6 个学习运行，到期待复习 25 项",
+    "到期待复习 25 项",
     "</here_and_now>",
   ].join("\n");
   const messages = buildCompanionPersonaMessages({
@@ -499,7 +517,10 @@ test("hereAndNow 注入 <here_and_now> 数据块并带边界声明", () => {
   });
   const system = String(messages[0].content);
   assert.match(system, /现在：2026-09-20 19:17 周日（晚上）/);
-  assert.match(system, /<here_and_now> 是系统此刻测得的真实状态/);
+  // 「可以自然引用、据此主动开启话题」是被实测否决的旧说法：用户只说「嘿嘿」，
+  // 她就"自然地"回了一句"今天已经学了 42 分钟"。这条断言钉住新口径。
+  assert.match(system, /用户没问学习情况，就不要报数字/);
+  assert.doesNotMatch(system, /可以自然引用，也可以据此主动开启话题/);
   // 排在记忆块之前：越靠前的约束对小模型的遵循度越高。
   assert.ok(system.indexOf("<here_and_now>") < system.indexOf("<memory_data>"),
     "环境快照必须在记忆块之前");
@@ -555,6 +576,32 @@ test("looksTruncatedReply：不误伤正常回复", () => {
 
 // ─── "承诺当答案"判据（2026-09-21）：样本取自活库真实落库正文 ─────────────
 
+/**
+ * 泄露判据以前有**两份**（对话侧一份、念头侧一份），实机 2026-09-21 拿同一批样本
+ * 双向比对，两个方向各有一个洞：
+ *  - `<here_and_now>` / `activeMemories` / `pageContext` 这种上下文回显，只有对话侧认得——
+ *    而念头链路的 prompt 里**就带着** `<here_and_now>`（`facts: renderHereAndNow(…)`），
+ *    等于"被喂了标记的那条链"恰好不拦它；
+ *  - 裸 uuid 只有念头侧认得，所以对话里她把 noteId/cardId 念出来没人管。
+ * 现在两条链共用 `containsCompanionInternalToken` 一份定义。这三条断言钉的是
+ * "合并之后两边的覆盖面都还在"，不是新行为。
+ */
+test("containsCompanionInternalToken：上下文回显与裸 uuid 都算泄露（两条链共用一份）", () => {
+  assert.equal(containsCompanionInternalToken("<here_and_now> 今日已学 12 分钟"), true);
+  assert.equal(containsCompanionInternalToken("我把 activeMemories 里那条念给你听"), true);
+  assert.equal(containsCompanionInternalToken("pageContext 显示你在笔记页"), true);
+  assert.equal(containsCompanionInternalToken("3f2e1369-7595-466c-af76-6cea5ee7440f 这张卡"), true);
+  assert.equal(containsCompanionInternalToken("刚看到 character.cue 变了"), true);
+  // 正常中文句子、以及她真该说的话，都不许被这条误伤
+  assert.equal(containsCompanionInternalToken("今天想继续昨天那三个公式吗？"), false);
+  assert.equal(containsCompanionInternalToken("F 等于 m a 这条我陪你再过一遍"), false);
+  // 增量校验走同一个判定（拒绝原因要还是 internal_token_leak）
+  assert.equal(
+    companionOutputRejectionReason("<here_and_now> 今日已学 12 分钟"),
+    "internal_token_leak",
+  );
+});
+
 test("looksLikeUnfulfilledActionNarration：只说了要做什么、一个工具都没调", () => {
   assert.equal(looksLikeUnfulfilledActionNarration("这就去记忆里翻一翻～"), true);
   assert.equal(looksLikeUnfulfilledActionNarration("好，这就把它忘掉～"), true);
@@ -587,6 +634,48 @@ test("looksLikeActionRequest：普通聊天与提问不算（不为它们白烧�
   assert.equal(looksLikeActionRequest("我现在这一页能看到什么？简单说说就好。"), false);
   assert.equal(looksLikeActionRequest("牛顿第二定律到底是啥来着？"), false);
   assert.equal(looksLikeActionRequest("哈哈"), false);
+});
+
+test("claimsLookupThatNeverRan：说『没搜到』而整轮零工具，一定是编的", () => {
+  // 两句都是实机原文（run: steps=1 tools=0）。
+  assert.equal(claimsLookupThatNeverRan("我按标题和关键词都没搜到《欧姆定律生成验收》这篇笔记。"), true);
+  assert.equal(claimsLookupThatNeverRan("这篇没搜到呢，我换个词再找找喵～"), true);
+  assert.equal(claimsLookupThatNeverRan("我没有查到这条记忆。"), true);
+  // 同一件事她每轮换一种说法（实机四轮实测），判据跟着覆盖到：
+  assert.equal(claimsLookupThatNeverRan("我把能搜的都搜过了：「欧姆」「定律」三个词分别查。"), true);
+  assert.equal(claimsLookupThatNeverRan("笔记库里没有这篇《欧姆定律生成验收》。"), true);
+  assert.equal(claimsLookupThatNeverRan("所以它的原文不存在，我读不到。"), true);
+});
+
+test("claimsLookupThatNeverRan：肯定结果不算——上文里可能就有", () => {
+  // "找到了" 可能来自上一轮真实工具结果留在历史里，那是合法出处。
+  assert.equal(claimsLookupThatNeverRan("找到了，是《消防疏散与灭火器使用》这篇。"), false);
+  assert.equal(claimsLookupThatNeverRan("今天不想学就不学。"), false);
+});
+
+/**
+ * 完成宣称（实机 2026-09-21 场景 Z，`run: succeeded steps=1 tools=0`）。
+ *
+ * 那一篇笔记在库里有 6 张图，而她说"正文读完了，里面没有截图"。旧判据只拦
+ * "没搜到/库里没有"这一类**否定结论**，完全放过"我把正文读完了"这一类**动作完成宣称**——
+ * 于是承诺型撒谎被拦住了，冒领型反而溜过去。断言用的是那一句的原文，不是构造的例句。
+ */
+test("claimsLookupThatNeverRan：零工具却说『读完了/里面没有截图』同样是冒领", () => {
+  assert.equal(claimsLookupThatNeverRan(
+    "我先把那篇笔记的原文读出来。\n\n我把这篇笔记的正文读完了，里面没有截图，也没有任何图片内容可以引用。",
+  ), true);
+  assert.equal(claimsLookupThatNeverRan("我把正文读完了，写的是版本更新和推理加速。"), true);
+  assert.equal(claimsLookupThatNeverRan("正文里没有截图啦。"), true);
+  assert.equal(claimsLookupThatNeverRan("我刚翻过这条记忆了。"), true);
+  // 反例：引用**过去**某轮的真实结果不算冒领（那是合法出处，本轮没有断言新动作）。
+  assert.equal(claimsLookupThatNeverRan("上次我读到过这一段，讲的是零样本 TTS。"), false);
+  assert.equal(claimsLookupThatNeverRan("好，那我不查了。"), false);
+  // 生活口语里也有"读完了/看完了"，但它没有系统里的对象——不拦。
+  // （这四句是收窄判据时实测的误伤样本，钉住它们，别让它退化成"她不敢说话"。）
+  assert.equal(claimsLookupThatNeverRan("我今天看完了这本书。"), false);
+  assert.equal(claimsLookupThatNeverRan("我刚看到窗外下雨了。"), false);
+  assert.equal(claimsLookupThatNeverRan("那本书我读完了好久了。"), false);
+  assert.equal(claimsLookupThatNeverRan("哈哈我读完了你的心情。"), false);
 });
 
 test("unverifiedNumericClaims：报出上下文里根本没有的数字", () => {
@@ -725,4 +814,19 @@ test("坍缩闸的字数线跟着活跃度配置走（抱怨 #2「配置没生�
   assert.equal(looksTruncatedReply("有", TRUNCATED_REPLY_MIN_CHARS.quiet), true);
   assert.equal(looksTruncatedReply("今天已经学了1", TRUNCATED_REPLY_MIN_CHARS.quiet), true);
   assert.equal(looksTruncatedReply("最近三篇是《消防", TRUNCATED_REPLY_MIN_CHARS.moderate), true);
+});
+
+// ─── 「没有到期的」这类不报数字的假阴性（2026-09-21 实机 25 项 → 答"列表是空的"）──
+
+test("claimsNothingDueAgainstFacts：真值在环境块里，她那句话就是可证伪的", () => {
+  const facts = "<here_and_now>现在：2026-09-21 18:40（晚上）\n今日已学 18 分钟，6 个学习运行，到期待复习 25 项</here_and_now>";
+  assert.equal(claimsNothingDueAgainstFacts("到期列表现在是空的，没有卡可以打开。", facts), true, "实机原句");
+  assert.equal(claimsNothingDueAgainstFacts("今天没有到期的复习。", facts), true);
+  assert.equal(claimsNothingDueAgainstFacts("到期的复习没有几张，先不管它们。", facts), true);
+  // 真值本来就是 0：同一句话是实话，不该拦。
+  assert.equal(claimsNothingDueAgainstFacts("到期列表现在是空的。", "<here_and_now>到期待复习 0 项</here_and_now>"), false);
+  // 环境块里没有这一行 → 无从对照，不凭措辞猜。
+  assert.equal(claimsNothingDueAgainstFacts("到期列表是空的。", "今日已学 12 分钟"), false);
+  // 同一条真值下如实报数，不该命中（否则 steer 会被自己的闸反复烧掉）。
+  assert.equal(claimsNothingDueAgainstFacts("到期待复习的有 25 项，先挑第一张？", facts), false);
 });

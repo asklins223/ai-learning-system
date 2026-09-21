@@ -19,6 +19,7 @@
 
 import { sql } from "drizzle-orm";
 import type { WorkerTransaction } from "../db.ts";
+import { normalizeWorkspaceAIPolicy } from "../lib/governance.ts";
 import { parsePageContext } from "./companion-dialogue-content.ts";
 
 const FALLBACK_TIMEZONE = "Asia/Shanghai";
@@ -58,6 +59,17 @@ export interface HereAndNowSnapshot {
    * 转头又问用户"你要我提醒什么"——许过约却不记得，比从没答应更伤信任。
    */
   nextReminder: { text: string; fireAtLocal: string } | null;
+  /**
+   * 用户这句话里点名的那篇笔记（《标题》形态）到底存不存在。见
+   * `extractNoteTitleReference` 的实测理由：这是**假阴性**的源头闸。
+   *
+   * `imageCount` 顺带在这里给出，理由与"存不存在"同一条：**不该由她决定去不去查**。
+   * 实机 2026-09-21 她零工具就说"这篇正文读完了，里面没有截图"，而那篇挂着 6 张图——
+   * 因为图不在 `note_blocks` 里，她照实读完正文仍会推出"没有图"这个假阴性。
+   */
+  noteReference: { title: string; found: boolean; noteId: string | null; ageLabel: string | null; imageCount: number } | null;
+  /** 图片外发政策是否开着（决定"有图但看不了"这句话怎么说）。 */
+  imagesReadable: boolean;
 }
 
 const ACTIVE_RUN_PHASES = ["preparing", "active", "assessing", "checkpoint", "committing", "paused"];
@@ -112,6 +124,21 @@ export function ageLabel(minutes: number): string {
   return `${Math.round(days / 30)} 个月前`;
 }
 
+/**
+ * 用户这句话点名的那篇笔记（《标题》形态，取第一个）。
+ *
+ * 为什么"有没有这篇"要在读阶段就算出来（方案 29 §9.29，实机五轮）：主模型面对
+ * "《X》写了什么"会**不查而答**，并且给出可证伪的假阴性——"都搜过了，库里没有这篇"
+ * （而那篇在库里，3 个正文块）。同一句 prompt 指名道姓要求它调用
+ * `companion_search_notes` 仍然不动；被 steer 换到兜底模型之后才真的去调。
+ * 也就是说"要不要查"不能交给它决定：这里先把结果当数据给它，
+ * 她只需要负责读和说。
+ */
+export function extractNoteTitleReference(userText: string): string | null {
+  const title = userText.match(/《([^》\n]{1,30})》/)?.[1]?.trim();
+  return title ? title : null;
+}
+
 export async function loadHereAndNow(
   tx: WorkerTransaction,
   scope: {
@@ -120,6 +147,8 @@ export async function loadHereAndNow(
     conversationId?: string | null;
     /** 本轮 Bridge page context（对象或 JSON 字符串）；缺省就没有"当前界面"这一行。 */
     pageContext?: unknown;
+    /** 用户当下这句话：只用来识别《某篇》形态，见 `extractNoteTitleReference`。 */
+    userText?: string;
   },
 ): Promise<HereAndNowSnapshot> {
   // 时钟与账号：单条 SELECT 常量查询，永远返回一行（账号行缺失时走回落时区）。
@@ -201,6 +230,26 @@ export async function loadHereAndNow(
     WHERE workspace_id = ${scope.workspaceId} AND user_id = ${scope.userId} AND status = 'pending'
   `);
 
+  // 用户点名的那篇笔记。`ILIKE '%标题%'` 而不是 `ILIKE '标题'`——不带百分号的
+  // ILIKE 是全等比较（记忆检索的 keyword 降级路径踩过同一个坑）。
+  const noteRefTitle = scope.userText ? extractNoteTitleReference(scope.userText) : null;
+  const noteRefRows = noteRefTitle
+    ? await tx.execute<{ id: string; title: string; age_minutes: string; image_count: string }>(sql`
+        SELECT n.id, n.title,
+               EXTRACT(EPOCH FROM (now() - n.updated_at)) / 60 age_minutes,
+               -- 图挂在另一张表里，不在 note_blocks——所以她"把正文读完了"仍然看不见它们。
+               (SELECT count(*) FROM note_image_assets a
+                 WHERE a.workspace_id = n.workspace_id
+                   AND a.uploaded_for_note_id = n.id
+                   AND a.status = 'ready' AND a.deleted_at IS NULL) AS image_count
+        FROM notes n
+        WHERE n.workspace_id = ${scope.workspaceId} AND n.deleted_at IS NULL
+          AND (n.title = ${noteRefTitle} OR n.title ILIKE ${`%${noteRefTitle}%`})
+        ORDER BY (n.title = ${noteRefTitle}) DESC, n.updated_at DESC
+        LIMIT 1
+      `)
+    : [];
+
   const reminderRows = await tx.execute<{ text: string; fire_at_local: string }>(sql`
     SELECT text,
            to_char(fire_at AT TIME ZONE ${tzSubquery(scope.userId)}, 'MM-DD HH24:MI') AS fire_at_local
@@ -210,6 +259,18 @@ export async function loadHereAndNow(
     ORDER BY fire_at
     LIMIT 1
   `);
+
+  // 图片外发政策在这里也要读一份：注入进去的那句"这篇有 6 张图，看不了"必须与
+  // **工具下发面**同源，否则会出现"告诉她看不了、却又把读图工具给她"或反过来。
+  // 同源指同一个判定函数（`normalizeWorkspaceAIPolicy`）跑在同一张表的同一行上——
+  // 读法不同（这里在既有读事务里一条 SELECT，那边从治理上下文取），口径相同。
+  const policyRows = await tx.execute<{ data_policy: unknown }>(sql`
+    SELECT data_policy FROM user_ai_settings WHERE user_id = ${scope.userId} LIMIT 1
+  `);
+  const imagesReadable = normalizeWorkspaceAIPolicy(
+    // 没有这一行=没同意过，`normalizeWorkspaceAIPolicy` 自己会回落到 fail-closed 默认。
+    policyRows[0]?.data_policy as Parameters<typeof normalizeWorkspaceAIPolicy>[0],
+  ).sendImageContent === true;
 
   return {
     localTime: clock?.local_time ?? "",
@@ -236,6 +297,18 @@ export async function loadHereAndNow(
     recentNotes: noteRows.map((row) => ({ title: row.title, ageLabel: ageLabel(Number(row.age_minutes)) })),
     noteCount: Number(noteCountRows[0]?.n ?? 0),
     pendingProposals: Number(proposalRows[0]?.n ?? 0),
+    noteReference: noteRefTitle
+      ? (noteRefRows[0]
+        ? {
+          title: noteRefRows[0].title,
+          found: true,
+          noteId: noteRefRows[0].id,
+          ageLabel: ageLabel(Number(noteRefRows[0].age_minutes)),
+          imageCount: Number(noteRefRows[0].image_count ?? 0),
+        }
+        : { title: noteRefTitle, found: false, noteId: null, ageLabel: null, imageCount: 0 })
+      : null,
+    imagesReadable,
     nextReminder: reminderRows[0]
       ? { text: reminderRows[0].text, fireAtLocal: reminderRows[0].fire_at_local }
       : null,
@@ -244,7 +317,7 @@ export async function loadHereAndNow(
 }
 
 /** 页面类型的中文说法；`other`/`home` 不渲染（见 resolveCurrentPage）。 */
-const PAGE_KIND_LABELS: Record<string, string> = {
+export const PAGE_KIND_LABELS: Record<string, string> = {
   note: "笔记",
   card: "学习卡",
   source: "资料",
@@ -328,28 +401,28 @@ export function renderHereAndNow(snapshot: HereAndNowSnapshot): string | null {
     lines.push(`距上次和用户说话：${ageLabel(snapshot.minutesSinceLastSeen)}`);
   }
   if (snapshot.pet) {
-    lines.push(`你是「${snapshot.pet.name}」，累计互动 ${snapshot.pet.interactionCount} 次`);
+    lines.push(`你是「${snapshot.pet.name}」`);
   }
   if (snapshot.activeRun) {
     const run = snapshot.activeRun;
-    const minutes = Math.round(run.usedSeconds / 60);
-    // "已学 0 分钟"是噪音：刚开始的运行只需要说在学什么，别说学了多久。
-    const spent = minutes > 0 ? `，已学 ${minutes} 分钟` : "";
-    const budget = run.budgetSeconds ? `${minutes > 0 ? " / 计划" : "，计划"} ${Math.round(run.budgetSeconds / 60)} 分钟` : "";
+    // 进度条上的分钟数不在这里：她在学什么、正在做哪一步才是对话用得上的，
+    // 而"已学 4 分钟"这种数用户低头就能看见，念出来就是报流水账。
     const task = run.taskPrompt ? `，正在做：${truncate(run.taskPrompt, 60)}` : "";
-    lines.push(`用户正在学习${run.topic ? `「${truncate(run.topic, 30)}」` : ""}${spent}${budget}${task}`);
+    lines.push(`用户正在学习${run.topic ? `「${truncate(run.topic, 30)}」` : ""}${task}`);
   }
-  const todayMinutes = Math.round(snapshot.today.studySeconds / 60);
-  if (todayMinutes > 0 || snapshot.today.runs > 0 || snapshot.dueReviews > 0) {
-    const parts: string[] = [];
-    if (todayMinutes > 0) parts.push(`今日已学 ${todayMinutes} 分钟`);
-    if (snapshot.today.runs > 0) parts.push(`${snapshot.today.runs} 个学习运行`);
-    if (snapshot.dueReviews > 0) parts.push(`到期待复习 ${snapshot.dueReviews} 项`);
-    lines.push(parts.join("，"));
+  // 今日学了多久 / 跑了几个运行 / 笔记库共几篇**不再渲染**（实机 2026-09-21：用户只说
+  // 了「嘿嘿」，她回"今天已经学了 42 分钟，本周累计 99 分钟"）。这块是她的感知，
+  // 不是台词本；用户真问"我今天学了多久"时她走 companion_get_learning_stats，
+  // 那条路实测通（同一口径）。
+  //
+  // 到期数**必须**留着：`claimsNothingDueAgainstFacts` 靠这一行识破
+  // "到期列表是空的"那句假阴性（§9.41），撤了等于把闸拆掉。
+  if (snapshot.dueReviews > 0) {
+    lines.push(`到期待复习 ${snapshot.dueReviews} 项`);
   }
   if (snapshot.recentNotes.length > 0) {
     const listed = snapshot.recentNotes.map((note) => `《${truncate(note.title, 20)}》(${note.ageLabel})`).join("、");
-    lines.push(`最近笔记：${listed}；笔记库共 ${snapshot.noteCount} 篇`);
+    lines.push(`最近笔记：${listed}`);
   }
   if (snapshot.pendingProposals > 0) {
     lines.push(`还有 ${snapshot.pendingProposals} 个动作在等用户确认`);
@@ -360,6 +433,23 @@ export function renderHereAndNow(snapshot: HereAndNowSnapshot): string | null {
   }
   if (snapshot.nextReminder) {
     lines.push(`你已经答应：${snapshot.nextReminder.fireAtLocal} 提醒用户「${truncate(snapshot.nextReminder.text, 30)}」`);
+  }
+  if (snapshot.noteReference) {
+    const ref = snapshot.noteReference;
+    lines.push(ref.found
+      ? `用户提到的《${truncate(ref.title, 24)}》在笔记库里，noteId=${ref.noteId}（${ref.ageLabel}写的）；要看正文就调用 companion_read_note 用这个 id。`
+      // 没找到时**不把"它不存在"当结论交给她**——那正是实机里她零工具却脱口而出的假阴性。
+      : `按标题没找到《${truncate(ref.title, 24)}》这篇笔记：标题可能记岔，或者它其实是一张卡片。先调用 companion_search_notes 换个关键词再查；查不到就照实说没查到，不要替笔记库下"没有这东西"的结论。`);
+    // 图的事实在这里给，而不是等她去猜：图片不是 note_blocks 的一部分，她把正文
+    // 读三遍也看不到图，于是"我读完了，里面没有截图"听起来像诚实的回答（实机
+    // 2026-09-21 就是这么一句假阴性）。
+    if (ref.found && ref.imageCount > 0) {
+      lines.push(snapshot.imagesReadable
+        ? `这篇另有 ${ref.imageCount} 张图，图不在正文里。要看图里写了什么就调用 companion_read_image。`
+        : `这篇另有 ${ref.imageCount} 张图，图不在正文里（正文没有图片标记不代表没有图）。`
+          + "图片外发没开启，这些图你看不了：照实说看不了，并告诉用户设置里有个「允许发送图片内容」的开关。"
+          + "不要说「我看看这张图」，也不要凭标题猜图里有什么。");
+    }
   }
   if (lines.length <= 1) return null;
   return ["<here_and_now>", ...lines, "</here_and_now>"].join("\n");

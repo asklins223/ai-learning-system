@@ -7,9 +7,12 @@ import { test } from "node:test";
 import {
   evaluateDismissalFeedback,
   evaluateProactivePolicy,
+  evaluateTriggeredPush,
   isWithinQuietHours,
   POLICY_LIMITS,
-  proactiveDailyLimit,
+  PROACTIVE_CADENCE_MS,
+  proactiveCadenceMs,
+  routineCadenceBlocked,
   type ProactivePolicyInput,
 } from "./companion-proactive-policy.ts";
 
@@ -20,7 +23,6 @@ function base(): ProactivePolicyInput {
     formalAnswerInProgress: false,
     msSinceLastShown: null,
     recentShownCount: 0,
-    dailyShownTotal: 0,
     expired: false,
     now: Date.now(),
   };
@@ -33,31 +35,82 @@ test("DND / offline / formal_answer / expired 全部抑制（最高优先级）"
   assert.equal(evaluateProactivePolicy({ ...base(), expired: true }).reasonCode, "expired");
 });
 
-test("quiet/moderate 单日预算独立", () => {
-  assert.equal(
-    evaluateProactivePolicy({
-      ...base(),
-      interventionLevel: "quiet",
-      dailyShownTotal: POLICY_LIMITS.quietDailyLimit,
-    }).reasonCode,
-    "daily_budget_exhausted",
+/**
+ * 用户 2026-09-21 的口径：**"不要给我限制，按用户偏好设置推送频率即可"**。
+ *
+ * 原来是一天几条（quiet 1 / moderate 3 / active 6）。那个控件答错了问题：
+ * 它不决定"什么时候说"，只决定"说到几条就闭嘴"，而且实测会整天静音——
+ * 三条从没展示过的僵尸念头就能把 moderate 的一天占满（§9.58）。
+ */
+test("例行主动只有间隔，没有日额度", () => {
+  assert.deepEqual(
+    (["quiet", "moderate", "active"] as const).map(proactiveCadenceMs),
+    [3 * 60 * 60 * 1000, 90 * 60 * 1000, 30 * 60 * 1000],
   );
-  // moderate 预算更高：quiet 满额在 moderate 下仍允许。
-  assert.equal(
-    evaluateProactivePolicy({
-      ...base(),
-      interventionLevel: "moderate",
-      dailyShownTotal: POLICY_LIMITS.quietDailyLimit,
-    }).allow,
-    true,
+  assert.deepEqual(PROACTIVE_CADENCE_MS, {
+    quiet: 3 * 60 * 60 * 1000,
+    moderate: 90 * 60 * 1000,
+    active: 30 * 60 * 1000,
+  });
+  // 间隔之内：三档都拦（"刚说过"不是"今天说够了"）。
+  for (const level of ["quiet", "moderate", "active"] as const) {
+    assert.equal(
+      evaluateProactivePolicy({
+        ...base(), interventionLevel: level, msSinceLastShown: proactiveCadenceMs(level) - 60_000,
+      }).reasonCode,
+      "cooldown",
+      `${level} 在间隔内不该开口`,
+    );
+    // 间隔一到就允许，而且**没有条数上限**：同一档连着满足间隔就一直能开口。
+    assert.equal(
+      evaluateProactivePolicy({
+        ...base(), interventionLevel: level, msSinceLastShown: proactiveCadenceMs(level),
+      }).allow,
+      true,
+      `${level} 满间隔后该放行`,
+    );
+  }
+  // 安静档是"少而轻"，不是"永不"：从没开过口时第一次一定允许。
+  assert.deepEqual(
+    [evaluateProactivePolicy({ ...base(), interventionLevel: "quiet" }).allow,
+     evaluateProactivePolicy({ ...base(), interventionLevel: "quiet" }).reasonCode],
+    [true, "allowed"],
   );
-  assert.equal(
-    evaluateProactivePolicy({
-      ...base(),
-      dailyShownTotal: POLICY_LIMITS.moderateDailyLimit,
-    }).reasonCode,
-    "daily_budget_exhausted",
-  );
+});
+
+/**
+ * 触发式 = 用户先要过的（0238 到点提醒）或正在等的（学习完成）。
+ * 它不是"频率"的对象：一条 09:00 的提醒被"她今天话说多了"压掉，
+ * 用户拿到的是"提醒不准"，不是"她有分寸"。
+ */
+test("触发式推送不进任何频率限制", () => {
+  const justSpoke = { ...base(), kind: "triggered" as const, msSinceLastShown: 1000 };
+  assert.deepEqual(evaluateProactivePolicy(justSpoke), { allow: true, reasonCode: "allowed" });
+  // 作答中也不拦：闹钟在该响的时候响。
+  assert.equal(evaluateProactivePolicy({
+    ...base(), kind: "triggered" as const, formalAnswerInProgress: true,
+  }).allow, true);
+  // 同一 key 已经展示过两次也不拦（去重窗口是例行那一类的规则）。
+  assert.equal(evaluateProactivePolicy({
+    ...base(), kind: "triggered" as const, recentShownCount: POLICY_LIMITS.dedupeWindowLimit,
+  }).allow, true);
+  // 但"设备明确不在"仍然挡：气泡进收件箱，人回来照样看得见。
+  assert.equal(evaluateProactivePolicy({ ...base(), kind: "triggered" as const, availability: "dnd" }).allow, false);
+  assert.equal(evaluateProactivePolicy({ ...base(), kind: "triggered" as const, availability: "offline" }).allow, false);
+  assert.equal(evaluateProactivePolicy({ ...base(), kind: "triggered" as const, expired: true }).reasonCode, "expired");
+  // 缺省必须是 routine：漏传 kind 不能把频率闸整个绕过去。
+  assert.equal(evaluateProactivePolicy({ ...base(), msSinceLastShown: 1000 }).reasonCode, "cooldown");
+  // 触发式的独立入口与上面完全同源（不是第二份判定）。
+  assert.deepEqual(evaluateTriggeredPush({ availability: "online", expired: false }), { allow: true, reasonCode: "allowed" });
+  assert.equal(evaluateTriggeredPush({ availability: "dnd", expired: false }).reasonCode, "dnd");
+  assert.equal(evaluateTriggeredPush({ availability: "online", expired: true }).reasonCode, "expired");
+});
+
+test("间隔判定与策略同源（念头管线只调这一条）", () => {
+  assert.equal(routineCadenceBlocked({ interventionLevel: "active", msSinceLastCue: null }), false);
+  assert.equal(routineCadenceBlocked({ interventionLevel: "active", msSinceLastCue: 29 * 60 * 1000 }), true);
+  assert.equal(routineCadenceBlocked({ interventionLevel: "active", msSinceLastCue: 31 * 60 * 1000 }), false);
+  assert.equal(routineCadenceBlocked({ interventionLevel: "quiet", msSinceLastCue: 2 * 60 * 60 * 1000 }), true);
 });
 
 test("dedupe 冷却窗口与窗口内次数上限", () => {
@@ -66,25 +119,7 @@ test("dedupe 冷却窗口与窗口内次数上限", () => {
     "cooldown",
   );
   assert.equal(
-    evaluateProactivePolicy({ ...base(), msSinceLastShown: POLICY_LIMITS.moderateCooldownMs }).allow,
-    true,
-  );
-  // active 间隔更短（15 分钟）：10 分钟前展示在 active 下仍处于冷却。
-  assert.equal(
-    evaluateProactivePolicy({
-      ...base(),
-      interventionLevel: "active",
-      msSinceLastShown: 10 * 60 * 1000,
-    }).reasonCode,
-    "cooldown",
-  );
-  // active 满间隔后允许。
-  assert.equal(
-    evaluateProactivePolicy({
-      ...base(),
-      interventionLevel: "active",
-      msSinceLastShown: POLICY_LIMITS.activeCooldownMs,
-    }).allow,
+    evaluateProactivePolicy({ ...base(), msSinceLastShown: PROACTIVE_CADENCE_MS.moderate }).allow,
     true,
   );
   assert.equal(
@@ -115,21 +150,6 @@ test("反馈判定：dismiss 不足阈值或窗口为空 → 不沉默", () => {
 test("反馈判定：只看传入的已送达状态，未读状态由调用方过滤", () => {
   // 传入 queued/delivered 不是本函数的合同——调用方 SQL 只取 displayed/acted/dismissed。
   assert.equal(evaluateDismissalFeedback(["queued", "delivered", "dismissed"]).suppress, false);
-});
-
-test("安静档是「少而轻」，不是结构上永不为零（抱怨 #8）", () => {
-  // quietDailyLimit 曾是 0：设成安静之后，主动提醒在结构上永远不会发生，
-  // 而界面上并没有"关闭主动提醒"这个开关，只有一档写着"安静"。
-  assert.equal(POLICY_LIMITS.quietDailyLimit, 1);
-  const first = evaluateProactivePolicy({ ...base(), interventionLevel: "quiet" });
-  assert.deepEqual([first.allow, first.reasonCode], [true, "allowed"]);
-  const second = evaluateProactivePolicy({ ...base(), interventionLevel: "quiet", dailyShownTotal: 1 });
-  assert.deepEqual([second.allow, second.reasonCode], [false, "daily_budget_exhausted"]);
-  // 三档额度都从同一个映射取（worker 的念头管线也走它）。
-  assert.deepEqual(
-    (["quiet", "moderate", "active"] as const).map(proactiveDailyLimit),
-    [1, 3, 6],
-  );
 });
 
 test("静默时段：跨午夜环绕、24:00 归一、坏配置一律不打扰", () => {

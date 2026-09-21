@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   companionConversationV1Schema,
+  companionContentBlockV1Schema,
   companionMessageV1Schema,
   companionTurnRunV1Schema,
   companionPageContextV1Schema,
@@ -686,4 +687,63 @@ test("划选投喂：turn 请求可携带 selection（user_selected），仍强�
     selection: { text: "一段话", sharing: "page_registered" },
   });
   assert.equal(wrongSharing.success, false);
+});
+
+test("nav 块：她带我去哪儿，落在消息里而不是消息外面", () => {
+  assert.equal(companionContentBlockV1Schema.safeParse({
+    type: "nav",
+    label: "打开《消防疏散》",
+    route: { kind: "note", noteId: UUID },
+  }).success, true);
+  // 落点仍按主进程白名单——不是"任何 kind + 任何 uuid"都能拼出一个可跳的东西
+  assert.equal(companionContentBlockV1Schema.safeParse({
+    type: "nav",
+    label: "x",
+    route: { kind: "user_settings" },
+  }).success, false);
+  assert.equal(companionContentBlockV1Schema.safeParse({
+    type: "nav",
+    label: "y".repeat(81),
+    route: { kind: "home" },
+  }).success, false);
+  // 一条助手消息 = 正文 + 落点，顺序即渲染顺序
+  const message = companionMessageV1Schema.safeParse({
+    version: 1,
+    id: UUID,
+    workspaceId: UUID,
+    conversationId: UUID2,
+    seq: 3,
+    role: "assistant",
+    kind: "text",
+    blocks: [
+      { type: "text", text: "带你去看那篇笔记。" },
+      { type: "nav", label: "打开《消防疏散》", route: { kind: "note", noteId: UUID } },
+    ],
+    runId: UUID,
+    clientMessageId: null,
+    contentSha256: SHA256,
+    createdAt: TIME,
+    editedAt: null,
+  });
+  assert.equal(message.success, true);
+});
+
+test("quote 块：她读到的原文由服务端带出，长度与字段都收紧", () => {
+  assert.equal(companionContentBlockV1Schema.safeParse({
+    type: "quote",
+    label: "《消防疏散与灭火器使用》· 3 天前",
+    text: "多层住宅疏散：先关燃气总阀，再带上门口的应急包。",
+  }).success, true);
+  assert.equal(companionContentBlockV1Schema.safeParse({
+    type: "quote",
+    label: "《一篇很长的笔记》",
+    text: "字".repeat(2_001),
+  }).success, false);
+  // 原文不是指令：块里没有可执行字段（route/tool 之类）
+  assert.equal(companionContentBlockV1Schema.safeParse({
+    type: "quote",
+    label: "《X》",
+    text: "正文",
+    route: { kind: "home" },
+  }).success, false);
 });
