@@ -80,7 +80,7 @@ export const cardGenerationStageCount = 4;
 export function cardGenerationProgressView(
   status: string,
   progress: CardGenerationProgressV1 | null | undefined,
-): { stage: number; percent: number; detail: string | null } | null {
+): { stage: number; percent: number; detail: string | null; inFlight: boolean; eyebrow: string } | null {
   const stage = cardGenerationStage(status);
   if (stage === null) return null;
 
@@ -102,7 +102,18 @@ export function cardGenerationProgressView(
   }
 
   const percent = Math.min(100, Math.round(((stage + fraction) / cardGenerationStageCount) * 100));
-  return { stage, percent, detail };
+  /**
+   * 在途时不给"第 N 步"和百分比：整条生成管道跑在一个事务里，`run.status` 与候选行
+   * 都到提交那一刻才对外可见（2026-09-21 两次真跑实测都是 planning → 终态一步跨完，
+   * 且 `authored` 在中途恒为 0）。所以任何进行中的刻度都只会从约 12% 直接跳到 100%。
+   * 与其亮一个不会动的进度，不如说清楚"写完一批一次给齐"。
+   * 真要做到逐张可见，得把落库挪出那个事务并换掉防双付的锁——不是改文案能解决的。
+   */
+  const inFlight = status === "planning" || status === "authoring" || status === "checking";
+  const eyebrow = inFlight
+    ? "正在生成 · 写完一批一次给齐"
+    : `第 ${Math.min(stage + 1, cardGenerationStageCount)} 步 / 共 ${cardGenerationStageCount} 步`;
+  return { stage, percent, detail, inFlight, eyebrow };
 }
 
 /** The manual-resync receipt: re-reading status must say what re-reading found. */

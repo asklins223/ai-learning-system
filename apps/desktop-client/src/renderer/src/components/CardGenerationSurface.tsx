@@ -797,7 +797,7 @@ export function CardGenerationSurface() {
               <div className="card-generation-progress__summary">
                 <div className="card-generation-progress__current">
                   <span className="card-generation-progress__eyebrow">
-                    当前步骤 · 第 {progressStep} 步 / 共 {cardGenerationStageCount} 步
+                    {progressView.eyebrow}
                   </span>
                   <strong className="card-generation-progress__name">
                     {progressInFlight
@@ -806,11 +806,14 @@ export function CardGenerationSurface() {
                     {cardGenerationStatusLabel(run.status)}
                   </strong>
                   <span className="card-generation-progress__meta">
-                    已完成 {progressDone} 步 · 待进行 {progressTodo} 步
+                    {progressView.inFlight
+                      ? "这一步的中间计数要等这一批写完才读得到"
+                      : `已完成 ${progressDone} 步 · 待进行 ${progressTodo} 步`}
                     {progressView.detail ? ` · ${progressView.detail}` : ""} · 最后更新 {formatRelative(run.updatedAt)}
                   </span>
                 </div>
                 <div
+                  hidden={progressView.inFlight}
                   className="card-generation-progress__gauge"
                   role="progressbar"
                   aria-label="整体进度"

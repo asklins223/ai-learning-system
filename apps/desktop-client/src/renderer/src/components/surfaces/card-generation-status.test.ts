@@ -126,7 +126,9 @@ describe("card-generation-status", () => {
   });
 
   it("进度只在服务端确认的阶段上说话", () => {
-    expect(cardGenerationProgressView("queued", null)).toEqual({ stage: 0, percent: 0, detail: null });
+    expect(cardGenerationProgressView("queued", null)).toEqual({
+      stage: 0, percent: 0, detail: null, inFlight: false, eyebrow: "第 1 步 / 共 4 步",
+    });
     expect(cardGenerationProgressView("review_ready", null)?.percent).toBe(75);
     expect(cardGenerationProgressView("activated", null)?.percent).toBe(100);
     // needs_attention / failed / stale 等走不到"第几步"的结论，进度块整体不渲染。
@@ -165,5 +167,26 @@ describe("card-generation-status", () => {
     expect(cardGenerationSyncReportText("checking", true)).toContain("这次生成到了「正在做质量检查」");
     // 状态没变时不能说成"已更新"——那正是用户抱怨"点了没用"的来源。
     expect(cardGenerationSyncReportText("planning", false)).not.toContain("这次生成到了");
+  });
+
+  it("在途时口径是「写完一批一次给齐」，不报第几步", () => {
+    // 2026-09-21 两次真跑实测：planning → 终态一步跨完，中途 authored 恒为 0，
+    // 因为整条管道在一个事务里，状态与候选都到提交才可见。
+    for (const status of ["planning", "authoring", "checking"]) {
+      const view = cardGenerationProgressView(status, {
+        plannedCards: 4, authored: 0, gatePassed: 0, gateFailed: 0,
+      });
+      expect(view?.inFlight, status).toBe(true);
+      expect(view?.eyebrow, status).toBe("正在生成 · 写完一批一次给齐");
+      expect(view?.eyebrow, status).not.toContain("步");
+    }
+  });
+
+  it("到终态才报第几步，让轨道停在能说清的位置", () => {
+    const done = cardGenerationProgressView("review_ready", {
+      plannedCards: 4, authored: 4, gatePassed: 4, gateFailed: 0,
+    });
+    expect(done?.inFlight).toBe(false);
+    expect(done?.eyebrow).toContain("共 4 步");
   });
 });
