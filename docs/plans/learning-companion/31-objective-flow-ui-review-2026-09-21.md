@@ -14,7 +14,7 @@
 ## 1. 怎么量的
 
 - **环境**：`apps/desktop-client` dev（`electron-vite dev -w --remoteDebuggingPort 9222`），CDP `:9222`，视口 1440×810 @dpr 2。
-- **样本**：工作区 214 条 active 目标，列表实际载入 16 条。真走完的三次作答见 §2.1。
+- **样本**：本工作区 16 条 active 目标（全部都有 active 卡），列表实际载入 16 条。真走完的三次作答见 §2.1。
 - **脚本**（`apps/desktop-client/scripts/`，gitignore 内，本轮保留当验收工具）：
   `tmp-objflow-lib.mjs`（连 CDP + 几何树 + 截图）、`tmp-objflow-s1-list` / `s2-detail` / `s3-run` / `s7-ordering` / `s9-choice` / `s11-hint` / `s13-formal` / `s16-density` / `s17-density2`（逐屏）、`tmp-objflow-s14-measure.mjs`（结算页溢出与遮挡）。
 - **截图与几何落在** `apps/desktop-client/.objflow-caps/`（gitignore 内）。
@@ -98,11 +98,11 @@
 - **实量**：`.v3-goal-list` = `[500,223,637,507]`，`scrollHeight 1520` vs `clientHeight 507`——16 行 93px 高的卡装在一个 507px 的内层滚动列里，行与行之间是 1px 横线，视觉上像一整张连续的纸，**看不出这里能滚**。
 - **方案**：要么让列表随页面滚（去掉内层滚动），要么给列表一个明确的可视窗口（半截行 + 顶部吸附计数 + 底部「还有 N 条」常驻）。二者都行，别保持现在这种「连续纸 + 隐形滚动」。
 
-### P12 搜索框说「搜索已载入目标」，而标题说「全部理解目标」
+### P12 ~~搜索框说「搜索已载入目标」，而标题说「全部理解目标」~~ **已撤回，见 §14 自我更正第 4 条**
 
-- **实量**：标题 `全部理解目标`，副行 `已载入 16 / 16 条`，但服务器 active 目标实际 **214 条**（`learning_objectives_v2` 计数）；placeholder 是 `搜索已载入目标`，输入框只有 190×36。
-- **为什么算问题**：同一块纸的标题承诺「全部」，控件承认「只搜已载入」。诚实的那半被藏成 placeholder。
-- **方案**：把「载入更多」做成显式动作（滚动到底自动续读 + 顶部计数改成「已在看 16 / 共 214」），或者把标题改成「在看的理解目标」。**别让标题撒谎。**
+- **实量**：标题 `全部理解目标`，副行 `已载入 16 / 16 条`，placeholder `搜索已载入目标`，输入框只有 190×36。
+- **我当时补的那句"但服务器 active 目标实际 214 条"是错的**：那是用超级用户 `ailearn` 跨**全部工作区**裸 count 出来的。按这个工作区（`97550966-…`）范围查，`lifecycle='active'` 就是 **16 条**，`GET /v2/learning-objectives?lifecycle=active` 也返回 `total: 16, nextCursor: null`。**标题没有撒谎，这条缺陷不存在。**
+- 撤回结论，但留一条真的：**"已载入 16 / 16" 这种写法在 nextCursor 为 null 时是冗余的**——它让人以为还有一个更大的池子没载入。归到 B8 的文案微调，不再是独立缺陷。
 
 ## 4. 详情页（page-11，`WorkspaceLibrarySurface.tsx:458-637`）
 
@@ -291,7 +291,7 @@
 |---|---|---|
 | **B0** | 结算页溢出 + 出口槽 + 印章裁切（P5/P27） | ✅ 已上线，见 §14。**口径改过**：原写「report 不再 `overflow-y:auto`」是错的——纸面高度固定时总得有一列可滚，病在出口落在那一列里。改成三条可判定的：主按钮下沿离纸面下沿 ≥8px、出口不在任何 `scrollHeight>clientHeight` 的祖先内、`__seal` `scrollHeight <= clientHeight` |
 | **B1** | 结算页自相矛盾（P1/P6/P30） | ✅ 已上线（除「接下来」便签里的真按钮，见下），见 §14。口径：同一次 `covered` 判定下「还需补上」不出现该 facet；「这次说清 N 条」数判定行；`skipped`/`declared_unable` 时 DOM 里**没有** `__seal` 节点。**「接下来」便签的可点动作没做**——它需要在结算页起一次新 Run，而 start 命令只在目标详情的 `primaryAction` 里，属于新功能不是修复，单独留出来 |
-| **B2** | `data-outcome` 真的驱动视觉 + 一次性压印（P2/P32） | 🟡 **代码与守卫已上线，实机像素对比待补**（环境把客户端打回门禁，见 §14）。已满足：`[data-outcome]` 在 CSS 里有 8 条规则分三档、压印只动 `transform`/`opacity`、`data-motion-mode="off"` 与 `prefers-reduced-motion` 都关。未满足：三种 outcome 的截图差异——需要一条真跑到 `demonstrated` 的正式作答 |
+| **B2** | `data-outcome` 真的驱动视觉 + 一次性压印（P2/P32） | 🟡 **代码与守卫已上线；实机三档差异未完成**，原因见 §14 的 B2 一节：run 卡在 checkpoint，`POST /learning-runs/:runId/actions/v2` 撞 `learning_tasks_run_sequence_unique` 报 500，走不到 `demonstrated`。已满足：`[data-outcome]` 8 条规则分三档、压印只动 `transform`/`opacity`、`data-motion-mode="off"` 与 `prefers-reduced-motion` 都关、`main.tsx` 加载顺序有守卫 |
 | **B3** | 「下次到期 刚刚」（P4） | ✅ 已上线，见 §14。没有新增 `formatDue`——`objective-state-copy.ts:114` 的 `formatObjectiveDay` 已经是「今天/昨天/明天/N 天后/M月D日」且被列表行在用，直接复用；另在 `surface-data.test.tsx` 钉住 `formatRelative` 的「只量过去」契约 |
 | **B4** | 字号地板（P7/P13/P21/P33） | ✅ 全部完成，见 §14 与 §14 的 B4 补充。列表/详情 <11px 段数 49→**0**、53→**0**；提示惩罚说明 7.5px→**12px** 且面板搬进题面区；紧凑档 `.button` 6px→**11px**、`.meta` 5px→**9px** |
 | **B5** | 空带（P8/P28；P14 已撤回） | ✅ 已上线：列表最大连续空白 251px→**24px**，焦点卡块间 281px→**35px**，结算绿栏块间 374px→**36px**。口径改成"块间间隙 ≤64px、尾部留白不判"，见 §14 自我更正第 3 条 |
@@ -497,11 +497,13 @@ P25：语音转写框此前只有 `width/height/resize`，边框与底色全是 
 
 病根同一个：`.v3-goal-pulse` 与结算的 `dl` 都写着 `margin: auto 0 0`，把底部元素钉死、中间劈出一个洞。改成跟着内容走 + 固定间距，卡片 `align-items: start` 让它按内容长高（右侧账本单独 `align-self: stretch`，它有自己的滚动列表，缩起来会在下面留更大的洞）。
 
-### 三处自我更正（都是量出来才发现原文写错了）
+### 四处自我更正（都是复核时才发现原文写错了）
 
 1. **P8 的「焦点卡横向溢出 65px 被裁」不成立。** `scrollWidth 467 > clientWidth 402` 是真的，但逐个元素量矩形后发现**没有任何子元素越过卡片右边界**——多出来的宽度来自装饰伪元素 `.v3-goal-focus::after`（`position:absolute; right:-40px; bottom:-55px; width:155px`）。纵向那 87px 同理：最后一个真实子元素（来源行）底边还在卡片内 22px 处。`scrollWidth/scrollHeight` 会把越界的伪元素算进去，**不能当"内容被裁"的证据**。
 2. **P14 的「四屏左边界跳 313px」不是 bug，是设计。** `approved-surfaces.css:139-142` 让 objective-detail / source-detail / graph 三页共用 `left:365; right:88`（列表是 `left:88; right:245`），而且 `:135` 写着 `transition: left 560ms, right 560ms`——这是一次**有动画的空间位移**，不是瞬跳。我原文还说"进出场动效反而放大这个跳"，恰好反了。B5 的"四屏左边界一致（x 差 ≤2px）"这条口径随本条一并作废。
 3. **B5 的空洞口径要分两种。** 第一版写"绿栏空带 ≤80px"，改完后实机报 301px，看着像没修好——拆开才发现 301px 全在**最后一块内容之下**，块与块之间最大只有 36px。满高侧栏下面留白是纸的本性（详情页那张纸的底部留白同理，不该算缺陷），**要修的只有"被 `margin:auto` 劈成上下两段、中间悬空"**。口径改成：块间间隙 ≤64px，尾部留白单列不判。
+4. **P12 整条作废，起因是我查库没带工作区范围。** 原文写「标题说全部、服务器却有 214 条 active 目标」。那个 214 是用超级用户 `ailearn` 跨**全部工作区**裸 count 的——开发库里跑着别的会话的验收工作区。按本工作区（`97550966-…`）范围重查：`lifecycle='active'` 就是 **16 条**，`GET /v2/learning-objectives` 也返回 `total:16, nextCursor:null`。**标题没有撒谎。** 这条从缺陷清单里撤下，只在 §1 留一条"已载入 16/16 在 nextCursor 为 null 时是冗余写法"的文案微调。
+   **同时把本文其余几个库数按同范围重查了一遍**：`practice_item` ordering 2 / single_choice 2 / true_false 0 / matching 0，`learning_runs` 合计 90、其中 `demonstrated` 8、`partial` 21、`practice_completed` 10——**加范围后数字与原文一致**，所以 §11「配对题与判断题实机走不到」和 B2「demonstrated 可达」两条结论仍然成立。教训不是"数字错了"，而是**跨工作区裸 count 与 RLS 范围内的数字在读数上同形**，凡是写"服务器有 N 条"都必须带上 workspace_id 再查一次。
 
 回归：`src/main` + `components/surfaces` 全量 **58 文件 585 条测试全绿**，类型干净。
 
@@ -521,3 +523,22 @@ P25：语音转写框此前只有 `width/height/resize`，边框与底色全是 
 **P33 量到了。** 原文写"没有改用户窗口尺寸所以没量"，这次用 `page.setViewportSize(720×405)` 做视口仿真（媒体查询照样响应，且不动窗口本身）：`.button` 从 **6px/20px 高抬到 11px/30px**、`.small/.meta` 从 **5px 抬到 9px**、确认框正文 5px→10px。这三条此前是 `hud-pages.css:161` 在 `@media(max-width:760px)` 里定的，HUD 段的紧凑覆盖从没把它们抬回去，而同一段落里「更多选择」的 `summary` 却单独抬到了 9px——同一个 dock 里两种地板。
 
 回归：**58 文件 587 条测试全绿**，类型干净。
+
+### B2 的 demonstrated 档没能实机验到 —— 撞上一条服务端缺陷（2026-09-22）
+
+为了量"答对时那张纸真的不一样"，我挑了本工作区历史上判出过 6 次 `demonstrated` 的 `Earth's orbital period` 走正式文本作答。结果 run 停在 checkpoint 出不来，界面上自己写着：
+
+> 这次没有形成可记录的结论 | 题目已经交上去了，但这一次判不出结论。你可以继续补充证据，或者结束这一轮——结束不会改变复习安排。 | **学习服务内部出了点问题，已记录；请稍后重试。**
+
+**真实报错**（postgres 日志，api 侧只留 `category: database` 已脱敏）：
+
+```
+ERROR: duplicate key value violates unique constraint "learning_tasks_run_sequence_unique"
+route: /learning-runs/:runId/actions/v2   statusCode: 500   ×3（17:51:16 / 17:51:20 / 17:51:23）
+```
+
+**形状**（`learning_tasks`，run `022faa29`）：`sequence 1 = explain / answered`、`sequence 2 = repair / answered`（17:51:09 建、17:51:13 答完），**而 run 的 `phase` 仍是 `checkpoint`**。第一次点「继续补充证据」把 seq 2 建出来并答完了，但 run 没有推进；我随后又点三次，每次都按"下一个 sequence = 2"再插一遍 → 撞唯一键 → 500。本工作区现在有 **4 条 run 卡在这个状态**。
+
+**排除我自己**：唯一约束来自 `0116_learning_runs.sql`（老迁移，不是当晚 `1e4d2e5a` 补进来的那批）；我这轮只改过 `run-processing-tick.ts` 里 `gapFacets` 的算法（不插 task、不碰 actions 路由）。**这条与本文档的批次无关，属 `objective-card-items-2026-09-21.md` 那条线**——它里面正写着"repair 尾段（revision insert / hash recompute / recheck）仍未被真实批次走到"，这大概率就是那个尾段第一次被真走到时露出来的failure。**我只报不修。**
+
+**因此 B2 的验收状态**：`[data-outcome]` 的 8 条规则、三档配色、压印只挂 `data-acknowledgement`、`off` 档与 `prefers-reduced-motion` 关闭——都由 `objective-flow-css-guard.test.ts` 静态钉住并做过变异检验；**"三种 outcome 截图差异 ≥ 两处"这条实机口径未完成**，要等服务端这条 checkpoint 推进的缺陷修好。
