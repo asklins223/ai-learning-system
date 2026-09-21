@@ -1909,7 +1909,8 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   const returnTarget = contractTarget ?? snapshot.returnTargetV2;
   const exitRoute = routeForReturnTarget(returnTarget);
   const exitDestinationLabel = exitRoute.kind === "review.queue" ? "回到复习队列" : "返回书房";
-  const resultReturnLabel = returnContract?.status === "projection_pending" ? `同步中 · ${exitDestinationLabel}` : exitDestinationLabel;
+  // 「同步中」是内部词：用户要知道的不是数据在同步，而是回去之后落点还没定。
+  const resultReturnLabel = returnContract?.status === "projection_pending" ? `确认中 · ${exitDestinationLabel}` : exitDestinationLabel;
   const recoveryHeading = recovery === "draft" ? "草稿版本需要同步" : "上一动作结果需要确认";
   const processingHeadline = processingPhase === "committing"
     ? "正在记录可信学习结果"
@@ -2071,7 +2072,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
                 {result?.outcome === "declared_unable"
                   ? "说不会不扣任何东西：这条已排到最近的复习。回研究册看懂之后再来一次，就当第一次见。"
                   : returnContract?.status === "projection_pending"
-                    ? "复习记录正在同步；返回后会继续刷新真实进度。"
+                    ? "复习安排还在确认，回去之后会自己刷新到最新。"
                     : returnContract?.status === "ready"
                       ? "复习记录已经就绪，可以沿着当前路径继续。"
                       : "回去之后会接着你真正要练的那一条。"}
@@ -2159,7 +2160,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
                 <p className="small">
                   {resultQueryBudgetExhausted
                     ? "结果还在后台算，算好会自动回到这一页；这段时间不用再交一次，也不会被算成两次。"
-                    : "你可以暂时离开；客户端只会在收到真实结果后显示复习影响。"}
+                    : "可以先离开，不用等在这儿；结果没回来之前，这里不会先给结论。"}
                 </p>
                 {processingFailure ? <p className="small" role="alert">{processingFailure.message}</p> : null}
               </div>
@@ -2291,11 +2292,14 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
       {pendingAction ? (
         <div className="run-confirmation-backdrop">
           <div className="run-confirmation" role="alertdialog" aria-modal="true" aria-labelledby="learning-run-confirmation-title" aria-describedby="learning-run-confirmation-description" onKeyDown={handleConfirmationKeyDown}>
-            <h2 id="learning-run-confirmation-title" ref={confirmationHeadingRef} tabIndex={-1}>确认这项学习旅程操作</h2>
-            <p id="learning-run-confirmation-description">确定要{actionLabel(pendingAction)}吗？当前已输入内容会按服务端合同处理。</p>
+            <h2 id="learning-run-confirmation-title" ref={confirmationHeadingRef} tabIndex={-1}>要现在停下来吗？</h2>
+            {/* 只有 skip_run 与 end 需要确认（learning-run-v2-contracts.ts:58/69），两者都是
+                「离开这次作答」，所以「草稿替你留着」对它们都成立。将来若加了别的可确认
+                动作，这句要重新核——它承诺的是数据去向，不是氛围文案。 */}
+            <p id="learning-run-confirmation-description">已经写下的内容会替你留着，回来可以从这里接着做。</p>
             <div className="actions">
-              <button type="button" className="button primary" disabled={resyncing} onClick={() => void confirmPendingAction()}>确认</button>
-              <button type="button" className="button" onClick={closeConfirmation}>取消</button>
+              <button type="button" className="button primary" disabled={resyncing} onClick={() => void confirmPendingAction()}>先停下来</button>
+              <button type="button" className="button" onClick={closeConfirmation}>我继续做</button>
             </div>
           </div>
         </div>

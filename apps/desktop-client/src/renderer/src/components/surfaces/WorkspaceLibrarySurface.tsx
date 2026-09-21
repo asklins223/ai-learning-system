@@ -627,7 +627,7 @@ export function ObjectiveDetailSurface() {
             </div>
             <footer className="v3-lineage-boundary">
               <strong>这里会展示什么</strong>
-              <p>这里仅呈现来源关系与学习状态；标准答案、评分规则和完整证据原文不会进入桌面渲染边界。</p>
+              <p>这里只讲来源关系和学习状态；标准答案、评分依据和你引用的原文段落，不会出现在这台设备上。</p>
             </footer>
           </aside>
         </div>

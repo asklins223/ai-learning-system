@@ -46,7 +46,9 @@ export function HudReturn({ label, onReturn }: { readonly label: string; readonl
       type="button"
       className="return-home"
       onClick={onReturn}
-      aria-label={`返回${label}`}
+      // 传进来的 label 本身就带「返回」（返回书房 / 返回星图 / 返回笔记库…），
+      // 这里再加一次前缀，读屏器念出来就是「返回返回书房」（31 号文档 P26）。
+      aria-label={label}
       data-surface-initial-focus="true"
     >
       <i aria-hidden="true"><ArrowLeft size={16} strokeWidth={2.2} /></i>
