@@ -1277,15 +1277,20 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
 
   const stopNoteDocStreams = (): void => {
     for (const noteId of [...noteDocStreams.keys()]) stopNoteDocStream(noteId);
+    // 本机那份文档与"还没送出去的增量"一起作废：留着的话，下一次写会把上一个空间的
+    // 正文差分按到这篇头上——那是跨空间的内容缝合，比丢一次编辑严重得多。
+    gateway.dropNoteDocLocalSessions();
   };
 
   const ensureNoteDocStream = (noteId: string): void => {
     if (!noteDocStreamAllowed() || !hasNoteDocSubscription(noteId) || noteDocStreams.has(noteId)) return;
     const streamWorkspaceEpoch = activeWorkspaceEpoch;
-    void gateway.watchNoteDocument(noteId, ({ noteId: _framedByGateway, ...event }) => {
+    // 连上了还压着一批离线增量，界面上就是"已经同步"的假象：先把欠的交清再建连接。
+    // 交不掉（还是没网）不挡建连——那条链自己也会失败，而队列仍然原样留着。
+    void gateway.flushNoteDocPending(noteId).catch(() => undefined).then(() => gateway.watchNoteDocument(noteId, ({ noteId: _framedByGateway, ...event }) => {
       if (streamWorkspaceEpoch !== activeWorkspaceEpoch) return;
       emit("noteDoc", { kind: "note_doc_event", noteId, event }, activeWorkspaceEpoch);
-    }).then((handle) => {
+    })).then((handle) => {
       // 建连期间可能已经退订、切了空间或改了角色——那条连接不属于这里了。
       if (!hasNoteDocSubscription(noteId) || !noteDocStreamAllowed() || streamWorkspaceEpoch !== activeWorkspaceEpoch) {
         handle.stop();
@@ -2432,17 +2437,15 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
         ? { via: "unchanged", revision: null, savedAt: new Date().toISOString() }
         : { via: "stream", revision: null, savedAt: new Date().toISOString() };
     }
+    // 出口由网关如实报：uploaded（服务端已落盘）/ unchanged（这次没改动）/
+    // queued（没网，已攒在本机文档里）。
     const receipt = await gateway.syncNoteDocBlocks(
       input.noteId,
       input.blocks ?? null,
       input.title,
       input.meta.requestId,
     );
-    return {
-      via: receipt.uploaded ? "uploaded" : "unchanged",
-      revision: receipt.revision,
-      savedAt: receipt.savedAt,
-    };
+    return { via: receipt.via, revision: receipt.revision, savedAt: receipt.savedAt };
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, noteDocWriteResultV1Schema);
 
   installHandler(DESKTOP_IPC_CHANNELS.noteDocPresence, noteDocPresenceInputSchema, options, (_event, _window, input) => {

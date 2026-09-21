@@ -282,7 +282,7 @@ export function NotebookSurface() {
      * 这一次走的是长连接还是 HTTP。它不是装饰：流式那条只说明"本机已并进文档"，
      * 服务端落盘还要等 Hocuspocus 的 debounce，保存行不能说成"已保存"。
      */
-    via: "stream" | "uploaded" | "unchanged";
+    via: "stream" | "uploaded" | "unchanged" | "queued";
   } | null>(null);
   const [saveFailure, setSaveFailure] = useState<string | null>(null);
   const [startingGeneration, setStartingGeneration] = useState(false);
@@ -750,7 +750,9 @@ export function NotebookSurface() {
           ? // 流式那条只能说"已写入、正在同步"：服务端落盘还要等 Hocuspocus 的空闲
             // 刷写。把本机接受说成已保存，就是这次审查里"看起来存下来了"那一类错觉。
             `● ${receipt.isAutosave
-              ? receipt.via === "stream" ? "已写入，正在同步" : "已自动保存"
+              ? receipt.via === "queued"
+                ? "没网，已记在本机，联网后自动交上去"
+                : receipt.via === "stream" ? "已写入，正在同步" : "已自动保存"
               : "已提交并确认"} · ${formatClock(receipt.savedAt)}`
           : "● 已经存好，和服务器上的版本一致";
 

@@ -63,6 +63,12 @@ export type NoteDocState = {
   dispose: () => void;
 };
 
+/** 把几条本机增量合成一条（重发时一次往返交完；Yjs 的合并是纯状态运算）。 */
+export function mergeNoteDocUpdates(updates: readonly string[]): string {
+  const bytes = updates.map((update) => Buffer.from(update, "base64"));
+  return Buffer.from(Y.mergeUpdates(bytes)).toString("base64");
+}
+
 export function createNoteDocState(): NoteDocState {
   const doc = new Y.Doc();
   doc.getMap("meta");

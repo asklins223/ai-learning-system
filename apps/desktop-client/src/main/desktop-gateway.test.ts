@@ -1,4 +1,12 @@
 import { createHmac } from "node:crypto";
+import * as Y from "yjs";
+import {
+  emptyNoteDoc,
+  projectNoteBlocks,
+  setNoteTitle,
+  snapshotOf,
+  syncNoteBlocksForEditor,
+} from "./note-doc-blocks";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DESKTOP_API_SERVICE_ID,
@@ -1929,5 +1937,151 @@ describe("workspace export", () => {
     await gateway.connect();
     await expect(gateway.fetchWorkspaceExport())
       .rejects.toMatchObject({ code: "forbidden" } satisfies Partial<DesktopGatewayFailure>);
+  });
+});
+
+describe("DesktopGateway · 笔记正文的离线提交（批次 4.4）", () => {
+  const NOTE_ID = "77777777-7777-4777-8777-777777777777";
+  const docStateUrl = `/v2/notes/${NOTE_ID}/doc-state`;
+  const docUpdateUrl = `/v2/notes/${NOTE_ID}/doc-update`;
+
+  function baseUpdate(): string {
+    const doc = emptyNoteDoc();
+    syncNoteBlocksForEditor(doc, [
+      { type: "heading", content: "标题" },
+      { type: "paragraph", content: "第一段" },
+    ]);
+    setNoteTitle(doc, "标题", "auto");
+    return Buffer.from(snapshotOf(doc)).toString("base64");
+  }
+
+  /**
+   * 把上送的那条增量应用到**同一份**起点上，读出正文——断言的是内容，不是字节。
+   *
+   * 起点必须逐字节复用：`baseUpdate()` 每调一次就是一份新文档，块条目的 struct id
+   * 完全不同，把增量应用到"另一份同样的正文"上会因为找不到被改的那些条目而静默无操作
+   * ——症状看着像"增量丢了"，其实是断言自己造了两个事实源。
+   */
+  function contentsAfter(base: string, updateBase64: string): string[] {
+    const doc = emptyNoteDoc();
+    Y.applyUpdate(doc, new Uint8Array(Buffer.from(base, "base64")));
+    Y.applyUpdate(doc, new Uint8Array(Buffer.from(updateBase64, "base64")));
+    const contents = projectNoteBlocks(doc).map((block) => block.content);
+    doc.destroy();
+    return contents;
+  }
+
+  function harness(options: { offline?: boolean; failStatus?: number } = {}) {
+    const base = baseUpdate();
+    const uploaded: string[] = [];
+    let docStateReads = 0;
+    let offline = options.offline ?? false;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/challenge")) return trustResponse(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      if (url.endsWith("/health")) return healthResponse();
+      if (offline) throw new TypeError("network down");
+      if (url.endsWith(docStateUrl)) {
+        docStateReads += 1;
+        return new Response(JSON.stringify({
+          update: base,
+          revision: 3,
+          backfilled: false,
+          savedAt: "2026-09-21T00:00:00.000Z",
+        }), { status: 200 });
+      }
+      if (url.endsWith(docUpdateUrl)) {
+        if (options.failStatus) {
+          return new Response(JSON.stringify({ error: "forbidden" }), { status: options.failStatus });
+        }
+        uploaded.push(JSON.parse(String(init?.body)).update as string);
+        return new Response(JSON.stringify({
+          revision: 4 + uploaded.length,
+          savedAt: "2026-09-21T00:00:09.000Z",
+        }), { status: 200 });
+      }
+      throw new Error(`unexpected URL ${url}`);
+    });
+    const gateway = new DesktopGateway(environment());
+    return { base, gateway, uploaded, docStateReads: () => docStateReads, goOffline: () => { offline = true; }, goOnline: () => { offline = false; } };
+  }
+
+  const blocksWith = (second: string) => [
+    { type: "heading", content: "标题" },
+    { type: "paragraph", content: second },
+  ];
+
+  it("没网时如实报 queued：不假装服务端收到了", async () => {
+    const { gateway, uploaded, goOffline } = harness();
+    await gateway.connect();
+    // 打开这篇时取过起点（离线编辑的前提），之后断网才只是"送不出去"。
+    await gateway.getNoteDocState(NOTE_ID);
+    goOffline();
+
+    await expect(gateway.syncNoteDocBlocks(NOTE_ID, blocksWith("第一段（离线改的）"), undefined)).resolves.toMatchObject({
+      via: "queued",
+    });
+    expect(uploaded).toEqual([]);
+  });
+
+  it("恢复后一次把攒下的都交掉，两条改动服务端都看得到", async () => {
+    const { base, gateway, uploaded, goOffline, goOnline } = harness();
+    await gateway.connect();
+    await gateway.getNoteDocState(NOTE_ID);
+    goOffline();
+    await gateway.syncNoteDocBlocks(NOTE_ID, blocksWith("甲加的这句"), undefined);
+    await gateway.syncNoteDocBlocks(NOTE_ID, blocksWith("甲加的这句，还有乙补的半句"), undefined);
+    expect(uploaded).toEqual([]);
+
+    goOnline();
+    const receipt = await gateway.syncNoteDocBlocks(NOTE_ID, blocksWith("甲加的这句，还有乙补的半句，加上丙的"), undefined);
+    expect(receipt.via).toBe("uploaded");
+    expect(uploaded).toHaveLength(1);
+    expect(contentsAfter(base, uploaded[0]!)).toEqual(["标题", "甲加的这句，还有乙补的半句，加上丙的"]);
+  });
+
+  it("非网络类失败不进队列——重发一百次也是同一个 403", async () => {
+    const { gateway, uploaded, docStateReads } = harness({ failStatus: 403 });
+    await gateway.connect();
+    await expect(gateway.syncNoteDocBlocks(NOTE_ID, blocksWith("不该被攒起来的一句"), undefined))
+      .rejects.toMatchObject({ code: "forbidden" });
+    expect(uploaded).toEqual([]);
+
+    // 队列是空的：下一次提交只带这一次的增量，不会把上次被拒的那条偷偷再塞进去。
+    const fresh = harness();
+    await fresh.gateway.connect();
+    await fresh.gateway.syncNoteDocBlocks(NOTE_ID, blocksWith("换一篇的增量"), undefined);
+    expect(fresh.uploaded).toHaveLength(1);
+    expect(docStateReads()).toBe(1);
+  });
+
+  it("切空间作废本机文档与队列：另一个空间的正文不能差分到这篇上", async () => {
+    const { gateway, uploaded, goOffline } = harness();
+    await gateway.connect();
+    await gateway.getNoteDocState(NOTE_ID);
+    goOffline();
+    await gateway.syncNoteDocBlocks(NOTE_ID, blocksWith("上一个空间的这句"), undefined);
+    expect(uploaded).toEqual([]);
+
+    gateway.dropNoteDocLocalSessions();
+
+    // 换到另一个空间（这里是新建的会话）：上一空间攒下的那句绝不能跟着过来。
+    const next = harness();
+    await next.gateway.connect();
+    await next.gateway.getNoteDocState(NOTE_ID);
+    const receipt = await next.gateway.syncNoteDocBlocks(NOTE_ID, blocksWith("这个空间的这句"), undefined);
+    expect(receipt.via).toBe("uploaded");
+    expect(next.uploaded).toHaveLength(1);
+    expect(contentsAfter(next.base, next.uploaded[0]!)).toEqual(["标题", "这个空间的这句"]);
+    // 旧的那台机器上：一次都没交出去，也没有在丢弃后被重新拾起。
+    expect(uploaded).toEqual([]);
+  });
+
+  it("只改标题的提交不动正文", async () => {
+    const { base, gateway, uploaded } = harness();
+    await gateway.connect();
+    const receipt = await gateway.syncNoteDocBlocks(NOTE_ID, null, { title: "改了名", titleSource: "manual" });
+    expect(receipt.via).toBe("uploaded");
+    expect(contentsAfter(base, uploaded[0]!)).toEqual(["标题", "第一段"]);
   });
 });

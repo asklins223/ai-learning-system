@@ -1433,7 +1433,9 @@ export type NoteDocUploadResultV1 = z.infer<typeof noteDocUploadResultV1Schema>;
  * 让界面知道"这次是哪条路"，才不会在断连时把两件事混成一个错误。
  */
 export const noteDocWriteResultV1Schema = z.strictObject({
-  via: z.enum(["stream", "uploaded", "unchanged"]),
+  // `queued` 必须是一个显式的值而不是"成功"：没网时改动只攒在本机文档里，
+  // 报成已提交就是这次审查里"看起来存下来了"那个错觉。
+  via: z.enum(["stream", "uploaded", "unchanged", "queued"]),
   /** 只有 uploaded 才有：服务端那份快照的 revision。 */
   revision: nonNegativeIntSchema.nullable(),
   /**

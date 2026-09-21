@@ -66,7 +66,8 @@ async function setup(session: { workspaceType: "personal" | "collaborative"; rol
   vi.resetModules();
   const { registerM1DesktopIpc } = await import("./desktop-ipc");
   const streamHandle = {
-    applyBlocks: vi.fn(() => null),
+    // 返回一条增量 = 这次提交确实改了文档（回执 `stream`）；返回 null 是"没改动"。
+    applyBlocks: vi.fn(() => "AA==" as string | null),
     view: vi.fn(() => ({ blocks: [], title: "", titleSource: "auto" })),
     setPresence: vi.fn(),
     stop: vi.fn(),
@@ -83,7 +84,7 @@ async function setup(session: { workspaceType: "personal" | "collaborative"; rol
     revision: 3,
     backfilled: false,
   }));
-  const syncViaGateway = vi.fn(async () => ({ revision: 11, savedAt: "2026-09-21T00:00:00.000Z" }));
+  const syncViaGateway = vi.fn(async () => ({ via: "uploaded" as const, revision: 11, savedAt: "2026-09-21T00:00:00.000Z" }));
   const send = vi.fn();
   const fakeWindow = {
     isDestroyed: () => false,
@@ -115,6 +116,10 @@ async function setup(session: { workspaceType: "personal" | "collaborative"; rol
     watchNoteDocument,
     uploadNoteDocUpdate,
     syncNoteDocBlocks: syncViaGateway,
+    // 网关那两个新动作在 IPC 这边只管调用；本机文档与队列的真实行为
+    // 在 `desktop-gateway.test.ts` 里对着网关本身验。
+    flushNoteDocPending: vi.fn(async () => undefined),
+    dropNoteDocLocalSessions: vi.fn(() => undefined),
     getNoteDocState,
   } as unknown as DesktopGateway;
 

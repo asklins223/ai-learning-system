@@ -77,7 +77,11 @@ import {
   type NoteDocStreamEventV1,
   type NoteDocUploadResultV1,
 } from "@ailearn/shared/desktop-ipc-contracts";
-import { createNoteDocState } from "./note-doc-state.ts";
+import {
+  createNoteDocState,
+  mergeNoteDocUpdates,
+  type NoteDocState,
+} from "./note-doc-state.ts";
 import type { NoteDocBlock } from "./note-doc-blocks.ts";
 import {
   NOTE_DOC_PREFIX,
@@ -424,6 +428,35 @@ export type SessionCredentialStore = {
   clear(): Promise<void>;
 };
 
+/** 一篇笔记的本机文档与待发增量。 */
+type NoteDocLocalSession = {
+  state: NoteDocState;
+  /** 是否已经从服务端取到过起点。没取到过就不能本机差分（见 `noteDocLocalSessions`）。 */
+  seeded: boolean;
+  revision: number;
+  savedAt: string;
+  /** 攒着待重发的增量，按提交顺序。 */
+  pending: string[];
+};
+
+/**
+ * 待发动量的条数上限。超它不是"再多攒一条"而是"这台机器的网络已经长到该让人
+ * 知道了"——继续无声累积的话，恢复时一次要交几百条，而中间任何一条被拒都无从解释。
+ */
+const NOTE_DOC_PENDING_MAX = 200;
+
+/** `syncNoteDocBlocks` 的出口：三条路各自说清自己走到了哪一步。 */
+export type NoteDocSyncOutcome = {
+  via: "uploaded" | "unchanged" | "queued";
+  revision: number;
+  savedAt: string;
+};
+
+function isOfflineFailure(error: unknown): boolean {
+  return error instanceof DesktopGatewayFailure
+    && (error.code === "api_unavailable" || error.code === "network_timeout");
+}
+
 export class DesktopGatewayFailure extends Error {
   readonly code: GatewayErrorCode;
   readonly retry: "never" | "user_action" | "safe_retry" | "resync_first";
@@ -640,6 +673,14 @@ export class DesktopGateway {
   private companionBridgeGeneration = 0;
   private readonly credentials: SessionCredentialStore | null;
   private readonly noteDocTransport: NoteDocTransport;
+  /**
+   * 一篇笔记在本机的那份文档，以及还没送达服务端的增量（批次 4.4 的离线那一半）。
+   *
+   * 为什么必须留着文档而不是每次都重新取起点：离线时取不到起点，而**没有共同祖先就
+   * 不能凭空造增量**（从行里拼一棵树会被服务端判成"另一篇文档"，一改就复制块）。
+   * 留着它，断网期间的提交仍然是在同一份状态上做差分，恢复后按序交上去即可。
+   */
+  private readonly noteDocLocalSessions = new Map<string, NoteDocLocalSession>();
   /** How the current credential is held; reported to the renderer as truth. */
   private credentialPersistence: "memory" | "safe_storage" = "memory";
   private credentialRestored = false;
@@ -3821,13 +3862,18 @@ export class DesktopGateway {
     if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
     // yjs 编码只活在这一层：主进程解成视图再交给界面。让界面也拿编码，就得在渲染进程
     // 再装一份 CRDT 依赖，而它要显示的本来就是块。
-    const state = createNoteDocState();
-    try {
-      state.seed(parsed.data.update);
-      return { ...state.view(), revision: parsed.data.revision, backfilled: parsed.data.backfilled };
-    } finally {
-      state.dispose();
+    // 顺手把这篇的本机会话打好底。**离线编辑的前提是"曾经拿到过起点"**：没有共同的
+    // 祖先就凭空造不出增量（从行里拼一棵树会被服务端当成另一篇文档，一改就复制块）。
+    // 所以取起点的那一刻（界面打开这篇）就把状态留下，而不是等第一次提交才去取——
+    // 那时候可能已经没有网了。
+    const session = this.noteDocLocalSession(safeNoteId);
+    if (!session.seeded) {
+      session.state.seed(parsed.data.update);
+      session.seeded = true;
+      session.revision = parsed.data.revision;
+      session.savedAt = parsed.data.savedAt;
     }
+    return { ...session.state.view(), revision: parsed.data.revision, backfilled: parsed.data.backfilled };
   }
 
   /**
@@ -3837,35 +3883,105 @@ export class DesktopGateway {
    * 为什么不直接"把整篇 POST 上去"：那等于回到覆盖式保存，正是本轮要消灭的形状。起点
    * 是服务端那份编码，差分才有"只改动真正变过的地方"这个语义。
    */
+  /**
+   * 一次提交（无长连接时的那条路）：拿到起点 → 本机文档差分 → 上送。
+   *
+   * 三种出口要分清，界面据此说不同的话：`uploaded` 服务端已落盘；`unchanged` 这次
+   * 什么都没改；`queued` 没网，改动已经攒在本机文档里、恢复后自动交。把 `queued`
+   * 报成 `uploaded` 就是这次审查里"看起来存下来了"的那个错觉本身。
+   *
+   * 不传 `blocks`（`null`）= 这次只改标题，正文一个字都不动。
+   */
   async syncNoteDocBlocks(
     noteId: string,
-    // `null` = 这次只改标题，正文不动。见 `note-doc-state.ts` 的 `submitBlocks`。
     blocks: NoteDocBlock[] | null,
     title: { title: string; titleSource: string } | undefined,
     requestId?: string,
-  ): Promise<NoteDocUploadResultV1 & { uploaded: boolean }> {
+  ): Promise<NoteDocSyncOutcome> {
     const safeNoteId = this.safeUuid(noteId);
-    const start = await this.request(
-      `/v2/notes/${safeNoteId}/doc-state`,
-      { method: "GET" },
-      true,
-      true,
-      requestId,
-    );
-    const parsed = noteDocServerStateV1Schema.safeParse(start.body);
-    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
-    const state = createNoteDocState();
-    let update: string | null;
-    try {
-      state.seed(parsed.data.update);
-      update = state.submitBlocks(blocks, title);
-    } finally {
-      state.dispose();
+    const session = this.noteDocLocalSession(safeNoteId);
+    if (!session.seeded) {
+      const start = await this.request(
+        `/v2/notes/${safeNoteId}/doc-state`,
+        { method: "GET" },
+        true,
+        true,
+        requestId,
+      );
+      const parsed = noteDocServerStateV1Schema.safeParse(start.body);
+      if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+      session.state.seed(parsed.data.update);
+      session.seeded = true;
+      session.revision = parsed.data.revision;
+      session.savedAt = parsed.data.savedAt;
     }
-    // 没差分出来东西就一个字节都不发。`uploaded` 是给回执用的：把"我什么都没改"
-    // 报成"已提交"，界面就会在明明没写的情况下跳一次同步中。
-    if (update === null) return { revision: parsed.data.revision, savedAt: parsed.data.savedAt, uploaded: false };
-    return { ...(await this.uploadNoteDocUpdate(safeNoteId, update, requestId)), uploaded: true };
+    const update = session.state.submitBlocks(blocks, title);
+    if (update !== null) {
+      if (session.pending.length >= NOTE_DOC_PENDING_MAX) {
+        // 不再往上堆：把"攒了多少"如实报出来，界面才能说"先联网再改"。
+        throw new DesktopGatewayFailure("result_unknown", "resync_first");
+      }
+      session.pending.push(update);
+    }
+    if (session.pending.length === 0) {
+      return { via: "unchanged", revision: session.revision, savedAt: session.savedAt };
+    }
+    const merged = mergeNoteDocUpdates(session.pending);
+    let receipt: NoteDocUploadResultV1;
+    try {
+      receipt = await this.uploadNoteDocUpdate(safeNoteId, merged, requestId);
+    } catch (error) {
+      if (!isOfflineFailure(error)) {
+        // 权限/尺寸/非法编码这类错误重发一百次也是同一个结果，不能留在队列里
+        // 让它变成"每次输入都重试一次的死循环"。只退掉这一次刚压进去的那条。
+        if (update !== null) session.pending.pop();
+        throw error;
+      }
+      return { via: "queued", revision: session.revision, savedAt: session.savedAt };
+    }
+    session.pending = [];
+    session.revision = receipt.revision;
+    session.savedAt = receipt.savedAt;
+    return { via: "uploaded", revision: receipt.revision, savedAt: receipt.savedAt };
+  }
+
+  /** 长连接建立前把攒下的增量交出去：连上了还压着一批，界面上就是"已经同步"的假象。 */
+  async flushNoteDocPending(noteId: string, requestId?: string): Promise<void> {
+    const session = this.noteDocLocalSessions.get(this.safeUuid(noteId));
+    if (!session || session.pending.length === 0) return;
+    const merged = mergeNoteDocUpdates(session.pending);
+    try {
+      const receipt = await this.uploadNoteDocUpdate(this.safeUuid(noteId), merged, requestId);
+      session.pending = [];
+      session.revision = receipt.revision;
+      session.savedAt = receipt.savedAt;
+    } catch (error) {
+      if (!isOfflineFailure(error)) {
+        session.pending = [];
+        throw error;
+      }
+      // 还是没通：留着，下一次写或下一次建连再试。
+    }
+  }
+
+  /** 切空间 / 被移出时调用：另一个空间的正文绝不能接着往这篇上差分。 */
+  dropNoteDocLocalSessions(): void {
+    for (const session of this.noteDocLocalSessions.values()) session.state.dispose();
+    this.noteDocLocalSessions.clear();
+  }
+
+  private noteDocLocalSession(noteId: string): NoteDocLocalSession {
+    const existing = this.noteDocLocalSessions.get(noteId);
+    if (existing) return existing;
+    const created: NoteDocLocalSession = {
+      state: createNoteDocState(),
+      seeded: false,
+      revision: 0,
+      savedAt: "",
+      pending: [],
+    };
+    this.noteDocLocalSessions.set(noteId, created);
+    return created;
   }
 
   /**
