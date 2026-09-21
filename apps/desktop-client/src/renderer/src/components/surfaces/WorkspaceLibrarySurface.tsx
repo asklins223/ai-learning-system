@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowRight,
@@ -460,8 +460,6 @@ export function ObjectiveLibrarySurface() {
                     <span className="v3-goal-row__body">
                       <span className="v3-goal-row__title">{item.conceptLabel ?? item.primaryNoteTitle ?? "未命名理解目标"}</span>
                       <span className="v3-goal-row__summary">{item.publicSummary}</span>
-                      {/* 一行 tag：状态（带色调的图标）+ 知识形态 + 作答进展。此前这些
-                          挤在一句 8px 灰字里，答完一张卡回到列表看不出任何变化（复盘 #7）。 */}
                       <span className="v3-objective-tags">
                         <span
                           className={`v3-objective-state v3-objective-state--${objectiveStateTone(item.personalState.state)}`}
@@ -469,12 +467,20 @@ export function ObjectiveLibrarySurface() {
                         >
                           <CircleDot size={12} aria-hidden="true" />{formatObjectiveState(item.personalState.state)}
                         </span>
-                        <span>{formatKnowledgeForm(item.knowledgeForm)}</span>
-                        {objectiveProgressChips(item.progress).map((chip) => (
-                          <span key={chip}>{chip}</span>
-                        ))}
+                        {/* P10：知识形态与作答进展不再各占一个 chip 容器。16 行里出现过
+                            22 种 chip 文案、同一字号同一底色同一圆角，扫视时无法分组——
+                            而"边界/步骤/因果模型"是内容属性、"复习已到期 17 天"是时间属性、
+                            "还没正式答过"是进度属性，三类东西长得一模一样。
+                            现在只有**状态**保留 chip（它带色点，是唯一需要颜色分级的），
+                            其余降成一句用间隔号串起来的事实。 */}
+                        <span className="v3-goal-row__facts">
+                          {formatKnowledgeForm(item.knowledgeForm)}
+                          {objectiveProgressChips(item.progress).map((chip) => (
+                            <Fragment key={chip}>&nbsp;· {chip}</Fragment>
+                          ))}
+                        </span>
+                        <span className="v3-goal-row__meta">建于 {formatDate(item.createdAt)}</span>
                       </span>
-                      <span className="v3-goal-row__meta">建于 {formatDate(item.createdAt)}</span>
                     </span>
                     {/* 行按下去是进详情，不是开始作答——所以右边写它带你去哪，
                         不重复服务端那个动词（同一个词在列表里指向两个地方，

@@ -89,3 +89,46 @@ describe("修正层的加载顺序", () => {
     expect(flow).toBeGreaterThan(hud);
   });
 });
+
+describe("列表行的事实句不许长成 chip（P10）", () => {
+  const css = stripComments(read("src/renderer/src/components/objective-flow.css"));
+  const source = read("src/renderer/src/components/surfaces/WorkspaceLibrarySurface.tsx");
+
+  // 病根在 `approved-surfaces.css:246` 的 `.v3-objective-tags span`——它把容器里
+  // **每一个**后代 span 都刷成带底小药丸。所以只断言 JSX 结构不够，必须同时钉住
+  // "有人把这个容器拿掉了"；两边任缺一条，22 种同权重 chip 就回来了。
+  it("chip 容器（padding / background / border-radius）被显式拿掉", () => {
+    const facts = css.match(/\.hud-surface \.v3-goal-row__facts[^{]*\{([^}]*)\}/);
+    expect(facts, "没有规则接手 .v3-goal-row__facts").not.toBeNull();
+    const body = facts?.[1] ?? "";
+    expect(body).toMatch(/background:\s*none/);
+    expect(body).toMatch(/border-radius:\s*0/);
+    expect(body).toMatch(/padding:\s*0/);
+  });
+
+  it("字号地板在紧凑档里也不给 tag 开后门——上一版我自己写错了这一条", () => {
+    // 地板写在一条多选择器规则里，所以按"哪个规则块接手了这个选择器"来找。
+    const blocks = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)].filter(
+      (rule) => /(^|,)\s*\.hud-surface \.v3-objective-tags span\s*(,|$|\n)/.test(rule[1] as string),
+    );
+    expect(blocks.length, "没有规则接手 .v3-objective-tags span 的字号").toBeGreaterThan(0);
+    const floor = Number(/font-size:\s*([0-9.]+)px/.exec(blocks[0]?.[2] ?? "")?.[1]);
+    expect(floor, "接手的那条规则没写 font-size").toBeGreaterThanOrEqual(11);
+    // 紧凑档不得再出现一条只给 tag 降字号的规则。地板本身是不是无条件的那一条，
+    // 静态扫只做到"挪进 @media 就找不到接手规则"这一步；真正的判据是实机算出来的
+    // 字号，所以 tmp-objflow-v-b8.mjs 在两个断点档各量一次。
+    const compact = css.slice(css.indexOf("@media (max-width: 760px)"));
+    expect(compact).not.toMatch(/\.v3-objective-tags[^{]*\{[^}]*font-size/);
+  });
+
+  it("知识形态与作答进展落在事实句里，不再各自成一个 chip", () => {
+    const facts = source.slice(
+      source.indexOf("v3-goal-row__facts"),
+      source.indexOf("v3-goal-row__meta"),
+    );
+    expect(facts).toContain("formatKnowledgeForm");
+    expect(facts).toContain("objectiveProgressChips");
+    // map 出来的是列表项，用 Fragment 简写会漏 key（React 每条都喊一次警告）。
+    expect(facts).toMatch(/<Fragment key=\{chip\}/);
+  });
+});

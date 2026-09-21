@@ -391,6 +391,19 @@
   .hud-surface .task-title p { font-size: 9px; }
 }
 
+/* P10：22 种 chip 同权重的真根因是 `approved-surfaces.css:246` 写的
+ * `.v3-objective-tags span { padding; background; border-radius }`——它把**所有**
+ * 后代 span 都刷成 chip，所以知识形态、进展、创建日期全都长成一个带底的小药丸。
+ * 只有状态那一个该是 chip，其余拿掉容器、留成一句事实。 */
+.hud-surface .v3-goal-row__facts,
+.hud-surface .v3-goal-row__meta {
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--v3-soft);
+}
+.hud-surface .v3-goal-row__facts { color: #5f5245; }
+
 /* ── B2：让 data-outcome 真的驱动视觉（P2）───────────────────────────────
  *
  * 这两个属性此前从 JSX 发出去、全仓没有任何一条 CSS 接手，所以「已理解」和
