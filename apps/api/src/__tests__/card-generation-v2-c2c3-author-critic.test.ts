@@ -55,6 +55,7 @@ function makeMockPlan(): CardPlanV2 {
         priority: "critical",
         knowledgeForm: "definition",
         strategy: "recall",
+        practiceForm: null,
         sourceAtomIds: ["atom-1"],
         reasonCodes: ["learnability-9000"],
         estimatedReviewCostSeconds: 60,
