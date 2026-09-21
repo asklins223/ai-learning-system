@@ -7,6 +7,7 @@
  *  - 规划器/executor 不产生异常、不触碰其他 workspace。
  */
 import { test, after } from "node:test";
+import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import { eq, sql } from "drizzle-orm";
 import { learningObjectivesV2 } from "@ailearn/shared/db-schema/card-generation-v2";
@@ -118,4 +119,76 @@ test("W2-05: executor 幂等——首次 created>=3，二次 created=0 且 skipp
         .delete(learningObjectiveOriginsV2)
         .where(eq(learningObjectiveOriginsV2.workspaceId, FIXTURE_WORKSPACE)),
   );
+});
+
+// ─── 生产入口：POST /v2/learning-objectives/origins/backfill ────────────
+//
+// 上面那些用例直接调 service，所以这个执行器**没有任何生产调用方**也能全绿
+// ——那正是 171 条历史目标一直没人修的原因（09-17 之后建的目标一条不缺，缺的全在
+// 更早：那条写入路径上线之前的存量）。这一组因此走真实 HTTP：路由存在、能修、
+// 幂等、且只对 owner 开放。
+
+const { default: Fastify } = await import("fastify");
+const { default: sensible } = await import("@fastify/sensible");
+const { authRoutes } = await import("../modules/identity/routes.ts");
+const { learningObjectiveRoutes } = await import("../modules/learning-objectives/routes.ts");
+const { issueSession } = await import("../modules/identity/service.ts");
+const { addV2ObjectiveToWorkspace } = await import("./helpers/v2-card-fixture.ts");
+
+test("backfill 有一个 owner-only 的 HTTP 入口，跑一次补上、再跑一次不重复写", async () => {
+  const app = Fastify({ logger: false });
+  await app.register(sensible);
+  await app.register(authRoutes);
+  await app.register(learningObjectiveRoutes);
+  await app.ready();
+
+  // 造一条"缺来源绑定"的目标（与 09-15 之前那批同样的形状：有卡、卡有 note_version_id，
+  // 但没有 origins 行）。不靠调整用例顺序来制造这个状态。
+  const seeded = await addV2ObjectiveToWorkspace(pgSql, FIXTURE_WORKSPACE, SYSTEM_USER, {
+    publicSummary: "缺来源绑定的那条",
+  });
+  const owner = await issueSession(SYSTEM_USER, FIXTURE_WORKSPACE);
+  const first = await app.inject({
+    method: "POST",
+    url: "/v2/learning-objectives/origins/backfill",
+    headers: { authorization: `Bearer ${owner.token}` },
+  });
+  assert.equal(first.statusCode, 200, `owner 调用必须成功：${first.statusCode} ${first.body}`);
+  assert.ok(first.json().created >= 1, "至少补上刚造的那一条");
+  const origins = await withWorkspaceTransaction(
+    { workspaceId: FIXTURE_WORKSPACE, userId: SYSTEM_USER },
+    (tx) => tx
+      .select({ objectiveId: learningObjectiveOriginsV2.objectiveId })
+      .from(learningObjectiveOriginsV2)
+      .where(eq(learningObjectiveOriginsV2.objectiveId, seeded.objectiveId)),
+  );
+  assert.equal(origins.length >= 1, true, "回执说补了，库里却没有那一行");
+
+  // 幂等：同一条再跑一次不该重复写（executor 是 ON CONFLICT DO NOTHING）。
+  const second = await app.inject({
+    method: "POST",
+    url: "/v2/learning-objectives/origins/backfill",
+    headers: { authorization: `Bearer ${owner.token}` },
+  });
+  assert.equal(second.statusCode, 200);
+  assert.equal(second.json().created, 0, "第二次跑又写了行——幂等只在 service 层成立不算过");
+
+  // owner 判据：同一个空间的成员不该能改整个空间的谱系。
+  const memberUser = randomUUID();
+  await pgSql`INSERT INTO users (id, email, password_hash, role)
+    VALUES (${memberUser}, ${`origin-gate-${memberUser.slice(0, 8)}@example.test`}, 'h', 'owner')`;
+  await pgSql`INSERT INTO workspace_members (workspace_id, user_id, role)
+    VALUES (${FIXTURE_WORKSPACE}, ${memberUser}, 'member')`;
+  const member = await issueSession(memberUser, FIXTURE_WORKSPACE);
+  const denied = await app.inject({
+    method: "POST",
+    url: "/v2/learning-objectives/origins/backfill",
+    headers: { authorization: `Bearer ${member.token}` },
+  });
+  assert.equal(denied.statusCode, 403, `成员也能跑这条：${denied.statusCode} ${denied.body}`);
+
+  await pgSql`DELETE FROM sessions WHERE user_id = ${memberUser}`;
+  await pgSql`DELETE FROM workspace_members WHERE user_id = ${memberUser}`;
+  await pgSql`DELETE FROM users WHERE id = ${memberUser}`;
+  await app.close();
 });
