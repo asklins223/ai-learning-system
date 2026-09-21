@@ -1577,5 +1577,6 @@ pedagogy 第一次对候选 1 判 `rewrite`、修复后对集合判 `keep`；aut
 （它停在 `authored`，`isCandidateReviewReadyV2` 会判它不可审核）。
 
 回归面：本文件 3/3、live-progress 8/8、worker 单测 724/724、api 单测 1416 项 0 失败、
-shared 340/340。（worker typecheck 里 `companion-thought.ts(23) proactiveDailyLimit` 是
-并发会话在途的另一处报错，与本次无关，未替他们改。）
+shared 340/340。worker typecheck 本次 0 行输出（干净）。中途它曾报过一条
+`companion-thought.ts(23) proactiveDailyLimit`——那是并发会话在途的报错，几分钟后他们
+自己补上了共享导出，我没有替他们改任何东西。
