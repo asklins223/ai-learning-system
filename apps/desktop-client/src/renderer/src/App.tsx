@@ -166,7 +166,10 @@ export function RoomExperience() {
       <CompanionPresence />
       <CompanionFeedMenu />
       <DirectoryRail />
-      {HOME_V2_ENABLED ? null : <RunRecoveryNotice />}
+      {/* 恢复横幅与首页是哪一版无关：它读的是房间投影里的在制 run / 生成批次，
+          自己会在有 surface 或首启引导开着时返回 null。以前它跟着 v1 走，
+          意味着一改成 v2 首页，"上一次生成没跑完"就再也没人说了。 */}
+      <RunRecoveryNotice />
       <HudRoomControl />
       {surface
         ? <HudReturn label={returnTarget?.label ?? "返回书房"} onReturn={returnTarget?.run ?? (() => invoke("home"))} />

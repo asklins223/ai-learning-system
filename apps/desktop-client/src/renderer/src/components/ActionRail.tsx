@@ -23,7 +23,6 @@ import { useRoomStore } from "../app/room-store";
 import { resolveSceneMotionMode } from "../scene/scene-motion";
 import { useHomeProjection } from "../app/home-projection";
 import { homePresentation } from "../app/home-presentation";
-import { RunRecoveryNotice } from "./RunRecoveryNotice";
 
 gsap.registerPlugin(useGSAP);
 
@@ -302,7 +301,6 @@ export function ActionRail() {
               <button type="button" onClick={() => setNotice(null)} aria-label="关闭提示"><X size={15} aria-hidden="true" /></button>
             </div>
           ) : null}
-          <RunRecoveryNotice />
         </div>
 
         <div className="home-catalog__groups">
