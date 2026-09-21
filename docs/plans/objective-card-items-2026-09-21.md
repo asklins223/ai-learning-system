@@ -1656,3 +1656,34 @@ parse 不过就是用户屏幕上一片错误，不是"少个数"，所以必须
 3. **唯一键要读未来的写入方**。§38 第一版少了 `plan_version`，"1600 行建得起来"只证明那条路没被走过； replan / repair / 重放三类写者都要过一遍，键才算选对。
 
 **还欠的（不写成已完）**：#33 的下半小节（驱动整条 `critiqueAndFinalizeCandidates`，钉"谁该被修、修复卡被踢出 deck gate 名单、排出 `card_generation_recheck_candidate`"，需要去掉门里 `useLLM` 那一项 + 脚本 pedagogy 判一次 `rewrite`）；`single_choice` 的选项数没有下限（今天量到 2 选项的一道，等于把点名选择题写回判断题）；`⌈N/2⌉` 在 1–2 张小批是否该免；库里两批 D6 的 6 张候选仍未决定。
+
+## 46. 两个选项的选择题：为什么不能直接把合同下限抬到 3，以及该怎么改
+
+§44 量到"2 道 `single_choice` 里有 1 道只有 2 个选项"。第一反应是抬下限
+（`practiceItemV2Schema` 里 `options: .min(2)` → `.min(3)`），但这条今天不能做，有实测理由：
+
+- `options` 的 `.min(2)` 不只约束作者输出，它同时是**读侧**合同的一部分：
+  `learning-target-v2-contracts.ts:154` 用 `practiceItemV2Schema.nullable()` 解析
+  已落库的 objective revision。抬到 3 会让**已经激活的卡**在自己被读取/判分的那一刻
+  解析失败。库里实测：`lifecycle=active` 的选择题 2 道，其中 **1 道就是 2 选项**
+  （候选阶段另有 3 道 2 选项）。所以这不是"历史数据脏"，是"改合同会当场打断现网读路径"。
+- 也不该在作者侧另起一份"严格版 schema"：那等于把同一个对象变成两套真相，
+  下一轮又会出现"作者侧合法、读侧不合法"或反过来的分叉。
+
+**该改的地方是结算，不是解析**。点名 `single_choice` 的唯一理由是"要证据化干扰项"，
+两个选项没有干扰项可言——它就是装在选择题壳子里的判断题。所以规则应该进
+`summarizePracticeQuotaV2` 这一支**唯一的结算函数**（服务端的
+`practice_quota_short` 事件与审核页头部那句都从它出，见 §37）：
+形状对上了还不算兑现，`single_choice` 必须 `options ≥ 3`。
+
+落地时的接口形状（避免又踩"两个来源各算一遍"）：现在那张 map 的 value 是
+`PracticeItemFormV2 | null`，只带形状不带宽度，改不成结算判据。应把它换成
+`{ form, optionCount }` 一个小记录，**结算内部**判 `form === "single_choice" && (optionCount ?? 0) < 3`
+→ 记 miss，`deliveredForm` 保留真值以便看出"交了但没按要求交"。两个调用点都是一行改动：
+worker 侧传 `candidate.objective.practiceItem` 的 `options.length`，api 侧
+`serializeCandidatePublic` 已经算了 `optionCount`（§37 那次）直接复用。
+测试先写在 `strategy-allocation.test.ts`（那里已有 D6 结算那组用例）。
+
+**这一版没顺手改的原因只有一条**：签名一变要同时动 shared / worker / api 三处，
+而我这一轮的余量已经不足以把三处一起改到能跑验证——把一半的签名留在树上，
+就是今天一整晚在防的那种事（红在别人的读路径上，理由写在我的提交里）。
