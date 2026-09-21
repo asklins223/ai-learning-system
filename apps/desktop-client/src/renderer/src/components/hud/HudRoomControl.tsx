@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronsRight, Gauge, House, Moon, Orbit, Settings2, Sun, UserRound, Volume2, VolumeX } from "lucide-react";
+import { ChevronsRight, Gauge, House, Moon, Orbit, Settings2, Sun, Volume2, VolumeX } from "lucide-react";
 import { useRoomStore } from "../../app/room-store";
 import { spaceRoleLabel } from "../../app/space-identity";
 import { publishGateInvalidation } from "../../app/gate-invalidation";
 import { resolveSceneMotionMode } from "../../scene/scene-motion";
+import { HudAccountCard, accountAvatarSrcFor, accountInitial } from "./HudAccountCard";
 import { HudAccountMenu } from "./HudAccountMenu";
 import { useHudPageClasses } from "./use-hud-page";
 import {
@@ -50,12 +51,19 @@ function SpaceSealIcon() {
  * 折叠入口（2026-09-18 交互修复，二次返工）：触发印章常驻药丸最右端的
  * 原位置——折叠时它是唯一圆点，展开后留在原地、图标换成双箭头，再点一下
  * 即从原位置缩回；不额外新增收起槽位。点空白与 Esc 保留。头像 / 设置这类
- * 要打开 surface 的槽位改为「先播放 300ms 折叠动画，动画走完再跳转」，
- * 避免设置面板瞬间盖住折叠过程。
+ * 要打开 surface 的槽位改为「先播完折叠动画再跳转」，避免设置面板瞬间盖住
+ * 折叠过程（预算见下面那个常量，由样式表算出来钉住）。
  */
 
-/** 药丸折叠动画 300ms，导航等它走完再发生，留一帧余量。 */
-const COLLAPSE_BEFORE_NAVIGATE_MS = 320;
+/**
+ * 药丸折叠动画的等待窗口，导航等它走完再发生。
+ *
+ * 折叠现在是一段有预算的动画：图标 110ms 淡出，槽位宽度再收 320ms、并带 80ms
+ * 起步延迟（`hud-surface.css` 末尾的 B0 段），合计 400ms。留 20ms 余量。
+ * 这个数与那条 CSS 是同一个事实的两半，由 `src/main/room-control-motion.test.ts`
+ * 从样式表里算出来钉住——改 CSS 时序而忘改这里，设置面板会盖在还没关完的岛上。
+ */
+const COLLAPSE_BEFORE_NAVIGATE_MS = 420;
 
 export function HudRoomControl({ decorative = false }: { readonly decorative?: boolean }) {
   /**
@@ -76,10 +84,14 @@ export function HudRoomControl({ decorative = false }: { readonly decorative?: b
   const setHudPage = useRoomStore((state) => state.setHudPage);
   /** 顶栏常驻空间胶囊的唯一数据源：门禁每次读到已验证会话都会发布。 */
   const spaceIdentity = useRoomStore((state) => state.spaceIdentity);
+  /** 账户槽位与设置页读同一个来源：门禁每次读到已验证会话都发布，与小空间胶囊同一时机。 */
+  const account = useRoomStore((state) => state.accountIdentity);
+  const avatarSrc = accountAvatarSrcFor(account, useRoomStore((state) => state.accountAvatar));
   const onboardingOpen = useRoomStore((state) => state.onboardingOpen);
   const motionMode = resolveSceneMotionMode(motionModeRaw, useRoomStore((state) => state.reducedMotion));
   const [expanded, setExpanded] = useState(false);
   const [spaceMenuOpen, setSpaceMenuOpen] = useState(false);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [spaceNotice, setSpaceNotice] = useState<string | null>(null);
   /**
    * 切换成功回执。必须由这个常驻宿主持有：surface 自己的 state 活不过切换引起的
@@ -90,6 +102,7 @@ export function HudRoomControl({ decorative = false }: { readonly decorative?: b
   const menuRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const spaceRef = useRef<HTMLButtonElement>(null);
+  const accountRef = useRef<HTMLButtonElement>(null);
   /** 「先折叠再跳转」的定时器；用户在窗口期内重新展开时必须撤销。 */
   const navigateTimerRef = useRef<number | undefined>(undefined);
 
@@ -144,6 +157,7 @@ export function HudRoomControl({ decorative = false }: { readonly decorative?: b
   useEffect(() => {
     if (surface || onboardingOpen) {
       setSpaceMenuOpen(false);
+      setAccountMenuOpen(false);
       setExpanded(false);
     }
   }, [onboardingOpen, surface]);
@@ -170,6 +184,7 @@ export function HudRoomControl({ decorative = false }: { readonly decorative?: b
     if (!isExpanded || decorative) return undefined;
     const collapse = () => {
       setSpaceMenuOpen(false);
+      setAccountMenuOpen(false);
       setExpanded(false);
     };
     const closeFromOutside = (event: PointerEvent) => {
@@ -193,6 +208,11 @@ export function HudRoomControl({ decorative = false }: { readonly decorative?: b
         window.requestAnimationFrame(() => spaceRef.current?.focus({ preventScroll: true }));
         return;
       }
+      if (accountMenuOpen) {
+        setAccountMenuOpen(false);
+        window.requestAnimationFrame(() => accountRef.current?.focus({ preventScroll: true }));
+        return;
+      }
       collapse();
       window.requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
     };
@@ -202,11 +222,12 @@ export function HudRoomControl({ decorative = false }: { readonly decorative?: b
       window.removeEventListener("pointerdown", closeFromOutside, true);
       window.removeEventListener("keydown", closeOnEscape, true);
     };
-  }, [isExpanded, decorative, spaceMenuOpen]);
+  }, [isExpanded, decorative, spaceMenuOpen, accountMenuOpen]);
 
   const toggleExpanded = () => {
     if (isExpanded) {
       setSpaceMenuOpen(false);
+      setAccountMenuOpen(false);
       setExpanded(false);
       return;
     }
@@ -239,13 +260,22 @@ export function HudRoomControl({ decorative = false }: { readonly decorative?: b
 
   const collapse = () => {
     setSpaceMenuOpen(false);
+    setAccountMenuOpen(false);
     setExpanded(false);
   };
 
   /** 胶囊两条路都做同一件事：展开药丸并把空间菜单打开。 */
   const openSpaceMenu = () => {
     setSpaceNotice(null);
+    setAccountMenuOpen(false);
     setSpaceMenuOpen(true);
+    setExpanded(true);
+  };
+
+  /** 账户小框与空间菜单互斥：同一个人一次只看一张卡，两张叠在一起没人读得懂。 */
+  const openAccountMenu = () => {
+    setSpaceMenuOpen(false);
+    setAccountMenuOpen(true);
     setExpanded(true);
   };
 
@@ -347,15 +377,26 @@ export function HudRoomControl({ decorative = false }: { readonly decorative?: b
         >
           <Settings2 aria-hidden="true" />
         </button>
+        {/* 账户槽位以前只是一个 `UserRound` 图标，点下去直接跳到设置页：屏幕上没有
+            任何一处回答「现在登录的是谁」，而换账号要的退出恰好无处可点。现在它是
+            一张脸（有头像用头像，否则用与设置页同一套首字母印章），点开小框。 */}
         <button
+          ref={accountRef}
           type="button"
+          className={accountMenuOpen ? "room-control-account active" : "room-control-account"}
           disabled={decorative}
           inert={!isExpanded || undefined}
-          aria-label="打开账户中心"
-          title="账户中心"
-          onClick={() => openSettings("account")}
+          aria-expanded={accountMenuOpen}
+          aria-haspopup="true"
+          aria-label={account
+            ? `当前登录账号 ${account.displayName ?? account.email}（${account.email}），打开账户菜单`
+            : "正在读取这台设备登录的账号"}
+          title={account ? account.email : "账户"}
+          onClick={openAccountMenu}
         >
-          <UserRound aria-hidden="true" />
+          {avatarSrc
+            ? <img className="room-control-account__photo" src={avatarSrc} alt="" aria-hidden="true" />
+            : <span className="room-control-account__seal" aria-hidden="true">{accountInitial(account)}</span>}
         </button>
         {/* 触发印章常驻药丸最右端的原位置：折叠时它是唯一的圆点，展开后
             留在原地变为收起控制（图标换成指向收拢方向的双箭头），再点一下
@@ -390,6 +431,11 @@ export function HudRoomControl({ decorative = false }: { readonly decorative?: b
               publishGateInvalidation("stale_workspace");
             }}
           />
+        </div>
+      ) : null}
+      {!decorative && isExpanded && accountMenuOpen ? (
+        <div ref={menuRef} className="room-control-menu">
+          <HudAccountCard onOpenAccount={() => openSettings("account")} />
         </div>
       ) : null}
       {switchReceipt !== null ? (

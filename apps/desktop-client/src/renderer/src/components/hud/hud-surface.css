@@ -3002,13 +3002,16 @@
   box-shadow: inset 0 0 0 1px rgba(96, 60, 35, 0.15);
 }
 .hud-surface .companion-diary-entry { border: var(--companion-card-border); background: var(--companion-card-glass); }
-.hud-surface .companion-diary-entry > strong { font: 650 var(--companion-font-title)/1.65 "Noto Serif SC", "Songti SC", serif; color: #fff3df; }
+/* 日记卡是 grid 容器，而 grid item 的 min-width 默认是 auto：
+   嵌进来的图或长引用一旦比卡片宽，会把整张卡拉爆（对话记录那边是块级流，没这个问题）。
+   0252 把图放进日记页时必须显式归零，让子块里的 max-width:100% 真的生效。 */
+.hud-surface .companion-diary-entry > * { min-width: 0; }
+/* 日记正文：她自己写的一段话，读起来要像手记不像标题。数字表已随 0250 一起撤下。 */
+.hud-surface .companion-diary-prose { margin: 0; font: 400 var(--companion-font-title)/1.9 "Noto Serif SC", "Songti SC", serif; color: #fff3df; }
+.hud-surface .companion-diary-prose + .companion-diary-prose { margin-top: 2px; }
 .hud-surface .companion-diary-entry > small { color: var(--companion-glass-soft); font-size: var(--companion-font-micro); }
-.hud-surface .companion-diary-entry dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--companion-gap-row); margin: 0; }
-.hud-surface .companion-diary-entry dt, .hud-surface .companion-diary-entry dd { margin: 0; }
 
-/* 事实/诊断共用的键值小格：同一角色只有一档长相。 */
-.hud-surface .companion-diary-entry dl div,
+/* 诊断键值小格。 */
 .hud-surface .companion-diagnostics div {
   display: flex;
   justify-content: space-between;
@@ -3019,8 +3022,6 @@
   background: rgba(255, 255, 255, 0.05);
   font-size: var(--companion-font-micro);
 }
-.hud-surface .companion-diary-entry dt,
-.hud-surface .companion-diary-entry dd,
 .hud-surface .companion-diagnostics dt,
 .hud-surface .companion-diagnostics dd { margin: 0; }
 
@@ -6146,4 +6147,189 @@
 .hud-surface .space-sharing-notice b {
   color: #fff1a8;
   font-weight: 700;
+}
+
+/* ===========================================================================
+ * B0 右上灵动岛：折叠态回收槽位宽度
+ * docs/plans/learning-companion/30-companion-center-ui-review-2026-09-21.md §4
+ *
+ * 折叠只回收那 6 个槽位自己的宽度贡献，DOM 一行不动。不能加包裹层：6 个槽位是
+ * 完全没有 class 的裸 button，样式表只能靠 `> button:not(…):not(…)` 点名它们，
+ * 包一层 div 会同时摘掉约 17 条 `> button` 规则与 :nth-child 错峰。
+ *
+ * 岛宽在代码里从没声明过（generated hud-pages.css:41 只给 right/top，无 width），
+ * 424px 全由内容撑出来。所以让槽位贡献变 0，岛的右缘钉死、左缘自然收进来，
+ * 胶囊那 240px 位移全部由这条布局产生——它自己一个 transition 都不参与。
+ * ======================================================================== */
+
+.hud-surface .room-control {
+  /* --hud-island-motion 定义在 .home-v2-hud 上（:329），不是 .hud-surface，
+     继承不到这里。写进 var() 会让整条 transition 声明失效且无声。 */
+  --island-motion: 320ms;
+  --island-slot-size: 36px;
+  --island-slot-gap: 4px;
+  /* 位移通道单独一条曲线：(.22,1,.36,1) 首帧斜率 4.55，240px 行程首帧就走 57px。
+     这条首帧速度为 0，折叠时门还没动图标就先淡完。 */
+  --island-travel-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  /* 0 宽的 flex item 照样各吃一道 gap：6 道 = 28px 死缝，胶囊与印章就贴不到一起。 */
+  gap: 0;
+}
+
+/* 折叠 = 先淡出（110ms@0），再关门（320ms@80ms）。
+   min-width:0 与 overflow 各挡一半的自动最小尺寸：槽位是 display:grid 的 flex
+   item，默认 min-width:auto = 内容尺寸 = 那颗 18px 的 svg，只写 width:0 会卡在
+   18px、岛只收到 316px。place-content 让 18px 图标左右对称地被裁——place-items
+   只把图标在轨道里居中，而轨道在 w<18 时仍是 18px 且贴在内容盒起点，图标会从
+   右边被切。 */
+.hud-surface .room-control > button:not(.room-control-trigger):not(.room-control-space) {
+  flex: 0 0 auto;
+  width: 0;
+  min-width: 0;
+  margin-inline-start: 0;
+  overflow: hidden;
+  place-content: center;
+  transition:
+    opacity 110ms ease-out,
+    transform 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    width var(--island-motion) var(--island-travel-ease) 80ms,
+    margin-inline-start var(--island-motion) var(--island-travel-ease) 80ms,
+    background-color 140ms var(--hud-ease-out), color 140ms ease;
+}
+
+/* 展开态与今天的 424px 逐像素相同：6×(4+36) = 240，正好补回原来 7 道 gap 的 28
+   加上 216 槽位宽。 */
+.hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger):not(.room-control-space) {
+  width: var(--island-slot-size);
+  margin-inline-start: var(--island-slot-gap);
+  transition:
+    opacity 150ms ease-out 65ms,
+    transform 240ms cubic-bezier(0.22, 1, 0.36, 1) 65ms,
+    width var(--island-motion) var(--island-travel-ease),
+    margin-inline-start var(--island-motion) var(--island-travel-ease),
+    background-color 140ms var(--hud-ease-out), color 140ms ease;
+}
+
+/* :1941 把 transition-property 重写成 4 项白名单，会把 width/margin 摘掉：按住
+   槽位时若被外部折叠（surface / onboardingOpen effect 或 SPACE_MENU_OPEN_EVENT）
+   就是 90ms 瞬移。按压手感仍然 90ms，位移通道补回来。 */
+.hud-surface .room-control > button:not(.room-control-trigger):not(.room-control-space):active {
+  transition-property: opacity, transform, background-color, color, width, margin-inline-start;
+  transition-duration: 90ms, 90ms, 90ms, 90ms, var(--island-motion), var(--island-motion);
+  transition-delay: 0ms, 0ms, 0ms, 0ms, 80ms, 80ms;
+}
+
+/* 印章：两态同一个 4px 缝 → 全程钉在原位置，自己不参与任何动画（:360-362 的合同）。 */
+.hud-surface .room-control .room-control-trigger { margin-inline-start: 4px; }
+
+/* 皮肤常驻：岛宽在动，inset:0 会跟着长。删掉 scaleX 与 transform-origin——皮肤缩放
+   与宽度增长是两条时间轴，一旦错开就是「外框比内容快」的观感。 */
+.hud-surface .room-control::before {
+  opacity: 1;
+  transform: none;
+  transition: background-color 180ms ease-out, border-color 180ms ease-out;
+}
+.hud-surface .room-control[data-expanded="true"]::before { transform: none; }
+
+/* 胶囊不再是「药丸里套一颗药丸」。.room-control 是 z-index:40 的层叠上下文，皮肤的
+   z-index:-1 落在所有子元素之下，不撤就会看到双层边框双份阴影。
+   缝用 border-inline-end，不用 ::after——:1702 的 `> button.active::after` 同特异度
+   也打给胶囊（空间菜单开着时它就 .active）。border-box（hud-pages.css:23）让这条缝
+   不占外层宽度，4px 间距不受影响。:hover / .active 是 (0,4,1)，仍然压得过这里的
+   透明底，所以胶囊照样有悬停与打开态。 */
+.hud-surface .room-control > button.room-control-space {
+  background: transparent;
+  box-shadow: none;
+  border-color: transparent;
+  border-inline-end: 1px solid rgba(255, 244, 226, 0.18);
+  transition: background-color 180ms ease-out, border-color 180ms ease-out;
+}
+
+/* 图标错峰与岛宽同一帧收束：145 + 175 = 320。原来 145+240=385，最后 65ms 是
+   「岛停了图标还在动」，那正是两条时间轴。 */
+.hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger):not(.room-control-space) svg {
+  animation-duration: 175ms;
+}
+
+/* 紧凑态（评审 §7 P19）：generated 的 23px 打在 `.room-control span` 上，打不到
+   槽位 button（`.hud-surface .room-control span` 特异度更高，媒体查询不加特异度），
+   所以槽位一直是 36px，而岛的内容盒只有 29 − 6 padding − 2 边框 = 21px，
+   全都顶出岛外；印章 23px 也比它要收纳的槽位还小。
+   岛高改成随内容：胶囊是「我在哪个空间」的唯一常驻答案，不能被裁，所以让它
+   决定岛的高度，而不是反过来把两行文字压进 21px。 */
+@media (max-width: 760px) {
+  .hud-surface .room-control { height: auto; min-height: 29px; --island-slot-size: 21px; --island-slot-gap: 3px; }
+  .hud-surface .room-control > button:not(.room-control-trigger):not(.room-control-space) { height: 21px; }
+  .hud-surface .room-control > button:not(.room-control-trigger):not(.room-control-space) > svg { width: 12px; height: 12px; }
+  .hud-surface .room-control .room-control-trigger { width: 21px; height: 21px; margin-inline-start: 3px; }
+}
+
+/* 必须排在上面的宽度规则之后：同特异度下源码顺序决定胜负，挪到前面就等于 reduce
+   下岛照样滑。位移通道整个摘掉，透明度/颜色保留——透明度不算位移。 */
+@media (prefers-reduced-motion: reduce) {
+  .hud-surface .room-control > button:not(.room-control-trigger):not(.room-control-space),
+  .hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger):not(.room-control-space) {
+    transition-property: opacity, background-color, color;
+    transition-duration: 150ms, 140ms, 140ms;
+    transition-delay: 0ms;
+  }
+}
+
+/* ── 顶栏账户槽位（退出登录入口）2026-09-21 ─────────────────────────────
+   账户按钮以前是 lucide 的 `UserRound` 图标，现在是一张脸：有头像用头像，
+   没有就落回与设置页、空间列表同一套首字母印章（同一底色，换个尺寸）。
+   只在文件末尾追加，不动上面任何一条既有规则。
+
+   选择器必须带上 `.room-control`：生成的 `hud-pages.css` 里那条
+   `.hud-surface .room-control span{width:36px;height:36px;font-size:15px}` 特异度是
+   (0,2,1)，比只写类名的 (0,2,0) 高一档——实机量过一次，少了这一档印章就被撑成
+   36px 填满整个槽位。`.room-control-trigger__status` 用同一写法就是这个原因。 */
+.hud-surface .room-control .room-control-account__seal {
+  display: grid;
+  width: 27px;
+  height: 27px;
+  place-items: center;
+  border-radius: 50%;
+  background: #52644f;
+  color: #fff8e8;
+  font: 700 13px/1 "Noto Serif SC", "Songti SC", serif;
+}
+
+.hud-surface .room-control .room-control-account__photo {
+  display: block;
+  width: 27px;
+  height: 27px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+/* 紧凑态（≤760px，即 200% 缩放）槽位只有 21px：27px 的脸会把岛顶出去。 */
+@media (max-width: 760px) {
+  .hud-surface .room-control .room-control-account__seal { width: 17px; height: 17px; font-size: 9px; }
+  .hud-surface .room-control .room-control-account__photo { width: 19px; height: 19px; }
+}
+
+/* 折叠态图标淡入那条规则按 `> svg` 排位；账户槽位里是 img/印章，交给上面两条。 */
+.hud-surface .room-control-account.active > .room-control-account__seal,
+.hud-surface .room-control-account.active > .room-control-account__photo {
+  box-shadow: 0 0 0 2px rgba(255, 244, 214, 0.55);
+}
+
+/* 退出那一行：印章格换成告警色，让「这一行会把会话结束掉」不只靠右边的标签说话。 */
+.hud-surface .home-menu .space-row[data-danger="true"] .space-seal {
+  background: #8c3d26;
+}
+
+/* 账户槽位里没有 `<svg>`（是印章或照片），上面那条淡入按 svg 排位，够不到它。
+   补同一条动画，不补 nth-child 的错峰延迟：错峰表由灵动岛那批用例钉住，
+   新槽位挤进去只会让两边互相打挂。 */
+.hud-surface .room-control[data-expanded="true"] > .room-control-account > .room-control-account__seal,
+.hud-surface .room-control[data-expanded="true"] > .room-control-account > .room-control-account__photo {
+  animation: hud-slot-icon-in 240ms cubic-bezier(0.23, 1, 0.32, 1) backwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud-surface .room-control[data-expanded="true"] > .room-control-account > .room-control-account__seal,
+  .hud-surface .room-control[data-expanded="true"] > .room-control-account > .room-control-account__photo {
+    animation: none;
+  }
 }
