@@ -558,6 +558,13 @@ export const buildAuthorSystemPrompt = (
   requiredPracticeForm?: PracticeItemFormV2 | null,
 ): string => {
   const spec = authorStrategySpecs[strategy];
+  // 不是"防御性检查"：这条真炸过一次（有界修复拿了一个即兴拼的、没有 strategy 的
+  // 计划目标替身），而炸法是 `Cannot read properties of undefined (reading 'label')`
+  // ——一个把整批已付费调用作废、又在日志里认不出来的 TypeError。
+  // strategy 来自持久化的 jsonb，运行时完全可能不是枚举里的值，所以要在这里喊明白。
+  if (!spec) {
+    throw new Error(`author prompt got an unknown strategy: ${String(strategy)}`);
+  }
   // v25：按知识形态限定客观题形状。顺序即优先级，第一个是首选。
   const allowedForms = knowledgeFormHint ? practiceFormsForKnowledgeForm(knowledgeFormHint) : [];
   const shapeLine = allowedForms.length > 0

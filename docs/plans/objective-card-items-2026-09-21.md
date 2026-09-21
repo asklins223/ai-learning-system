@@ -1242,3 +1242,27 @@ gauge    存在、未被 hidden 遮住，aria-valuenow=49
 
 回归：桌面 138 文件 1128/1128、typecheck 干净（另两条红是别人在途的
 `companion-center-surface.test.ts`）。
+
+## 34. repair 分支：不为了测它给产品开缝，改成把崩溃那一端钉死
+
+想把"修复 → 新修订 → 重跑门禁"整条走一遍，只有两条路：把 `boundedRepairCandidate`
+导出（给产品代码开一个只为测试存在的缝），或者在测试里重建一整套
+`sealed + plan + candidate + sourceContent` 夹具。两个都不做——前者是我不想留的债，
+后者的夹具本身就可能与真实结构漂移，测出来也不算数。
+
+改成钉**崩溃的那一端**（`author-prompt-strategy.test.ts`）：
+
+- 七种题型逐个建提示，断言题型写进去了、被点名的卡有配额那句、没被点名的卡说的是另一句
+  （不能出现强制语气）；
+- `buildAuthorSystemPrompt` 现在对未知题型**明确抛** `author prompt got an unknown strategy: X`。
+  这不是防御性代码：`strategy` 来自持久化的 jsonb，运行时可能不是枚举值，而这条路径
+  真炸过一次。变异验证时去掉守卫，测试打印出来的正是当初那句
+  `TypeError: Cannot read properties of undefined (reading 'label')`——等于把事故现场
+  变成了断言。
+
+**仍然没验到的**：修复之后的候选落库、`candidateRevisionHash` 重算、recheck 收口这三段。
+它们要等一次 pedagogy 真判 `repair` 的批次（确定性 provider 永远判 `pass`，
+所以测试里也走不到）。下次动这块要么就等真批次，要么认真讨论"要不要给 repair 开一个
+可注入的 provider 缝"——那是设计决定，不该由补测试顺手做掉。
+
+回归：worker 715/715、typecheck 干净（另有一条红是别人在途的 `companion-daily-summary.test.ts`）。
