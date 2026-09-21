@@ -21,6 +21,13 @@ import * as Y from "yjs";
  * 合并结果是**两块**——同一块被两人改过就变成两份内容。实测数字：3 块并发改两处
  * 收成 4 块，1 块并发改收成 2 块。改成块内 `Y.Text` 后，替换是在同一个文本对象上做
  * 字符级操作，块数不会增殖，两个人改同一段也只是文本合并。
+ *
+ * **这个文件不能挪进 `packages/shared`**（试过，症状很怪所以写在这里）：本仓没有 workspace 根，
+ * `apps/api` 与 `packages/shared` 各有自己的 `node_modules`，而 `import "yjs"` 是按**该文件所在
+ * 位置**解析的。挪过去之后 api 进程里就有两份 yjs：Hocuspocus 用 api 那份建 `Y.Doc`，这里的
+ * `instanceof Y.Text` 却是另一份的类，判据静默为假 → `contentOf` 走字符串分支返回 `""`，症状是
+ * "块都在、正文全空"（实测：协同集测 7 条同时红）。渲染层要共用这份形状，前提是同一个进程只有
+ * 一份 yjs；跨包共享源码不满足它。真要收敛，先让依赖布局收敛（加 workspace 根）。
  */
 
 /** 与 `note_blocks.source_ref`（jsonb）同形：证据链按"哪个来源的哪一段"锚定。 */
@@ -139,7 +146,7 @@ export function writeNoteBlocks(doc: Y.Doc, blocks: NoteDocBlock[]): void {
       const block = blocks[index];
       if (contentOf(item) !== block.content) {
         const text = item.get("content");
-        if (text instanceof Y.Text) text.delete(0, text.length), text.insert(0, block.content);
+        if (text instanceof Y.Text) patchBlockText(text, block.content);
       }
       if (String(item.get("type") ?? "") !== block.type) item.set("type", block.type);
       const ref = block.sourceRef ?? null;
@@ -166,21 +173,31 @@ export function editBlockContent(doc: Y.Doc, ordinal: number, nextContent: strin
     if (!item) throw new Error(`笔记没有第 ${ordinal} 块`);
     const text = item.get("content");
     if (!(text instanceof Y.Text)) throw new Error(`第 ${ordinal} 块的正文不是 Y.Text`);
-    const current = text.toString();
-    if (current === nextContent) return;
-    // 首尾公共字符不动，只替换真正变了的中段：这样两边改同一段的不同位置时，
-    // 各自的操作落在不相交的区间上，合并结果就是两处都改到。
-    let prefix = 0;
-    while (prefix < current.length && prefix < nextContent.length && current[prefix] === nextContent[prefix]) prefix += 1;
-    let suffix = 0;
-    while (
-      suffix < current.length - prefix
-      && suffix < nextContent.length - prefix
-      && current[current.length - 1 - suffix] === nextContent[nextContent.length - 1 - suffix]
-    ) suffix += 1;
-    text.delete(prefix, current.length - prefix - suffix);
-    text.insert(prefix, nextContent.slice(prefix, nextContent.length - suffix));
+    patchBlockText(text, nextContent);
   });
+}
+
+/**
+ * 在一个 `Y.Text` 上把内容改成 `next`，只替换真正变了的中段。
+ *
+ * 首尾公共字符不动，所以两边改同一段的不同位置时，操作落在不相交的区间上，合并
+ * 结果就是两处都改到。反过来，"清空再整段插入"在 CRDT 里是 delete+insert 而不是
+ * 替换，两个人同时改一段会把这段变成两份——`writeNoteBlocks` 也走这里，理由相同：
+ * 一次导入或一次编辑器保存都不该把别人正在编辑的块换成新条目。
+ */
+function patchBlockText(text: Y.Text, next: string): void {
+  const current = text.toString();
+  if (current === next) return;
+  let prefix = 0;
+  while (prefix < current.length && prefix < next.length && current[prefix] === next[prefix]) prefix += 1;
+  let suffix = 0;
+  while (
+    suffix < current.length - prefix
+    && suffix < next.length - prefix
+    && current[current.length - 1 - suffix] === next[next.length - 1 - suffix]
+  ) suffix += 1;
+  text.delete(prefix, current.length - prefix - suffix);
+  text.insert(prefix, next.slice(prefix, next.length - suffix));
 }
 
 /** 当前块 vs 目标块 → 最小的一段替换（前后缀相同的部分不动）。 */
