@@ -2221,3 +2221,118 @@ describe("DesktopGateway · 笔记正文的离线提交（批次 4.4）", () => 
     expect(reopened.gateway.noteDocLocalSnapshot(NOTE_ID)?.pending).toEqual([]);
   });
 });
+
+describe("DesktopGateway · 重认证那道门不该把空间换掉", () => {
+  const USER_ID = "11111111-1111-4111-8111-111111111111";
+  const PERSONAL = "22222222-2222-4222-8222-222222222222";
+  const COLLAB = "33333333-3333-4333-8333-333333333333";
+  const EMAIL = "member@example.test";
+
+  const meBody = (workspaceId: string) => ({
+    userId: USER_ID,
+    workspaceId,
+    email: EMAIL,
+    role: workspaceId === COLLAB ? "member" : "owner",
+    displayName: null,
+    avatarUrl: null,
+    workspaceName: workspaceId === COLLAB ? "验收空间" : "我的个人空间",
+    workspaceType: workspaceId === COLLAB ? "collaborative" : "personal",
+    isPersonal: workspaceId === PERSONAL,
+    personalWorkspaceId: PERSONAL,
+  });
+
+  const listBody = () => ({
+    workspaces: [
+      { workspaceId: PERSONAL, workspaceName: "我的个人空间", role: "owner", workspaceType: "personal", isPersonal: true, leftAt: null },
+      { workspaceId: COLLAB, workspaceName: "验收空间", role: "member", workspaceType: "collaborative", isPersonal: false, leftAt: null },
+    ],
+  });
+
+  function reauthHarness() {
+    // 服务端这一侧的事实：登录恒常落在账号的默认（个人）空间，切空间才会把人挪走。
+    let active = PERSONAL;
+    let switchCalls = 0;
+    // 默认允许切；用例里 `blockSwitch()` 之后才扮演"那个人已经被移出去了"。
+    let switchAllowed = true;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/health")) return healthResponse();
+      if (url.endsWith("/challenge")) return trustResponse(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      if (url.endsWith("/auth/login")) {
+        // 登录建的是**新会话**，落在这个账号的默认空间；上一个会话在哪一个空间与它无关。
+        active = PERSONAL;
+        return new Response(JSON.stringify({ token: "tok-1", ctx: { userId: USER_ID, workspaceId: PERSONAL, membershipRole: "owner" }, ...listBody() }), { status: 200 });
+      }
+      if (url.endsWith("/auth/me")) {
+        return new Response(JSON.stringify(meBody(active)), { status: 200 });
+      }
+      if (url.endsWith("/auth/switch-workspace")) {
+        switchCalls += 1;
+        const wanted = JSON.parse(String(init?.body)).workspaceId as string;
+        if (!switchAllowed) return new Response(JSON.stringify({ error: "forbidden" }), { status: 403 });
+        active = wanted;
+        // 服务端这个端点真实的形状：只有 token + ctx（+ csrfToken），**没有** workspaces 名册。
+        return new Response(JSON.stringify({ token: "tok-2", ctx: { userId: USER_ID, workspaceId: wanted, membershipRole: wanted === COLLAB ? "member" : "owner" } }), { status: 200 });
+      }
+      if (url.endsWith("/auth/workspaces")) return new Response(JSON.stringify(listBody()), { status: 200 });
+      if (url.endsWith("/auth/logout")) return new Response(JSON.stringify({ loggedOut: true }), { status: 200 });
+      throw new Error(`unexpected URL ${url}`);
+    });
+    const gateway = new DesktopGateway(environment());
+    return {
+      gateway,
+      active: () => active,
+      switchCalls: () => switchCalls,
+      blockSwitch: () => { switchAllowed = false; },
+    };
+  }
+
+  it("在协作空间里过的重认证门，开完还在同一个空间", async () => {
+    const { gateway, active } = reauthHarness();
+    await gateway.connect();
+    await gateway.login(EMAIL, "pw");
+    await gateway.switchWorkspace(COLLAB);
+    expect(active()).toBe(COLLAB);
+
+    const session = await gateway.reauthenticate("pw");
+    expect(session.workspace?.workspaceId).toBe(COLLAB);
+    expect(active()).toBe(COLLAB);
+    // 顶栏胶囊读的就是这份会话：它不能再报成个人空间。
+    expect(session.workspace?.workspaceType).toBe("collaborative");
+    expect(session.workspace?.role).toBe("member");
+  });
+
+  it("本来就在默认空间时不多发一次切换", async () => {
+    const { gateway, switchCalls } = reauthHarness();
+    await gateway.connect();
+    await gateway.login(EMAIL, "pw");
+    const before = switchCalls();
+    const session = await gateway.reauthenticate("pw");
+    expect(session.workspace?.workspaceId).toBe(PERSONAL);
+    expect(switchCalls()).toBe(before);
+  });
+
+  it("那个空间已经回不去了（被移出）：门照样开，落回默认空间而不是卡住", async () => {
+    const { gateway, blockSwitch } = reauthHarness();
+    await gateway.connect();
+    await gateway.login(EMAIL, "pw");
+    await gateway.switchWorkspace(COLLAB);
+    // -setup 之后才断：模拟"人在这个空间里待过，回来时已经被移出去了"。
+    blockSwitch();
+    const session = await gateway.reauthenticate("pw");
+    // 抛错的话人连登录都完不成——回不去是"落在能落的那个空间"，不是一次失败。
+    expect(session.workspace?.workspaceId).toBe(PERSONAL);
+    expect(session.status).toBe("authenticated");
+  });
+
+  it("退登之后再登录，不会被拖回上一个空间", async () => {
+    const { gateway, active } = reauthHarness();
+    await gateway.connect();
+    await gateway.login(EMAIL, "pw");
+    await gateway.switchWorkspace(COLLAB);
+    await gateway.logout();
+    await gateway.login(EMAIL, "pw");
+    expect(active()).toBe(PERSONAL);
+    expect((await gateway.getSession()).workspace?.workspaceId).toBe(PERSONAL);
+  });
+});

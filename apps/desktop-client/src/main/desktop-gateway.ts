@@ -365,6 +365,12 @@ const rawAuthResponseSchema = z.strictObject({
     workspaceId: z.string().uuid(),
     membershipRole: z.string().nullable().optional(),
   }),
+  // `login` / `register` 会带这一份名册，`switch-workspace` **不带**（它只回 token 与 ctx）。
+  // 所以它是可选的：以前写成必填，切空间每次都 `unsupported_contract` —— 服务端已经切过去
+  // 并轮换掉旧会话，客户端却因为解析失败没拿到新 token，下一次请求 401、弹重认证门，
+  // 重认证又是"重新登录"，于是人回到默认空间（2026-09-21 实窗量到的那条即此）。
+  // 之所以还声明着而不是删掉：`strictObject` 要能收下服务端完整的登录信封，
+  // 而这个数组在本文件里没有任何读取方。
   workspaces: z.array(z.strictObject({
     workspaceId: z.string().uuid(),
     workspaceName: nonEmptyStringSchema,
@@ -372,7 +378,7 @@ const rawAuthResponseSchema = z.strictObject({
     workspaceType: z.enum(["personal", "collaborative"]),
     isPersonal: z.boolean(),
     leftAt: z.string().datetime({ offset: true }).nullable(),
-  })),
+  })).optional(),
   // The API also returns a CSRF token for cookie-authenticated consumers.
   // Bearer-token desktop requests do not persist or expose it, but the strict
   // response contract must accept the server's complete login envelope.
@@ -668,6 +674,11 @@ export class DesktopGateway {
   private connection: ApiConnectionStateV1;
   private trust: LocalApiTrustV1;
   private token: string | null = null;
+  /**
+   * 这个人**进来时**在哪一个空间。重认证等于重新登录，而登录落在账号默认空间上，
+   * 不在这里留一份的话，切空间会被那道门吞掉（见 `reauthenticate`）。
+   */
+  private sessionWorkspaceReturn: { email: string; workspaceId: string } | null = null;
   private currentSession: SessionContextV1 | null = null;
   private transportEpoch = 0;
   private workspaceEpoch = 1;
@@ -940,6 +951,8 @@ export class DesktopGateway {
     const token = this.token;
     this.token = null;
     this.currentSession = null;
+    // 退登是人自己要走，下一次登录落回默认空间就是对的，不该被拖回上一个空间。
+    this.sessionWorkspaceReturn = null;
     this.roomProjectionCache = null;
     this.commandIdempotency.clear();
     this.clearCompanionRuntimeState();
@@ -968,7 +981,22 @@ export class DesktopGateway {
   async reauthenticate(password: string, requestId?: string): Promise<SessionContextV1> {
     const current = this.currentSession ?? await this.getSession(requestId);
     if (current.status !== "authenticated") throw new DesktopGatewayFailure("reauth_required", "user_action");
-    return this.login(current.user.email, password, requestId);
+    // 必须在 login 之前取：`loadSession` 会把这一位刷成"新会话所在的空间"，
+    // 先登录再读就永远等于新会话，那个人刚离开的空间就查不到了。
+    const wanted = this.sessionWorkspaceReturn;
+    const session = await this.login(current.user.email, password, requestId);
+    // 重新登录拿到的是这个账号**默认那一个**空间的会话。人本来在协作空间里，
+    // 门开完却回到个人空间——切空间那一步等于被这道门吞掉了（2026-09-21 实窗量到的：
+    // 成员点「验收空间 / 成员 · 只读」，服务端已经切过去，重认证之后胶囊又是个人空间）。
+    // 所以门开完要把人送回他进来时那一个空间；回不去（已被移出、空间没了）不是错误，
+    // 落回默认那个就行，硬抛错会让人连登录都完不成。
+    if (!wanted || wanted.email !== current.user.email || session.status !== "authenticated") return session;
+    if (session.workspace?.workspaceId === wanted.workspaceId) return session;
+    try {
+      return await this.switchWorkspace(wanted.workspaceId, requestId);
+    } catch {
+      return session;
+    }
   }
 
   /**
@@ -4261,6 +4289,8 @@ export class DesktopGateway {
       workspaceEpoch: this.workspaceEpoch,
       credentialPersistence: this.credentialPersistence,
     });
+    // 记下"这个人现在在哪个空间"，给重认证那道门回去用（见 `reauthenticate`）。
+    if (workspace) this.sessionWorkspaceReturn = { email: parsed.data.email, workspaceId: workspace.workspaceId };
     return this.currentSession;
   }
 
