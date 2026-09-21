@@ -807,8 +807,12 @@ function OrderingEditor({
     <ol className="run-order-list" aria-label="可调整顺序的内容">
       {value.map((id, index) => (
         <li key={`${id}-${index}`}>
+          {/* 排序题的全部认知负荷在「谁在第几位」，此前屏幕上没有任何位置标记
+              （<ol> 的 list-style 被关掉，也没有别的编号），移动按钮又在 500px 外
+              的最右端——用户要自己在心里编号（31 号文档 P24）。 */}
+          <b className="run-order-index">{index + 1}</b>
           <GripVertical size={16} aria-hidden="true" />
-          <span>{indexedPublicLabel(labels, ids, id, "排序项")}</span>
+          <span className="run-order-label">{indexedPublicLabel(labels, ids, id, "排序项")}</span>
           <span className="run-order-controls">
             <button type="button" className="run-icon-button" disabled={index === 0} onClick={() => move(index, -1)} aria-label={`将${indexedPublicLabel(labels, ids, id, "排序项")}上移`}><ArrowUp size={14} aria-hidden="true" /></button>
             <button type="button" className="run-icon-button" disabled={index === value.length - 1} onClick={() => move(index, 1)} aria-label={`将${indexedPublicLabel(labels, ids, id, "排序项")}下移`}><ArrowDown size={14} aria-hidden="true" /></button>

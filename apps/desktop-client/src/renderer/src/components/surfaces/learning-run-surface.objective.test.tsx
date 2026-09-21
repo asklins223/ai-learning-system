@@ -179,4 +179,24 @@ describe("客观题作答控件", () => {
     expect(screen.getByText("选择题")).toBeTruthy();
     expect(document.body.textContent).not.toContain("single_choice");
   });
+
+  it("排序题每一行都带位置编号（P24）", async () => {
+    // 排序题的全部认知负荷在「谁在第几位」。此前 <ol> 的 list-style 被关掉、也没有
+    // 别的编号，屏幕上没有任何位置标记，而移动按钮在 500px 外的最右端。
+    last = snapshotFor({
+      kind: "ordering",
+      publicTokenIds: ["tok:c", "tok:a", "tok:b"],
+      publicTokenLabels: {
+        "tok:c": "压下压把，左右扫射",
+        "tok:a": "提起灭火器，颠倒几次",
+        "tok:b": "拔掉保险销",
+      },
+    });
+    snapshots = [last];
+    stubGateway();
+    useRoomStore.setState({ activeRunId: RUN_ID, activeObjectiveId: OBJECTIVE_ID });
+    render(<LearningRunSurface onExit={() => undefined} />);
+    await waitFor(() => expect(document.querySelectorAll(".run-order-list > li").length).toBe(3));
+    expect([...document.querySelectorAll(".run-order-index")].map((badge) => badge.textContent)).toEqual(["1", "2", "3"]);
+  });
 });
