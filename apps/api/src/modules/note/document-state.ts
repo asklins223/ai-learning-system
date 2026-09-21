@@ -1,0 +1,135 @@
+import { and, eq, sql } from "drizzle-orm";
+import type { ApiTransaction } from "../../db/client.ts";
+import { noteBlocks, noteDocumentStates, notes } from "@ailearn/shared/db-schema/note";
+import {
+  docFromSnapshot,
+  emptyNoteDoc,
+  projectNoteBlocks,
+  setNoteTitle,
+  snapshotOf,
+  writeNoteBlocks,
+  type NoteDocBlock,
+} from "./doc.ts";
+
+/**
+ * `note_document_states` 的读写与投影（批次 4.1）。
+ *
+ * 一注一篇一文档：Y.Doc 是正文的**事实源**，`note_blocks` 是它在某个版本上的投影。
+ * 文档挂在 note 上而不是挂在 version 上，因为版本是历史刻度，协同发生在"当前"。
+ *
+ * 一条硬约束（4.0 实测决定，见 `doc.ts` 文件头）：**只有"确实拥有整篇"的路径能走
+ * 这里的整篇写入**——导入、来源转笔记、版本创建、恢复历史版本。交互自动保存不能
+ * 用整篇写入（并发下块数会增殖），它要等 4.3 客户端改成上送增量之后再接进来；
+ * 在那之前自动保存仍走原路，本模块只负责让事实源先统一。
+ */
+
+export type NoteDocScope = { workspaceId: string; noteId: string };
+
+type NoteDoc = ReturnType<typeof emptyNoteDoc>;
+
+/** 读正文文档。没有快照时从当前版本的 note_blocks 反向补齐（这就是迁移接缝）。 */
+export async function loadNoteDoc(
+  tx: ApiTransaction,
+  scope: NoteDocScope,
+): Promise<{ doc: NoteDoc; backfilled: boolean }> {
+  // 快照查询也必须带 workspace_id。这张表的 RLS 会挡，但代码不能把隔离**寄托**在
+  // 连接角色上：dev 全程用 superuser，策略对它不存在（实测就是这条断言先红的）。
+  const stored = await tx.query.noteDocumentStates.findFirst({
+    where: and(
+      eq(noteDocumentStates.noteId, scope.noteId),
+      eq(noteDocumentStates.workspaceId, scope.workspaceId),
+    ),
+  });
+  if (stored) {
+    return { doc: docFromSnapshot(Uint8Array.from(stored.state)), backfilled: false };
+  }
+
+  // notes / note_blocks 的 RLS 还关着（这次审查的既有事实），所以这里必须自己带上
+  // workspace_id：只按 noteId 查会让陌生空间的事务读出别人的正文。实测过——不带时
+  // 集成用例第 4 条读到 6 行。
+  const note = await tx.query.notes.findFirst({
+    where: and(eq(notes.id, scope.noteId), eq(notes.workspaceId, scope.workspaceId)),
+    columns: { currentVersionId: true, title: true, titleSource: true },
+  });
+  const rows = note?.currentVersionId
+    ? await tx.query.noteBlocks.findMany({
+        where: and(
+          eq(noteBlocks.versionId, note.currentVersionId),
+          eq(noteBlocks.workspaceId, scope.workspaceId),
+        ),
+        orderBy: (b, { asc }) => [asc(b.ordinal)],
+      })
+    : [];
+
+  const doc = emptyNoteDoc();
+  setNoteTitle(doc, note?.title ?? "", note?.titleSource ?? "auto");
+  writeNoteBlocks(
+    doc,
+    rows.map((row) => ({
+      type: row.type,
+      content: row.content,
+      ...(row.sourceRef ? { sourceRef: row.sourceRef } : {}),
+      ...(row.imageAssetId ? { imageAssetId: row.imageAssetId } : {}),
+    })),
+  );
+  return { doc, backfilled: true };
+}
+
+/** 落盘快照。`revision` 单调 +1，客户端用它判断本机状态落后多少。 */
+export async function saveNoteDoc(tx: ApiTransaction, scope: NoteDocScope, doc: NoteDoc): Promise<void> {
+  const state = snapshotOf(doc);
+  await tx
+    .insert(noteDocumentStates)
+    .values({ noteId: scope.noteId, workspaceId: scope.workspaceId, state, revision: 1 })
+    .onConflictDoUpdate({
+      target: noteDocumentStates.noteId,
+      set: { state, revision: sql`${noteDocumentStates.revision} + 1`, updatedAt: new Date() },
+    });
+}
+
+/**
+ * 服务端唯一的正文写入口：加载文档 → 一次事务内改 → 落盘 → 投影成该版本的 note_blocks。
+ *
+ * `mutate` 拿到活的 Y.Doc：整篇替换用 `writeNoteBlocks`，恢复版本用
+ * `restoreNoteBlocksFrom`。除这里之外不该再有第二条改正文的路。
+ */
+export async function applyNoteDocUpdate(
+  tx: ApiTransaction,
+  scope: NoteDocScope,
+  versionId: string,
+  mutate: (doc: NoteDoc) => void,
+): Promise<{ blocks: NoteDocBlock[]; doc: NoteDoc }> {
+  const { doc } = await loadNoteDoc(tx, scope);
+  doc.transact(() => mutate(doc));
+  await saveNoteDoc(tx, scope, doc);
+  const projected = projectNoteBlocks(doc);
+  await projectBlocksIntoVersion(tx, scope.workspaceId, versionId, projected);
+  return { blocks: projected.map(({ ordinal: _ordinal, ...block }) => block), doc };
+}
+
+/**
+ * 投影成某个版本的 `note_blocks` 行。
+ *
+ * 这里是"删重插"而不是逐行 diff：走到这里的都是整篇替换事件（导入/转笔记/新版本/恢复），
+ * 频次低、语义就是整篇；留着按 ordinal 的 diff 反而会把上一版残留的行留在原地。
+ */
+export async function projectBlocksIntoVersion(
+  tx: ApiTransaction,
+  workspaceId: string,
+  versionId: string,
+  blocks: Array<{ ordinal: number } & NoteDocBlock>,
+): Promise<void> {
+  await tx.delete(noteBlocks).where(eq(noteBlocks.versionId, versionId));
+  if (blocks.length === 0) return;
+  await tx.insert(noteBlocks).values(
+    blocks.map((block) => ({
+      versionId,
+      workspaceId,
+      ordinal: block.ordinal,
+      type: block.type,
+      content: block.content,
+      imageAssetId: block.imageAssetId ?? null,
+      sourceRef: block.sourceRef ?? null,
+    })),
+  );
+}

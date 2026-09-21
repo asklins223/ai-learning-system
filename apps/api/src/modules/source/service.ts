@@ -1,6 +1,8 @@
 import { and, asc, desc, eq, ne, sql, count, inArray, isNull } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
-import { sources, sourceSegments, notes, noteVersions, noteBlocks } from "@ailearn/shared/db-schema/note";
+import { sources, sourceSegments, notes, noteVersions } from "@ailearn/shared/db-schema/note";
+import { applyNoteDocUpdate } from "../note/document-state.ts";
+import { writeNoteBlocks } from "../note/doc.ts";
 import { computeContentHash, ensureImageAssetsForBlocks } from "../note/service.ts";
 import { jobs } from "@ailearn/shared/db-schema/job";
 import { searchDocuments } from "@ailearn/shared/db-schema/search";
@@ -522,19 +524,22 @@ export async function createNoteFromSource(
       })
       .returning();
 
-    // 创建 note_blocks，每个 block 的 source_ref 指向 source_segment
+    // 创建 note_blocks，每个 block 的 source_ref 指向 source_segment。
+    // 批次 4.1：来源转笔记是"整篇由这一次动作拥有"的路径，所以走文档入口——
+    // 快照先落，行由文档派生；块级 sourceRef 必须进文档，否则恢复历史版本时
+    // 第一个丢的就是证据链回指。
     const blocksWithAssets = await ensureImageAssetsForBlocks(tx, workspaceId, blocks, userId, note.id);
-    await tx.insert(noteBlocks).values(
-      blocksWithAssets.map((b, idx) => ({
-        versionId: version.id,
-        workspaceId,
-        ordinal: idx,
-        type: b.type,
-        content: b.content,
-        imageAssetId: b.imageAssetId,
-        sourceRef: { sourceId: source.id, segmentId: segments[idx]?.id },
-      })),
-    );
+    await applyNoteDocUpdate(tx, { workspaceId, noteId: note.id }, version.id, (doc) => {
+      writeNoteBlocks(
+        doc,
+        blocksWithAssets.map((b, idx) => ({
+          type: b.type,
+          content: b.content,
+          ...(b.imageAssetId ? { imageAssetId: b.imageAssetId } : {}),
+          sourceRef: { sourceId: source.id, segmentId: segments[idx]?.id },
+        })),
+      );
+    });
 
     // 更新 note.currentVersionId
     await tx

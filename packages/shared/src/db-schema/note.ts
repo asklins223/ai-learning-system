@@ -8,12 +8,13 @@ import { sourceStatusEnum } from "./enums.ts";
  * 这一列要自己声明。读写都是原样透传：Postgres 的 bytea 驱动层已经是 Buffer，
  * 自己再做一次 base64 只会让"快照落盘再读回"多一个可能出错的环节。
  */
-const bytea = customType<{ data: Buffer; driverParam: Buffer }>({
+const bytea = customType<{ data: Uint8Array; driverParam: Uint8Array | Buffer }>({
   dataType() {
     return "bytea";
   },
-  toDriver: (value: unknown) => value as Buffer,
-  fromDriver: (value: unknown) => value as Buffer,
+  // 驱动只认 Buffer（node-postgres 的 bytea 序列化路径），而 yjs 给的是 Uint8Array。
+  toDriver: (value: unknown) => Buffer.from(value as Uint8Array),
+  fromDriver: (value: unknown) => value as Uint8Array,
 });
 
 export const sources = pgTable(

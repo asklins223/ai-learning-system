@@ -349,7 +349,29 @@ describe("source to note conversion", () => {
     });
   });
 
-  it("creates note/version/blocks and updates the search projection", async () => {
+/**
+ * 正文写入口改成"文档→投影"（批次 4.1）后，`createNoteFromSource` 会多读三处：
+ * 快照、笔记行、当前版本的块。这些桩只负责让假事务不炸 —— 本文件断言的仍是
+ * note/version 行与搜索投影那三件事；文档与块的真要对着真库验，见
+ * `note-document-state-postgres.integration.ts`（那里才有 RLS、upsert、组合外键）。
+ */
+function docWriteStubs(noteTitle = "Source") {
+  return {
+    notes: {
+      findFirst: async () => ({
+        id: "note-1",
+        currentVersionId: "version-1",
+        title: noteTitle,
+        titleSource: "auto",
+        workspaceId: WORKSPACE_ID,
+      }),
+    },
+    noteDocumentStates: { findFirst: async () => undefined },
+    noteBlocks: { findMany: async () => [] },
+  };
+}
+
+it("creates note/version/blocks and updates the search projection", async () => {
     const inserted: Array<{ table: unknown; value: any }> = [];
     const updated: Array<{ table: unknown; value: any }> = [];
     let indexed: any;
@@ -368,13 +390,19 @@ describe("source to note conversion", () => {
             { id: "segment-2", text: "Paragraph", segmentType: "paragraph", charStart: 8, charEnd: 17 },
           ],
         },
+        // 正文写入口已改成"文档→投影"（批次 4.1）。这里的桩只负责**不炸**：
+        // 本用例断言的是 note/version 行与搜索投影三件事，文档与块的真要在
+        // `note-document-state-postgres.integration.ts` 里对真库验，
+        // 那里才有 RLS、upsert 与组合外键。
+        ...docWriteStubs(source.title),
       },
+      delete: () => ({ where: async () => undefined }),
       insert: (table: unknown) => ({
         values: (value: any) => {
           inserted.push({ table, value });
           if (table === notes) return { returning: async () => [{ id: "note-1", title: source.title }] };
           if (table === noteVersions) return { returning: async () => [{ id: "version-1" }] };
-          return Promise.resolve();
+          return { onConflictDoUpdate: async () => undefined };
         },
       }),
       update: (table: unknown) => ({
@@ -426,12 +454,14 @@ describe("source to note conversion", () => {
         sourceSegments: {
           findMany: async () => [{ id: "segment-1", text: "Body", segmentType: null, charStart: 0, charEnd: 4 }],
         },
+        ...docWriteStubs(),
       },
+      delete: () => ({ where: async () => undefined }),
       insert: (table: unknown) => ({
         values: () => {
           if (table === notes) return { returning: async () => [{ id: "note-1", title: "Source" }] };
           if (table === noteVersions) return { returning: async () => [{ id: "version-1" }] };
-          return Promise.resolve();
+          return { onConflictDoUpdate: async () => undefined };
         },
       }),
       update: () => updateChain(),

@@ -10,8 +10,10 @@
 import { createHash } from "node:crypto";
 import { eq, and, inArray, sql, isNull } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
-import { notes, noteVersions, noteBlocks } from "@ailearn/shared/db-schema/note";
+import { notes, noteVersions } from "@ailearn/shared/db-schema/note";
 import { computeContentHash, ensureImageAssetsForBlocks } from "../note/service.ts";
+import { applyNoteDocUpdate } from "../note/document-state.ts";
+import { writeNoteBlocks } from "../note/doc.ts";
 import { preRegisterImageAssetsForImport } from "../../lib/image-asset.ts";
 import { markdownToBlocks, extractTitleFromBlocks, type ParsedBlock } from "@ailearn/shared/markdown-parser";
 import { extractObjectKeyFromMarkdownImage } from "../../lib/markdown-image.ts";
@@ -209,15 +211,22 @@ async function importItems(
             userId,
             note.id,
           );
-          await itemTx.insert(noteBlocks).values(
-            blocksWithAssets.map((b, idx) => ({
-              versionId: version.id,
-              workspaceId,
-              ordinal: idx,
-              type: b.type,
-              content: b.content,
-              imageAssetId: b.imageAssetId,
-            })),
+          // 批次 4.1：导入"确实拥有整篇"，所以走文档而不是直接插行。
+          // 快照落盘 + 投影成这个版本的 note_blocks 都在同一个入口里完成。
+          await applyNoteDocUpdate(
+            itemTx as Parameters<typeof applyNoteDocUpdate>[0],
+            { workspaceId, noteId: note.id },
+            version.id,
+            (doc) => {
+              writeNoteBlocks(
+                doc,
+                blocksWithAssets.map((b) => ({
+                  type: b.type,
+                  content: b.content,
+                  ...(b.imageAssetId ? { imageAssetId: b.imageAssetId } : {}),
+                })),
+              );
+            },
           );
         }
 
