@@ -586,3 +586,26 @@ poll 路径）。我新加的那个文件因此用 `UPDATE … WHERE status='pen
 干扰项「通过主动回忆来巩固记忆」（提取练习）边界偏近——两者在原文里是相邻的两个概念。
 这是"干扰项够不够锐"的问题，不是错误；等下一次真跑顺带多看几道再决定要不要在 prompt 里
 要求"干扰项必须来自另一个概念而不是同一概念的近义改写"。
+
+### §22 尾注：第二次真跑尝试也没能开跑（08:14 起 dev API 不是我们的代码起不来）
+
+08:06 前后 worker 已连续 8 分钟没有重启，于是重建夹具准备再试一次真跑。脚本在**登录请求**上
+就被断开：`ready` 探测返回空（curl exit 52）。日志给的是别人的在途状态，两条连着来：
+
+```
+8:14:15 [tsx] change in ./src/modules/note/service.ts Rerunning...
+  SyntaxError: The requested module '../note/service.ts' does not provide an export named 'computeContentHash'
+8:14:50 [tsx] change in ./src/modules/import/markdown-import-service.ts Rerunning...
+  TransformError: markdown-import-service.ts:18:74: Unexpected "}"
+```
+
+也就是说此刻 api 进程**根本起不来**（不是某个路由 500）。这不是我该动的文件，没有替他们改。
+夹具笔记已删（级联带走它的 run/候选），读数表 0 行。
+
+顺带清出来的一条旧账（不动，只报）：库里还有一挂 `planning` 的 run `9b536df1`（2026-08-19，
+笔记"间隔重复是一种学习策略…"，它的 outbox job 已是 `failed`）——它就是 §7 那类
+"死批次"豁免要认得的形态，占着一个 `MAX_INFLIGHT_RUNS` 槽。
+
+真跑阶梯**目前不是关键路径**：tick 落在活路径上这件事已由第 5 条确定性用例钉住
+（`authored` 读数 == 候选表张数）。真跑只剩"真实时间尺度上每一格都会被采到"这一条观感，
+需要的前提有两个：api 能起来，且那一次生成期间没有 agent 在存 `workers/ai-worker/src`。
