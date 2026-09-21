@@ -253,3 +253,17 @@ knowledgeForm 给约束，确定性可测。
 并在分配阶段就按形态决定"这张该出哪种"。要不要为验证它再花一次真跑，由用户定；
 若要跑，应当挑**事实/定义类知识为主**的材料，才能把 fact→选择题这条路径真正压出来
 （这次挑的 IndexTTS 笔记是流程型材料，天然出不了这个信号）。
+
+## 15. v25 已落地（提交 a8d77886）
+
+`knowledgeForm → 允许的 practiceItem 形状` 做成共享层一张表
+（`PRACTICE_FORMS_BY_KNOWLEDGE_FORM` + `practiceFormsForKnowledgeForm`），author 系统提示
+按本卡形态注入"只允许这些形状，交不出写 null，不要换成别的"。
+提示里提要求是一回事，能被测试钉住是另一回事：现在"fact 卡该出选择题"是一条断言。
+
+回归：shared 335/335、api 1413（1412 pass / 0 fail，含两侧 prompt 版本同步）、
+worker 695/695、四端 typecheck 干净。桌面 134 文件里有 1 个文件红：
+`src/main/desktop-ipc-note-doc.test.ts`（笔记协同 IPC，对应他们三个在途的 main 文件），不是我这批改的。
+
+**仍未答**：v25 能不能让模型真为 fact/definition 写出选择题。要答它必须换材料——
+挑事实/定义密集的笔记再跑一次；这次的流程型笔记天然压不出这个信号。
