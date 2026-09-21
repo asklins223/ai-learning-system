@@ -43,6 +43,7 @@ import {
 } from "../../app/desktop-client";
 import { SurfaceReturnControl } from "./SurfaceReturnControl";
 import { learningRunPhaseLabels } from "./learning-run-surface";
+import { startObjectiveJourney } from "./objective-primary-action";
 import {
   formatObjectiveDateTime,
   formatObjectiveState,
@@ -219,12 +220,15 @@ const FILTER_BUCKETS = [
 export function ObjectiveLibrarySurface() {
   const invoke = useRoomStore((state) => state.invoke);
   const setActiveObjectiveId = useRoomStore((state) => state.setActiveObjectiveId);
+  const setActiveRunId = useRoomStore((state) => state.setActiveRunId);
   const epochRef = useRef<number | undefined>(undefined);
   const listRef = useRef<HTMLUListElement>(null);
   const loadedCursorsRef = useRef(new Set<string>());
   const [page, setPage] = useState<ObjectiveListPageV3 | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [startingFocus, setStartingFocus] = useState(false);
+  const [focusFailure, setFocusFailure] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [pageFailure, setPageFailure] = useState<string | null>(null);
   const [primaryFocusId, setPrimaryFocusId] = useState<string | null>(null);
@@ -351,6 +355,37 @@ export function ObjectiveLibrarySurface() {
     invoke("open-objective");
   };
 
+  /**
+   * 焦点卡那颗按钮真的去开始/继续，而不是打开详情页（31 号文档 P9）。
+   * 执行处与详情页共用同一个 `startObjectiveJourney`，所以按钮上的动词和
+   * 按下去的去处在两边必然一致。
+   */
+  const startFocus = async (goal: ObjectiveListItemV3) => {
+    if (startingFocus) return;
+    setFocusFailure(null);
+    if (!window.ailearn) {
+      setFocusFailure("这次没有拿到完整的学习凭据，先不开始。");
+      return;
+    }
+    setStartingFocus(true);
+    try {
+      const started = await startObjectiveJourney(goal.primaryAction, {
+        epochRef,
+        setActiveObjectiveId,
+        setActiveRunId,
+        openRunSurface: () => invoke("validate"),
+        reload: load,
+      });
+      // refresh / view_successor / 等待类不起旅程，留在列表上；
+      // 但「看新版本」这种换了对象的，直接带进详情，免得用户在列表上找不着。
+      if (!started && goal.primaryAction.kind === "view_successor") openObjective(goal.primaryAction.successorObjectiveId);
+    } catch (error) {
+      setFocusFailure(gatewayErrorMessage(error));
+    } finally {
+      setStartingFocus(false);
+    }
+  };
+
   return (
     <ApprovedSurfaceFrame family="workshop" eyebrow="理解构建" headingId="objective-library-title" title="理解目标" detail="先看下一步，再浏览每一条可验证的理解">
       {loading ? <SurfaceDataState kind="loading" message="正在读取理解目标" detail="状态和进度都来自服务器，不是本机推算的。" /> : null}
@@ -367,9 +402,16 @@ export function ObjectiveLibrarySurface() {
               <p>{serverFocus ? "今日主焦点" : "接下来可以继续"}</p>
               <h3 id="goal-focus-title">{activeGoal.conceptLabel ?? activeGoal.primaryNoteTitle ?? "未命名理解目标"}</h3>
               <blockquote>{activeGoal.publicSummary}</blockquote>
-              <button type="button" className="v3-goal-focus__action" onClick={() => openObjective(activeGoal.objectiveId)}>
-                <span><small>打开目标详情</small>{primaryActionLabel(activeGoal.primaryAction)}</span>
+              <button type="button" className="v3-goal-focus__action" disabled={startingFocus} onClick={() => void startFocus(activeGoal)}>
+                <span><small>{startingFocus ? "正在开始…" : "这一步真的开始作答"}</small>{primaryActionLabel(activeGoal.primaryAction)}</span>
                 <ArrowRight size={19} aria-hidden="true" />
+              </button>
+              {/* 为什么这一句要单独占一行：它比按钮上的动词长，塞进按钮的 kicker 里
+                  会把 320px 宽的按钮撑破（31 号文档 P8 量过这张卡的横向溢出）。 */}
+              <p className="v3-goal-focus__hint">{primaryActionDescription(activeGoal.primaryAction)}</p>
+              {focusFailure ? <p className="v3-goal-focus__error" role="alert">{focusFailure}</p> : null}
+              <button type="button" className="v3-goal-focus__detail" onClick={() => openObjective(activeGoal.objectiveId)}>
+                先看这条目标的详情
               </button>
             </div>
             <dl className="v3-goal-pulse" aria-label="目标状态概览">
@@ -434,7 +476,10 @@ export function ObjectiveLibrarySurface() {
                       </span>
                       <span className="v3-goal-row__meta">建于 {formatDate(item.createdAt)}</span>
                     </span>
-                    <span className="v3-goal-row__next"><small>{primaryActionLabel(item.primaryAction)}</small><ChevronRight size={16} aria-hidden="true" /></span>
+                    {/* 行按下去是进详情，不是开始作答——所以右边写它带你去哪，
+                        不重复服务端那个动词（同一个词在列表里指向两个地方，
+                        就是 31 号文档 P9 的病）。真正开始作答的入口只有焦点卡那颗。 */}
+                    <span className="v3-goal-row__next"><small>进入详情</small><ChevronRight size={16} aria-hidden="true" /></span>
                   </button>
                 </li>
               ))}
@@ -487,37 +532,20 @@ export function ObjectiveDetailSurface() {
 
   const startAction = async () => {
     if (!objective || starting) return;
-    const action = objective.primaryAction;
     setActionFailure(null);
-    if (action.kind === "refresh") {
-      await load();
-      return;
-    }
-    if (action.kind === "view_successor") {
-      setActiveObjectiveId(action.successorObjectiveId);
-      return;
-    }
-    if (action.kind === "resume_run") {
-      setActiveRunId(action.runId);
-      invoke("validate");
-      return;
-    }
-    if (action.kind !== "create_run" && action.kind !== "create_review_run" && action.kind !== "practice_only") return;
     if (!window.ailearn) {
       setActionFailure("这次没有拿到完整的学习凭据，先不开始。");
       return;
     }
     setStarting(true);
     try {
-      const response = await window.ailearn.learningRun.start({
-        meta: createRequestMeta(epochRef.current),
-        commandId: createCommandId(action.kind === "create_review_run" ? "start-objective-review" : action.kind === "practice_only" ? "start-objective-practice" : "start-objective-run"),
-        request: action.start,
+      await startObjectiveJourney(objective.primaryAction, {
+        epochRef,
+        setActiveObjectiveId,
+        setActiveRunId,
+        openRunSurface: () => invoke("validate"),
+        reload: load,
       });
-      if (response.workspaceEpoch) epochRef.current = response.workspaceEpoch;
-      const snapshot = unwrapGatewayResult(response);
-      setActiveRunId(snapshot.runId);
-      invoke("validate");
     } catch (error) {
       setActionFailure(gatewayErrorMessage(error));
     } finally {
@@ -591,11 +619,11 @@ export function ObjectiveDetailSurface() {
               </dl>
             </section>
 
+            {/* 原来这里排着五个 8px 的 span：目标第 N 版 / 状态变更 N 次 / 学习卡第 N 版 /
+                发布第 N 版 / 创建于…。前四个是 revision 闭包与 lifecycle 的内部账本，
+                对「我会不会这道题」零帮助，摆在最底部像一张收据（31 号文档 P16）。
+                合同要求的是可追溯，不是把追溯字段铺在主版面上——只留创建时间。 */}
             <footer className="v3-objective-revision">
-              <span>目标第 {objective.surfaceRevision} 版</span>
-              <span>状态变更 {objective.lifecycleEpoch} 次</span>
-              <span>{content.presentation.cardRevision ? `学习卡第 ${content.presentation.cardRevision} 版` : "尚无公开学习卡"}</span>
-              <span>{content.presentation.publicationRevision ? `发布第 ${content.presentation.publicationRevision} 版` : "尚未发布"}</span>
               <span>创建于 {formatObjectiveDateTime(objective.createdAt)}</span>
             </footer>
           </article>

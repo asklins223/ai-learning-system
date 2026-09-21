@@ -42,6 +42,42 @@
  * 写进长期记录。两者此前共用同一个「已经证明」的说法，用户分不清。 */
 .hud-surface .learning-run-result-evidence [data-role="proved-this-time"] b { color: var(--hud-green); }
 
+/* ── B8：列表焦点卡的主行动（P9）────────────────────────────────────────
+ *
+ * 那颗按钮此前印着服务端的动词、按下去却只打开详情页。现在它真的开始/继续，
+ * 「看详情」拆成下面一条单独的路。三行新文案都按 B4 的地板给 ≥12px，
+ * 不再往 8px 那一档里塞要参与决策的句子。                              */
+.hud-surface .v3-goal-focus__hint {
+  margin: 10px 0 0;
+  color: rgba(255, 248, 232, 0.78);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.hud-surface .v3-goal-focus__error {
+  margin: 8px 0 0;
+  color: var(--hud-butter);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.hud-surface .v3-goal-focus__detail {
+  margin-top: 14px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: rgba(255, 248, 232, 0.66);
+  font-size: 12px;
+  font-weight: 650;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.hud-surface .v3-goal-focus__detail:hover { color: #fff8e8; }
+
+/* P16：详情页那排内部版本账本删到只剩创建时间，剩下这句就不该再是 8px
+ * （approved-surfaces.css:286-288 那一档）。 */
+.hud-surface .v3-objective-revision span { font-size: 11px; }
+
 /* ── B2：让 data-outcome 真的驱动视觉（P2）───────────────────────────────
  *
  * 这两个属性此前从 JSX 发出去、全仓没有任何一条 CSS 接手，所以「已理解」和
