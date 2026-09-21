@@ -27,7 +27,7 @@ const READ_PATTERNS = [
 const GUARD_TOKENS = [
   "visibleNotesCondition",
   "noteVisibleSqlText",
-  "noteVisibleForSearchIndexSql",
+  "searchDocumentsVisibleSql",
   // 只按作者筛是同一句话的**更严**形式（onboarding 探针、里程碑判定只看自己的），
   // 所以它算带上判据，不算漏。
   "eq(notes.createdBy",

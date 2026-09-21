@@ -19,6 +19,7 @@ import { getLatestGenerationRunForNoteV2 } from "../modules/card-generation-v2/g
 import { listActiveCardsV2, readPublicCardV2 } from "../modules/card-generation-v2/card-service.ts";
 import { addV2ObjectiveToWorkspace } from "./helpers/v2-card-fixture.ts";
 import { assembleObjectiveSurfaceV3, listObjectiveSurfacesV3 } from "../modules/learning-objectives/surface-service.ts";
+import { reindexWorkspaceSearch, search } from "../modules/search/service.ts";
 import { CardGenerationV2ServiceError } from "../modules/card-generation-v2/helpers.ts";
 
 const CONN = process.env.DATABASE_URL_API ?? process.env.DATABASE_URL;
@@ -342,3 +343,30 @@ function expectLike(ids: string[], objectiveId: string, message: string) {
 function expectNotLike(ids: string[], objectiveId: string, message: string) {
   assert.equal(ids.find((id) => id === objectiveId), undefined, message);
 }
+
+test("搜索这一侧也一样：私有笔记的目标不出现在别人的命中里", async () => {
+  // 索引是全空间共用的一份，所以这一侧必须**查询时**判（建索引时按人裁会把某个人的
+  // 视角烧进共用数据）。目标那一支和列表/详情用的是同一句话——判据走"目标 → 卡 → 笔记"。
+  const phrase = `只在私有目标里的短语 ${tag}`;
+  const seeded = await addV2ObjectiveToWorkspace(sql, workspaceId, author, {
+    publicSummary: phrase,
+    objectiveStatement: phrase,
+  });
+
+  const hits = await withWorkspaceTransaction({ workspaceId, userId: author }, async (tx) => {
+    await reindexWorkspaceSearch(tx, workspaceId);
+    const asOther = await search(tx, workspaceId, phrase, { userId: other, type: "objective" });
+    const asAuthor = await search(tx, workspaceId, phrase, { userId: author, type: "objective" });
+    return { other: asOther.items.map((i) => i.objectId), author: asAuthor.items.map((i) => i.objectId) };
+  });
+
+  assert.equal(
+    hits.other.find((id) => id === seeded.objectiveId),
+    undefined,
+    "成员搜到了「仅自己可见」笔记的目标",
+  );
+  assert.ok(
+    hits.author.includes(seeded.objectiveId),
+    `作者自己也搜不到（正向对照失败：${hits.author.length} 条命中）`,
+  );
+});

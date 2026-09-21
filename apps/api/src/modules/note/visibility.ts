@@ -67,14 +67,27 @@ export function noteVisibleSqlText(alias: string, viewerExpr: string): string {
  *
  * 返回的片段假设外层已经把查看者放进了一个 `v(viewer)` 的 CROSS JOIN。
  */
-export function noteVisibleForSearchIndexSql(): string {
-  return `(search_document.object_type <> 'note' OR EXISTS (
-    SELECT 1 FROM public.notes visible_note
-    WHERE visible_note.id = search_document.object_id
-      AND visible_note.workspace_id = search_document.workspace_id
-      AND visible_note.deleted_at IS NULL
-      AND ${noteVisibleSqlText("visible_note", "v.viewer")}
-  ))`;
+export function searchDocumentsVisibleSql(): string {
+  return `(search_document.object_type NOT IN ('note', 'objective')
+    OR (search_document.object_type = 'note' AND EXISTS (
+      SELECT 1 FROM public.notes visible_note
+      WHERE visible_note.id = search_document.object_id
+        AND visible_note.workspace_id = search_document.workspace_id
+        AND visible_note.deleted_at IS NULL
+        AND ${noteVisibleSqlText("visible_note", "v.viewer")}
+    ))
+    OR (search_document.object_type = 'objective' AND (
+      -- 目标这一支与 visibleObjectivesCondition 同一句话：判据走「目标 → 卡 → 笔记」，
+      -- 没有带笔记来源的卡 = 没有可追溯的私有来源，不受这条边界约束。
+      NOT EXISTS (SELECT 1 FROM public.learning_cards_v2 objective_card
+                  WHERE objective_card.objective_id = search_document.object_id
+                    AND objective_card.note_version_id IS NOT NULL)
+      OR EXISTS (SELECT 1 FROM public.learning_cards_v2 objective_card
+                 JOIN public.note_versions objective_version ON objective_version.id = objective_card.note_version_id
+                 JOIN public.notes objective_note ON objective_note.id = objective_version.note_id
+                 WHERE objective_card.objective_id = search_document.object_id
+                   AND ${noteVisibleSqlText("objective_note", "v.viewer")})
+    )))`;
 }
 
 /**

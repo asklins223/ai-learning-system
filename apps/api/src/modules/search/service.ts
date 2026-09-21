@@ -7,7 +7,7 @@ import {
 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { notes, noteBlocks, sources, sourceSegments } from "@ailearn/shared/db-schema/note";
 import { searchDocuments } from "@ailearn/shared/db-schema/search";
-import { noteVisibleForSearchIndexSql } from "../note/visibility.ts";
+import { searchDocumentsVisibleSql } from "../note/visibility.ts";
 import { SourceStatus } from "@ailearn/shared";
 import { logger } from "../../lib/logger.ts";
 
@@ -124,7 +124,7 @@ async function getSearchTotal(
       FROM search_documents AS search_document
       CROSS JOIN (SELECT ${userId}::uuid AS viewer) v
       WHERE workspace_id = ${workspaceId}
-        AND ${sql.raw(noteVisibleForSearchIndexSql())}
+        AND ${sql.raw(searchDocumentsVisibleSql())}
         AND (
           body ILIKE '%' || ${searchEscapedQuery(query)} || '%' ESCAPE '\\'
           OR title ILIKE '%' || ${searchEscapedQuery(query)} || '%' ESCAPE '\\'
@@ -241,7 +241,7 @@ export async function search(
         -- 原生 SQL：查看者以一个 v(viewer) 列进来，片段里引用的是它而不是占位符。
         CROSS JOIN (SELECT ${opts.userId}::uuid AS viewer) v
         WHERE workspace_id = ${workspaceId}
-          AND ${sql.raw(noteVisibleForSearchIndexSql())}
+          AND ${sql.raw(searchDocumentsVisibleSql())}
           AND (
             body ILIKE '%' || ${escapedQuery} || '%' ESCAPE '\\'
             OR title ILIKE '%' || ${escapedQuery} || '%' ESCAPE '\\'
