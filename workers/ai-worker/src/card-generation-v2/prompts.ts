@@ -130,7 +130,8 @@
  *    答案的可判分命题）+ 整类清单（玩笑段子/情绪吐槽/闲聊寒暄/无意义字符/
  *    个人事务/身份凭据/传闻八卦/纯链接/无答案的提问/口味偏好）。
  */
-import type { CardStrategyV2 } from "@ailearn/shared/card-generation-v2-contracts";
+import type { CardStrategyV2, KnowledgeFormV2 } from "@ailearn/shared/card-generation-v2-contracts";
+import { practiceFormsForKnowledgeForm } from "@ailearn/shared/card-generation-v2-contracts";
 import { taskIntentsForStrategy } from "@ailearn/shared/card-generation-v2-pipeline";
 
 /**
@@ -166,7 +167,7 @@ import { taskIntentsForStrategy } from "@ailearn/shared/card-generation-v2-pipel
  * 偏好 + 单一题型 ≤⌈N/2⌉ 分配 strategy，author 只能执行。模型逐张出题时看不到同批
  * 其他卡，题型多样性不可能靠提示词自觉达成。
  */
-export const CARD_GENERATION_V2_PROMPT_VERSION = "card-generation-v2/v24";
+export const CARD_GENERATION_V2_PROMPT_VERSION = "card-generation-v2/v25";
 
 export const PLANNER_PROMPT_VERSION = `${CARD_GENERATION_V2_PROMPT_VERSION}/planner`;
 export const AUTHOR_PROMPT_VERSION = `${CARD_GENERATION_V2_PROMPT_VERSION}/author`;
@@ -548,8 +549,19 @@ const exampleHintsForStrategy: Record<CardStrategyV2, { level1: string; level2: 
  *
  * v21：按 planner 分配的 strategy 出题（模板与示例的 strategy 值不再是常量 recall）。
  */
-export const buildAuthorSystemPrompt = (strategy: CardStrategyV2): string => {
+export const buildAuthorSystemPrompt = (
+  strategy: CardStrategyV2,
+  knowledgeFormHint?: KnowledgeFormV2,
+): string => {
   const spec = authorStrategySpecs[strategy];
+  // v25：按知识形态限定客观题形状。顺序即优先级，第一个是首选。
+  const allowedForms = knowledgeFormHint ? practiceFormsForKnowledgeForm(knowledgeFormHint) : [];
+  const shapeLine = allowedForms.length > 0
+    ? "- 本卡知识形态是 " + String(knowledgeFormHint)
+      + "，practiceItem 只允许这些形状（按优先级）："
+      + allowedForms.join(" → ")
+      + "。交不出这个形状就写 null，不要退而求其次换成别的形状。\n"
+    : "";
   return `
 你是 Candidate Author。你为规划好的学习目标编写候选卡片：objective（含 canonical
 answer 与 rubric）、presentation（含 front cue/prompt 与教学转换类型）。
@@ -676,7 +688,7 @@ answer 与 rubric）、presentation（含 front cue/prompt 与教学转换类型
   * 证据写了"常被误认为 / 实际上 / 注意 / 并非"这类纠偏表述 → **必须**提取进 misconception；
   * 证据给了具体例子、题设、样本 → **必须**提取进 workedExample；
   确实没有对应内容才输出空字符串。判定方法是逐句回到证据里找，不是凭感觉。
-- **practiceItem 是这张卡的客观练习件，必须显式回答（v24）**：交不出就写 null，不许省略这个键：
+${shapeLine}- **practiceItem 是这张卡的客观练习件，必须显式回答（v24）**：交不出就写 null，不许省略这个键：
   * 它只用于**练习与诊断**——正式验证仍是产出型作答，一道选择题不能证明理解，所以
     它绝不取代 canonicalAnswer，也不许把 canonicalAnswer 写成"选出来的那个字母"；
   * 四种形状任选其一，按知识本身的形状挑：

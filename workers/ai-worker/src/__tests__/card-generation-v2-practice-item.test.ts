@@ -7,6 +7,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { sanitizePracticeItem, authorObjectiveDraftSchema } from "../card-generation-v2/providers.ts";
+import { buildAuthorSystemPrompt } from "../card-generation-v2/prompts.ts";
+import { practiceFormsForKnowledgeForm } from "@ailearn/shared/card-generation-v2-contracts";
 import type { PracticeItemV2 } from "@ailearn/shared/card-generation-v2-contracts";
 
 /** author 输出的最小合法 objective（v24 验收只用它的 practiceItem 键）。 */
@@ -71,6 +73,31 @@ describe("authorObjectiveDraftSchema v24", () => {
         "拒绝原因必须指到 practiceItem 本身",
       );
     }
+  });
+});
+
+/**
+ * v25：客观题形状按知识形态限定。
+ * 这条表的真正作用是让"fact 卡为什么没有选择题"变成一个可断言的问题，
+ * 而不是每次跑完靠肉眼猜模型有没有偷懒。
+ */
+describe("practiceFormsForKnowledgeForm", () => {
+  it("无次序的知识首选选择/判断，有次序的首选排序", () => {
+    assert.deepEqual([...practiceFormsForKnowledgeForm("fact")], ["single_choice", "true_false"]);
+    assert.deepEqual([...practiceFormsForKnowledgeForm("definition")][0], "single_choice");
+    assert.deepEqual([...practiceFormsForKnowledgeForm("boundary")][0], "true_false");
+    assert.deepEqual([...practiceFormsForKnowledgeForm("sequence")], ["ordering"]);
+    assert.deepEqual([...practiceFormsForKnowledgeForm("procedure")], ["ordering", "matching"]);
+    assert.deepEqual([...practiceFormsForKnowledgeForm("comparison")][0], "matching");
+  });
+
+  it("author 系统提示把这张卡允许的形状写进去，序列题不会被提示成选择题", () => {
+    const factPrompt = buildAuthorSystemPrompt("recall", "fact");
+    assert.match(factPrompt, /practiceItem 只允许这些形状/);
+    assert.ok(factPrompt.includes("single_choice"), "fact 卡应被告知首选选择题");
+    const seqPrompt = buildAuthorSystemPrompt("sequence", "sequence");
+    assert.ok(seqPrompt.includes("ordering → ") || seqPrompt.includes("ordering"), "序列表仍应拿到 ordering");
+    assert.ok(!seqPrompt.includes("single_choice → "), "次序类知识不该被提示成选择题优先");
   });
 });
 

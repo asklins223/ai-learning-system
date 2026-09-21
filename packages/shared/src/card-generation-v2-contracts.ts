@@ -680,6 +680,40 @@ export const practiceItemV2Schema = z.discriminatedUnion("kind", [
 export type PracticeItemV2 = z.infer<typeof practiceItemV2Schema>;
 
 /**
+ * v25：按知识形态限定"这道客观题该长什么样"。
+ *
+ * 依据（2026-09-21 真跑实测）：v24 之后模型愿意填 practiceItem 了，但它总挑
+ * `ordering`。看着像偷懒，查了知识形态才发现——那两张卡本来就是 sequence/procedure，
+ * ordering 是**正确形状**。真正的空白是另一头：fact / definition / boundary 这类
+ * 没有内在次序的知识，一条选择题都没产出过。所以不能靠"多写点提示"碰运气，
+ * 得按形态给形状，并把这条变成一个可以单点断言的表。
+ *
+ * 顺序即优先级：第一个是首选形状。
+ */
+export const PracticeItemFormValuesV2 = [
+  "single_choice", "true_false", "ordering", "matching",
+] as const;
+export type PracticeItemFormV2 = (typeof PracticeItemFormValuesV2)[number];
+
+export const PRACTICE_FORMS_BY_KNOWLEDGE_FORM: Record<KnowledgeFormV2, readonly PracticeItemFormV2[]> = {
+  fact: ["single_choice", "true_false"],
+  definition: ["single_choice", "true_false"],
+  boundary: ["true_false", "single_choice"],
+  application_rule: ["single_choice"],
+  causal_model: ["true_false", "single_choice"],
+  relationship: ["matching", "single_choice"],
+  comparison: ["matching", "single_choice"],
+  sequence: ["ordering"],
+  procedure: ["ordering", "matching"],
+};
+
+export function practiceFormsForKnowledgeForm(
+  form: KnowledgeFormV2,
+): readonly PracticeItemFormV2[] {
+  return PRACTICE_FORMS_BY_KNOWLEDGE_FORM[form] ?? [];
+}
+
+/**
  * 正确项必须是**给出过的**选项，否则判分器永远比不中、这道题变成死题。
  * 模型输出的 id 空间由它自己编，所以这条必须在合同层兜住。
  */

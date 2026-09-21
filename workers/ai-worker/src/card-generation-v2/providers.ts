@@ -833,7 +833,7 @@ export class CardAuthoringProvider implements AuthoringProvider {
     });
     const raw = await this.runtime.chatJsonWithRepair<AuthoringProviderOutput>({
       stage: AUTHOR_PROMPT_VERSION,
-      system: buildAuthorSystemPrompt(strategy),
+      system: buildAuthorSystemPrompt(strategy, input.planObjective.knowledgeForm),
       user,
       signal: input.signal,
       requiredKeys: ["objective", "presentation"],
