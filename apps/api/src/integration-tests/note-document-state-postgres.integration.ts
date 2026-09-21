@@ -16,7 +16,7 @@ import postgres from "postgres";
 import { closeDatabase, withWorkspaceTransaction } from "../db/client.ts";
 import { createNote } from "../modules/note/service.ts";
 import { applyNoteDocUpdate, loadNoteDoc } from "../modules/note/document-state.ts";
-import { importMarkdownNotes } from "../modules/import/markdown-import-service.ts";
+import { importMarkdownNotes, prepareMarkdownImport } from "../modules/import/markdown-import-service.ts";
 import {
   projectNoteBlocks,
   restoreNoteBlocksFrom,
@@ -248,8 +248,11 @@ test("批量 Markdown 导入：每个新建笔记都有快照，且投影与解�
     { title: `导入二 ${tag}`, content: `第二段导入的开头\n\n- 列表项甲\n- 列表项乙\n` },
   ];
 
+  // 走真实流程：prepare 在业务事务外解析 blocks（导入合同就是这么分的），
+  // 直接塞 {title, content} 会绕过 prepared 形状、测到一条生产不走的路。
+  const prepared = await prepareMarkdownImport({ workspaceId, userId }, items);
   const outcome = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
-    importMarkdownNotes(tx, { workspaceId, userId }, { items }),
+    importMarkdownNotes(tx, { workspaceId, userId }, { items: prepared, importId: null }),
   );
 
   const notes = outcome.response.notes;
@@ -273,6 +276,8 @@ test("批量 Markdown 导入：每个新建笔记都有快照，且投影与解�
     const projected = projectNoteBlocks(doc);
     doc.destroy();
 
+    // 先确认不是"两边都空所以相等"这种假绿：这两篇每篇都该有多块。
+    assert.ok(rows.length >= 2, `笔记 ${item.note.id} 只投影出 ${rows.length} 块，断言会变得空洞`);
     assert.equal(rows.length, projected.length, "投影行数与文档块数不一致");
     assert.deepEqual(
       rows.map((row) => String(row.content)),
