@@ -988,3 +988,52 @@ api card-generation 237/237、四端 typecheck；那 1 条 shared 红是**别人
 
 （另：截至本节写作时 dev api 仍因 §27 末尾那条缺 `exports` 的在途改动起不来，
 #29 的两处真机界面复测与"第一批 D6 真实生成"都还压着。）
+
+### 首批 D6 的对账查询（已在存量上跑过，可执行、返回 0 行）
+
+```sql
+-- D6 首批验收：对账"计划点了名"与"作者实际交出的形状"，并列出缺额。
+-- 与 summarizePracticeQuotaV2 同一判据：形状对上才算兑现；候选被淘汰也记缺额。
+-- 跑出行的那一刻就是第一批 D6 生效的证据。事件是否落下另查：
+--   select payload from card_generation_events_v2
+--   where run_id = :'run_id' and event_type = 'card_generation.practice_quota_short';
+WITH named AS (
+  SELECT r.id AS run_id,
+         r.created_at,
+         o ->> 'objectiveLocalId' AS oid,
+         o ->> 'knowledgeForm'     AS knowledge_form,
+         o ->> 'practiceForm'      AS required_form
+  FROM card_generation_runs_v2 r
+  JOIN card_generation_plans_v2 p
+    ON p.run_id = r.id AND p.plan_version = r.current_plan_version
+  CROSS JOIN LATERAL jsonb_array_elements(p.result -> 'objectives') o
+  -- 关键：键必须存在（不是判 null），旧批次的目标对象里根本没有这个键
+  WHERE o ? 'practiceForm' AND o ->> 'practiceForm' IS NOT NULL
+), latest AS (
+  SELECT DISTINCT ON (c.run_id, c.plan_objective_local_id)
+         c.run_id,
+         c.plan_objective_local_id AS oid,
+         c.quality_state,
+         c.objective_draft #>> '{practiceItem,kind}' AS delivered_form
+  FROM card_generation_candidates_v2 c
+  ORDER BY c.run_id, c.plan_objective_local_id, c.revision DESC
+)
+SELECT n.run_id,
+       n.created_at::timestamp(0),
+       count(*) AS required_cards,
+       count(*) FILTER (WHERE l.delivered_form = n.required_form) AS met_cards,
+       count(*) FILTER (WHERE l.run_id IS NULL)                    AS dropped,
+       count(*) FILTER (WHERE l.run_id IS NOT NULL
+                          AND coalesce(l.delivered_form, 'null') <> n.required_form) AS wrong_shape,
+       string_agg(DISTINCT n.required_form, ',')                  AS required_shapes,
+       string_agg(DISTINCT coalesce(l.delivered_form, '-'), ',')  AS delivered_shapes
+FROM named n
+LEFT JOIN latest l ON l.run_id = n.run_id AND l.oid = n.oid
+GROUP BY n.run_id, n.created_at
+ORDER BY n.created_at DESC;
+```
+
+判据写死了两件事：**必须用 `o ? 'practiceForm'` 判键存在**（旧批次不是值为 null，是压根没有这个键，只判 null 会把它们全筛进来）；
+**`dropped` 与 `wrong_shape` 分开数**——被淘汰的候选和交错形状的缺额是两回事，只有后者才说明
+"要求 true_false 却交了 matching"。事件侧另查 `card_generation_events_v2` 里那条
+`card_generation.practice_quota_short`（注释里带了语句）。
