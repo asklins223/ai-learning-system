@@ -431,9 +431,12 @@
 .hud-surface .learning-run-result-board[data-outcome="practice_completed"] .learning-run-result-summary__seal {
   color: rgba(255, 248, 232, 0.82);
 }
-/* 不成立的三档共用一张安静的纸。 */
+/* 不成立的三档共用一张安静的纸。partial 也算这一档：它的意思是"还有缺口"，
+ * 而实机量出来它此前**哪一档都不在**——既没拿绿栏也没拿石板蓝，于是和
+ * practice_completed 只差一个印章色（两两对比实测 1 处差异，通不过"至少 2 处"）。 */
 .hud-surface .learning-run-result-board[data-outcome="not_assessable"] .learning-run-result-summary,
 .hud-surface .learning-run-result-board[data-outcome="needs_repair"] .learning-run-result-summary,
+.hud-surface .learning-run-result-board[data-outcome="partial"] .learning-run-result-summary,
 .hud-surface .learning-run-result-board[data-outcome="skipped"] .learning-run-result-summary,
 .hud-surface .learning-run-result-board[data-outcome="declared_unable"] .learning-run-result-summary {
   background: var(--hud-blue);
@@ -441,11 +444,11 @@
 .hud-surface .learning-run-result-board[data-outcome="no_result"] .learning-run-result-summary {
   background: var(--hud-soft);
 }
-/* partial 是唯一"两半都要看清"的档：说清的走绿、没说清的走陶土，
- * 靠颜色之外的位置与标签区分（DESIGN.md:142 不许只用颜色说明）。 */
-.hud-surface .learning-run-result-board[data-outcome="partial"] .learning-run-result-evidence [data-role="proved-this-time"] b {
-  color: var(--hud-green);
-}
+/* 这里**不写** partial 的"这次说清了"配色规则，虽然 §9.3 的直觉是想让两半分开上色：
+ * 库里 21 条 partial 的 rubric 判定实测全是 `not_assessable` 或 `missing`，
+ * 没有一条带 `covered`（`tmp-objflow-partial-scan.mjs` 逐条读过）。
+ * 也就是说 `[data-outcome="partial"] [data-role="proved-this-time"]` 这个组合
+ * 在真实数据下永远不成立，写了就是给一个不存在的形状留死规则。 */
 
 /* 一次性压印：只在 data-acknowledgement="active" 上跑，而那个属性本身就只有
  * demonstrated 且本次会话真跑完才为真（learning-run-result-policy.ts:123），

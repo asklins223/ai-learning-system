@@ -293,7 +293,7 @@
 |---|---|---|
 | **B0** | 结算页溢出 + 出口槽 + 印章裁切（P5/P27） | ✅ 已上线，见 §14。**口径改过**：原写「report 不再 `overflow-y:auto`」是错的——纸面高度固定时总得有一列可滚，病在出口落在那一列里。改成三条可判定的：主按钮下沿离纸面下沿 ≥8px、出口不在任何 `scrollHeight>clientHeight` 的祖先内、`__seal` `scrollHeight <= clientHeight` |
 | **B1** | 结算页自相矛盾（P1/P6/P30） | ✅ 已上线（除「接下来」便签里的真按钮，见下），见 §14。口径：同一次 `covered` 判定下「还需补上」不出现该 facet；「这次说清 N 条」数判定行；`skipped`/`declared_unable` 时 DOM 里**没有** `__seal` 节点。**「接下来」便签的可点动作没做**——它需要在结算页起一次新 Run，而 start 命令只在目标详情的 `primaryAction` 里，属于新功能不是修复，单独留出来 |
-| **B2** | `data-outcome` 真的驱动视觉 + 一次性压印（P2/P32） | 🟡 **代码与守卫已上线；实机三档差异未完成**，原因见 §14 的 B2 一节：**两堵墙**——① 新 run 卡在 checkpoint，`POST /learning-runs/:runId/actions/v2` 撞 `learning_tasks_run_sequence_unique` 报 500；② 想直接渲染库里已存的 `demonstrated` 也走不通，`learningRun.getResult` 对完成态 run 返回 **409 conflict**，结算页只认"这台客户端刚结算完的那一轮"。已满足：`[data-outcome]` 8 条规则分三档、压印只动 `transform`/`opacity`、`data-motion-mode="off"` 与 `prefers-reduced-motion` 都关、`main.tsx` 加载顺序有守卫 |
+| **B2** | `data-outcome` 真的驱动视觉 + 一次性压印（P2/P32） | ✅ 已上线并**实机验完**（见 §14「B2 实机三档差异」）。三档两两可见差异 **3 / 4 / 2 处**；5 种 outcome 各渲染一遍记 `data-outcome`·印章·进度带。过程中修掉一个真缺陷：**`partial` 此前哪一档都不在**，与练习几乎同色。压印只动 `transform`/`opacity`、`data-motion-mode="off"` 与 `prefers-reduced-motion` 都关、`main.tsx` 加载顺序有守卫。**上一条"两堵墙"的结论已撤回**（见 §14）。仍开着但与本批无关：`actions/v2` 撞 `learning_tasks_run_sequence_unique` 报 500 |
 | **B3** | 「下次到期 刚刚」（P4） | ✅ 已上线，见 §14。没有新增 `formatDue`——`objective-state-copy.ts:114` 的 `formatObjectiveDay` 已经是「今天/昨天/明天/N 天后/M月D日」且被列表行在用，直接复用；另在 `surface-data.test.tsx` 钉住 `formatRelative` 的「只量过去」契约 |
 | **B4** | 字号地板（P7/P13/P21/P33） | ✅ 全部完成，见 §14 与 §14 的 B4 补充。列表/详情 <11px 段数 49→**0**、53→**0**；提示惩罚说明 7.5px→**12px** 且面板搬进题面区；紧凑档 `.button` 6px→**11px**、`.meta` 5px→**9px** |
 | **B5** | 空带（P8/P28；P14 已撤回） | ✅ 已上线：列表最大连续空白 251px→**24px**，焦点卡块间 281px→**35px**，结算绿栏块间 374px→**36px**。口径改成"块间间隙 ≤64px、尾部留白不判"，见 §14 自我更正第 3 条 |
@@ -499,7 +499,7 @@ P25：语音转写框此前只有 `width/height/resize`，边框与底色全是 
 
 病根同一个：`.v3-goal-pulse` 与结算的 `dl` 都写着 `margin: auto 0 0`，把底部元素钉死、中间劈出一个洞。改成跟着内容走 + 固定间距，卡片 `align-items: start` 让它按内容长高（右侧账本单独 `align-self: stretch`，它有自己的滚动列表，缩起来会在下面留更大的洞）。
 
-### 四处自我更正（都是复核时才发现原文写错了）
+### 自我更正（都是复核时才发现原文写错了；第 5 条见文末「B2 实机三档差异」一节）
 
 1. **P8 的「焦点卡横向溢出 65px 被裁」不成立。** `scrollWidth 467 > clientWidth 402` 是真的，但逐个元素量矩形后发现**没有任何子元素越过卡片右边界**——多出来的宽度来自装饰伪元素 `.v3-goal-focus::after`（`position:absolute; right:-40px; bottom:-55px; width:155px`）。纵向那 87px 同理：最后一个真实子元素（来源行）底边还在卡片内 22px 处。`scrollWidth/scrollHeight` 会把越界的伪元素算进去，**不能当"内容被裁"的证据**。
 2. **P14 的「四屏左边界跳 313px」不是 bug，是设计。** `approved-surfaces.css:139-142` 让 objective-detail / source-detail / graph 三页共用 `left:365; right:88`（列表是 `left:88; right:245`），而且 `:135` 写着 `transition: left 560ms, right 560ms`——这是一次**有动画的空间位移**，不是瞬跳。我原文还说"进出场动效反而放大这个跳"，恰好反了。B5 的"四屏左边界一致（x 差 ≤2px）"这条口径随本条一并作废。
@@ -543,18 +543,34 @@ route: /learning-runs/:runId/actions/v2   statusCode: 500   ×3（17:51:16 / 17:
 
 **排除我自己**：唯一约束来自 `0116_learning_runs.sql`（老迁移，不是当晚 `1e4d2e5a` 补进来的那批）；我这轮只改过 `run-processing-tick.ts` 里 `gapFacets` 的算法（不插 task、不碰 actions 路由）。**这条与本文档的批次无关，属 `objective-card-items-2026-09-21.md` 那条线**——它里面正写着"repair 尾段（revision insert / hash recompute / recheck）仍未被真实批次走到"，这大概率就是那个尾段第一次被真走到时露出来的failure。**我只报不修。**
 
-**因此 B2 的验收状态**：`[data-outcome]` 的 8 条规则、三档配色、压印只挂 `data-acknowledgement`、`off` 档与 `prefers-reduced-motion` 关闭——都由 `objective-flow-css-guard.test.ts` 静态钉住并做过变异检验；**"三种 outcome 截图差异 ≥ 两处"这条实机口径未完成**，要等服务端这条 checkpoint 推进的缺陷修好。
+**因此 B2 的验收状态（当晚即被下一条推翻并补齐）**：`[data-outcome]` 的规则、三档配色、压印只挂 `data-acknowledgement`、`off` 档与 `prefers-reduced-motion` 关闭——由 `objective-flow-css-guard.test.ts` 静态钉住并做过变异检验；**"三种 outcome 截图差异 ≥ 两处"这条实机口径当时判为未完成，理由是错的，见下一条。**
 
-**当晚复核：这条路有两堵墙，不是一堵。** 本工作区库里存着 6 种 outcome 的历史结果（`partial 21 / skipped 18 / practice_completed 10 / demonstrated 8 / declared_unable 2 / not_assessable 1`），我本想直接渲染一条**已存的** `demonstrated`（run `46fc6801-…`）来补上那张截图，绕开上面那条缺陷。实测走不通：
+**当晚复核：这条路有两堵墙，不是一堵。** ⚠️ **这一段的两条结论当晚就被自己推翻了，正确版本见下一条。保留原文是因为"错在哪"本身有记录价值。**
 
-```
-window.ailearn.learningRun.getResult({ meta, runId: '46fc6801-…' })
-→ { ok: false, error: { code: "conflict", httpStatus: 409, retry: "never" } }
-```
+### B2 实机三档差异 —— 已完成，并撤回上一条的两句结论（2026-09-22）
 
-（第一次探是 `invalid_request`，那是我的 `meta` 写错了——`contractVersion` 要的是字符串 `"desktop-ipc-v1"` 而不是数字；修好后才露出真正的 409。）
+上一条说的"两堵墙"，**两堵都是我误读的**：
 
-也就是说结算页**只能从"这台客户端刚结算完的那一轮"进去**，读不到历史结果。所以要量三档配色，必须先让一条新 run 真的结算完——而那正好撞在 `learning_tasks_run_sequence_unique` 上。**两条都在服务端，都不在本批范围**，仍然只报不修。postgres 日志里那条 ERROR 最后一次出现在 17:51，之后没人再走过这条路，所以它不是"好了"，是"没再被碰"。
+1. **409 不是"结算页只认刚结算完的那一轮"。** 网关把服务端那句具体原因压成了通用 `error.conflict`（只回 `code / safeMessageKey / retry`，`message` 被吃掉），所以必须绕开网关直接打 HTTP 才看得到真因：`{"error":"unsupported_contract","message":"V2 result 的 nested result 不是 canonical 结果"}`。顺着 `projectLearningRunResultV2`（`run-service.ts:1287`）找到那句 `learningRunResultSchema.safeParse(rawResult)`，再把库里 **8 条 demonstrated 的存储结果逐条过一遍真 schema**：**7 条 PASS**，只有我挑中的那条 `46fc6801` FAIL，原因是它的 `returnTarget` 是改形状之前的旧写法（`{kind:"review", objectiveId}`，schema 要 `keyPointId`，而 `objectiveId` 算 unrecognized key）。**历史结果能读；我把个例写成了机制，而且"按 updated_at 取最新一条"不是抽样，是撞大运。**
+2. **我中途还用 SQL 得出过"8 条 demonstrated 的 origin 都不是严格 V2"** —— 那条 SQL 查的是 `origin ? 'version'`，而 `learningRunOriginV2Schema`（`learning-target-v2-contracts.ts:37-68`）**根本没有 `version` 键**。字段查错，结论作废；改查 binding / snapshot / userId 三项后全部对得上。
+
+**补上的实机口径**（`.objflow-caps/b2-*.png`）。入口走的是 `companion-center-surface.tsx:429` 那个 `openLearningRun` 的同两步：`setActiveRunId(runId)` + `invoke("validate")`，在页面上下文里 `import('/src/app/room-store.ts')` 拿线上模块本体，不是假组件。
+
+| 两两对比 | 可见差异处数 |
+|---|---|
+| demonstrated vs practice_completed | **3**（印章色、进度带段位、绿栏金内描边） |
+| demonstrated vs partial | **4**（+ 栏底色） |
+| practice_completed vs partial | **2**（栏底色、印章色） |
+
+5 种 outcome 各渲染一遍并记 `data-outcome / 印章文字 / 进度带段位`：`已理解·band=2`、`练习完成·band=1`、`部分理解·band=1`、`这次先放着·band=none`、`这次说了暂时不会·band=none`。跑两次数字一致。
+
+**这一轮量出一个真缺陷并修掉：`partial` 此前哪一档都不在。** 第一版两两对比里 practice vs partial **只差 1 处**，通不过"至少 2 处"——`partial` 既没拿"成立"档的绿栏金环，也没拿"不成立"档的石板蓝，于是和练习几乎同色。把它归进安静那一档后变成 2/3/4。**这条只有做两两对比才会暴露**：单查"三档各自有没有规则"会以为没问题，`partial` 确实有一条自己的规则——只是作用在一个从不出现的组合上（见下）。
+
+**顺手删掉我自己在 B2 写的一条死规则。** 原注释说 partial 要"两半都上色"，配了 `[data-outcome="partial"] … [data-role="proved-this-time"] b`。查库：本工作区 **21 条 partial 的 rubric 判定实测全是 `not_assessable` 或 `missing`，没有一条带 `covered`**（`tmp-objflow-partial-scan.mjs` 逐条读过），这个选择器组合在真实数据下永不成立。规则连同这次新加的左边线一起删掉，在原处留一条"为什么不写"。
+
+**仍然开着的那条**：`POST /learning-runs/:runId/actions/v2` 撞 `learning_tasks_run_sequence_unique` 报 500、run 卡在 `checkpoint`（本工作区 4 条）。**但它与三档视觉已经无关**——历史结果足够把 B2 验完。仍属 `objective-card-items-2026-09-21.md` 那条线，只报不修；postgres 里它最后一次出现是 17:51，之后没人再走这条路，所以那不是"修好了"，是"没再被碰"。
+
+**另记一条与本次无关的数据疑点**：`dbb08231` 等 4 条 partial 的存储结果里 `demonstratedFacets` 与 `gapFacets` **同时含 `"explain"`**——同一个 facet 既算已证明又算待补，界面上会让"这次说清"和"仍需补上"并列同一件事实。不是这次改的 `uncoveredFacets` 产生的（那些是 8-20/9-20 的老行），留给那条线核对。
 
 ### B8 的 P10：22 种同权重 chip 收敛成 4 种 — 已完成（2026-09-22）
 
