@@ -1539,3 +1539,43 @@ pedagogy 第一次对候选 1 判 `rewrite`、修复后对集合判 `keep`；aut
 
 顺带一条只有真跑才能量、但不花钱的问题留给 B5 一起看：repair 之后那张卡在审核页
 以什么状态出现（它停在 `authored`，`isCandidateReviewReadyV2` 会把它判为不可审核）。
+
+## 41. repair 尾段现在测得到了：一对脚本 provider，零 AI 调用
+
+§40 定的做法落地了，比原计划小一圈，先说清少了哪一块。
+
+**实际钉住的**（`card-generation-v2-bounded-repair-postgres.integration.ts`，3 条用例，
+全程确定性 provider，不出网不花钱）：先用确定性管道跑出一条真 run（计划与候选都是真落盘的），
+再拿库里那条真候选配一个脚本 author 走 `boundedRepairCandidate`。六条断言分别是：
+
+1. 作者收到的计划目标里有 `strategy` / `practiceForm` / `sourceAtomIds` —— §34 那个
+   三字段替身留下的崩溃点。**变异检查**：把 `plannedObjectiveForCandidateV2` 换回替身，
+   这条立刻红，而且是断言喊出"计划目标里没有 strategy"，不是别处抛 TypeError；
+2. 新 `revision = 旧 + 1`，`candidate_revision_id` 是新的；
+3. `derived_from` 带着旧 revision 的哈希——修复链可追；
+4. 库里两条行都在（旧行 immutable），新行 `quality_state='authored'`、`publish_state='unpublished'`，
+   即"等 recheck"而不是"冒充过了门禁"；
+5. 题面内容与哈希都变了。两条都要：**哈希单独不足以证明修了什么**——`revision`、新
+   `candidateRevisionId`、`derivedFrom` 全在哈希闭包里，原样重写也换哈希（这是读代码读出来、
+   跑一遍验证的）。只看"哈希变了"会写出一条永远绿的假断言；
+6. 对同一条初版候选再修一遍 → 又被挡下，挡它的是 0253 那条唯一索引。
+   **变异检查**：`DROP INDEX` 之后这条红在"第二次修复没有被挡下来"，其余两条照绿；
+   重建索引后全绿（库里 `pg_indexes` 已确认恢复）。
+
+**改了产品什么**：只把 `loadV2RunInputs` / `candidateRowToObject` / `boundedRepairCandidate`
+三个既有内部件加了 `export`（本文件已有 33 个 export，其中 `insertAuthoredCandidatesBatched`
+同样没有外部调用方——导出阶段件是这个文件的既有写法）。**没有**新增运行期开关，
+也**没有**动 §40 提过的那道门：`allowBoundedRepair && useLLM && providers` 里的 `useLLM`
+这一项现在测试用不着去掉（我从阶段函数的下游那个函数进），所以那一步先不做，
+留给"真要把整段 stage 跑起来"的时候再说。
+
+**还没测到的**（不写成已完）：pedagogy 真判 `rewrite` → 由 `critiqueAndFinalizeCandidates`
+决定修哪几张、把修复后的候选踢出 deck gate 名单、并排出一条
+`card_generation_recheck_candidate`（`handler:2258-2282`）。这一段要有界地跑整条 stage，
+需要 §40 里"去掉门中 `useLLM` 一项 + 脚本 pedagogy 判一次 rewrite"那步，
+留给 #33 的下一小节；届时也要顺手量一句：修复出的那张卡在审核页以什么状态出现
+（它停在 `authored`，`isCandidateReviewReadyV2` 会判它不可审核）。
+
+回归面：本文件 3/3、live-progress 8/8、worker 单测 724/724、api 单测 1416 项 0 失败、
+shared 340/340。（worker typecheck 里 `companion-thought.ts(23) proactiveDailyLimit` 是
+并发会话在途的另一处报错，与本次无关，未替他们改。）
