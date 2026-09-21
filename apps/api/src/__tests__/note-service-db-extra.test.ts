@@ -501,12 +501,15 @@ describe("note/service updateNote", () => {
     );
     assert.deepEqual(versionInsert?.data.contentJson, currentVersion.contentJson);
     assert.equal(versionInsert?.data.contentHash, currentVersion.contentHash);
-    const blockInsert = mock._insertCalls.find(
-      (call: { data: unknown }) => Array.isArray(call.data),
-    );
+    // 证据链不丢这件事，现在要看的是**返回的块**，不是"有没有一次数组 INSERT"。
+    // 行由文档投影而来（批次 4.1/4.3），而这个假 `noteBlocks.findMany` 不看 where
+    // 条件、把上一版的行当成新版的行返回，于是投影正确地判断"无需重写"、一次 INSERT
+    // 都不发——按 INSERT 断言就等于在测夹具的瞎。真正"新版本初始为空、必须写入整篇"
+    // 由 note-document-state-postgres 集测在真库上覆盖。
     assert.deepEqual(
-      blockInsert?.data[0].sourceRef,
+      (result!.blocks as Array<{ sourceRef?: unknown }>)[0]?.sourceRef,
       { sourceId: "source-1", segmentId: "segment-1" },
+      "只改标题就把块级来源引用丢了",
     );
   });
 

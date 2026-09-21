@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, inArray, isNull, isNotNull, or, sql } from "drizzle-orm";
 import { applyNoteDocUpdate } from "./document-state.ts";
-import { projectNoteBlocks, syncNoteBlocksForEditor, writeNoteBlocks, type NoteDocBlock } from "./doc.ts";
+import { projectNoteBlocks, setNoteTitle, syncNoteBlocksForEditor, writeNoteBlocks, type NoteDocBlock } from "./doc.ts";
 import { createHash } from "node:crypto";
 import { type ApiTransaction } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks, noteImageAssets } from "@ailearn/shared/db-schema/note";
@@ -414,6 +414,41 @@ async function updateVersionInPlace(
     .where(eq(noteVersions.id, versionId));
 
   return projectNoteBlocks(doc) as Array<NoteBlock & { imageAssetId: string | null; sourceRef?: unknown }>;
+}
+
+/**
+ * 新建一个版本时把正文交给文档，再由文档投影成这个版本的行。
+ *
+ * 直接插行是本轮在修的那类缺陷的另一个现场：文档快照会停在保存之前，下一次按文档读
+ * （协同落盘、`doc-state` 取编辑起点）就把这次保存的内容顶回去，而且不报错。标题也一样
+ * ——它同时存在于 `notes.title` 与文档的 `meta.title`，只写行的话快照里留着旧标题。
+ */
+async function writeVersionThroughDoc(
+  tx: ApiTransaction,
+  workspaceId: string,
+  noteId: string,
+  versionId: string,
+  blocks: Array<{ type: NoteBlock["type"]; content: string }>,
+  title: { title: string; titleSource: string },
+): Promise<NoteDocBlock[]> {
+  const withAssets = blocks.length
+    ? await resolveImageAssetIds(tx, workspaceId, blocks)
+    : [];
+  const { blocks: projected, doc } = await applyNoteDocUpdate(
+    tx,
+    { workspaceId, noteId },
+    versionId,
+    (live) => {
+      syncNoteBlocksForEditor(live, withAssets.map((block) => ({
+        type: block.type,
+        content: block.content,
+        imageAssetId: block.imageAssetId ?? null,
+      })));
+      setNoteTitle(live, title.title, title.titleSource);
+    },
+  );
+  doc.destroy();
+  return projected;
 }
 
 type NoteSearchDocument = {
@@ -849,19 +884,20 @@ export async function updateNote(
           })
           .returning();
 
-        if (currentBlocks.length) {
-          await tx.insert(noteBlocks).values(
-            currentBlocks.map((block) => ({
-              versionId: newVersion.id,
-              workspaceId,
-              ordinal: block.ordinal,
-              type: block.type,
-              content: block.content,
-              imageAssetId: block.imageAssetId,
-              sourceRef: block.sourceRef ?? null,
-            })),
-          );
-        }
+        // 只改标题也要让文档跟着走。正文与上一版相同，所以这里是逐块对齐、不动数组；
+        // 但标题必须写进文档的 meta——只写 `notes.title` 的话快照里留着旧标题，下一次
+        // 按文档读（协同落盘、doc-state 取起点）就把这次改名顶回去。
+        await writeVersionThroughDoc(
+          tx,
+          workspaceId,
+          noteId,
+          newVersion.id,
+          currentBlocks.map((block) => ({
+            type: block.type as NoteBlock["type"],
+            content: block.content,
+          })),
+          { title: requestedManualTitle as string, titleSource: "manual" },
+        );
 
         await tx
           .update(notes)
@@ -988,20 +1024,17 @@ export async function updateNote(
             })
             .returning();
 
-          let blocksWithAssets: Array<{ type: NoteBlock["type"]; content: string; imageAssetId: string | null }> = [];
-          if (sanitizedBlocks.length) {
-            blocksWithAssets = await resolveImageAssetIds(tx, workspaceId, sanitizedBlocks);
-            await tx.insert(noteBlocks).values(
-              blocksWithAssets.map((b, idx) => ({
-                versionId: newVersion.id,
-                workspaceId,
-                ordinal: idx,
-                type: b.type,
-                content: b.content,
-                imageAssetId: b.imageAssetId,
-              })),
-            );
-          }
+          const blocksWithAssets = await writeVersionThroughDoc(
+            tx,
+            workspaceId,
+            noteId,
+            newVersion.id,
+            sanitizedBlocks,
+            {
+              title: effectiveTitleSource === "manual" ? effectiveTitle : autoTitle,
+              titleSource: effectiveTitleSource,
+            },
+          );
 
           await tx
             .update(notes)
@@ -1050,20 +1083,17 @@ export async function updateNote(
           })
           .returning();
 
-        let blocksWithAssets: Array<{ type: NoteBlock["type"]; content: string; imageAssetId: string | null }> = [];
-        if (sanitizedBlocks.length) {
-          blocksWithAssets = await resolveImageAssetIds(tx, workspaceId, sanitizedBlocks);
-          await tx.insert(noteBlocks).values(
-            blocksWithAssets.map((b, idx) => ({
-              versionId: newVersion.id,
-              workspaceId,
-              ordinal: idx,
-              type: b.type,
-              content: b.content,
-              imageAssetId: b.imageAssetId,
-            })),
-          );
-        }
+        const blocksWithAssets = await writeVersionThroughDoc(
+          tx,
+          workspaceId,
+          noteId,
+          newVersion.id,
+          sanitizedBlocks,
+          {
+            title: effectiveTitleSource === "manual" ? effectiveTitle : autoTitle,
+            titleSource: effectiveTitleSource,
+          },
+        );
 
         await tx
           .update(notes)

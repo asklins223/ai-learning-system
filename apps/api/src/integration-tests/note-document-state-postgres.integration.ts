@@ -19,6 +19,7 @@ import { applyNoteDocUpdate, loadNoteDoc } from "../modules/note/document-state.
 import { importMarkdownNotes, prepareMarkdownImport } from "../modules/import/markdown-import-service.ts";
 import {
   projectNoteBlocks,
+  readNoteTitle,
   restoreNoteBlocksFrom,
   snapshotOf,
   writeNoteBlocks,
@@ -371,4 +372,68 @@ test("恢复历史版本后，文档快照与新的当前版本一致", async ()
   const contents = projectNoteBlocks(doc).map((block) => block.content);
   doc.destroy();
   assert.deepEqual(contents, [historyContent], "指针切到旧版了，文档还是恢复前的正文（两套事实源）");
+});
+
+/**
+ * 剩下两条曾经绕开文档的写路：只改标题（克隆一个新版本）与手动保存（建新版本）。
+ *
+ * 它们原来直接 INSERT `note_blocks`，于是文档快照停在保存之前——下一次按文档读（协同
+ * 落盘、`doc-state` 取编辑起点）就把这次改动顶回去，而且不报错。这条用例就是这个缺陷
+ * 的现场取证：改完必须两边一致，包括标题（它在行里是 `notes.title`，在文档里是 `meta.title`）。
+ */
+test("改名与手动保存建新版本：文档必须跟着走，不再有两套正文", async () => {
+  const currentVersionId = async (): Promise<string> => {
+    const rows = await sql`SELECT current_version_id FROM notes WHERE id = ${noteId}`;
+    return String(rows[0].current_version_id);
+  };
+  const rowsOf = async (vid: string): Promise<string[]> => {
+    const rows = await sql`
+      SELECT content FROM note_blocks WHERE version_id = ${vid} ORDER BY ordinal
+    `;
+    return rows.map((row) => String(row.content));
+  };
+  const docView = async (): Promise<{ contents: string[]; title: string | null }> => {
+    const { doc } = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
+      loadNoteDoc(tx, { workspaceId, noteId }),
+    );
+    const contents = projectNoteBlocks(doc).map((block) => block.content);
+    const title = readNoteTitle(doc)?.title ?? null;
+    doc.destroy();
+    return { contents, title };
+  };
+
+  // ① 只改标题：正文没动，但新版本与文档的 meta 都必须拿到新标题。
+  const renamed = `文档要跟上的标题 ${tag}`;
+  const beforeRename = await currentVersionId();
+  await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
+    updateNote(tx, noteId, workspaceId, userId, {
+      title: renamed,
+      baseVersionId: beforeRename,
+      isAutosave: false,
+    }),
+  );
+  const clonedVersion = await currentVersionId();
+  assert.notEqual(clonedVersion, beforeRename, "改名应当克隆出新版本（否则这条没测到克隆分支）");
+  assert.deepEqual(await docView(), { contents: await rowsOf(clonedVersion), title: renamed }, "改名没进文档 meta");
+
+  // ② 手动保存（建新版本）：正文必须同时是行与文档。
+  const submitted = [
+    { type: "heading" as const, content: renamed },
+    { type: "paragraph" as const, content: `手动保存的正文 ${tag}` },
+  ];
+  const beforeSave = await currentVersionId();
+  await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
+    updateNote(tx, noteId, workspaceId, userId, {
+      blocks: submitted,
+      baseVersionId: beforeSave,
+      isAutosave: false,
+    }),
+  );
+  const savedVersion = await currentVersionId();
+  assert.equal((await rowsOf(savedVersion)).length, 2, "新版本的行没写出来");
+  assert.deepEqual(
+    (await docView()).contents,
+    submitted.map((block) => block.content),
+    "文档停在手动保存之前（下一次按文档读会把它顶回去）",
+  );
 });
