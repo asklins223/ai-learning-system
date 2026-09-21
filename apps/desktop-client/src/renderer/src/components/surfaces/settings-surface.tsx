@@ -1524,7 +1524,7 @@ export function SettingsSurface() {
             <div className="settings-rows">
               <SettingRow
                 title="只有空间所有者能发邀请、看名册、移成员"
-                detail="你在这个空间是成员：可以读写学习资料，但成员名册与邀请由所有者管理。需要别人加入或离开，请找所有者。"
+                detail="你在这个空间是成员：读得到已共享的资料，也能做复习与验证；采集、写笔记和生成学习卡由所有者发起。名册与邀请要改动，请找所有者。"
               >
                 <span className="tag">只读</span>
               </SettingRow>

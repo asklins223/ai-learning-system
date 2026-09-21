@@ -498,6 +498,13 @@ describe("owner invite and member management (旧版设置页回补)", () => {
     // 看不见 ≠ 知道自己不能做：这一块必须以锁定态出现在原位。
     const row = (await screen.findByText("只有空间所有者能发邀请、看名册、移成员")).closest(".settings-row") as HTMLElement;
     expect(within(row).getByText("只读")).toBeTruthy();
+    // 说明本身也要是真的：能力投影里 member 只放开读取 + learning_run.*，
+    // 采集/写笔记/生成卡都在 owner 那一支。写成"可以读写学习资料"会让人
+    // 在点不动按钮时以为是界面坏了。
+    const detail = within(row).getByText(/你在这个空间是成员/) as HTMLElement;
+    expect(detail.textContent).toMatch("复习");
+    expect(detail.textContent).toMatch("所有者发起");
+    expect(detail.textContent).not.toMatch(/可以读写|能读写资料/);
   });
 });
 
