@@ -12,14 +12,14 @@ type ModuleContract = {
 
 const MODULE_CONTRACTS: ModuleContract[] = [
   // Desktop NOTE-READ/NOTE-SAVE V2 is the only note route surface.
-  // 第 10 条是 `/v2/notes/:id/doc-update`（批次 4.3 的增量上送口）。它是本表里唯一
-  // "路由体里没有 withWorkspaceTransaction(" 的处理器：正文的写入边界在协同那一侧
-  // （`collaboration.ts` 的 applyUploadedDocUpdate 按 (workspaceId, userId) 开事务，
-  // 落盘走 onStoreDocument 自己的事务），把它们都塞进一条事务反而会把 Hocuspocus 的
-  // 活文档锁在事务里。跨空间不可见不再靠这条字符串计数保证，而由
-  // `note-collaboration-postgres.integration.ts` 的行为用例证明（别人的空间上送 → 404
-  // 且库里没动）。豁免数只准减不准加：新处理器要么自带事务，要么先补一条行为用例。
-  { name: "note", handlers: 10, services: 9, handlerWithoutInlineTransaction: 1 },
+  // 11 条里唯一"路由体里没有 withWorkspaceTransaction(" 的是 `/v2/notes/:id/doc-update`
+  // （批次 4.3 的增量上送口）：正文的写入边界在协同那一侧（`collaboration.ts` 的
+  // applyUploadedDocUpdate 按 (workspaceId, userId) 开事务，落盘走 onStoreDocument
+  // 自己的事务），把它们都塞进一条事务反而会把 Hocuspocus 的活文档锁在事务里。
+  // 跨空间不可见不再靠这条字符串计数保证，而由 `note-collaboration-postgres.integration.ts`
+  // 的行为用例证明（别人的空间上送 → 404 且库里没动）。豁免数只准减不准加：
+  // 新处理器要么自带事务，要么先补一条行为用例。
+  { name: "note", handlers: 11, services: 9, handlerWithoutInlineTransaction: 1 },
   // 删掉无人调用的 POST /sources/statuses 后：7 路由 / 7 服务。
   { name: "source", handlers: 7, services: 7 },
   // v0.6 新增 /search/drift 与 /search/auto-fix 后：4 路由 / 4 服务

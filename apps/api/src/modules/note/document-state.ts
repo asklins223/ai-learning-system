@@ -123,6 +123,40 @@ export async function applyNoteDocUpdate(
 }
 
 /**
+ * 读"能直接喂给 Y.Doc 的那份状态"，给客户端做编辑起点（批次 4.3）。
+ *
+ * 为什么不能拿 `GET /v2/notes/:id` 的 blocks 自己拼一棵文档树：CRDT 的合并靠**同源
+ * 历史**，从行重建出来的文档与库里那份没有共同祖先，两边一改就是 4.0 实测的块增殖。
+ * 所以"要编辑就必须先拿到那份编码"，personal 空间（不建长连接）尤其需要这个口。
+ *
+ * 没有快照的历史笔记走 `loadNoteDoc` 的补齐路：返回的是补齐后的编码，客户端拿到的
+ * 仍然是"与服务端同源的一份状态"。
+ */
+export async function readNoteDocState(
+  tx: ApiTransaction,
+  scope: NoteDocScope,
+): Promise<{ update: Uint8Array; revision: number; backfilled: boolean } | null> {
+  const note = await tx.query.notes.findFirst({
+    where: and(eq(notes.id, scope.noteId), eq(notes.workspaceId, scope.workspaceId)),
+    columns: { deletedAt: true },
+  });
+  if (!note || note.deletedAt !== null) return null;
+  const { doc, backfilled } = await loadNoteDoc(tx, scope);
+  const stored = backfilled
+    ? null
+    : await tx.query.noteDocumentStates.findFirst({
+        where: and(
+          eq(noteDocumentStates.noteId, scope.noteId),
+          eq(noteDocumentStates.workspaceId, scope.workspaceId),
+        ),
+        columns: { revision: true },
+      });
+  const update = snapshotOf(doc);
+  doc.destroy();
+  return { update, revision: Number(stored?.revision ?? 0), backfilled };
+}
+
+/**
  * 投影成某个版本的 `note_blocks` 行。
  *
  * 这里是"删重插"而不是逐行 diff：走到这里的都是整篇替换事件（导入/转笔记/新版本/恢复），

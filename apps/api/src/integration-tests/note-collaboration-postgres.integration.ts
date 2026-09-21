@@ -487,6 +487,39 @@ test("非法或超限的增量：400 与 413 分得清", async () => {
   assert.equal(tooBig.json().error, "update_too_large");
 });
 
+test("编辑起点必须来自 doc-state：从行重建会复制块", async () => {
+  // 这条测的是"为什么要有 GET /v2/notes/:id/doc-state"。客户端若拿 blocks 自己拼一棵
+  // 文档树，它和库里那份没有共同祖先，一改就变成 4.0 实测的块增殖。
+  const response = await app.inject({
+    method: "GET",
+    url: `/v2/notes/${noteId}/doc-state`,
+    headers: { authorization: `Bearer ${ownerToken}` },
+  });
+  assert.equal(response.statusCode, 200);
+  const payload = response.json() as { update: string; revision: number; backfilled: boolean };
+  assert.ok(payload.update.length > 0, "没有增量可取，客户端无从起步");
+  assert.equal(payload.backfilled, false, "4.1 之后新建的笔记本应已有快照");
+
+  const local = docFromSnapshot(Buffer.from(payload.update, "base64"));
+  assert.deepEqual(docContents(local), await projectedRows(), "doc-state 与投影不一致（两套事实源）");
+
+  const seeded = `${paraA}（从 doc-state 起步改的）`;
+  editBlockContent(local, 1, seeded);
+  const upload = await uploadUpdate(ownerToken, await incrementalUpdate(local));
+  assert.equal(upload.statusCode, 200, `实际 ${upload.statusCode}: ${upload.body}`);
+  await waitFor(async () => (await projectedRows()).includes(seeded), "编辑落库");
+  assert.equal((await projectedRows()).length, 3, "同一起点合并仍复制块——起点不是同源编码");
+  local.destroy();
+
+  // 陌生空间读同一篇：404，且不透露它存在。
+  const foreign = await app.inject({
+    method: "GET",
+    url: `/v2/notes/${noteId}/doc-state`,
+    headers: { authorization: `Bearer ${strangerToken}` },
+  });
+  assert.equal(foreign.statusCode, 404, `实际 ${foreign.statusCode}`);
+});
+
 test("关停：debounce 窗口里的最后一次编辑必须落盘", async () => {
   // 这条测的是关停顺序（server.ts 里 flush 在 app.close() 之前）。
   // 反过来的话，最后 2 秒内的编辑会随连接一起丢掉——正是"静默销毁用户内容"。

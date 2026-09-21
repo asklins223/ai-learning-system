@@ -22,6 +22,7 @@ import { deleteObject } from "../../lib/object-storage.ts";
 import { logger } from "../../lib/logger.ts";
 import { projectNoteDetailV1, projectNoteSaveReceiptV1 } from "./note-projection.ts";
 import { applyUploadedDocUpdate } from "./collaboration.ts";
+import { readNoteDocState } from "./document-state.ts";
 import { noteSaveRequestV1Schema } from "@ailearn/shared/note-save-contracts";
 
 export async function noteRoutes(app: FastifyInstance) {
@@ -64,6 +65,30 @@ export async function noteRoutes(app: FastifyInstance) {
     reply.header("Cache-Control", "private, no-store");
     reply.header("ETag", `"${projection.revision}"`);
     return projection;
+  });
+
+  // Desktop NOTE-DOC-STATE：读"能直接喂给 Y.Doc 的那份状态"。
+  // 编辑起点必须是与服务端同源的一份编码，不能由行重建（重建出的文档没有共同祖先，
+  // 两边一改就复制块）。凡是要改正文的客户端，先取这个，再决定走 WS 还是走
+  // /v2/notes/:id/doc-update。
+  app.get<{ Params: { id: string } }>("/v2/notes/:id/doc-state", async (req, reply) => {
+    const params = uuidParamSchema.safeParse(req.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
+    const state = await withWorkspaceTransaction(
+      { workspaceId: req.session.workspaceId, userId: req.session.userId },
+      (transaction) => readNoteDocState(transaction, {
+        workspaceId: req.session.workspaceId,
+        noteId: params.data.id,
+      }),
+    );
+    if (!state) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
+    reply.header("Cache-Control", "private, no-store");
+    return {
+      update: Buffer.from(state.update).toString("base64"),
+      revision: state.revision,
+      // true = 这篇还没有快照（建得比 0244 早），返回的是从行里补齐后重新编码的一份。
+      backfilled: state.backfilled,
+    };
   });
 
   app.patch<{ Params: { id: string } }>("/v2/notes/:id", { preHandler: [requireOwner] }, async (req, reply) => {
