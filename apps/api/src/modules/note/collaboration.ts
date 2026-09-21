@@ -15,6 +15,7 @@ import {
   resolveNoteDocFlushTarget,
 } from "./document-state.ts";
 import { snapshotOf } from "./doc.ts";
+import { visibleNotesCondition } from "./visibility.ts";
 
 /**
  * 笔记协同的服务端（批次 4.2）。
@@ -248,7 +249,11 @@ export async function applyUploadedDocUpdate(input: {
   const scope = { workspaceId: input.workspaceId, userId: input.userId };
   const note = await withWorkspaceTransaction(scope, (tx) =>
     tx.query.notes.findFirst({
-      where: and(eq(notes.id, input.noteId), eq(notes.workspaceId, input.workspaceId)),
+      where: and(
+        eq(notes.id, input.noteId),
+        eq(notes.workspaceId, input.workspaceId),
+        visibleNotesCondition(input.userId),
+      ),
       columns: { currentVersionId: true, deletedAt: true },
     }),
   );
@@ -287,7 +292,7 @@ export async function applyUploadedDocUpdate(input: {
       })),
     withWorkspaceTransaction(scope, (tx) =>
       tx.query.notes.findFirst({
-        where: eq(notes.id, input.noteId),
+        where: and(eq(notes.id, input.noteId), visibleNotesCondition(input.userId)),
         columns: { updatedAt: true },
       })),
   ]);

@@ -676,7 +676,13 @@ export async function exportNoteMarkdown(noteId: string, workspaceId: string, us
     async (tx) => {
       // CONC-03: 不导出已软删除的笔记
       const note = await tx.query.notes.findFirst({
-        where: and(eq(notes.id, noteId), eq(notes.workspaceId, workspaceId), isNull(notes.deletedAt)),
+        // 单篇导出也是导出：「仅自己可见」的那篇别人要能拿到，整个边界就白做了。
+        where: and(
+          eq(notes.id, noteId),
+          eq(notes.workspaceId, workspaceId),
+          visibleNotesCondition(userId),
+          isNull(notes.deletedAt),
+        ),
       });
       if (!note) return null;
 

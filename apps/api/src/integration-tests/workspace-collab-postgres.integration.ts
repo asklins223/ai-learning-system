@@ -51,6 +51,7 @@ const { reviewRoutes } = await import("../modules/review/routes.ts");
 const { exportRoutes } = await import("../modules/export/routes.ts");
 const { statsRoutes } = await import("../modules/stats/routes.ts");
 const { jobRoutes } = await import("../modules/job/routes.ts");
+const { searchRoutes } = await import("../modules/search/routes.ts");
 const { createInvite } = await import("../modules/identity/invite-service.ts");
 const { issueSession, revokeSession } = await import("../modules/identity/service.ts");
 const { closeDatabase } = await import("../db/client.ts");
@@ -103,6 +104,9 @@ before(async () => {
   await app.register(exportRoutes);
   await app.register(statsRoutes);
   await app.register(jobRoutes);
+  // 搜索是这条边界上最宽的一个面（索引是全空间共用的一份），所以成员搜不到作者
+  // 没共享的那篇这件事必须有它在。
+  await app.register(searchRoutes);
   await app.ready();
 
   const owner = await issueSession(userOwner, wsCollab);
@@ -660,4 +664,41 @@ test("判据的两份写法在同一份数据上给同一个结果集", async ()
   `;
   assert.ok(ownerRaw.length >= fromRaw.length, "作者在同一个夹具下读到的反而更少");
   assert.ok(ownerRaw.length > 0, "夹具里作者一篇都没有，上面两条都是假绿");
+});
+
+test("搜索索引收全量、发结果按人筛：私有笔记的正文不出现在成员的命中里", async () => {
+  // 这条钉的是批次 4.5 里唯一一处"故意不裁"的地方：`search_documents` 是全空间共用的
+  // 一份索引，建索引时按某人可见范围裁就等于把他的视角烧进共用数据（下一次 owner
+  // 重索引，私有笔记连作者自己都搜不到）。所以索引收全量，发不发由查询侧那次 join 判。
+  const phrase = `只在作者私有笔记里的一句话 ${tag}`;
+  const created = await appInject("POST", "/notes", ownerToken, {
+    blocks: [{ type: "paragraph", content: phrase }],
+  });
+  const noteId = created.json().note.id as string;
+
+  const memberHits = await appInject("GET", `/search?q=${encodeURIComponent(tag)}&type=note`, memberToken);
+  assert.equal(memberHits.statusCode, 200, memberHits.body);
+  const memberIds = (memberHits.json().items as Array<{ objectId: string }>).map((item) => item.objectId);
+  assert.ok(!memberIds.includes(noteId), "成员搜到了作者没共享的那篇");
+
+  // 正向对照：同一篇、同一个关键词，作者自己必须搜得到——否则上一条的"没有"
+  // 只是索引没建起来或者查询整个坏了。
+  const ownerHits = await appInject("GET", `/search?q=${encodeURIComponent(phrase)}&type=note`, ownerToken);
+  const ownerIds = (ownerHits.json().items as Array<{ objectId: string }>).map((item) => item.objectId);
+  assert.ok(ownerIds.includes(noteId), `作者自己搜不到这篇（命中 ${ownerIds.length} 条）——上一条的"搜不到"是假绿`);
+
+  // 共享之后成员也要搜得到：证明筛的是归属，不是"这篇有没有进索引"。
+  await appInject("PATCH", `/v2/notes/${noteId}/share-scope`, ownerToken, { shareScope: "shared" });
+  const afterShare = await appInject("GET", `/search?q=${encodeURIComponent(phrase)}&type=note`, memberToken);
+  const afterIds = (afterShare.json().items as Array<{ objectId: string }>).map((item) => item.objectId);
+  assert.ok(afterIds.includes(noteId), "共享之后成员仍然搜不到——查询侧那次 join 接错了");
+
+  // 撤回之后总数不能还带着它：缓存键没带查看者的话，这里会拿到作者那份的数字。
+  await appInject("PATCH", `/v2/notes/${noteId}/share-scope`, ownerToken, { shareScope: "private" });
+  const afterUnshare = await appInject("GET", `/search?q=${encodeURIComponent(phrase)}&type=note`, memberToken);
+  assert.equal(
+    (afterUnshare.json().items as unknown[]).length,
+    0,
+    "撤回之后成员的搜索里还有它（或者命中数缓存没按人分键）",
+  );
 });

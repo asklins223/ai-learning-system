@@ -404,7 +404,6 @@ export async function listNotes(
   // 批次 4.5: 「仅自己可见」的笔记不在别人的列表里——包括空间 owner。
   const conditions = [
     eq(notes.workspaceId, workspaceId),
-    visibleNotesCondition(opts.userId),
     opts.trashed ? isNotNull(notes.deletedAt) : isNull(notes.deletedAt),
   ];
 
@@ -428,11 +427,10 @@ export async function listNotes(
   // correct for cursor pagination. In high-concurrency write scenarios the total
   // may differ slightly from the actual page contents, but this is an inherent
   // trade-off of cursor pagination and acceptable for note lists.
-  const countConditions = and(
+  const countConditions = [
     eq(notes.workspaceId, workspaceId),
-    visibleNotesCondition(opts.userId),
     opts.trashed ? isNotNull(notes.deletedAt) : isNull(notes.deletedAt),
-  );
+  ];
 
   const [rows, countRows] = await Promise.all([
     executor
@@ -450,13 +448,13 @@ export async function listNotes(
         cursorTimestamp: sql<string>`to_char(${notes.updatedAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
       })
       .from(notes)
-      .where(and(...conditions))
+      .where(and(visibleNotesCondition(opts.userId), ...conditions))
       .orderBy(desc(notes.updatedAt), desc(notes.id))
       .limit(limit + 1),
     executor
       .select({ count: sql<number>`count(*)::int` })
       .from(notes)
-      .where(countConditions),
+      .where(and(visibleNotesCondition(opts.userId), ...countConditions)),
   ]);
 
   const hasMore = rows.length > limit;

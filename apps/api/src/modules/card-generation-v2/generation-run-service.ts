@@ -176,12 +176,17 @@ export async function createGenerationRunV2(
     // `.limit(1)` 取到的是 Postgres 任意给的一行，同篇笔记既有已死批次又有一批还没
     // 审完时，只要先摸到已死那行就放行，结果新旧两批 review_ready 并存——正是用户
     // 抱怨的"旧卡不废弃"。只要还有一行活着就挡住。
+    // 批次 4.5：这一位在制守卫按 **(笔记, 人)** 判，不是按笔记。原来的写法是"这篇
+    // 有别人的一批在制，我就再也点不动生成"——而"这批是谁的"从来没人回答。今天
+    // `card_generation.*` 只对 owner 开放所以看不出来，等成员能生成时那个洞就是
+    // 别人占坑我进不去。
     const noteInFlight = await tx
       .select({ id: cardGenerationRunsV2.id, status: cardGenerationRunsV2.status, errorCode: cardGenerationRunsV2.errorCode })
       .from(cardGenerationRunsV2)
       .where(and(
         eq(cardGenerationRunsV2.workspaceId, ctx.workspaceId),
         eq(cardGenerationRunsV2.noteId, noteId),
+        eq(cardGenerationRunsV2.userId, ctx.userId),
         inArray(cardGenerationRunsV2.status, [...ACTIVE_GENERATION_RUN_STATUSES]),
       ));
     const liveBatch = noteInFlight.find((run) => !(
@@ -205,6 +210,8 @@ export async function createGenerationRunV2(
       .where(and(
         eq(cardGenerationRunsV2.workspaceId, ctx.workspaceId),
         eq(cardGenerationRunsV2.noteId, noteId),
+        // 只替代**自己**上一批。按笔记找的话，甲重新生成会把乙已经激活的那批卡废掉。
+        eq(cardGenerationRunsV2.userId, ctx.userId),
         eq(cardGenerationRunsV2.status, "activated"),
       ))
       .orderBy(desc(cardGenerationRunsV2.updatedAt))
@@ -480,6 +487,7 @@ export async function getLatestGenerationRunForNoteV2(ctx: RunContext, noteId: s
       .where(and(
         eq(cardGenerationRunsV2.workspaceId, ctx.workspaceId),
         eq(cardGenerationRunsV2.noteId, noteId),
+        eq(cardGenerationRunsV2.userId, ctx.userId),
       ))
       .orderBy(desc(cardGenerationRunsV2.updatedAt))
       .limit(1);

@@ -555,6 +555,7 @@ jobs:
             src/integration-tests/note-document-state-postgres.integration.ts \
             src/integration-tests/note-collaboration-postgres.integration.ts \
             src/integration-tests/learning-objective-search.integration.ts \
+            src/integration-tests/card-generation-run-ownership-postgres.integration.ts \
             2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/note-collaboration.tap"
 
       # 空间隔离 schema 棘轮：把当前"带 workspace_id 但缺外键 / 缺 RLS"的表如实登记为

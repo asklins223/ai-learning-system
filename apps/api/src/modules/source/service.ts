@@ -435,12 +435,11 @@ export async function listNotesBySource(
 
   // 列表与 total 共用这一个 where：那个数字在界面上写的是"共 N 篇"，
   // 只筛列表不筛数字就会自相矛盾。
-  const where = and(
+  const where = [
     eq(notes.sourceId, sourceId),
     eq(notes.workspaceId, workspaceId),
-    visibleNotesCondition(userId),
     isNull(notes.deletedAt),
-  );
+  ];
   const [noteRows, countRows] = await Promise.all([
     executor
       .select({
@@ -452,13 +451,14 @@ export async function listNotesBySource(
         currentVersionId: notes.currentVersionId,
       })
       .from(notes)
-      .where(where)
+      .where(and(visibleNotesCondition(userId), ...where))
       .orderBy(desc(notes.updatedAt))
       .limit(50),
     executor
       .select({ count: sql<number>`count(*)::int` })
       .from(notes)
-      .where(where),
+      // 列表与 total 同一条判据：那个数字在界面上写的是「共 N 篇」。
+      .where(and(visibleNotesCondition(userId), ...where)),
   ]);
 
   return { items: noteRows, total: countRows[0]?.count ?? 0 };
