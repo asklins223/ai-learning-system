@@ -355,3 +355,18 @@ job 并发跑完 LLM（双份计费 + 双写终态）。所以"拆事务"必须�
 B（提交 66a0049f）已经让界面不再撒谎。A 做完后，把 B 里那句
 "这一步的中间计数要等这一批写完"和 `inFlight` 分支一起去掉，恢复逐步读数——
 两处都有注释指向本节，不会漏。
+
+## 19. 边界审计：正确项有没有可能从别的接口漏到客户端（真数据验证）
+
+正确项就躺在 `objective_draft.practiceItem` 里，所以"只投影种类+计数"这件事必须被验证，
+不能被我自己的代码注释说服。查了三条路径：
+
+| 路径 | 结论 |
+|---|---|
+| `GET /v2/card-generation-runs/:runId/candidates` | 服务端在 `helpers.ts` 里重组成 `{kind, optionCount}`；**实测**（run `d375f218`，含 4 道真选择题）响应体里 `correctUnitId` / `correctTokenIds` 均不存在，库里那 4 个正确项 id 在响应中命中 **0/4** |
+| `reveal` 接口 | 逐字段组装（只取 canonicalAnswer / learningSupport 三项 / evidenceRefIds），不含 practiceItem，且出口再过 strict 的 `parseCandidateRevealV2` |
+| 候选审核写路径 | 那里出现整包 `objectiveDraft` 是服务端哈希输入与 DB 写入，不对外返回 |
+
+一处如实记录的粗糙：`true_false` 的 `optionCount` 是 0（摘要只数 options/units/pairs）。
+界面标签是硬编码的「判断题 · 对不对二选一」，所以显示不受影响，但这个字段对判断题没有意义——
+下次要么给它 2 的语义，要么让标签不读计数。
