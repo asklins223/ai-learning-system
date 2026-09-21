@@ -630,15 +630,19 @@ async function createNoteTx(
 
   if (sanitizedBlocks.length) {
     const blocksWithAssets = await resolveImageAssetIds(tx, workspaceId, sanitizedBlocks);
-    await tx.insert(noteBlocks).values(
-      blocksWithAssets.map((b, idx) => ({
-        versionId: version.id,
-        workspaceId,
-        ordinal: idx,
-        type: b.type,
-        content: b.content,
-        imageAssetId: b.imageAssetId,
-      })),
+    const initialBlocks: NoteDocBlock[] = blocksWithAssets.map((b) => ({
+      type: b.type,
+      content: b.content,
+      ...(b.imageAssetId ? { imageAssetId: b.imageAssetId } : {}),
+    }));
+    // 批次 4.1：新建笔记就是文档的第一次拥有，快照从第一行起就存在，
+    // 之后所有读取都走快照而不是从关系表猜。
+    await applyNoteDocUpdate(
+      tx,
+      { workspaceId, noteId: row.id },
+      version.id,
+      (noteDoc) => writeNoteBlocks(noteDoc, initialBlocks),
+      initialBlocks,
     );
   }
 

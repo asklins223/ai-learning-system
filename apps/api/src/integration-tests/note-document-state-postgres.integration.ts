@@ -41,6 +41,8 @@ let noteId = "";
 let versionId = "";
 /** 导入用例新建的笔记，teardown 要一起清。 */
 const importedNoteIds: string[] = [];
+/** 本用例开始时的 revision，用来断言"每次写都 +1"而不是猜绝对值。 */
+let revisionAtStart = 0;
 
 const original = [
   { type: "heading" as const, content: `补齐测试标题 ${tag}` },
@@ -112,11 +114,14 @@ after(async () => {
   await closeDatabase();
 });
 
-test("补齐无损：从现有 note_blocks 读出的文档与原行逐块相等", async () => {
+test("补齐无损：0244 之前建的笔记仍能从行里读出原文（迁移接缝）", async () => {
+  // 4.1 之后新建的笔记一开始就有快照（createNoteTx 走文档入口），所以"没有快照"
+  // 这个状态只能由历史数据构成：删掉快照行来代表 0244 之前建的笔记。
+  await sql`DELETE FROM note_document_states WHERE note_id = ${noteId}`;
   const { doc, backfilled } = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
     loadNoteDoc(tx, { workspaceId, noteId }),
   );
-  assert.equal(backfilled, true, "首读必须是从关系表补齐（还没有任何快照）");
+  assert.equal(backfilled, true, "没有快照时必须从关系表补齐（新建笔记也一样，先删快照模拟历史数据）");
   assert.deepEqual(
     projectNoteBlocks(doc).map(({ ordinal: _o, ...block }) => block),
     original.map((block) => ({ ...block })),
@@ -139,7 +144,8 @@ test("写一次即成为事实源：快照落盘、投影回 note_blocks、revis
   });
 
   const stored = await sql`SELECT revision FROM note_document_states WHERE note_id = ${noteId}`;
-  assert.equal(Number(stored[0].revision), 1, "第一次落盘 revision 应为 1");
+  assert.equal(stored.length, 1, "写入后必须有快照行");
+  revisionAtStart = Number(stored[0].revision);
   assert.deepEqual(contentsOf(await blocksOfCurrentVersion()), contentsOf(next), "note_blocks 没跟上文档");
 
   // 必须在事务**提交之后**再读 revision：在同一个 withWorkspaceTransaction 里用另一个
@@ -150,7 +156,11 @@ test("写一次即成为事实源：快照落盘、投影回 note_blocks、revis
     });
   });
   const second = await sql`SELECT revision FROM note_document_states WHERE note_id = ${noteId}`;
-  assert.equal(Number(second[0].revision), 2, "第二次写 revision 必须 +1");
+  assert.equal(
+    Number(second[0].revision),
+    revisionAtStart + 1,
+    `第二次写必须把 revision 从 ${revisionAtStart} 推到 ${revisionAtStart + 1}，实际 ${second[0].revision}`,
+  );
 
   // 重开一篇文档必须读到快照而不是关系表（backfilled=false 才是"事实源已切换"的证据）。
   const reloaded = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
