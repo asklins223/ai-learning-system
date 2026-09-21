@@ -1401,3 +1401,53 @@ SSE 走的是同一个查询（`getGenerationRunEventsV2`），所以两条路�
 在跑的 Electron 窗口停在 `chrome-error://`，而它的渲染层没有 HMR——按并发会话的说明，
 要看到新头部必须重启桌面端。所以这一条的主张只到"服务端已下发 + jsdom 已断言文本"，
 真机读数等下一次重启窗口。
+
+## 38. A1 的前置约束落地：候选的幂等键，以及第一版键选错了这件事
+
+用户催的是"别等迁移，直接应用"。先量了一下到底有什么可应用：
+`__drizzle_migrations` 有 260 行，journal 有 252 条，把 252 条各自的 SQL 文件算 sha256
+逐个对库——**252 条全部命中**，也就是仓库里没有任何"写了没应用"的迁移（那 8 行是历史上
+被改过内容/重编号留下的旧 hash，不影响）。所以"等"不是等迁移器，是等我自己没写的那条迁移。
+
+于是补 A1（§18/§21 里那条"逐候选可见要先有候选幂等"）的前置：
+`0253_candidate_objective_revision_unique.sql`——给
+`card_generation_candidates_v2` 建唯一索引。它不改任何写路径，只是把
+"重投的 job 第二次插同一目标"从"悄悄多出几张候选"变成"当场失败"。
+
+**第一版的键选错了，而且错得看不出来。** 我按 dev 库实测选的
+`(workspace_id, run_id, plan_objective_local_id, revision)`：1600 行候选里
+`distinct (run, objective, revision) = 1600`（建得起来、不动数据），
+`distinct (run, objective) = 1545`（同一目标确实有 revision 2，所以 revision 不能拿掉）。
+应用完之后去读 replan 那条路才发现漏了一列：`card_generation_replan_set` 会把旧计划的候选
+`supersede` 而**不删除**（immutable），再用 `planVersion+1` 的新计划重新一批 author，
+而新计划的 `objectiveLocalId` 同样由原子下标导出（`obj-atom-1`…）、revision 也从 1 起
+——旧键会把「再生成一次候选」和整条 replan 路当场打死。dev 库里 `plan_version>1` 的候选
+是 0 行，所以旧键也"建得起来"：**能建索引只证明历史没走过这条路，不证明键选对了**。
+现在键里带上 `plan_version`，并 DROP 掉初版那条名字不同的索引（两条语句都幂等，
+文件 hash 变了会让迁移器重跑一次，重跑安全）。
+
+四条探针（都在 `BEGIN … ROLLBACK` 里跑完，事后 `candidate_revision_id='ffff…'` 计数 0）：
+
+| 探针 | 结果 |
+|---|---|
+| 同 run / 同 plan_version / 同目标 / 同 revision 再插一行 | `duplicate key … "cg_v2_cand_plan_objective_revision_idx"`，键值原样报出 `(workspace, run, obj-atom-1, 1)` |
+| 同目标同 revision 但 `plan_version=2`（replan 那一波） | `INSERT 0 1` |
+| 同目标同 plan_version 但 `revision=2`（regenerate / 有界修复） | `INSERT 0 1` |
+| `pg_indexes` 终态 | 只剩带 plan_version 的那条唯一索引，初版名字已消失 |
+
+迁移测先写后红再绿，并且做了变异检查：把 SQL 里的 `plan_version` 删掉，
+`索引里缺列 plan_version` 立刻红——这条断言不是装饰。
+
+**与并发会话的编号冲突（要人裁决，不是我能单干的）**：这个工作树里 journal 的
+idx 252 是 `0253_candidate_objective_revision_unique`（我写的、已应用的），磁盘上
+**没有** `0253_companion_self_correction_learned.sql`；对面报的那批文件
+（`0247_companion_synthesis_latency` / `0252_objective_fact_recall_severity` /
+`0254_…` / `0255_…`）与那几个 commit 号，在本树 `git log --all`、`ls` 里全部不存在。
+两边都以为自己在同一条树上给 idx 252 登记了不同的 tag——共享的是那个 dev 库，
+不共享的是 journal 文件。谁后提交，谁就把对方的登记覆盖成"文件在、清单没有"，
+而那条迁移就永远不被应用（正是 `migration-journal-coverage` 守的那个坑）。
+
+A1 本身还没做：这条索引只是让它有可能开始写。剩下的两步是
+①入口守卫从"看 `run.status`"改成"看自己那条 outbox 租约"（否则重投对着已提交的
+`authoring` 静默空转，把 run 钉死、这篇笔记此后每次生成都吃 409，§21），
+②逐候选提交时按目标"已有则跳过/补 revision"，而不是裸 INSERT。

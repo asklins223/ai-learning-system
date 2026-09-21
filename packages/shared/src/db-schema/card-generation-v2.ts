@@ -140,6 +140,19 @@ export const cardGenerationCandidatesV2 = pgTable(
   },
   (t) => ({
     revisionUnique: uniqueIndex("cg_v2_cand_revision_idx").on(t.workspaceId, t.candidateRevisionId),
+    /**
+     * 「1 版计划 : 1 个计划目标 : 1 个 revision」是 A1（逐候选提交）的幂等键，
+     * 写进库里而不是只写进注释：重投的 job 第二次插同一目标时必须当场失败。
+     * plan_version 必须在键里：replan 会 supersede 旧候选而不删除，并用同一批
+     * `obj-atom-N` 目标号出新的一版计划（2026-09-21 读路径核对），少这一列会打死重试。
+     */
+    planObjectiveRevisionUnique: uniqueIndex("cg_v2_cand_plan_objective_revision_idx").on(
+      t.workspaceId,
+      t.runId,
+      t.planVersion,
+      t.planObjectiveLocalId,
+      t.revision,
+    ),
     runIdx: index("cg_v2_cand_run_idx").on(t.workspaceId, t.runId, t.candidateId, t.revision),
     latestIdx: index("cg_v2_cand_latest_idx").on(t.workspaceId, t.runId, t.candidateId, sql`${t.revision} DESC`),
     qualityCheck: check("cg_v2_cand_quality_chk", sql`${t.qualityState} IN ('authored','checking','passed','failed')`),

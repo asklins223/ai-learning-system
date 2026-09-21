@@ -1744,6 +1744,34 @@
       "tag": "0249_card_generation_live_progress",
       "breakpoints": true,
       "when": 1789800000003
+    },
+    {
+      "idx": 249,
+      "version": "7",
+      "tag": "0250_companion_daily_diary_failure_reason",
+      "breakpoints": true,
+      "when": 1789800000004
+    },
+    {
+      "idx": 250,
+      "version": "7",
+      "tag": "0251_widen_daily_summary_tick",
+      "breakpoints": true,
+      "when": 1789800000005
+    },
+    {
+      "idx": 251,
+      "version": "7",
+      "tag": "0252_companion_daily_diary_blocks",
+      "breakpoints": true,
+      "when": 1789800000006
+    },
+    {
+      "idx": 252,
+      "version": "7",
+      "tag": "0253_candidate_objective_revision_unique",
+      "breakpoints": true,
+      "when": 1789800000007
     }
   ]
 }
