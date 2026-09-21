@@ -48,6 +48,7 @@ import { useSourceImage } from "./source-image";
 import { ImageGalleryLightbox, useImageLightbox, ZoomableReadingImage, type GalleryImage } from "./image-viewer";
 import { NoteMarkdownEditor, type NoteMarkdownEditorHandle } from "./note-markdown-editor";
 import { useNoteDocLiveView } from "./use-note-doc-live-view";
+import { NotebookPresence } from "./notebook-presence";
 import { NoteImageUploads, useNoteImageUploads } from "./note-image-uploads";
 
 /**
@@ -267,6 +268,9 @@ export function NotebookSurface() {
   const activeNoteRef = useRoomStore((state) => state.activeNoteRef);
   // 协同流只在协作空间里存在（personal 按门控不建长连接），所以订阅与否看它。
   const spaceIdentity = useRoomStore((state) => state.spaceIdentity);
+  // 我在这一篇里是谁，要广播给同处这篇的人。只取显示名，不取邮箱：成员列表里别人
+  // 本来看不到你的邮箱，协同状态不该另开一条路把它散出去。
+  const presenceName = useRoomStore((state) => state.accountIdentity?.displayName ?? null);
   const setReturnTarget = useRoomStore((state) => state.setReturnTarget);
   const editorRef = useRef<NoteMarkdownEditorHandle | null>(null);
   const editorPaneRef = useRef<HTMLDivElement>(null);
@@ -689,6 +693,7 @@ export function NotebookSurface() {
     () => {
       void reload({ silent: true });
     },
+    presenceName,
   );
 
   useEffect(() => {
@@ -1137,6 +1142,7 @@ export function NotebookSurface() {
         <span>阅读</span>
         <span>版本 v{note.currentVersion.versionNo}</span>
         <span>来源片段 {segments.length}</span>
+        <NotebookPresence peers={noteDocLive.presencePeers} selfName={presenceName} />
         {shareStateControls}
       </div>
       <h2 className="title">{note.title || "未命名笔记"}</h2>
@@ -1270,11 +1276,7 @@ export function NotebookSurface() {
       <div className="editor-head">
         <div>
           <span className="tag red">{dirty || saveState === "error" ? "草稿" : "已同步"}</span>
-      {noteDocLive.presenceCount > 0 ? (
-        <span className="tag" title="这几个人也开着这一篇">
-          {noteDocLive.presenceCount + 1} 人在看
-        </span>
-      ) : null}
+      <NotebookPresence peers={noteDocLive.presencePeers} selfName={presenceName} />
       {shareStateControls}
       {/* 那句"每次改动都会存成一个版本"已经不成立：自动保存并入正文，只有
           「提交并确认」才存成一个可回去的版本。继续写着就是给读者一个假的心智模型。 */}

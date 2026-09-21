@@ -10,11 +10,13 @@ type Listener = (event: { data: unknown }) => void;
 let listeners: Listener[];
 let subscribe: ReturnType<typeof vi.fn>;
 let unsubscribe: ReturnType<typeof vi.fn>;
+let presence: ReturnType<typeof vi.fn>;
 
 function installApi() {
   listeners = [];
   subscribe = vi.fn(async () => ({ ok: true, data: { subscriptionId: "sub-1" } }));
   unsubscribe = vi.fn(async () => ({ ok: true, data: { closed: true } }));
+  presence = vi.fn(async () => ({ ok: true, data: { shared: true } }));
   (window as unknown as { ailearn: unknown }).ailearn = {
     subscriptions: {
       subscribe,
@@ -26,6 +28,7 @@ function installApi() {
         };
       },
     },
+    note: { doc: { presence } },
   };
 }
 
@@ -48,12 +51,37 @@ afterEach(() => {
 });
 
 describe("笔记协同的实时视图订阅", () => {
-  it("personal 空间不订阅：那里本来就没有长连接", async () => {
+  it("personal 空间不订阅，也不广播在场：那里本来就没有长连接", async () => {
     const onRemoteChange = vi.fn();
-    const { result } = renderHook(() => useNoteDocLiveView(NOTE_ID, false, onRemoteChange));
+    const { result } = renderHook(() => useNoteDocLiveView(NOTE_ID, false, onRemoteChange, "Asklins"));
     await act(async () => { vi.advanceTimersByTime(0); });
     expect(subscribe).not.toHaveBeenCalled();
-    expect(result.current.presenceCount).toBe(0);
+    expect(presence).not.toHaveBeenCalled();
+    expect(result.current.presencePeers).toEqual([]);
+  });
+
+  it("订阅上就报一次自己在场，卸载时收回", async () => {
+    const { unmount } = renderHook(() => useNoteDocLiveView(NOTE_ID, true, () => undefined, "Asklins"));
+    await act(async () => { vi.advanceTimersByTime(0); });
+    // 名字是广播出去的，不是查名册查出来的：对端看到的必须是你自己报的那个。
+    expect(presence).toHaveBeenLastCalledWith(expect.objectContaining({
+      noteId: NOTE_ID,
+      state: JSON.stringify({ name: "Asklins" }),
+    }));
+    presence.mockClear();
+    // 离场走同一条通道、报空串——主进程据此把 awareness 的本地状态置 null。
+    unmount();
+    await act(async () => { vi.advanceTimersByTime(0); });
+    expect(presence).toHaveBeenCalledTimes(1);
+    expect(presence).toHaveBeenLastCalledWith(expect.objectContaining({ state: "" }));
+  });
+
+  it("没有显示名也照样在场：不报的话人数比头像多出一个来历不明的人", async () => {
+    renderHook(() => useNoteDocLiveView(NOTE_ID, true, () => undefined, null));
+    await act(async () => { vi.advanceTimersByTime(0); });
+    expect(presence).toHaveBeenLastCalledWith(expect.objectContaining({
+      state: JSON.stringify({ name: "" }),
+    }));
   });
 
   it("正文帧只叫醒一次回读：连着的三帧合并成一次", async () => {
@@ -81,14 +109,35 @@ describe("笔记协同的实时视图订阅", () => {
     expect(onRemoteChange).not.toHaveBeenCalled();
   });
 
-  it("presence 与只读态从帧里取，供界面说真话", async () => {
+  it("在场名单从帧里取：报得出名字的带名字，报不出的留空而不是把那个人丢掉", async () => {
     const { result } = renderHook(() => useNoteDocLiveView(NOTE_ID, true, () => undefined));
     await act(async () => { vi.advanceTimersByTime(0); });
 
     act(() => {
-      emit(frame(NOTE_ID, { type: "presence", states: [{ clientId: 7, state: { editing: true } }] }));
+      emit(frame(NOTE_ID, {
+        type: "presence",
+        states: [
+          { clientId: 7, state: { name: " 小琳 " } },
+          { clientId: 8, state: { editing: true } },
+          { clientId: 9, state: "not-an-object" },
+        ],
+      }));
     });
-    expect(result.current.presenceCount).toBe(1);
+    expect(result.current.presencePeers).toEqual([
+      { clientId: 7, name: "小琳" },
+      { clientId: 8, name: null },
+      { clientId: 9, name: null },
+    ]);
+
+    act(() => {
+      emit(frame(NOTE_ID, { type: "presence", states: [] }));
+    });
+    expect(result.current.presencePeers).toEqual([]);
+  });
+
+  it("只读态与失败原因从帧里取，供界面说真话", async () => {
+    const { result } = renderHook(() => useNoteDocLiveView(NOTE_ID, true, () => undefined));
+    await act(async () => { vi.advanceTimersByTime(0); });
 
     act(() => {
       emit(frame(NOTE_ID, { type: "status", status: "authenticated", authorizedScope: "readonly" }));

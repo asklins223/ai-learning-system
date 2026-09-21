@@ -5794,6 +5794,26 @@
   padding-bottom: 2px;
 }
 
+/* ── 同处这一篇的人：一排印章，人数由后面那句文字说 ── */
+.hud-surface .notebook-presence {
+  display: inline-flex;
+  align-items: center;
+}
+/* 印章彼此压住一点：五个人也不把那一行撑开。名字在 title 与 aria-label 里，
+   这里只画首字母——`version-ribbon span` 那条把字号压到 9px，所以选择器要多一层。 */
+.hud-surface .notebook-presence .notebook-presence__peer {
+  display: grid;
+  place-items: center;
+  width: 19px;
+  height: 19px;
+  margin-right: -6px;
+  border-radius: 50%;
+  border: 1px solid rgba(73, 47, 29, 0.28);
+  background: #d7e1d2;
+  color: #3f5a40;
+  font: 750 10px/1 "Noto Serif SC", "Songti SC", serif;
+}
+
 /* 正文缩进对齐页边红线（`:before` 落在 left:32px），与标题同一条左边缘。 */
 
 /* ── 书写区：32px 一格的横线，行高就是格高 ── */
