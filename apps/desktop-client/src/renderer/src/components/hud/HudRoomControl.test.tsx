@@ -236,3 +236,70 @@ describe("顶栏账户槽位", () => {
     expect(screen.getByRole("button", { name: /^当前登录账号/ }).hasAttribute("disabled")).toBe(true);
   });
 });
+
+/**
+ * 再点一次同一个槽位就该把手里的卡收回去（2026-09-22 用户报："再次点击头像不能缩放
+ * 或者关闭回去浮窗"）。这条对顶栏两张卡都成立：账户小框是新加的，空间胶囊是旧的，
+ * 但人的手感一样——那颗东西还在那儿、还亮着，就是在等我再点它一下。
+ */
+describe("再点同一个槽位收起它的卡", () => {
+  afterEach(() => {
+    cleanup();
+    Reflect.deleteProperty(window, "ailearn");
+    useRoomStore.setState({ accountIdentity: null, accountAvatar: null });
+  });
+
+  function openAccountCard() {
+    fireEvent.click(screen.getByRole("button", { name: "展开房间控制" }));
+    fireEvent.click(screen.getByRole("button", { name: /^当前登录账号/ }));
+    expect(document.querySelectorAll(".room-control-menu")).toHaveLength(1);
+  }
+
+  it("再点头像：卡片收掉，岛留在展开态", () => {
+    stubAccountGateway();
+    useRoomStore.getState().setAccountIdentity({ email: "asklins@example.com", displayName: null });
+    render(<div className="hud-surface"><HudRoomControl /></div>);
+    openAccountCard();
+
+    fireEvent.click(screen.getByRole("button", { name: /^当前登录账号/ }));
+
+    expect(document.querySelectorAll(".room-control-menu")).toHaveLength(0);
+    expect((document.querySelector(".room-control") as HTMLElement).dataset.expanded).toBe("true");
+    expect(screen.getByRole("button", { name: /^当前登录账号/ }).getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("再点头像关掉后，第三次点又能打开（不是只关不开）", () => {
+    stubAccountGateway();
+    useRoomStore.getState().setAccountIdentity({ email: "asklins@example.com", displayName: null });
+    render(<div className="hud-surface"><HudRoomControl /></div>);
+    openAccountCard();
+    fireEvent.click(screen.getByRole("button", { name: /^当前登录账号/ }));
+
+    fireEvent.click(screen.getByRole("button", { name: /^当前登录账号/ }));
+
+    expect(document.querySelectorAll(".room-control-menu")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: /^退出登录/ })).toBeTruthy();
+  });
+
+  it("卡开着时头像处于激活态（告诉人这张卡归它管）", () => {
+    stubAccountGateway();
+    useRoomStore.getState().setAccountIdentity({ email: "asklins@example.com", displayName: null });
+    render(<div className="hud-surface"><HudRoomControl /></div>);
+    openAccountCard();
+
+    expect(screen.getByRole("button", { name: /^当前登录账号/ }).className).toContain("active");
+  });
+
+  it("空间胶囊同样 toggle：再点一次收起学习空间那张卡", () => {
+    stubAccountGateway();
+    useRoomStore.getState().setSpaceIdentity({ name: "我的书房", role: "owner", isPersonal: true });
+    render(<div className="hud-surface"><HudRoomControl /></div>);
+    fireEvent.click(screen.getByRole("button", { name: "展开房间控制" }));
+    fireEvent.click(screen.getByRole("button", { name: /^当前学习空间/ }));
+    expect(document.querySelectorAll(".room-control-menu")).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: /^当前学习空间/ }));
+
+    expect(document.querySelectorAll(".room-control-menu")).toHaveLength(0);
+  });
+});

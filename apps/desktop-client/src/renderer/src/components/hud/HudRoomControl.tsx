@@ -264,10 +264,21 @@ export function HudRoomControl({ decorative = false }: { readonly decorative?: b
     setExpanded(false);
   };
 
-  /** 胶囊两条路都做同一件事：展开药丸并把空间菜单打开。 */
+  /**
+   * 胶囊两条路都做同一件事：展开药丸并把空间菜单打开；已经开着就收掉它。
+   *
+   * toggle 而不是"只开不关"（2026-09-22）：卡开着的时候那颗胶囊还亮着、还在原地，
+   * 人的手感就是再点一下该收回去了。以前这里只写 `set(true)`，再点等于什么都没
+   * 发生，只能去点空白或按 Esc——用户报"再次点击头像不能关闭回去浮窗"，空间这张
+   * 卡其实同一条毛病。关卡时岛保持展开：岛是岛的开关，卡是卡的开关，两件事各管一次点击。
+   */
   const openSpaceMenu = () => {
     setSpaceNotice(null);
     setAccountMenuOpen(false);
+    if (spaceMenuOpen) {
+      setSpaceMenuOpen(false);
+      return;
+    }
     setSpaceMenuOpen(true);
     setExpanded(true);
   };
@@ -275,6 +286,10 @@ export function HudRoomControl({ decorative = false }: { readonly decorative?: b
   /** 账户小框与空间菜单互斥：同一个人一次只看一张卡，两张叠在一起没人读得懂。 */
   const openAccountMenu = () => {
     setSpaceMenuOpen(false);
+    if (accountMenuOpen) {
+      setAccountMenuOpen(false);
+      return;
+    }
     setAccountMenuOpen(true);
     setExpanded(true);
   };
