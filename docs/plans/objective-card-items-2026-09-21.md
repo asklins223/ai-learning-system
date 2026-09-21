@@ -1064,3 +1064,57 @@ ORDER BY n.created_at DESC;
 另记一条现场：`workers/ai-worker` 的 typecheck 现在有一条红在别人的在途文件上
 （`src/handlers/companion-daily-summary.test.ts:3` 要 `buildSummaryText`，
 `companion-daily-summary.ts` 已不导出）。不在本批范围，只报不改。
+
+## 30. 真机复测（一处成了、一处被热重载打断）+ 库清理，顺带撞出一个删除缺陷
+
+### 审核页这一处：过了，是在跑着的 app 里逐张读的
+
+`cdp` 走真鼠标点击进 笔记库 → 「学习科学术语定义集」→ 审核学习卡，把 8 张候选逐张翻完，
+读右侧那张表里的「随卡练习」行：
+
+| 候选 | 界面读到 |
+|---|---|
+| 1 | 没有，只能用自己的话答 |
+| 2 | 判断题 · 对不对二选一 |
+| 3 | 没有，只能用自己的话答 |
+| 4 | 选择题 · 2 个选项 |
+| 5 | 没有，只能用自己的话答 |
+| 6-8 | 选择题 · 3 个选项 |
+
+与库里那批的 `practice_item` 一字不差（1 张判断 + 4 张选择，选项数 2/3/3/3，其余 3 张没有），
+顺序也对得上。截图留在 `/tmp/cdp-review.png`：这一行没有把选项文本或正确项带上界面，
+也没出现别的会话刚修过的那类竖排挤压。
+
+### 生成中那一屏：没抓到图，原因不在产品
+
+要读的是 `.card-generation-progress` 那块（在途时"已写出 N / M 张"与进度条不再被藏）。
+我用夹具 run 造了一次活租约 + 读数（测完已还原：run 回 `activated`、outbox 回 `completed`、
+读数行删净，`card_generation_run_progress_v2` 现在 0 行）。但每次点进去，界面就被重置回房间——
+note 侧此刻正在改 `desktop-ipc.ts` / `note-doc-state.ts`，渲染层每隔几十秒被 HMR 打断一次。
+这一处现有的证据是：组件用例（改前红过）+ 真路由实测（活租约报 11/12、租约过期回候选表真相 8/8）。
+图等他们停手再补，不在别人的保存缝隙里硬撑。
+
+### 库清理（你批准的三件）
+
+- **8-19 那挂僵尸 run 已取消**（`9b536df1…` → `cancelled`），现在库里"仍在进行中"的 run 是 0。
+  顺带记我自己的一个错：第一次我用了一个**抄错的 uuid** 打 cancel，拿到 404 就差点写成"它已经不在了"，
+  回库按主键一查才发现是 id 错。以后"报不存在"之前必须先查一次。
+- **夹具笔记已进回收站**（`DELETE /notes/:id` 返回 204）。它留下的 **2 张已激活卡我没动**——
+  那已经是产品数据，要不要一并撤掉你说一声。
+- **`f01c70ec` 那两批的实情变了**：09-21 那批（`e87dc46f`）已经 `activated`，不再是"两批并存"；
+  现在只剩 09-18 的 `dcc809e2` 有 4 张待决定，在界面里点保留或「结束本次审核」就行，不用我代做决定。
+
+### 撞出来的一个缺陷（note 侧，只报不改）
+
+彻底删除这篇夹具笔记时 `DELETE /notes/:id/permanent` 返回 **500**。日志把 DB 细节吞了
+（`category: "database"`，无 message），我在回滚事务里复现同一条删除才拿到真因：
+
+```
+ERROR: update or delete on table "note_versions" violates foreign key constraint
+       "learning_cards_v2_note_version_id_fkey" on table "learning_cards_v2"
+DETAIL: Key (id)=(336e0654-…) is still referenced from table "learning_cards_v2".
+```
+
+也就是说：**笔记派生出的卡还活着时，"彻底删除"不是被拒绝，而是崩**。用户看到的是一句
+"服务器内部错误"，拿不到"这篇笔记还有 N 张卡在复习队列里"这个真实原因。按本仓库的口径
+这该是一个带原因码的 409。不在我的域里，没动。
