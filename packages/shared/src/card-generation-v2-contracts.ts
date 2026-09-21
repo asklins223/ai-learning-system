@@ -631,6 +631,118 @@ export const cardHintPairV2Schema = z.strictObject({
 });
 export type CardHintPairV2 = z.infer<typeof cardHintPairV2Schema>;
 
+/**
+ * 客观练习件（2026-09-21 方案 D1/D4，docs/plans/objective-card-items-2026-09-21.md）。
+ *
+ * 与 `canonicalAnswer` **并列**而不是取代它：正式验证仍是产出型（文档明文：纯选择题
+ * 不能可靠证明理解），练习件只走练习/诊断通道、由确定性判分器比对。
+ *
+ * 因为它落在 `objective_draft` 里，所以自动进 revision 哈希闭包 —— 与 hints 相反，
+ * 提示不是判分内容、被明确排除在闭包之外，而这里的正确项**必须**在闭包内。
+ */
+const practiceItemOptionSchema = z.strictObject({
+  unitId: z.string().min(1).max(40),
+  text: z.string().min(1).max(400),
+  /** 干扰项也必须可追溯：给不出证据的干扰项应由作者不产出整件，而不是硬造（§16.5）。 */
+  evidenceRefIds: z.array(z.string().uuid()).max(20).optional(),
+});
+
+const practiceItemPairSchema = z.strictObject({
+  leftId: z.string().min(1).max(40),
+  leftText: z.string().min(1).max(400),
+  rightId: z.string().min(1).max(40),
+  rightText: z.string().min(1).max(400),
+  evidenceRefIds: z.array(z.string().uuid()).max(20).optional(),
+});
+
+export const practiceItemV2Schema = z.discriminatedUnion("kind", [
+  z.strictObject({
+    kind: z.literal("single_choice"),
+    options: z.array(practiceItemOptionSchema).min(2).max(6),
+    correctUnitId: z.string().min(1).max(40),
+  }),
+  z.strictObject({
+    kind: z.literal("true_false"),
+    proposition: z.string().min(1).max(2000),
+    expected: z.boolean(),
+    evidenceRefIds: z.array(z.string().uuid()).max(20).optional(),
+  }),
+  z.strictObject({
+    kind: z.literal("ordering"),
+    units: z.array(practiceItemOptionSchema).min(2).max(8),
+    correctUnitOrder: z.array(z.string().min(1).max(40)).min(2).max(8),
+  }),
+  z.strictObject({
+    kind: z.literal("matching"),
+    pairs: z.array(practiceItemPairSchema).min(2).max(8),
+  }),
+]);
+export type PracticeItemV2 = z.infer<typeof practiceItemV2Schema>;
+
+/**
+ * 正确项必须是**给出过的**选项，否则判分器永远比不中、这道题变成死题。
+ * 模型输出的 id 空间由它自己编，所以这条必须在合同层兜住。
+ */
+export function practiceItemCrossRefError(item: PracticeItemV2): string | null {
+  if (item.kind === "single_choice") {
+    const ids = item.options.map((option) => option.unitId);
+    if (!ids.includes(item.correctUnitId)) return "correctUnitId 不在 options 里";
+    if (new Set(ids).size !== ids.length) return "options unitId 重复";
+    if (ids.length < 2) return "选项不足两项";
+    return null;
+  }
+  if (item.kind === "ordering") {
+    const ids = item.units.map((unit) => unit.unitId);
+    if (new Set(ids).size !== ids.length) return "units unitId 重复";
+    if (
+      item.correctUnitOrder.length !== ids.length
+      || item.correctUnitOrder.some((id) => !ids.includes(id))
+      || new Set(item.correctUnitOrder).size !== ids.length
+    ) return "correctUnitOrder 不是 units 的一个全排列";
+    return null;
+  }
+  if (item.kind === "matching") {
+    const lefts = item.pairs.map((pair) => pair.leftId);
+    const rights = item.pairs.map((pair) => pair.rightId);
+    if (new Set(lefts).size !== lefts.length) return "配对左端 id 重复";
+    if (new Set(rights).size !== rights.length) return "配对右端 id 重复";
+    return null;
+  }
+  return null;
+}
+
+/**
+ * 作者没交 practiceItem、但 canonicalAnswer 本身就是结构化时，**零模型**派生一道
+ * 客观练习件（2026-09-21 方案 D6）。
+ *
+ * 这不是伪造：单元、文本、顺序全部来自作者已经写下的答案，这里只是把"排出正确
+ * 顺序 / 连出正确配对"这个任务形状显式化。反过来，`text`/`bullets` 这类没有内在
+ * 次序的答案**不派生** —— 那需要编造干扰项，正是 §16.5 与本方案 D4 禁止的事。
+ */
+export function derivePracticeItemFromCanonicalAnswer(
+  answer: CanonicalAnswerV2,
+): PracticeItemV2 | undefined {
+  if (answer.kind === "ordered_steps" && answer.steps.length >= 2) {
+    return {
+      kind: "ordering",
+      units: answer.steps.map((step) => ({ unitId: step.unitId, text: step.text })),
+      correctUnitOrder: answer.steps.map((step) => step.unitId),
+    };
+  }
+  if (answer.kind === "mapping" && answer.pairs.length >= 2) {
+    return {
+      kind: "matching",
+      pairs: answer.pairs.map((pair, index) => ({
+        leftId: `left-${index + 1}`,
+        leftText: pair.left,
+        rightId: `right-${index + 1}`,
+        rightText: pair.right,
+      })),
+    };
+  }
+  return undefined;
+}
+
 export const learningObjectiveDraftV2Schema = z
   .strictObject({
     objectiveStatement: z.string().min(1).max(2000),
@@ -642,6 +754,8 @@ export const learningObjectiveDraftV2Schema = z
     knowledgeForm: knowledgeFormV2Schema,
     preferredTaskIntents: z.array(taskIntentSchema).min(1).max(6),
     canonicalAnswer: canonicalAnswerV2Schema,
+    /** 客观练习件；作者给不出可追溯的干扰项时就该缺省，绝不为凑数硬造。 */
+    practiceItem: practiceItemV2Schema.optional(),
     learningSupport: z.strictObject({
       explanation: z.string().min(1).max(6000),
       boundary: z.string().min(1).max(3000).optional(),

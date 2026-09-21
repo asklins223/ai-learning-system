@@ -41,9 +41,10 @@ import type {
   GenerationSemanticSpecV2,
   GenerationStageRuntimeSnapshotV2,
   NoCardReasonCodeV2,
+  PracticeItemV2,
 } from "@ailearn/shared/card-generation-v2-contracts";
 import { z } from "zod";
-import { cardPresentationDraftV2Schema, canonicalAnswerV2Schema, cardHintPairV2Schema } from "@ailearn/shared/card-generation-v2-contracts";
+import { cardPresentationDraftV2Schema, canonicalAnswerV2Schema, cardHintPairV2Schema, practiceItemV2Schema, practiceItemCrossRefError } from "@ailearn/shared/card-generation-v2-contracts";
 import { fallbackCardHints, countAnswerUnits } from "@ailearn/shared/card-generation-v2-pipeline";
 import type {
   ExtractedKnowledgeAtom,
@@ -695,7 +696,8 @@ ${describeSchemaIssues(error)}
  * （rubric.units[].evidenceRefIds / objective.evidenceRefIds / rubricHash），
  * 归一化由 CardAuthoringProvider 完成。
  */
-const modelObjectiveDraftSchema = z
+/** 导出给测试：v24 起 practiceItem 是必填可空，省略键必须被拒。 */
+export const authorObjectiveDraftSchema = z
   .strictObject({
     objectiveStatement: z.string().min(1).max(2000),
     publicSummary: z.string().min(1).max(1500),
@@ -763,10 +765,54 @@ const modelObjectiveDraftSchema = z
         }),
       )
       .max(60),
+    // v24：这一项**必须出现**，但值可以是 null。v23 里它是可省略字段，结果一整批
+    // 模型全都当没看见（实测 single_choice/true_false 产出 0），"没交"和"想过但不要"
+    // 分不开，也就永远不知道是能力问题还是提示问题。要求显式作答后，交不出就写 null。
+    practiceItem: practiceItemV2Schema.nullable(),
     difficulty: z.enum(["introductory", "intermediate", "advanced"]),
     evidenceRefIds: z.array(z.string().min(1).max(200)).max(100).optional(),
   })
   .strict();
+
+/**
+ * v23：把模型交来的练习件过两道确定性闸，不过就整个丢掉（宁可没有，不可伪造）。
+ *
+ * 1. **交叉引用**：`correctUnitId` / `correctUnitOrder` 必须指向给出过的 unitId。
+ *    自相矛盾的题永远判不对，学习者会以为是自己不会。
+ * 2. **干扰项要有出处**：每个非正确选项都得能指回证据（自己的 evidenceRefIds），
+ *    或者本卡有 misconception —— 那是"有证据的常见误解"，天然可做干扰项。
+ *    凭空的错误说法会把学习者往错的方向上练，比没有练习题更糟。
+ */
+export function sanitizePracticeItem(
+  item: PracticeItemV2 | null | undefined,
+  support: { misconception?: string },
+): PracticeItemV2 | undefined {
+  if (!item) return undefined;
+  if (practiceItemCrossRefError(item)) return undefined;
+  const hasMisconception = (support.misconception ?? "").trim().length > 0;
+  const distractorsWithoutEvidence = ((): number => {
+    if (item.kind === "single_choice") {
+      return item.options.filter((option) =>
+        option.unitId !== item.correctUnitId
+        && !(option.evidenceRefIds?.length ?? 0)
+        && !hasMisconception).length;
+    }
+    if (item.kind === "ordering") {
+      const correct = new Set(item.correctUnitOrder);
+      return item.units.filter((unit) =>
+        !correct.has(unit.unitId)
+        && !(unit.evidenceRefIds?.length ?? 0)
+        && !hasMisconception).length;
+    }
+    if (item.kind === "matching") {
+      // 配对两侧都来自答案本身，没有"编出来的错误项"这一说。
+      return 0;
+    }
+    // true_false：命题整体必须可追溯，否则整件丢掉。
+    return item.evidenceRefIds?.length || hasMisconception ? 0 : 1;
+  })();
+  return distractorsWithoutEvidence > 0 ? undefined : item;
+}
 
 export class CardAuthoringProvider implements AuthoringProvider {
   private readonly runtime: CardGenerationProviderRuntime;
@@ -845,7 +891,7 @@ ${describeSchemaIssues(error)}
     const rawRubric = (rawObjective.rubric ?? {}) as Record<string, unknown>;
     const { rubricHash: _modelRubricHash, ...rubricNoModelHash } = rawRubric;
     const strippedObjective = { ...rawObjective, rubric: rubricNoModelHash };
-    const objParse = modelObjectiveDraftSchema.safeParse(strippedObjective);
+    const objParse = authorObjectiveDraftSchema.safeParse(strippedObjective);
     if (!objParse.success) {
       const paths = objParse.error.issues.map((i) => i.path.join(".")).join(",");
       // 2026-08-16（实机验证，溯源日志）：schema 违规记录完整 issues（字段路径级
@@ -910,6 +956,11 @@ ${describeSchemaIssues(error)}
     const fixedObjective = {
       ...validated,
       evidenceRefIds: Array.isArray(validated.evidenceRefIds) ? validated.evidenceRefIds : [],
+      // v23：过不了两道闸的练习件在这里就丢掉，不留到判分现场才发现是死题。
+      practiceItem: sanitizePracticeItem(
+        validated.practiceItem as PracticeItemV2 | null | undefined,
+        validated.learningSupport,
+      ) ?? null,
       rubric: { ...rubricFinal, rubricHash: computeRubricHashV2(rubricForHash) },
     };
     /**

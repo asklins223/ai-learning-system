@@ -220,11 +220,218 @@ function generateRepairFallback(input: StructuredTargetInput): RepairPayload {
   };
 }
 
+// ─── 客观题：single_choice / true_false（练习与诊断通道）──────────────────
+
+/**
+ * 2026-09-21 客观题方案 §3：选择题/判断题的**素材来自作者产出的练习件**
+ * （`objectiveDraft.practiceItem`，见 docs/plans/objective-card-items-2026-09-21.md），
+ * 不从标点或定长切片里造 —— 那是 §16.5 明令禁止的老路。
+ *
+ * 泄题防护沿用 ordering 的姿态：option id 由**选项文本**的哈希派生，
+ * public 序列按 id 升序，因此与作者书写顺序无关（正确项写在第一位也漏不出去），
+ * 而 correctOptionId / expected 只存在于私有 solution。
+ */
+export interface ChoiceTaskInput {
+  options: Array<{ unitId?: string; text: string }>;
+  correctUnitId: string;
+  /** 判分目标 id；缺省时按选项内容派生（与 ordering 同规则）。 */
+  rubricTargetId?: string;
+}
+
+export interface ChoicePayload {
+  interaction: { kind: "single_choice"; publicOptionIds: string[] };
+  /** option id → 文本（public：renderer 展示用，不含对错）。 */
+  publicOptionLabels: Record<string, string>;
+  solution: { kind: "choice"; correctOptionId: string; rubricTargetIds: string[] };
+}
+
+export interface TrueFalseTaskInput {
+  proposition: string;
+  expected: boolean;
+  rubricTargetId?: string;
+}
+
+export interface TrueFalsePayload {
+  interaction: { kind: "true_false"; proposition: string };
+  solution: { kind: "true_false"; expected: boolean; rubricTargetIds: string[] };
+}
+
+function choiceOptionId(text: string): string {
+  return `opt:${sha256Hex(text.trim()).slice(0, 10)}`;
+}
+
+/**
+ * 选择题构造。返回 null 而不是硬造一道题的情形：正确项在选项里找不到、
+ * 去重后不足两项（两项以下没有"选择"可言，且二选一时猜对率 50%，
+ * 判分没有信息量）。
+ */
+export function generateChoiceTask(input: ChoiceTaskInput): ChoicePayload | null {
+  const byText = new Map<string, string>();
+  for (const option of input.options) {
+    const text = option.text.trim();
+    if (!text) continue;
+    if (!byText.has(text)) byText.set(text, option.unitId ?? text);
+  }
+  const correctText = input.options
+    .find((option) => (option.unitId ?? option.text.trim()) === input.correctUnitId)
+    ?.text.trim();
+  if (!correctText || !byText.has(correctText)) return null;
+  const texts = [...byText.keys()];
+  if (texts.length < 2) return null;
+
+  const ids = texts.map(choiceOptionId);
+  const labels: Record<string, string> = {};
+  texts.forEach((text, index) => { labels[ids[index]] = text; });
+  const publicOptionIds = [...ids].sort();
+  const correctOptionId = choiceOptionId(correctText);
+  return {
+    interaction: { kind: "single_choice", publicOptionIds },
+    publicOptionLabels: labels,
+    solution: {
+      kind: "choice",
+      correctOptionId,
+      rubricTargetIds: [
+        input.rubricTargetId
+          ?? `rubric:choice:${sha256Hex(texts.join("|")).slice(0, 12)}`,
+      ],
+    },
+  };
+}
+
+export function generateTrueFalseTask(input: TrueFalseTaskInput): TrueFalsePayload {
+  const proposition = input.proposition.trim();
+  return {
+    interaction: { kind: "true_false", proposition },
+    solution: {
+      kind: "true_false",
+      expected: input.expected,
+      rubricTargetIds: [
+        input.rubricTargetId ?? `rubric:true_false:${sha256Hex(proposition).slice(0, 12)}`,
+      ],
+    },
+  };
+}
+
+export interface MatchingTaskInput {
+  pairs: Array<{
+    leftId: string;
+    leftText: string;
+    rightId: string;
+    rightText: string;
+  }>;
+  rubricTargetId?: string;
+}
+
+export interface MatchingPayload {
+  interaction: {
+    kind: "matching";
+    publicLeftIds: string[];
+    publicRightIds: string[];
+    publicLabels: Record<string, string>;
+  };
+  solution: {
+    kind: "matching";
+    correctPairs: Array<{ leftId: string; rightId: string }>;
+    rubricTargetIds: string[];
+  };
+}
+
+/**
+ * 配对题构造。两列的 id 都由**该端文本**哈希派生，因此列内顺序与配对关系无关
+ * （作者按 pairs 顺序写、正确项总在第 0 列位，也不会把答案排成"第 i 个对第 i 个"）。
+ * 去重后两侧数量不等或不足两项 → null（不硬造）。
+ */
+export function generateMatchingTask(input: MatchingTaskInput): MatchingPayload | null {
+  const lefts = new Map<string, string>();
+  const rights = new Map<string, string>();
+  const pairs: Array<{ leftId: string; rightId: string }> = [];
+  for (const pair of input.pairs) {
+    const leftText = pair.leftText.trim();
+    const rightText = pair.rightText.trim();
+    if (!leftText || !rightText) continue;
+    const leftId = choiceOptionId(leftText);
+    const rightId = choiceOptionId(rightText);
+    if (lefts.has(leftId) || rights.has(rightId)) continue;
+    lefts.set(leftId, leftText);
+    rights.set(rightId, rightText);
+    pairs.push({ leftId, rightId });
+  }
+  if (pairs.length < 2) return null;
+  const labels: Record<string, string> = { ...Object.fromEntries(lefts), ...Object.fromEntries(rights) };
+  return {
+    interaction: {
+      kind: "matching",
+      publicLeftIds: [...lefts.keys()].sort(),
+      publicRightIds: [...rights.keys()].sort(),
+      publicLabels: labels,
+    },
+    solution: {
+      kind: "matching",
+      correctPairs: pairs,
+      rubricTargetIds: [
+        input.rubricTargetId
+          ?? `rubric:matching:${sha256Hex(pairs.map((p) => `${p.leftId}>${p.rightId}`).join("|")).slice(0, 12)}`,
+      ],
+    },
+  };
+}
+
+/**
+ * 排序题（作者产出的单元序列 → ordering）。与 generateOrderingTask 的区别：
+ * 那个从 claim 文本切片（§16.5 已禁止用于 V2 结构题），这里直接吃作者写好的
+ * 单元文本与正确顺序，id 仍由内容哈希派生，所以 public 顺序不泄露答案位置。
+ */
+export function generateOrderingFromUnits(
+  units: Array<{ unitId?: string; text: string }>,
+  correctUnitOrder: string[],
+): OrderingPayload | null {
+  const byId = new Map<string, string>();
+  for (const unit of units) {
+    const text = unit.text.trim();
+    if (!text) continue;
+    const id = choiceOptionId(text);
+    if (!byId.has(id)) byId.set(id, text);
+  }
+  const correctIds = correctUnitOrder
+    .map((unitId) => units.find((unit) => (unit.unitId ?? unit.text.trim()) === unitId)?.text.trim())
+    .filter((text): text is string => Boolean(text))
+    .map(choiceOptionId);
+  if (correctIds.length < 2 || byId.size !== correctIds.length) return null;
+  if (new Set(correctIds).size !== correctIds.length) return null;
+  const labels: Record<string, string> = Object.fromEntries(byId);
+  return {
+    interaction: { kind: "ordering", publicTokenIds: [...byId.keys()].sort() },
+    publicTokenLabels: labels,
+    solution: {
+      kind: "ordering",
+      correctTokenIds: correctIds,
+      rubricTargetIds: [`rubric:ordering:${sha256Hex(correctIds.join("|")).slice(0, 12)}`],
+    },
+  };
+}
+
 // ─── 组合生成器 ──────────────────────────────────────────────────────────
 
-export type StructuredTaskPayload = OrderingPayload | RelationPayload | RepairPayload;
+export type StructuredTaskPayload =
+  | OrderingPayload | RelationPayload | RepairPayload | ChoicePayload | TrueFalsePayload | MatchingPayload;
 
-export type StructuredTaskKind = "ordering" | "relation" | "repair";
+export type StructuredTaskKind =
+  "ordering" | "relation" | "repair" | "choice" | "true_false" | "matching";
+
+/**
+ * 哪些提交载荷走确定性判分（`deterministic_structured`）。
+ *
+ * 这张表同时是路由的唯一真相：再加一种交互时漏了这里，作答就会被丢给
+ * assessment_critic —— 花钱、且把"点了一个选项"当成一段自由文本去判
+ * （2026-09-21 第一版就踩到了：新种类没进路由表）。
+ */
+const DETERMINISTIC_PAYLOAD_KINDS = new Set([
+  "ordering", "relation", "repair", "structured_bundle", "choice", "true_false", "matching",
+]);
+
+export function isDeterministicStructuredPayload(payloadKind: string): boolean {
+  return DETERMINISTIC_PAYLOAD_KINDS.has(payloadKind);
+}
 
 export function generateStructuredTask(
   kind: StructuredTaskKind,
@@ -234,6 +441,12 @@ export function generateStructuredTask(
     case "ordering": return generateOrderingTask(input);
     case "relation": return generateRelationTask(input);
     case "repair": return generateRepairTask(input);
+    // 客观题需要作者产出的选项/命题素材，不能只凭 claim+quote 造：
+    // 走到这里说明调用方拿错了入口，应当用 generateChoiceTask/generateTrueFalseTask。
+    case "choice":
+    case "true_false":
+    case "matching":
+      throw new Error(`${kind} 需要练习件素材，请走对应的 generate*Task`);
   }
 }
 
@@ -304,6 +517,57 @@ export function assessStructuredPayload(
       return { verdict: "covered", userFacingReason: "修复正确" };
     }
     return { verdict: matched > 0 ? "partial" : "missing", userFacingReason: `${matched}/${accepted.length} 个操作正确` };
+  }
+  if (kind === "choice") {
+    const selected = payload.selectedOptionId as string | undefined;
+    const correct = solution.correctOptionId as string | undefined;
+    if (!selected) {
+      return { verdict: "not_assessable", userFacingReason: "没有提交选择" };
+    }
+    if (!correct) {
+      return { verdict: "not_assessable", userFacingReason: "这道题没有可比对的正确项" };
+    }
+    // 理由串会原样送到客户端：它一旦提到正确选项的文本，就等于绕开
+    // 「答案只在你主动查看时才下发并记账」那条曝光规则，所以只报结果。
+    return selected === correct
+      ? { verdict: "covered", userFacingReason: "选择正确" }
+      : { verdict: "missing", userFacingReason: "这个选择不对" };
+  }
+  if (kind === "true_false") {
+    const answer = payload.answer;
+    const expected = solution.expected;
+    if (typeof answer !== "boolean" || typeof expected !== "boolean") {
+      return { verdict: "not_assessable", userFacingReason: "没有提交判断" };
+    }
+    return answer === expected
+      ? { verdict: "covered", userFacingReason: "判断正确" }
+      : { verdict: "missing", userFacingReason: "这个判断不对" };
+  }
+  if (kind === "matching") {
+    const assignments = (payload.assignments ?? []) as Array<{ leftId: string; rightId: string }>;
+    const correct = (solution.correctPairs ?? []) as Array<{ leftId: string; rightId: string }>;
+    if (!Array.isArray(assignments) || assignments.length === 0) {
+      return { verdict: "not_assessable", userFacingReason: "没有提交配对" };
+    }
+    const key = (pair: { leftId: string; rightId: string }) => `${pair.leftId}|${pair.rightId}`;
+    const correctKeys = new Set(correct.map(key));
+    const submittedKeys = new Set(assignments.map(key));
+    const matched = [...correctKeys].filter((k) => submittedKeys.has(k)).length;
+    // 与 relation 同一姿态的反穷举：一个左端只能配一个右端，多交/重复交的边
+    // 不涨分，且 covered 要求提交集合恰好等于正确集合。
+    const noise = assignments.length - submittedKeys.size
+      + [...submittedKeys].filter((k) => !correctKeys.has(k)).length;
+    const lefts = new Set(assignments.map((a) => a.leftId));
+    if (lefts.size !== assignments.length) {
+      return { verdict: "partial", userFacingReason: "有左端配了多条，只算一次" };
+    }
+    if (matched === correctKeys.size && noise === 0 && assignments.length === correctKeys.size) {
+      return { verdict: "covered", userFacingReason: `全部 ${correctKeys.size} 对都配对了` };
+    }
+    return {
+      verdict: matched > 0 ? "partial" : "missing",
+      userFacingReason: `${matched}/${correctKeys.size} 对正确`,
+    };
   }
   return { verdict: "not_assessable", userFacingReason: "未知题型" };
 }

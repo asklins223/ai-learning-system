@@ -165,6 +165,15 @@ export async function createGenerationRunV2(
     // 2026-09-20（实走复盘 #5）：一篇笔记同时只允许一批在制的学习卡。
     // 此前配额只落在 workspace 维度（在途数 + 日次数），同一篇笔记可以被反复
     // 点「生成学习卡」，每点一次就多一批候选卡。
+    // 但"失败到没法就地重试"的那一批不能把笔记永久锁死：needs_attention 且失败原因
+    // 不是质量门禁时，retry 端点自己会拒绝（`not_retryable`），cancel 也判
+    // `invalid_state`，于是只剩"重新生成"这一条路——而这条守卫正是拦它的。
+    // 判据与 retry 端点保持同一句话：只有 quality_gate_failed 的失败批次仍然算在制。
+    //
+    // 2026-09-21 真实生成实测修正：这里必须遍历**全部**在制行，不能只看一行。原先
+    // `.limit(1)` 取到的是 Postgres 任意给的一行，同篇笔记既有已死批次又有一批还没
+    // 审完时，只要先摸到已死那行就放行，结果新旧两批 review_ready 并存——正是用户
+    // 抱怨的"旧卡不废弃"。只要还有一行活着就挡住。
     const noteInFlight = await tx
       .select({ id: cardGenerationRunsV2.id, status: cardGenerationRunsV2.status, errorCode: cardGenerationRunsV2.errorCode })
       .from(cardGenerationRunsV2)
@@ -172,15 +181,11 @@ export async function createGenerationRunV2(
         eq(cardGenerationRunsV2.workspaceId, ctx.workspaceId),
         eq(cardGenerationRunsV2.noteId, noteId),
         inArray(cardGenerationRunsV2.status, [...ACTIVE_GENERATION_RUN_STATUSES]),
-      ))
-      .limit(1);
-    // 但"失败到没法就地重试"的那一批不能把笔记永久锁死：needs_attention 且失败原因
-    // 不是质量门禁时，retry 端点自己会拒绝（`not_retryable`），cancel 也判
-    // `invalid_state`，于是只剩"重新生成"这一条路——而这条守卫正是拦它的。
-    // 判据与 retry 端点保持同一句话：只有 quality_gate_failed 的失败批次仍然算在制。
-    const deadBatch = noteInFlight[0]?.status === "needs_attention"
-      && noteInFlight[0]?.errorCode !== "quality_gate_failed";
-    if (noteInFlight.length > 0 && !deadBatch) {
+      ));
+    const liveBatch = noteInFlight.find((run) => !(
+      run.status === "needs_attention" && run.errorCode !== "quality_gate_failed"
+    ));
+    if (liveBatch) {
       throw new CardGenerationV2ServiceError(
         "note_generation_in_flight",
         409,
@@ -268,7 +273,7 @@ export async function createGenerationRunV2(
             modelSnapshot: "v1",
             deploymentId: "local",
             capabilityFingerprint: "basic",
-            promptVersion: "v22",
+            promptVersion: "v24",
             sampling: { temperature: 0 },
             outputSchemaVersion: "v2",
           },
@@ -278,7 +283,7 @@ export async function createGenerationRunV2(
             modelSnapshot: "v1",
             deploymentId: "local",
             capabilityFingerprint: "basic",
-            promptVersion: "v22",
+            promptVersion: "v24",
             sampling: { temperature: 0 },
             outputSchemaVersion: "v2",
           },
@@ -288,7 +293,7 @@ export async function createGenerationRunV2(
             modelSnapshot: "v1",
             deploymentId: "local",
             capabilityFingerprint: "basic",
-            promptVersion: "v22",
+            promptVersion: "v24",
             sampling: { temperature: 0 },
             outputSchemaVersion: "v2",
           },
@@ -298,7 +303,7 @@ export async function createGenerationRunV2(
             modelSnapshot: "v1",
             deploymentId: "local",
             capabilityFingerprint: "basic",
-            promptVersion: "v22",
+            promptVersion: "v24",
             sampling: { temperature: 0 },
             outputSchemaVersion: "v2",
           },

@@ -113,6 +113,27 @@ export type TaskInteractionV1 =
   | { kind: "voice_teachback"; maxSeconds: number }
   | { kind: "text_response"; maxChars: number }
   | { kind: "ordering"; publicTokenIds: string[]; publicTokenLabels?: Record<string, string> }
+  /**
+   * 客观题（2026-09-21 方案 §3 D1/D2）：选择题与判断题都只做练习/诊断，
+   * 判分走确定性通道，`templateTrustCeiling` 恒为 practice_only。
+   * 正确项**不在** public 载荷里（`correctOptionId` 只存在于私有 solution），
+   * option id 由内容哈希派生 —— 与 ordering 的 token id 同一姿态，防止从 id 猜答案。
+   */
+  | {
+      kind: "single_choice";
+      publicOptionIds: string[];
+      publicOptionLabels?: Record<string, string>;
+    }
+  | { kind: "true_false"; proposition: string }
+  /**
+   * 配对题：左右两列各自打乱，学习者把左端连到右端。正确映射只在私有 solution 里。
+   */
+  | {
+      kind: "matching";
+      publicLeftIds: string[];
+      publicRightIds: string[];
+      publicLabels?: Record<string, string>;
+    }
   | {
       kind: "relation_canvas";
       publicNodeIds: string[];
@@ -381,6 +402,23 @@ export type ArtifactPayloadV1 =
       interactionRefs: string[];
     }
   | {
+      kind: "choice";
+      /** 省略 = 还没选。界面因此不需要"空串"或"默认选第一项"这种假状态。 */
+      selectedOptionId?: string;
+      interactionRefs: string[];
+    }
+  | {
+      kind: "true_false";
+      /** 省略 = 还没判。 */
+      answer?: boolean;
+      interactionRefs: string[];
+    }
+  | {
+      kind: "matching";
+      assignments: Array<{ leftId: string; rightId: string }>;
+      interactionRefs: string[];
+    }
+  | {
       kind: "relation";
       edges: Array<{ fromNodeId: string; toNodeId: string; edgeKind: RelationEdgeKindV1 }>;
       interactionRefs: string[];
@@ -510,6 +548,14 @@ export type PrivateTaskSolutionV1 =
       contradictionRuleIds: string[];
     }
   | { kind: "ordering"; correctTokenIds: string[]; rubricTargetIds: string[] }
+  /** 客观题的正确项只存在于这一层（public 载荷带不出去）。 */
+  | { kind: "choice"; correctOptionId: string; rubricTargetIds: string[] }
+  | { kind: "true_false"; expected: boolean; rubricTargetIds: string[] }
+  | {
+      kind: "matching";
+      correctPairs: Array<{ leftId: string; rightId: string }>;
+      rubricTargetIds: string[];
+    }
   | {
       kind: "relation";
       requiredEdges: Array<{ fromNodeId: string; toNodeId: string; edgeKind: RelationEdgeKindV1 }>;
@@ -987,6 +1033,21 @@ export const taskInteractionSchema = z.discriminatedUnion("kind", [
     replacementOptionLabels: z.record(z.string(), z.string().min(1).max(200)).optional(),
   }),
   z.strictObject({
+    kind: z.literal("single_choice"),
+    publicOptionIds: z.array(z.string().min(1)).min(2).max(8),
+    publicOptionLabels: z.record(z.string(), z.string().min(1).max(400)).optional(),
+  }),
+  z.strictObject({
+    kind: z.literal("true_false"),
+    proposition: z.string().min(1).max(2000),
+  }),
+  z.strictObject({
+    kind: z.literal("matching"),
+    publicLeftIds: z.array(z.string().min(1)).min(2).max(8),
+    publicRightIds: z.array(z.string().min(1)).min(2).max(8),
+    publicLabels: z.record(z.string(), z.string().min(1).max(400)).optional(),
+  }),
+  z.strictObject({
     kind: z.literal("structured_bundle"),
     parts: z.union([
       z.tuple([structuredPartPublicSchema]),
@@ -1096,6 +1157,28 @@ export const artifactPayloadSchema = z.discriminatedUnion("kind", [
   z.strictObject({
     kind: z.literal("ordering"),
     orderedTokenIds: z.array(z.string().min(1)).min(1),
+    interactionRefs: z.array(z.string().min(1)),
+  }),
+  z.strictObject({
+    kind: z.literal("choice"),
+    selectedOptionId: z.string().min(1).optional(),
+    interactionRefs: z.array(z.string().min(1)),
+  }),
+  z.strictObject({
+    kind: z.literal("true_false"),
+    answer: z.boolean().optional(),
+    interactionRefs: z.array(z.string().min(1)),
+  }),
+  z.strictObject({
+    kind: z.literal("matching"),
+    assignments: z
+      .array(
+        z.strictObject({
+          leftId: z.string().min(1),
+          rightId: z.string().min(1),
+        }),
+      )
+      .max(8),
     interactionRefs: z.array(z.string().min(1)),
   }),
   z.strictObject({
@@ -1384,6 +1467,23 @@ export const learningDraftPayloadSchema = z.discriminatedUnion("kind", [
   z.strictObject({
     kind: z.literal("ordering"),
     orderedTokenIds: z.array(z.string().min(1)),
+    interactionRefs: z.array(z.string().min(1)),
+  }),
+  z.strictObject({
+    kind: z.literal("choice"),
+    selectedOptionId: z.string().min(1).optional(),
+    interactionRefs: z.array(z.string().min(1)),
+  }),
+  z.strictObject({
+    kind: z.literal("true_false"),
+    answer: z.boolean().optional(),
+    interactionRefs: z.array(z.string().min(1)),
+  }),
+  z.strictObject({
+    kind: z.literal("matching"),
+    assignments: z
+      .array(z.strictObject({ leftId: z.string().min(1), rightId: z.string().min(1) }))
+      .max(8),
     interactionRefs: z.array(z.string().min(1)),
   }),
   z.strictObject({

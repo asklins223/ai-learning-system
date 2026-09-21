@@ -40,6 +40,7 @@ import {
   computeRubricHashV2,
   computeCanonicalAnswerHashV2,
   computeLearningSupportHashV2,
+  computePracticeItemHashV2,
   computeRelationsHashV2,
   computeEvidenceBindingSetHashV2,
   computeEvidenceEligibilityVectorHashV2,
@@ -50,6 +51,7 @@ import type {
   ObjectiveRubricV2,
   CanonicalAnswerV2,
   ObjectiveRelationV2,
+  PracticeItemV2,
 } from "@ailearn/shared/card-generation-v2-contracts";
 import type {
   EvidenceBindingTargetUnitV2,
@@ -455,6 +457,11 @@ export async function freezeTargetSnapshotV2(
   const canonicalAnswer = revision.canonicalAnswer as CanonicalAnswerV2;
   const scoringRubric = revision.scoringRubric as ObjectiveRubricV2;
   const relations = (revision.relations ?? []) as ObjectiveRelationV2[];
+  // 0245：作者产出的客观练习件；NULL = 这张卡没有练习件（不伪造）。
+  const practiceItem = (revision as { practiceItem?: unknown }).practiceItem as
+    | PracticeItemV2
+    | null
+    | undefined;
   const knowledgeForm = revision.knowledgeForm as KnowledgeFormV2;
   const preferredIntents = (revision.preferredIntents ?? []) as TaskIntentV1[];
 
@@ -463,6 +470,7 @@ export async function freezeTargetSnapshotV2(
   const learningSupportHash = computeLearningSupportHashV2(revision.learningSupport);
   const rubricHash = computeRubricHashV2(stripRubricHash(scoringRubric));
   const relationsHash = computeRelationsHashV2(relations);
+  const practiceItemHash = computePracticeItemHashV2(practiceItem ?? null);
   const semanticSupportReportSetHash = computeSemanticSupportReportSetHashV2(
     evidenceClosure.evidence.map((e) => e.semanticSupportReportHash),
   );
@@ -480,6 +488,7 @@ export async function freezeTargetSnapshotV2(
     learningSupportHash,
     rubricHash,
     relationsHash,
+    practiceItemHash,
     evidenceBindingSetHash: evidenceClosure.evidenceBindingSetHash,
     semanticSupportReportSetHash,
   });
@@ -513,6 +522,7 @@ export async function freezeTargetSnapshotV2(
       learningSupport: revision.learningSupport as LearningTargetSnapshotV2["target"]["learningSupport"],
       scoringRubric,
       relations,
+      practiceItem: practiceItem ?? null,
       evidence: evidenceClosure.evidence,
       evidenceBindingSetHash: evidenceClosure.evidenceBindingSetHash,
       evidenceEligibilityVectorHash: evidenceClosure.evidenceEligibilityVectorHash,

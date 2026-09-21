@@ -22,6 +22,7 @@
  */
 
 import { and, eq, inArray, sql, desc } from "drizzle-orm";
+import type { StructuredTaskKind } from "./run-structured.ts";
 import { db, resolveApiStatementTimeoutMs, withWorkspaceTransaction } from "../../db/client.ts";
 import {
   canonicalLearningEventOutbox,
@@ -995,7 +996,7 @@ async function finishStructuredAssessment(
   // （逐 part 确定性对比，取最低 verdict；part 缺失/伪造在提交层已拒绝）。
   const assessment = payloadKind === "structured_bundle"
     ? assessStructuredBundlePayload(payload, solution)
-    : assessStructuredPayload(payloadKind as "ordering" | "relation" | "repair", payload, solution);
+    : assessStructuredPayload(payloadKind as StructuredTaskKind, payload, solution);
 
   const rubricTargetIds = Array.isArray(solution.rubricTargetIds)
     ? (solution.rubricTargetIds as string[])

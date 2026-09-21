@@ -49,6 +49,9 @@ export function computeTargetRevisionHashV2(input: {
   learningSupportHash: string;
   rubricHash: string;
   relationsHash: string;
+  // 0245：客观练习件（后加的哈希输入，与上面 conceptLabel 同理 —— hash 每次写入
+  // 时重算，历史快照不参与跨版本比对）。
+  practiceItemHash: string;
   evidenceBindingSetHash: string;
   semanticSupportReportSetHash: string;
 }): string {
@@ -179,6 +182,21 @@ export function computeLearningSupportHashV2(input: unknown): string {
 /** relations 组件哈希。 */
 export function computeRelationsHashV2(input: unknown): string {
   return hashCanonicalV2("objective-relations-v2", input);
+}
+
+/**
+ * 0245 practiceItem 组件哈希。
+ *
+ * 与 hints 相反：练习件的正确项是**判分内容**，必须进 target revision hash 闭包
+ * （用户 2026-09-20 的原话是"提示不能进判分内容的同一条审计链"，反过来说判分内容
+ * 就必须在里面）。没有练习件时用固定标记参与哈希，而不是跳过该输入 —— 跳过会让
+ * "没有练习件"和"这一版还没算练习件"两种状态撞出同一个 hash。
+ */
+export function computePracticeItemHashV2(input: unknown): string {
+  return hashCanonicalV2(
+    "objective-practice-item-v2",
+    input ?? { absent: "no-practice-item" },
+  );
 }
 
 /**

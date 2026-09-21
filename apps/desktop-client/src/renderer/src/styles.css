@@ -1424,6 +1424,62 @@ button:disabled {
 .run-repair-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(150px, 0.8fr) auto; align-items: center; gap: 8px; font-size: 11px; }
 .run-repair-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* 客观题（2026-09-21 批次 3）：选择 / 判断 / 配对的作答控件。
+   与排序、关系同一套纸质色板，不引新颜色。 */
+.run-choice-list { display: grid; gap: 6px; }
+.run-choice-option {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  color: #514031;
+  font-size: 11px;
+  text-align: left;
+  border: 1px solid rgba(77, 50, 31, 0.15);
+  border-radius: 8px;
+  background: rgba(255, 252, 244, 0.55);
+  cursor: pointer;
+}
+.run-choice-option:hover { border-color: rgba(77, 50, 31, 0.32); background: var(--paper-strong); }
+.run-choice-option.is-selected { color: var(--accent-deep); border-color: var(--accent-deep); background: rgba(255, 252, 244, 0.9); }
+.run-choice-option__mark { flex: none; font-size: 12px; line-height: 1; }
+
+.run-truefalse { display: grid; gap: 9px; }
+.run-truefalse__claim {
+  padding: 8px 10px;
+  color: #3d2f24;
+  font-size: 12px;
+  border-left: 3px solid rgba(77, 50, 31, 0.24);
+  background: rgba(255, 252, 244, 0.6);
+}
+.run-truefalse__actions { display: inline-flex; gap: 8px; }
+
+.run-matching { display: grid; gap: 8px; }
+.run-matching__columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.run-matching__col { display: grid; gap: 6px; padding: 0; margin: 0; list-style: none; }
+.run-matching__item {
+  display: flex;
+  width: 100%;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 6px 9px;
+  color: #514031;
+  font-size: 11px;
+  text-align: left;
+  border: 1px solid rgba(77, 50, 31, 0.15);
+  border-radius: 8px;
+  background: rgba(255, 252, 244, 0.55);
+  cursor: pointer;
+}
+.run-matching__item:hover:not(:disabled) { border-color: rgba(77, 50, 31, 0.32); }
+.run-matching__item.is-active { color: var(--accent-deep); border-color: var(--accent-deep); }
+.run-matching__item:disabled { opacity: 0.55; cursor: default; }
+.run-matching__linked { flex: none; color: var(--ink-soft); font-size: 10px; }
+.run-matching__trail { display: flex; align-items: center; gap: 8px; color: var(--ink-soft); font-size: 11px; }
+
 .run-bundle-editor { gap: 12px; }
 .run-bundle-part { display: grid; gap: 9px; padding: 12px; border: 1px solid rgba(77, 50, 31, 0.16); border-radius: 7px; background: rgba(255, 252, 244, 0.34); }
 .run-bundle-part h4 { margin: 0; }

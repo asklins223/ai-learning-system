@@ -39,6 +39,7 @@ import {
   computeRubricHashV2,
 } from "../card-generation-v2-hashing.ts";
 import { hashCanonicalV2 } from "../hash-canonical-v2.ts";
+import { derivePracticeItemFromCanonicalAnswer } from "../card-generation-v2-contracts.ts";
 import { DomainError } from "../domain-error.ts";
 import { deriveConceptLabel } from "./concept-label.ts";
 import { taskIntentsForStrategy } from "./planner-service.ts";
@@ -191,6 +192,15 @@ export async function authorCandidateForObjective(
     );
   }
 
+  // v23（方案 D6）：作者没交练习件、但答案本身就是有序/成对结构时，零模型派生一道。
+  // 放在 revision hash 之前 —— 练习件是判分内容，必须进闭包。
+  const objectiveWithPracticeItem = providerOutput.objective.practiceItem
+    ? providerOutput.objective
+    : {
+      ...providerOutput.objective,
+      practiceItem: derivePracticeItemFromCanonicalAnswer(providerOutput.objective.canonicalAnswer),
+    };
+
   // Build candidate revision
   const candidateId = randomUUID();
   const candidateRevisionId = randomUUID();
@@ -217,7 +227,7 @@ export async function authorCandidateForObjective(
       reasonCodes: planObj.reasonCodes,
     },
     derivedFromCandidateRevisions: [],
-    objective: providerOutput.objective,
+    objective: objectiveWithPracticeItem,
     presentation: providerOutput.presentation,
     evidenceSetHash,
   };

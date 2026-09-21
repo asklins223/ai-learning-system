@@ -134,7 +134,24 @@ import type { CardStrategyV2 } from "@ailearn/shared/card-generation-v2-contract
 import { taskIntentsForStrategy } from "@ailearn/shared/card-generation-v2-pipeline";
 
 /**
-  * v22：author 同时交出这张卡自带的两级提示 hints（top-level 兄弟字段，不进 objective/presentation）。
+  * v24：practiceItem 从"可省略"改成**必须显式回答**（值可为 null）。
+ *    依据：v23 真实批次实测 single_choice/true_false 产出为 0，两条练习件全部来自服务端
+ *    零模型派生 —— 可省略字段让模型"没看见"和"看见了但不要"混成一团，无法判断是提示没
+ *    说清还是模型写不出有证据的干扰项。改成必填可空后，这一批到底交不交得出选择题，一次
+ *    真跑就能分清。
+ * v23：author 同时交出这张卡的**客观练习件** practiceItem（选择 / 判断 / 排序 / 配对）。
+ *    依据（2026-09-21 用户实走：「从始至终没看到过一道非主观题」）：判分链路只把自由
+ *    文本 + LLM critic 派给学习者，作答合同上 `front` 是 strict 的 {cue,context,prompt}、
+ *    `canonicalAnswer` 七种 kind 全是产出型，所以每一道题必然都是主观题。
+ *    结构题引擎（ordering/relation/repair + deterministic_structured 判分）本来就在，
+ *    但它只吃 canonicalAnswer 的显式结构，而全库 47 个有答案的修订里 ordered_steps 只
+ *    有 2 个、mapping/comparison 各 0 个 —— 造不出题。故 v23 同时提两条要求：
+ *    ① 有顺序/对应关系的知识必须落成 ordered_steps / mapping，不许压成 bullets；
+ *    ② 每张卡尽量带一个 practiceItem，**干扰项必须能指回证据**（evidenceRefIds 或
+ *    本卡 misconception），指不出就不要交出这一件 —— 宁缺毋伪（§16.5）。
+ *    与 hints 的关键差别：hints 不是判分内容、被排除在哈希闭包外；practiceItem 的正确项
+ *    是判分内容，必须进闭包，因此它落在 objective 里而不是 top-level 兄弟字段。
+ * v22：author 同时交出这张卡自带的两级提示 hints（top-level 兄弟字段，不进 objective/presentation）。
  *    依据（2026-09-20 实走复盘 #10）：作答侧提示取自 run-planner.ts:746 的 9×3 常量表，
  *    卡片正文不参与，任意两张卡的第一级提示一字不差。规则含"两级都不许出现判分要点术语"
  *    与"不许写再想想/看看原文这类无信息量的话"。缺提示不重跑也不淘汰候选：提示不是判分
@@ -149,7 +166,7 @@ import { taskIntentsForStrategy } from "@ailearn/shared/card-generation-v2-pipel
  * 偏好 + 单一题型 ≤⌈N/2⌉ 分配 strategy，author 只能执行。模型逐张出题时看不到同批
  * 其他卡，题型多样性不可能靠提示词自觉达成。
  */
-export const CARD_GENERATION_V2_PROMPT_VERSION = "card-generation-v2/v22";
+export const CARD_GENERATION_V2_PROMPT_VERSION = "card-generation-v2/v24";
 
 export const PLANNER_PROMPT_VERSION = `${CARD_GENERATION_V2_PROMPT_VERSION}/planner`;
 export const AUTHOR_PROMPT_VERSION = `${CARD_GENERATION_V2_PROMPT_VERSION}/author`;
@@ -659,6 +676,26 @@ answer 与 rubric）、presentation（含 front cue/prompt 与教学转换类型
   * 证据写了"常被误认为 / 实际上 / 注意 / 并非"这类纠偏表述 → **必须**提取进 misconception；
   * 证据给了具体例子、题设、样本 → **必须**提取进 workedExample；
   确实没有对应内容才输出空字符串。判定方法是逐句回到证据里找，不是凭感觉。
+- **practiceItem 是这张卡的客观练习件，必须显式回答（v24）**：交不出就写 null，不许省略这个键：
+  * 它只用于**练习与诊断**——正式验证仍是产出型作答，一道选择题不能证明理解，所以
+    它绝不取代 canonicalAnswer，也不许把 canonicalAnswer 写成"选出来的那个字母"；
+  * 四种形状任选其一，按知识本身的形状挑：
+    single_choice = { options:[{unitId,text,evidenceRefIds}], correctUnitId }；
+    true_false = { proposition, expected, evidenceRefIds }（命题须是一句可判真假的完整陈述，
+    不要写成"是否……之一"这类含糊问句）；
+    ordering = { units:[{unitId,text,evidenceRefIds}], correctUnitOrder:[unitId…] }
+    （**步骤/流程类知识优先用它**，判分是逐项比位置）；
+    matching = { pairs:[{leftId,leftText,rightId,rightText,evidenceRefIds}] }；
+  * **每个干扰项都必须能指回证据**：填它自己的 evidenceRefIds，或就是本卡
+    learningSupport.misconception 里那条 mistaken belief 的改写。指不出证据的干扰项
+    就是编造，此时 practiceItem **整体交 null**（写成 "practiceItem": null，不要省略这个键）——缺练习件只是少一道
+    练习题，交个假干扰项会把学习者往错的方向上练；
+  * correctUnitId / correctUnitOrder 必须是给出过的 unitId（自相矛盾的题永远判不对）；
+  * 选项文本各自 ≤40 字，2–6 项；不要把"以上都对/都不对"当选项。
+- **canonicalAnswer 的 kind 要贴知识的形状，不要一律写成 bullets（v23）**：
+  * 有先后顺序的流程/操作/步骤 → ordered_steps；两组一一对应 → mapping；
+    两个对象的异同 → comparison；这些结构会被服务端派生成排序题与配对题，
+    压成 bullets 就等于放弃了客观判分的可能。
 - **hints 是这张卡自带的两级提示，必须一起交出（v22）**：
   * level1 给**结构线索**——这条知识该从哪个侧面开口（"它是一组步骤还是一个条件？"）；
   * level2 给更强的定位，但仍不给出结论（可以说组成部分的数量、首个词的词性、
@@ -692,6 +729,14 @@ answer 与 rubric）、presentation（含 front cue/prompt 与教学转换类型
     "relations": [
       { "relationId": "rel-1", "fromAnswerUnitId": "ans-1", "toAnswerUnitId": "ans-2", "kind": "causes" }
     ],
+    "practiceItem": {
+      "kind": "single_choice",
+      "options": [
+        { "unitId": "opt-1", "text": "正确说法", "evidenceRefIds": [] },
+        { "unitId": "opt-2", "text": "有证据支持的另一种说法（干扰项）", "evidenceRefIds": [] }
+      ],
+      "correctUnitId": "opt-1"
+    },
     "difficulty": "introductory",
     "evidenceRefIds": []
   },

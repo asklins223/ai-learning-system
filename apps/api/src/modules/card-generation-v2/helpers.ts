@@ -212,6 +212,28 @@ export function serializeCandidatePublic(row: typeof cardGenerationCandidatesV2.
     knowledgeForm: string;
   };
   const recommendation = row.recommendation as { recommended: boolean; reasonCodes: string[] };
+  /**
+   * 审核页只需要知道"这张卡配了哪种客观题、几个候选"，所以这里**刻意只投影种类与计数**。
+   * 练习件里含正确项（`correctUnitId` / `correctUnitOrder`）与全部选项文本：
+   * 一旦随候选列表下发，就等于绕过曝光记账白送答案（与 0234 给 hints 定的同一条线）。
+   */
+  const practiceItem = (objective as {
+    practiceItem?: {
+      kind: string;
+      options?: unknown[];
+      units?: unknown[];
+      pairs?: unknown[];
+    } | null;
+  }).practiceItem;
+  const practiceItemSummary = practiceItem
+    ? {
+      kind: practiceItem.kind as "single_choice" | "true_false" | "ordering" | "matching",
+      optionCount: practiceItem.options?.length
+        ?? practiceItem.units?.length
+        ?? practiceItem.pairs?.length
+        ?? 0,
+    }
+    : null;
   return {
     candidateId: row.candidateId,
     candidateRevisionId: row.candidateRevisionId,
@@ -237,6 +259,7 @@ export function serializeCandidatePublic(row: typeof cardGenerationCandidatesV2.
     candidateEvidenceBindingPlanHash: row.evidenceBindingPlanHash,
     candidateRevisionHash: row.candidateRevisionHash,
     qualityState: row.qualityState,
+    practiceItem: practiceItemSummary,
     reviewDecision: row.reviewDecision,
     publishState: row.publishState,
     isReviewReady: isCandidateReviewReadyV2({

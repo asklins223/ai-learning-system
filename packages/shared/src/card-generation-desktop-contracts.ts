@@ -363,6 +363,17 @@ export const cardGenerationCandidateV1Schema = z.strictObject({
   candidateEvidenceBindingPlanHash: hashSchema.nullable(),
   candidateRevisionHash: hashSchema,
   qualityState: z.enum(["authored", "checking", "passed", "failed"]),
+  /**
+   * 审核页只需要"这张卡配了哪种客观题、几个候选"。选项文本与正确项**不下发**：
+   * 它们属于判分内容，随列表下发等于绕过答案查看记账。
+   */
+  practiceItem: z
+    .strictObject({
+      kind: z.enum(["single_choice", "true_false", "ordering", "matching"]),
+      optionCount: z.number().int().min(0).max(12),
+    })
+    .nullable()
+    .optional(),
   reviewDecision: z.enum(["undecided", "keep", "reject", "merged"]),
   publishState: z.enum(["unpublished", "activating", "activated", "activation_failed", "superseded", "expired"]),
   isReviewReady: z.boolean(),

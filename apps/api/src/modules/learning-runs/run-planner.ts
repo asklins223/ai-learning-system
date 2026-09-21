@@ -15,12 +15,14 @@ import type {
   StructuredPartPublicV1,
   TaskInteractionV1,
 } from "@ailearn/shared";
-import { generateStructuredBundleTask, generateStructuredTask, generateStructuredFromSnapshot, type StructuredBundlePayload, type StructuredTargetInput, type StructuredTaskPayload } from "./run-structured.ts";
+import { generateChoiceTask, generateMatchingTask, generateOrderingFromUnits, generateStructuredBundleTask, generateStructuredTask, generateStructuredFromSnapshot, generateTrueFalseTask, type StructuredBundlePayload, type StructuredTargetInput, type StructuredTaskPayload } from "./run-structured.ts";
 import type {
   CanonicalAnswerV2,
   ObjectiveRelationV2,
+  PracticeItemV2,
   ObjectiveRubricV2,
 } from "@ailearn/shared/card-generation-v2-contracts";
+import { practiceItemCrossRefError } from "@ailearn/shared/card-generation-v2-contracts";
 import type {
   LearningTargetSnapshotV2,
   TaskIntentV1,
@@ -40,6 +42,11 @@ export interface PlannerV2Target {
   canonicalAnswer: CanonicalAnswerV2;
   scoringRubric: ObjectiveRubricV2;
   relations: ObjectiveRelationV2[];
+  /**
+   * 0245：作者产出的客观练习件（选择 / 判断 / 排序 / 配对）。null = 这张卡没有
+   * 练习件，规划器就只出产出型任务 —— 绝不为"看起来题型多了"伪造一道。
+   */
+  practiceItem: PracticeItemV2 | null;
   evidence: LearningTargetSnapshotV2["target"]["evidence"];
   /** PREPARE eligibility ceiling（V2 run 的 publishedTargetEligibility）。 */
   publishedTargetEligibility: LearningTargetSnapshotV2["publishedTargetEligibility"];
@@ -439,7 +446,10 @@ function planV2Run(target: RunPlannerTargetInput, options: PlannerOptions): Plan
   const structuredPrimary = wantsStructured
     ? generateStructuredFromSnapshot(v2.canonicalAnswer, v2.relations)
     : null;
-  const structuredAlternative = structuredPrimary
+  // 0245：作者产出的练习件**优先于**"从 canonicalAnswer 反推"的备位结构题 ——
+  // 作者是看着证据写选项/干扰项的，反推只是猜形状。没有练习件时行为一字不变。
+  const practicePayload = practiceItemToPayload(v2.practiceItem ?? null);
+  const structuredAlternative = structuredPrimary || practicePayload
     ? null
     : generateStructuredFromSnapshot(v2.canonicalAnswer, v2.relations);
   const practiceOnly = v2.publishedTargetEligibility === "practice_only"
@@ -481,11 +491,12 @@ function planV2Run(target: RunPlannerTargetInput, options: PlannerOptions): Plan
   const voiceVariant = buildVariant(runId, taskId, "voice", estSeconds, target, task);
 
   // 备位结构变体（练习通道）：与口述并列进「换一种方式」。
+  const alternativeStructured = practicePayload ?? structuredAlternative;
   let structuredAlternativeVariant: PlannedVariant | null = null;
   let structuredAlternativeSolution: PrivateTaskSolutionV1 | undefined;
-  if (structuredAlternative) {
-    structuredAlternativeSolution = structuredAlternative.solution as unknown as PrivateTaskSolutionV1;
-    structuredAlternativeVariant = buildStructuredPlannedVariant(structuredAlternative, task.prompt);
+  if (alternativeStructured) {
+    structuredAlternativeSolution = alternativeStructured.solution as unknown as PrivateTaskSolutionV1;
+    structuredAlternativeVariant = buildStructuredPlannedVariant(alternativeStructured, task.prompt);
   }
 
   const runPlanHash = sha256Hex([
@@ -525,7 +536,27 @@ function planV2Run(target: RunPlannerTargetInput, options: PlannerOptions): Plan
   };
 }
 
-/** 结构化载荷 → PlannedVariant（主位/备位共用同一装配）。 */
+/**
+ * 0245：作者的练习件 → 结构题载荷。返回 null 的两种情形都故意不出题：
+ * 素材自相矛盾（正确项不在选项里 / 顺序不是全排列），此时硬造出来的是
+ * 一道"永远判不对"的死题；以及合同层的交叉校验本来就该在生成阶段拦掉它。
+ */
+function practiceItemToPayload(item: PracticeItemV2 | null): StructuredTaskPayload | null {
+  if (!item) return null;
+  const error = practiceItemCrossRefError(item);
+  if (error) return null;
+  switch (item.kind) {
+    case "single_choice":
+      return generateChoiceTask({ options: item.options, correctUnitId: item.correctUnitId });
+    case "true_false":
+      return generateTrueFalseTask({ proposition: item.proposition, expected: item.expected });
+    case "ordering":
+      return generateOrderingFromUnits(item.units, item.correctUnitOrder);
+    case "matching":
+      return generateMatchingTask({ pairs: item.pairs });
+  }
+}
+
 function buildStructuredPlannedVariant(
   structured: StructuredTaskPayload | StructuredBundlePayload,
   prompt: string,
@@ -614,8 +645,24 @@ function buildStructuredInteraction(
       replacementOptionLabels: payload.replacementOptionLabels,
     };
   }
-  // fallback：永远不该到达（generateStructuredTask 与 kind 同步）。
-  return { kind: "text_response", maxChars: 2000 };
+  if (structured.interaction.kind === "single_choice") {
+    const payload = structured as Extract<StructuredTaskPayload, { interaction: { kind: "single_choice" } }>;
+    return {
+      ...payload.interaction,
+      publicOptionLabels: payload.publicOptionLabels,
+    };
+  }
+  if (structured.interaction.kind === "true_false") {
+    return structured.interaction;
+  }
+  if (structured.interaction.kind === "matching") {
+    // 配对的标签就在 interaction 里（左右两列共用一张 label 表），直接展开。
+    return structured.interaction;
+  }
+  // 走到这里说明新加了交互种类却没在这里加分支。绝不再静默退回文本框——
+  // 那正是"作者产了练习件、学习者却只拿到一个文本框"能永久藏身的形状
+  // （2026-09-21 实测第一次就是这样：交互退化成 text_response，测试还不红）。
+  throw new Error(`buildStructuredInteraction：未支持的交互种类 ${String(structured.interaction.kind)}`);
 }
 
 /**

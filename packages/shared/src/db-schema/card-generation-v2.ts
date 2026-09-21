@@ -203,6 +203,12 @@ export const learningObjectiveRevisionsV2 = pgTable(
      * target_revision_hash / private_payload_hash 的输入。
      */
     hints: jsonb("hints").notNull().default(sql`'{}'::jsonb`),
+    /**
+     * 0245：作者产出的客观练习件（选择 / 判断 / 排序 / 配对）。NULL = 这张卡
+     * 没有练习件（历史卡、以及作者拿不出有证据的干扰项时）。与 hints 相反，
+     * 它是判分内容，因此进 target_revision_hash / private_payload_hash 闭包。
+     */
+    practiceItem: jsonb("practice_item"),
     scoringRubric: jsonb("scoring_rubric").notNull(),
     relations: jsonb("relations").notNull().default(sql`'[]'::jsonb`),
     evidenceBindings: jsonb("evidence_bindings").notNull().default(sql`'[]'::jsonb`),

@@ -71,7 +71,10 @@ async function setup(session: { workspaceType: "personal" | "collaborative"; rol
     setPresence: vi.fn(),
     stop: vi.fn(),
   };
-  const watchNoteDocument = vi.fn(async () => streamHandle);
+  type WatchCall = [string, (event: { noteId: string } & Record<string, unknown>) => void | Promise<void>];
+  const watchNoteDocument = vi.fn(async (..._args: WatchCall) => streamHandle) as unknown as ReturnType<typeof vi.fn> & {
+    mock: { calls: WatchCall[] };
+  };
   const uploadNoteDocUpdate = vi.fn(async () => ({ revision: 7 }));
   const getNoteDocState = vi.fn(async () => ({ update: "state-as-base64", revision: 3, backfilled: false }));
   const send = vi.fn();
@@ -122,6 +125,12 @@ async function setup(session: { workspaceType: "personal" | "collaborative"; rol
 
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 
+/** 只有成功回执才带 data；失败时把整个信封抖出来，免得用例只留下一句 "data 不存在"。 */
+function requireData(result: GatewayResultV1<unknown>): Record<string, unknown> {
+  if (!result.ok) throw new Error(`IPC 调用失败：${JSON.stringify(result.error)}`);
+  return result.data as Record<string, unknown>;
+}
+
 describe("笔记协同的 IPC 通道", () => {
   beforeEach(() => {
     electronMock.handlers.clear();
@@ -134,7 +143,8 @@ describe("笔记协同的 IPC 通道", () => {
       meta,
       topic: { kind: "noteDoc", noteId: NOTE_ID },
     });
-    expect(subscribed, JSON.stringify(subscribed)).toMatchObject({ ok: true });
+    const subscriptionId = requireData(subscribed).subscriptionId as string;
+    expect(subscriptionId).toBeTruthy();
     await settle();
     expect(watchNoteDocument).toHaveBeenCalledTimes(1);
     expect(watchNoteDocument.mock.calls[0][0]).toBe(NOTE_ID);
@@ -230,27 +240,27 @@ describe("笔记协同的 IPC 通道", () => {
 
   it("退订之后连接被收掉；同一篇的另一个订阅者还在时不收", async () => {
     const { event, streamHandle } = await setup({ workspaceType: "collaborative", role: "owner" });
-    const secondWindowEvent = event;
-    const first = await handler(DESKTOP_IPC_CHANNELS.subscriptionsSubscribe)(event, {
+    const firstId = requireData(await handler(DESKTOP_IPC_CHANNELS.subscriptionsSubscribe)(event, {
       meta,
       topic: { kind: "noteDoc", noteId: NOTE_ID },
-    });
-    const second = await handler(DESKTOP_IPC_CHANNELS.subscriptionsSubscribe)(secondWindowEvent, {
+    })).subscriptionId as string;
+    const secondId = requireData(await handler(DESKTOP_IPC_CHANNELS.subscriptionsSubscribe)(event, {
       meta,
       topic: { kind: "noteDoc", noteId: NOTE_ID },
-    });
+    })).subscriptionId as string;
+    expect(secondId).not.toBe(firstId);
     await settle();
     expect(streamHandle.stop).not.toHaveBeenCalled();
 
     await handler(DESKTOP_IPC_CHANNELS.subscriptionsUnsubscribe)(event, {
       meta,
-      subscriptionId: (first.data as { subscriptionId: string }).subscriptionId,
+      subscriptionId: firstId,
     });
     expect(streamHandle.stop).not.toHaveBeenCalled();
 
     await handler(DESKTOP_IPC_CHANNELS.subscriptionsUnsubscribe)(event, {
       meta,
-      subscriptionId: (second.data as { subscriptionId: string }).subscriptionId,
+      subscriptionId: secondId,
     });
     expect(streamHandle.stop).toHaveBeenCalledTimes(1);
   });

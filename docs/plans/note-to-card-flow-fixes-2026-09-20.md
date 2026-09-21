@@ -259,7 +259,8 @@
 
 | 条目 | 状态 | 说明 |
 |---|---|---|
-| #3 题型、#5 重复生成/旧卡、#2 假进度、#10 提示来源、#1 保留即排队 | 代码完成 | 批次 A，全部确定性验证；真实生成 + 真实作答各一次收尾验收（含「提示真的从卡片读到」这一跳） |
+| #3 题型、#5 重复生成/旧卡、#2 假进度、#10 提示来源、#1 保留即排队 | 真实生成已跑通（#2 的阶梯仍待长笔记复测） | 批次 A；§7 那次真跑实测：题型 3 种零 recall、8 条提示全非空且张张不同、2 张被门禁判失败且界面说得出。**顺带修掉在制守卫的一处漏洞**（`.limit(1)` 任取一行判死活 → 新旧两批 review_ready 并存），见 §7 |
+| 审核卡面两处文案缺陷 | 代码完成 | §7：「还有 N 张未决」改成整批口径的「N 张还没决定」；卡面 `front.cue` 不再占用「提示」这个词，改标「线索」。先补 2 条断言（改前红）再改，活应用复测过 |
 | #12 退出按钮、#11 提示阶梯、#13 计时 | 代码完成 | 批次 B 部分；见下节 |
 | #8 语音作答 | 代码完成 | 见 §3.6：语音输入从无到有 + 真能力探测 + 切换可回转 |
 | #6 提交后的评估反馈 | 代码完成 | 见下节「#6」；等结果这一跳只跑真实 critic 一次验收 |
@@ -391,3 +392,40 @@
 - 错误位置：`workers/ai-worker/src/lib/governance.ts:347 / 350 / 372` —— `Property 'aiDataPolicy' / 'aiConsentVersion' / 'aiConsentAt' does not exist on type '{ name; id; createdAt; workspaceType; ownerId }'`。同意迁到账号级（0237）之后 `workspaces` 行类型里这三样已经不存在，worker 这一路还在按老地方读。
 - 运行时后果与 02:42 实测一致：`normalizeWorkspaceAIPolicy(undefined)` → `DEFAULT_AI_DATA_POLICY.sendToExternal = false` → 所有非 mock 调用在发出请求前就被拒（`elapsedMs: 0`、`category unknown`）。api 侧已经改读 `user_ai_settings`（`identity/service.ts`、`identity/invite-service.ts`），worker 侧还没有对应读取。
 - 结论：#2/#3/#10 那一次真实生成的验收**只卡在这半截迁移**，与配额、与 v22 prompt 无关。接手时要注意 0237 注释里的坑：读 `user_ai_settings` 必须走 `withWorkspaceTransaction`，否则 RLS 静默返回 0 行，又会变成"永远没同意"。
+
+## 7. 08:40 那一次真实生成终于跑通了
+
+治理改到账号级、并把它挪出管道事务（方案 A）之后，挡了几小时的那道墙消失了。
+
+**先确认治理解析（不花模型）**
+- `workers/ai-worker`：typecheck 干净，测试 673/673。
+- 在 worker 容器里实调 `resolveAIGovernanceContext(97550966…, f6c4a80e…)` → `consentOk=true`、`sendToExternal=true`、`provider=openai_compatible`、`embeddingProvider=siliconflow`。
+- 一条踩坑记录：同一句脚本在**宿主**上跑会给出 `provider=mock` + 「agent_turn 平台未配置」告警，看着像 bug。实际是宿主没带 `AI_PLATFORMS_CONFIG`（容器里是 `/app/config/ai-platforms.json`）。测治理要在容器里测。
+
+**第一次真跑（00:10，笔记 97df7ac9）：终态 `no_cards_recommended`，判定是对的**
+`pipeline.route.standard` 给出 `evidenceCount=0 / sourceTextLength=0 / reasons=[non_text_block]`；查库这篇笔记 `content_json` 里只有 1 个块、`type=code`。没有正文就没有可学分目标，planner 这么报没问题（1 次 planner 调用，`ai_audit_log` 00:10:10 可对上）。
+- 留一条**产品问题**（未改）：整篇只有代码块的笔记点「生成学习卡」，用户看到的是"不推荐出卡"，拿不到"因为这篇没有正文"这句话。
+
+**第二次真跑（00:21，笔记 f01c70ec《消防疏散与灭火器使用》，6 个文本块，此前挂着两条 `generation_failed` 死批次）**
+- 中途被并行改动打断过一次：00:22:38 `companion-agent-runtime.ts` 变化 → tsx watch 杀掉在跑的 job，而 job 仍占着 30 分钟租约挂在 `processing`。我把这条 job 手动回队（`status=pending, lease_token=NULL`）后一分钟内跑完。**并行改动会真金白银地打断生成，这不只是日志噪音。**
+- 终态 `review_ready`，真实调用 **11 次** `card_generation_v2:chat_completion`（00:21:41 planner，00:23:42–00:24:22 十次），模型 `qwen3.8-flash`。
+- **#5 死批次能重新生成**：同一篇笔记挂着 needs_attention 死批次，POST 没返回 409，批次建起来了。
+- **#3 题型真的铺开**（库与界面双向对上）：`sequence 2 / application 1 / boundary 1`，零 recall；界面「题型」实读 `顺序重建 / 情境应用 / 边界判断 / 顺序重建`。
+- **#10 提示确实由作者产出**：4 张 8 条 `hints.level1/level2` 全非空、张张不同（sequence 卡「回忆这四个字在物理操作上分别对应什么动作对象…」／boundary 卡「思考在极端危险下，什么价值高于物质财富」）。不是常量表。
+- **门禁在真拒东西**：2 张 `quality_state=failed`，事件给了原因码 `front_leaks_answer`、`grounding_hard`；界面「质量状态」实读「质量检查未通过」；`activation-service.ts:396` 只允许 passed 进激活。
+- **#2 只验到"计数是真数"**：`progress` 实返回 `{plannedCards:4, authored:4, gatePassed:2, gateFailed:2}`，四个数自洽（4=4、2+2=4）。但这次整条管道 <1 分钟，HTTP 3 秒采样只抓到 `planning → review_ready` 两个值，**中间阶梯没被观测到**；`card_generation_events_v2` 的时间戳是同事务 `now()`（全 23:35），也还原不出阶段时序。这条仍算"机制对、现场没看到"，要看到阶梯得换一篇长笔记再跑一次。
+- 顺手纠正我脚本里的两个错断言：`progress` 的字段是 `plannedCards/authored/gatePassed/gateFailed`，**没有 `candidates`**；run 详情里也**没有 `currentStage`**。
+
+**界面实测抓到两条真实缺陷，已改（按惯例先补测试）**
+1. 「候选 1/4 · 还有 4 张未决」——停在最后一张仍写"还有 4 张"。这个数是**整批**未决数，"还有"把它读成了"这张之后还剩几张"。改成 `N 张还没决定`。
+2. 卡面 `front.cue` 的标签占用了「提示」这个词（实测渲染成「提示灭火器使用口诀"提、拔、握、压"」），而系统现在**真有**两级提示，两者混用会让人以为已经给了提示。改成「线索」。
+- 新增 2 条断言在 `CardGenerationSurface.review.test.tsx`（改前红、改后绿）；desktop 127 files / 1033 tests 全绿，`tsconfig.web` typecheck 干净；活应用复测实读「候选 1 / 4 · 4 张还没决定」「线索高层建筑火灾逃生路径选择」。
+
+**还抓到一条我自己写的守卫的漏洞（阻断级，已修）**
+在制守卫原先 `.limit(1)` 只取**一行**判死活，而这一行是 Postgres 任意给的。同一篇笔记既有已死批次、又有一批还没审完时，只要先摸到已死那行就放行 —— 结果新旧两批 `review_ready` 并存。这次真实数据就是证据：`f01c70ec` 上 `dcc809e2`（09-18，4 张）和 `e87dc46f`（09-21，4 张）都在，`superseded=0`。
+改成遍历**全部**在制行，只要有一行还活着就挡住；补断言「在审的旧批次和已死的批次并存时，仍然算在制」（改前 `Missing expected rejection`）。`apps/api` 1404 tests / 0 fail。
+- 存量没动：那两条并存的 review_ready 批次仍在库里。修完之后新发起会被挡，但已存在的两批要有人处理（关一批或各自审完）。
+- 遗留的 5 条 `needs_attention` + `generation_failed`（eb35b1eb / 5589acf6 / 6b32745e / ed5c9084 / 926788f1）我没有强行清理：按我自己的判据，它们正是"retry 拒、cancel 也拒、只剩重新生成"那一类，deadBatch 这条豁免就是为它们存在的。
+
+**此刻仓库里唯一不自洽的地方（不是本批次改的）**
+`apps/api/src/modules/note/document-state.ts` 是并行 agent 的**未跟踪新文件**（`git status` = `??`），`npx tsc` 在它上报 3 组错（`Uint8Array` 不能赋给 `Buffer`、`PgColumn + number`）。api 测试不受影响（1403 pass / 0 fail），但 `apps/api` 的 typecheck 现在因它不干净——我只改了 `card-generation-v2/generation-run-service.ts` 和它的测试，报错文件列表里只有这一个。

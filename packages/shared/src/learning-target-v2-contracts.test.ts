@@ -47,6 +47,7 @@ function baseTarget(): LearningTargetSnapshotV2["target"] {
       rubricHash: FAKE_HASH,
     },
     relations: [],
+    practiceItem: null,
     evidence: [],
     evidenceBindingSetHash: FAKE_HASH,
     evidenceEligibilityVectorHash: FAKE_HASH,

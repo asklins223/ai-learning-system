@@ -98,6 +98,7 @@ import {
   type PlannerV2Target,
   type RunPlannerTargetInput,
 } from "./run-planner.ts";
+import { isDeterministicStructuredPayload } from "./run-structured.ts";
 import { sha256Hex } from "@ailearn/shared/content-hash";
 import {
   freezeTargetSnapshotV2,
@@ -227,6 +228,8 @@ async function planFollowupTask(
       canonicalAnswer: t.canonicalAnswer,
       scoringRubric: t.scoringRubric,
       relations: t.relations,
+      // 0245：存量快照没有这一字段 → null（没有练习件），不是"未计算"。
+      practiceItem: t.practiceItem ?? null,
       evidence: t.evidence,
       publishedTargetEligibility: snapshot.publishedTargetEligibility,
     },
@@ -731,6 +734,7 @@ export async function createRunV2(
     canonicalAnswer: frozen.snapshot.target.canonicalAnswer,
     scoringRubric: frozen.snapshot.target.scoringRubric,
     relations: frozen.snapshot.target.relations,
+    practiceItem: frozen.snapshot.target.practiceItem ?? null,
     evidence: frozen.snapshot.target.evidence,
     publishedTargetEligibility: frozen.snapshot.publishedTargetEligibility,
   };
@@ -1977,6 +1981,7 @@ export async function applyAction(
             canonicalAnswer: st.canonicalAnswer,
             scoringRubric: st.scoringRubric,
             relations: st.relations,
+            practiceItem: st.practiceItem ?? null,
             evidence: st.evidence,
             publishedTargetEligibility: snap.publishedTargetEligibility,
           },
@@ -2589,6 +2594,9 @@ export async function submitArtifact(
     publicElementIds?: string[];
     allowedOperationKinds?: string[];
     replacementOptionIds?: string[];
+    publicOptionIds?: string[];
+    publicLeftIds?: string[];
+    publicRightIds?: string[];
   };
   if (interaction.kind === "text_response" && payload.kind !== "text" && payload.kind !== "declared_unable") {
     throw new LearningRunServiceError("payload_variant_mismatch", "作答类型与题目不符", 400);
@@ -2642,6 +2650,34 @@ export async function submitArtifact(
       // replace/insert 必须携带选项（remove/move 不允许携带）。
       if ((operation.op === "replace" || operation.op === "insert") && optionKey === undefined) {
         throw new LearningRunServiceError("payload_variant_mismatch", "修复操作缺少选项", 400);
+      }
+    }
+  }
+
+  // 客观题（2026-09-21 方案 §3 D2）：提交的选项 id 必须属于本题 public 载荷——
+  // 正确项只在私有 solution 里，所以这里只防"编一个没给过的 id"，不接触答案。
+  if (interaction.kind === "single_choice") {
+    if (payload.kind !== "choice") throw new LearningRunServiceError("payload_variant_mismatch", "作答类型与题目不符", 400);
+    if (!payload.selectedOptionId || !(interaction.publicOptionIds ?? []).includes(payload.selectedOptionId)) {
+      throw new LearningRunServiceError("payload_variant_mismatch", "请从本题给出的选项里选一个", 400);
+    }
+  }
+  if (interaction.kind === "true_false") {
+    if (payload.kind !== "true_false") throw new LearningRunServiceError("payload_variant_mismatch", "作答类型与题目不符", 400);
+    if (typeof payload.answer !== "boolean") {
+      throw new LearningRunServiceError("payload_variant_mismatch", "请先给出这条说法对不对", 400);
+    }
+  }
+  if (interaction.kind === "matching") {
+    if (payload.kind !== "matching") throw new LearningRunServiceError("payload_variant_mismatch", "作答类型与题目不符", 400);
+    const lefts = new Set(interaction.publicLeftIds ?? []);
+    const rights = new Set(interaction.publicRightIds ?? []);
+    if (payload.assignments.length > 8) {
+      throw new LearningRunServiceError("payload_variant_mismatch", "配对数量超出题目允许范围", 400);
+    }
+    for (const assignment of payload.assignments) {
+      if (!lefts.has(assignment.leftId) || !rights.has(assignment.rightId)) {
+        throw new LearningRunServiceError("payload_variant_mismatch", "配对内容与题目不符", 400);
       }
     }
   }
@@ -2783,7 +2819,7 @@ export async function submitArtifact(
     userId: input.userId,
     source: payload.kind === "declared_unable"
       ? "deterministic_declared_unable"
-      : payload.kind === "ordering" || payload.kind === "relation" || payload.kind === "repair" || payload.kind === "structured_bundle"
+      : isDeterministicStructuredPayload(payload.kind)
         ? "deterministic_structured"
         : "assessment_critic",
     status: "queued",

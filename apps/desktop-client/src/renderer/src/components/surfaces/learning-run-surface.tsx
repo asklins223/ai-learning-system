@@ -293,6 +293,13 @@ function emptyEditor(task: LearningTaskPublic): ArtifactPayload {
         orderedTokenIds: [...interaction.publicTokenIds],
         interactionRefs: [interactionRef(task.taskId)],
       };
+    case "single_choice":
+      // 不给默认选项：合同里 selectedOptionId 可省略，省略就是"还没选"。
+      return { kind: "choice", interactionRefs: [interactionRef(task.taskId)] };
+    case "true_false":
+      return { kind: "true_false", interactionRefs: [interactionRef(task.taskId)] };
+    case "matching":
+      return { kind: "matching", assignments: [], interactionRefs: [interactionRef(task.taskId)] };
     case "relation_canvas":
       return { kind: "relation", edges: [], interactionRefs: [interactionRef(task.taskId)] };
     case "repair":
@@ -339,6 +346,13 @@ function payloadIsReady(payload: ArtifactPayload): boolean {
       return payload.text.trim().length > 0;
     case "ordering":
       return payload.orderedTokenIds.length > 1;
+    case "choice":
+      return Boolean(payload.selectedOptionId);
+    case "true_false":
+      return typeof payload.answer === "boolean";
+    case "matching":
+      // 要求每一端都被连过：连一半就提交会把"没连的"默默算错。
+      return payload.assignments.length >= 2;
     case "relation":
       return payload.edges.length > 0;
     case "repair":
@@ -417,6 +431,9 @@ function interactionLabel(task: LearningTaskPublic): string {
     case "voice_teachback": return "语音讲解";
     case "text_response": return "用自己的话回答";
     case "ordering": return "顺序整理";
+    case "single_choice": return "选择题";
+    case "true_false": return "判断题";
+    case "matching": return "配对题";
     case "relation_canvas": return "关系搭建";
     case "repair": return "纠错修补";
     case "structured_bundle": return "组合证明";
@@ -573,6 +590,140 @@ function PartEditor({
   return <p className="run-inline-error">当前结构化部分与任务版本不一致，请重新同步。</p>;
 }
 
+function ChoiceEditor({
+  ids,
+  labels,
+  value,
+  onChange,
+}: {
+  readonly ids: string[];
+  readonly labels?: Record<string, string>;
+  readonly value: string | undefined;
+  readonly onChange: (value: string) => void;
+}) {
+  return (
+    <div className="run-choice-list" role="radiogroup" aria-label="选择一个答案">
+      {ids.map((id, index) => (
+        <button
+          key={id}
+          type="button"
+          role="radio"
+          aria-checked={value === id}
+          className={`run-choice-option${value === id ? " is-selected" : ""}`}
+          onClick={() => onChange(id)}
+        >
+          <span className="run-choice-option__mark" aria-hidden="true">{value === id ? "●" : "○"}</span>
+          {indexedPublicLabel(labels, ids, id, `第 ${index + 1} 个选项`)}
+        </button>
+      ))}
+      {ids.length === 0 ? <p className="run-empty-row">这道题没有给出选项。</p> : null}
+    </div>
+  );
+}
+
+function TrueFalseEditor({
+  proposition,
+  value,
+  onChange,
+}: {
+  readonly proposition: string;
+  readonly value: boolean | undefined;
+  readonly onChange: (value: boolean) => void;
+}) {
+  return (
+    <div className="run-truefalse">
+      <p className="run-truefalse__claim">{proposition}</p>
+      <div className="run-truefalse__actions" role="radiogroup" aria-label="判断这条说法对不对">
+        <button
+          type="button"
+          role="radio"
+          aria-checked={value === true}
+          className={`button${value === true ? " primary" : ""}`}
+          onClick={() => onChange(true)}
+        >这条说法对</button>
+        <button
+          type="button"
+          role="radio"
+          aria-checked={value === false}
+          className={`button${value === false ? " primary" : ""}`}
+          onClick={() => onChange(false)}
+        >这条说法错</button>
+      </div>
+      {value === undefined ? <p className="meta">先选一个，再提交。</p> : null}
+    </div>
+  );
+}
+
+function MatchingEditor({
+  leftIds,
+  rightIds,
+  labels,
+  value,
+  onChange,
+}: {
+  readonly leftIds: string[];
+  readonly rightIds: string[];
+  readonly labels?: Record<string, string>;
+  readonly value: Array<{ leftId: string; rightId: string }>;
+  readonly onChange: (value: Array<{ leftId: string; rightId: string }>) => void;
+}) {
+  const [activeLeft, setActiveLeft] = useState<string | null>(null);
+  const paired = new Map(value.map((pair) => [pair.leftId, pair.rightId]));
+
+  const connect = (rightId: string) => {
+    if (!activeLeft) return;
+    // 一个左端只保留一条连线：重复连同一端是改答案，不是加答案。
+    onChange([
+      ...value.filter((pair) => pair.leftId !== activeLeft),
+      { leftId: activeLeft, rightId },
+    ]);
+    setActiveLeft(null);
+  };
+
+  return (
+    <div className="run-matching">
+      <p className="meta">先点左边一项，再点右边它该连的那一项。</p>
+      <div className="run-matching__columns">
+        <ul className="run-matching__col" aria-label="左列">
+          {leftIds.map((id) => (
+            <li key={id}>
+              <button
+                type="button"
+                className={`run-matching__item${activeLeft === id ? " is-active" : ""}`}
+                aria-pressed={activeLeft === id}
+                onClick={() => setActiveLeft(activeLeft === id ? null : id)}
+              >
+                {labels?.[id] ?? id}
+                {paired.get(id) ? <span className="run-matching__linked" aria-hidden="true">已连</span> : null}
+              </button>
+            </li>
+          ))}
+        </ul>
+        <ul className="run-matching__col" aria-label="右列">
+          {rightIds.map((id) => (
+            <li key={id}>
+              <button
+                type="button"
+                className="run-matching__item"
+                disabled={!activeLeft}
+                onClick={() => connect(id)}
+              >
+                {labels?.[id] ?? id}
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+      {value.length > 0 ? (
+        <p className="run-matching__trail" role="status">
+          已连 {value.length} 对
+          <button type="button" className="text-action" onClick={() => { onChange([]); setActiveLeft(null); }}>全部重连</button>
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 function OrderingEditor({
   ids,
   labels,
@@ -645,6 +796,39 @@ function InteractionEditor({
         />
         <small className="meta" style={{ display: "block", marginTop: 6, textAlign: "right" }}>{value.text.length} / {interaction.maxChars}</small>
       </label>
+    );
+  }
+
+  if (interaction.kind === "single_choice" && value.kind === "choice") {
+    return (
+      <ChoiceEditor
+        ids={interaction.publicOptionIds}
+        labels={interaction.publicOptionLabels}
+        value={value.selectedOptionId}
+        onChange={(selectedOptionId) => onChange({ ...value, selectedOptionId })}
+      />
+    );
+  }
+
+  if (interaction.kind === "true_false" && value.kind === "true_false") {
+    return (
+      <TrueFalseEditor
+        proposition={interaction.proposition}
+        value={value.answer}
+        onChange={(answer) => onChange({ ...value, answer })}
+      />
+    );
+  }
+
+  if (interaction.kind === "matching" && value.kind === "matching") {
+    return (
+      <MatchingEditor
+        leftIds={interaction.publicLeftIds}
+        rightIds={interaction.publicRightIds}
+        labels={interaction.publicLabels}
+        value={value.assignments}
+        onChange={(assignments) => onChange({ ...value, assignments })}
+      />
     );
   }
 

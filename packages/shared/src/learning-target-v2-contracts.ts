@@ -27,6 +27,7 @@ import {
   canonicalAnswerV2Schema,
   objectiveRubricV2Schema,
   objectiveRelationV2Schema,
+  practiceItemV2Schema,
   knowledgeFormV2Schema,
 } from "./card-generation-v2-contracts.ts";
 import { evidenceBindingTargetUnitV2Schema } from "./card-quality-v2-contracts.ts";
@@ -145,6 +146,12 @@ export const learningTargetSnapshotV2Schema = z
           .strict(),
         scoringRubric: objectiveRubricV2Schema,
         relations: z.array(objectiveRelationV2Schema).max(100),
+        /**
+         * 0245：随目标一起冻下来的客观练习件（选择 / 判断 / 排序 / 配对）。
+         * null = 这张卡没有练习件。规划器只从冻结快照消费（§16.4），所以它必须
+         * 在这里，而不是只在候选行上。
+         */
+        practiceItem: practiceItemV2Schema.nullable(),
         evidence: z
           .array(
             z.strictObject({

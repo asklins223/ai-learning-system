@@ -21,6 +21,7 @@ const RUN_ID = "aaaaaaa1-1111-4111-8111-111111111111";
 
 type CandidateState = {
   candidateId: string;
+  practiceItem?: { kind: string; optionCount: number } | null;
   statement: string;
   reviewDecision: string;
   publishState: string;
@@ -68,6 +69,7 @@ function stubGateway(initial: readonly CandidateState[], runOverride: { status?:
     candidateEvidenceBindingPlanHash: "plan-hash",
     publishState: candidate.publishState,
     qualityState: "passed",
+    practiceItem: candidate.practiceItem ?? null,
     strategy: "why",
     transformationKind: "mechanism_reconstruction",
     planVersion: 1,
@@ -200,6 +202,74 @@ describe("CardGenerationSurface · 候选审核", () => {
     // 决定被记下后，审核继续往前走，而不是停在按钮已消失的卡片上。
     await waitFor(() => expect(screen.getByText("第二张")).toBeTruthy());
     expect(screen.queryByText("第一张")).toBeNull();
+  });
+
+  it("未决计数说清的是整批还剩多少，不是「这张之后还剩几张」", async () => {
+    const { state } = stubGateway([
+      { candidateId: "cand-1", statement: "第一张", reviewDecision: "undecided", publishState: "unpublished" },
+      { candidateId: "cand-2", statement: "第二张", reviewDecision: "undecided", publishState: "unpublished" },
+      { candidateId: "cand-3", statement: "第三张", reviewDecision: "undecided", publishState: "unpublished" },
+    ]);
+    useRoomStore.setState({ activeCardGenerationRunId: RUN_ID });
+    render(<CardGenerationSurface />);
+
+    await waitFor(() => expect(screen.getByText("第一张")).toBeTruthy());
+    // 2026-09-21 真实批次实测：这一行以前写「还有 N 张未决」，而这个 N 是**整批**
+    // 的未决数——于是停在最后一张时仍写「还有 4 张」，读起来像后面还有 4 张。
+    const meta = () => (document.querySelector(".candidate-card__meta")?.textContent ?? "");
+    expect(meta()).toContain("3 张还没决定");
+    expect(meta()).not.toContain("还有");
+    expect(meta()).not.toContain("未决");
+
+    fireEvent.click(screen.getByRole("button", { name: /^保留（进入激活队列）/ }));
+    await waitFor(() => expect(state.reviewCalls).toHaveLength(1));
+    await waitFor(() => expect(meta()).toContain("2 张还没决定"));
+  });
+
+  it("卡面的线索不占用「提示」这个词", async () => {
+    stubGateway([
+      { candidateId: "cand-1", statement: "第一张", reviewDecision: "undecided", publishState: "unpublished" },
+    ]);
+    useRoomStore.setState({ activeCardGenerationRunId: RUN_ID });
+    render(<CardGenerationSurface />);
+
+    await waitFor(() => expect(screen.getByText("第一张")).toBeTruthy());
+    // 生成时产出的两级提示才是「提示」；审核卡面上这行是题面线索，
+    // 两者混用会让人以为已经给了提示。
+    const cue = document.querySelector(".candidate-card__cue b");
+    expect(cue?.textContent).toBe("线索");
+    expect(document.querySelector(".candidate-card__cue")?.textContent).toContain("回忆一次提取练习");
+  });
+
+  it("审核页说出这张卡带哪种客观练习，且不把选项文本漏给列表", async () => {
+    stubGateway([
+      {
+        candidateId: "cand-1",
+        statement: "第一张",
+        reviewDecision: "undecided",
+        publishState: "unpublished",
+        practiceItem: { kind: "ordering", optionCount: 4 },
+      },
+    ]);
+    useRoomStore.setState({ activeCardGenerationRunId: RUN_ID });
+    render(<CardGenerationSurface />);
+
+    await waitFor(() => expect(screen.getByText("第一张")).toBeTruthy());
+    expect(screen.getByText("排序题 · 排 4 步")).toBeTruthy();
+    // 正确项与选项文本连字段都没下发，这里再确认一次界面没自己造出来。
+    const board = JSON.stringify((window.ailearn.note.cardGeneration.getCandidates as ReturnType<typeof vi.fn>).mock.calls);
+    expect(board).not.toContain("correctUnitId");
+  });
+
+  it("没配练习件的卡直说没有，不假装有一道题", async () => {
+    stubGateway([
+      { candidateId: "cand-1", statement: "第一张", reviewDecision: "undecided", publishState: "unpublished" },
+    ]);
+    useRoomStore.setState({ activeCardGenerationRunId: RUN_ID });
+    render(<CardGenerationSurface />);
+
+    await waitFor(() => expect(screen.getByText("第一张")).toBeTruthy());
+    expect(screen.getByText("没有，只能用自己的话答")).toBeTruthy();
   });
 
   it("不保留先问原因，并把选择的原因码交给服务端", async () => {

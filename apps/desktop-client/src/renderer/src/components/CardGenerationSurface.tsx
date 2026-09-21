@@ -105,6 +105,23 @@ function knowledgeFormLabel(value: CardGenerationCandidateV1["objective"]["knowl
   }[value];
 }
 
+/**
+ * 审核页这一行只说"激活后能做什么练习"。选项文本和正确项服务端就没下发，
+ * 这里也就无从泄露——它只是让"这张卡带不带客观题"这件事变得可见。
+ */
+function practiceItemLabel(
+  item: { kind: string; optionCount: number } | null | undefined,
+): string {
+  if (!item) return "没有，只能用自己的话答";
+  switch (item.kind) {
+    case "single_choice": return `选择题 · ${item.optionCount} 个选项`;
+    case "true_false": return "判断题 · 对不对二选一";
+    case "ordering": return `排序题 · 排 ${item.optionCount} 步`;
+    case "matching": return `配对题 · ${item.optionCount} 组`;
+    default: return "有，但这次没读出来";
+  }
+}
+
 function strategyLabel(value: CardGenerationCandidateV1["strategy"]): string {
   return {
     recall: "主动回忆",
@@ -930,13 +947,13 @@ export function CardGenerationSurface() {
               <>
                 <div className="candidate-study-card__body">
                   <div className="candidate-card__meta" role="status" aria-live="polite">
-                    <span>候选 {activeCandidateIndex + 1} / {candidates.length}{undecidedCount ? ` · 还有 ${undecidedCount} 张未决` : " · 都已决定"}</span>
+                    <span>候选 {activeCandidateIndex + 1} / {candidates.length}{undecidedCount ? ` · ${undecidedCount} 张还没决定` : " · 都已决定"}</span>
                     <span>{candidateDecisionLabel(activeCandidate)}</span>
                   </div>
                   <p className="candidate-card__kicker">这张卡准备验证</p>
                   <h2 id="candidate-card-title">{activeCandidate.objective.statement}</h2>
                   {activeCandidate.front.cue ? (
-                    <p className="candidate-card__cue"><b>提示</b>{activeCandidate.front.cue}</p>
+                    <p className="candidate-card__cue"><b>线索</b>{activeCandidate.front.cue}</p>
                   ) : null}
                   {activeCandidate.front.context ? (
                     <p className="candidate-card__context"><b>情境</b>{activeCandidate.front.context}</p>
@@ -1061,6 +1078,7 @@ export function CardGenerationSurface() {
                 <div><dt>预计用时</dt><dd>约 {activeCandidate.estimatedReviewSeconds} 秒</dd></div>
                 <div><dt>候选版本</dt><dd>v{activeCandidate.revision} · 计划 {activeCandidate.planVersion}</dd></div>
                 <div><dt>质量状态</dt><dd>{candidateDecisionLabel(activeCandidate)}</dd></div>
+                <div><dt>随卡练习</dt><dd>{practiceItemLabel(activeCandidate.practiceItem)}</dd></div>
                 <div><dt>看过答案</dt><dd>{exposureLabel(exposure, exposureFailure)}</dd></div>
                 <div><dt>首次验证</dt><dd>{firstValidationLabel(exposure, exposureFailure)}</dd></div>
               </dl>

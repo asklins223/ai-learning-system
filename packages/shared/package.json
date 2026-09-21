@@ -301,6 +301,11 @@
       "import": "./src/note-save-contracts.ts",
       "default": "./src/note-save-contracts.ts"
     },
+    "./note-doc-conformance": {
+      "types": "./src/note-doc-conformance.ts",
+      "import": "./src/note-doc-conformance.ts",
+      "default": "./src/note-doc-conformance.ts"
+    },
     "./note-image-upload-contracts": {
       "types": "./src/note-image-upload-contracts.ts",
       "import": "./src/note-image-upload-contracts.ts",

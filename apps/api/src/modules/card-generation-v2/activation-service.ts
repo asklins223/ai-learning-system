@@ -62,6 +62,7 @@ import {
   type ActivateCardCandidatesRequestV2,
   type CardActivationReceiptV2,
   type ActivationIntentV2,
+  type PracticeItemV2,
 } from "@ailearn/shared/card-generation-v2-contracts";
 import { isCardGenerationReviewOpen } from "@ailearn/shared/card-generation-desktop-contracts";
 import { closePendingSchedules } from "./card-service.ts";
@@ -79,6 +80,7 @@ import {
   computeCanonicalAnswerHashV2,
   computeLearningSupportHashV2,
   computeRelationsHashV2,
+  computePracticeItemHashV2,
   computeEvidenceBindingSetHashV2,
   computeEvidenceBindingHashV2,
   computeEvidenceEligibilityVectorHashV2,
@@ -762,6 +764,8 @@ async function createOrUpdateObjectiveAndCard(
     conceptLabel?: string | null;
     knowledgeForm: string;
     canonicalAnswer: unknown;
+    /** 0245：客观练习件；缺失即这张卡没有练习件（历史候选也没有）。 */
+    practiceItem?: PracticeItemV2 | null;
     learningSupport: {
       explanation: string;
       boundary?: string;
@@ -820,6 +824,7 @@ async function createOrUpdateObjectiveAndCard(
       const learningSupportHash = computeLearningSupportHashV2(objectiveDraft.learningSupport);
       const rubricHash = objectiveDraft.rubric.rubricHash;
       const relationsHash = computeRelationsHashV2(objectiveDraft.relations ?? []);
+      const practiceItemHash = computePracticeItemHashV2(objectiveDraft.practiceItem ?? null);
       const semanticSupportReportSetHash = computeSemanticSupportReportSetHashV2([]);
 
       // §17.5 step 9 / §12.2：从 exact CandidateEvidenceBindingPlanV2 机械映射
@@ -892,6 +897,7 @@ async function createOrUpdateObjectiveAndCard(
         learningSupportHash,
         rubricHash,
         relationsHash,
+        practiceItemHash,
         evidenceBindingSetHash,
         semanticSupportReportSetHash,
       });
@@ -932,6 +938,7 @@ async function createOrUpdateObjectiveAndCard(
         hints: readCandidateHints(candidate.hints),
         scoringRubric: objectiveDraft.rubric,
         relations: objectiveDraft.relations ?? [],
+        practiceItem: objectiveDraft.practiceItem ?? null,
         evidenceBindings: canonicalBindings,
         semanticTargetFingerprint,
         targetRevisionHash,
@@ -1297,6 +1304,7 @@ async function createOrUpdateObjectiveAndCard(
       const learningSupportHash = computeLearningSupportHashV2(objectiveDraft.learningSupport);
       const rubricHash = objectiveDraft.rubric.rubricHash;
       const relationsHash = computeRelationsHashV2(objectiveDraft.relations ?? []);
+      const practiceItemHash = computePracticeItemHashV2(objectiveDraft.practiceItem ?? null);
       const evidenceBindingSetHash = computeEvidenceBindingSetHashV2([]);
       const semanticSupportReportSetHash = computeSemanticSupportReportSetHashV2([]);
 
@@ -1311,6 +1319,7 @@ async function createOrUpdateObjectiveAndCard(
         learningSupportHash,
         rubricHash,
         relationsHash,
+        practiceItemHash,
         evidenceBindingSetHash,
         semanticSupportReportSetHash,
       });
@@ -1336,6 +1345,7 @@ async function createOrUpdateObjectiveAndCard(
         hints: readCandidateHints(candidate.hints),
         scoringRubric: objectiveDraft.rubric,
         relations: objectiveDraft.relations ?? [],
+        practiceItem: objectiveDraft.practiceItem ?? null,
         evidenceBindings: [],
         supersedesObjectiveRevisionId: obj.currentObjectiveRevisionId,
         semanticTargetFingerprint,
@@ -1557,6 +1567,10 @@ async function createOrUpdateObjectiveAndCard(
         learningSupportHash,
         rubricHash,
         relationsHash,
+        // 故意不放 practiceItemHash：这是「目标的语义内容」，用于等价性判定，
+        // 加一道选择题不改变这个目标意味着什么；且该 hash 客户端也会算（服务端
+        // 重算后与提交的 equivalenceReportHash 闭合比对，漂移即 409）。
+        // 练习件的哈希闭包在 targetRevisionHash 那一层（上方两处调用）。
       });
       const bindingPlanRows = await tx.select({
         bindingPlanHash: candidateEvidenceBindingPlansV2.bindingPlanHash,

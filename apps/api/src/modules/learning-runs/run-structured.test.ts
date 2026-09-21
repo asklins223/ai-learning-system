@@ -7,10 +7,13 @@ import { test } from "node:test";
 import {
   assessStructuredBundlePayload,
   assessStructuredPayload,
+  generateChoiceTask,
+  generateMatchingTask,
   generateOrderingTask,
   generateRelationTask,
   generateRepairTask,
   generateStructuredBundleTask,
+  generateTrueFalseTask,
   splitClaimIntoTokens,
 } from "./run-structured.ts";
 
@@ -19,6 +22,35 @@ const target = {
   claim: "遗忘曲线表明复习间隔决定长期记忆，主动回忆比重复阅读更有效。",
   quote: "间隔重复能显著降低遗忘率。",
 };
+
+// 客观题夹具：作者产出的练习件（选项 + 正确项 + 命题），字段形状对齐方案 §4。
+const choiceInput = {
+  options: [
+    { unitId: "u1", text: "主动回忆比重复阅读更能延长保持" },
+    { unitId: "u2", text: "重复阅读比重复提取更能延长保持" },
+    { unitId: "u3", text: "复习间隔对长期记忆没有影响" },
+  ],
+  correctUnitId: "u1",
+};
+
+const trueFalseInput = {
+  proposition: "间隔越长的复习对长期记忆一定越好。",
+  expected: false,
+};
+
+const matchingInput = {
+  pairs: [
+    { leftId: "l1", leftText: "提", rightId: "r1", rightText: "提起灭火器" },
+    { leftId: "l2", leftText: "拔", rightId: "r2", rightText: "拔掉保险销" },
+    { leftId: "l3", leftText: "握", rightId: "r3", rightText: "握住喷管" },
+  ],
+};
+
+/** 合法练习件素材却返回 null 就是实现的问题；显式抛错让类型收窄。 */
+function requireTask<T>(task: T | null): T {
+  if (!task) throw new Error("合法练习件素材不应返回 null");
+  return task;
+}
 
 test("splitClaimIntoTokens：按标点切句，短 claim 回退短语切分", () => {
   const tokens = splitClaimIntoTokens(target.claim);
@@ -69,6 +101,121 @@ test("generateRepairTask：挖最长词 + 干扰项，solution 签名为 replace
   // 正确选项 label 是 claim 中的词；选项 id 是哈希派生（不泄露位置）。
   const correctOptionId = accepted.split(":").slice(3).join(":");
   assert.ok(target.claim.includes(task.replacementOptionLabels[correctOptionId]));
+});
+
+test("generateChoiceTask：正确项只活在私有 solution，public 载荷带不出去", () => {
+  const task = requireTask(generateChoiceTask(choiceInput));
+  // 正确项 id 当然是 public 选项之一（学生要点它）；要保证的是**分辨不出**它是正确项：
+  // 载荷里只有 kind 与选项 id 列表，没有任何指向对错的字段，且每个选项都同样有标签。
+  assert.deepEqual(Object.keys(task.interaction).sort(), ["kind", "publicOptionIds"]);
+  assert.equal(task.interaction.publicOptionIds.includes(task.solution.correctOptionId), true);
+  for (const id of task.interaction.publicOptionIds) {
+    assert.ok(task.publicOptionLabels[id], `选项 ${id} 缺少标签`);
+  }
+  assert.match(task.solution.correctOptionId, /^opt:[0-9a-f]{10}$/);
+  assert.deepEqual(
+    [...task.interaction.publicOptionIds].sort(),
+    [...task.interaction.publicOptionIds],
+    "选项序列按内容哈希定序：与作者书写顺序无关",
+  );
+  // option id 由内容哈希派生：不含 unitId，也不编码位置。
+  for (const id of task.interaction.publicOptionIds) {
+    assert.match(id, /^opt:[0-9a-f]{10}$/);
+    assert.equal(/u\d/.test(id), false);
+  }
+  // 作者把正确项写在第一个还是最后一个，public 序列都必须一样 ——
+  // 否则"选项顺序"本身就把答案泄出去了。
+  assert.deepEqual(
+    requireTask(generateChoiceTask({
+      ...choiceInput,
+      options: [...choiceInput.options].reverse(),
+    })).interaction.publicOptionIds,
+    task.interaction.publicOptionIds,
+  );
+});
+
+test("assessStructuredPayload：choice 命中 covered、错选 missing，且理由不漏答案", () => {
+  const task = requireTask(generateChoiceTask(choiceInput));
+  const correctLabel = task.publicOptionLabels[task.solution.correctOptionId];
+  const wrongOptionId = task.interaction.publicOptionIds.find(
+    (id) => id !== task.solution.correctOptionId,
+  )!;
+
+  assert.equal(
+    assessStructuredPayload("choice", { selectedOptionId: task.solution.correctOptionId }, task.solution).verdict,
+    "covered",
+  );
+  const missed = assessStructuredPayload("choice", { selectedOptionId: wrongOptionId }, task.solution);
+  assert.equal(missed.verdict, "missing");
+  // 判分理由会原样送到客户端：它一旦提到正确选项，就等于绕开「答案只主动查看才给」的记账。
+  assert.equal(missed.userFacingReason.includes(correctLabel), false);
+  assert.equal(missed.userFacingReason.includes(task.solution.correctOptionId), false);
+  assert.equal(
+    assessStructuredPayload("choice", {}, task.solution).verdict,
+    "not_assessable",
+  );
+});
+
+test("assessStructuredPayload：true_false 判对/判错，理由不倒出该判什么", () => {
+  const task = generateTrueFalseTask(trueFalseInput);
+  assert.equal(task.interaction.kind, "true_false");
+  // 注意不能用 "JSON 里不含 true/false 字样" 来表达防泄题 —— kind 字面量
+  // `true_false` 自己就同时含这两个词（第一版断言就是这么写错的）。
+  // 真正的合同是：public 只有命题本身，判定只活在私有 solution。
+  assert.deepEqual(Object.keys(task.interaction).sort(), ["kind", "proposition"]);
+  assert.equal(task.interaction.proposition, trueFalseInput.proposition.trim());
+
+  assert.equal(
+    assessStructuredPayload("true_false", { answer: task.solution.expected }, task.solution).verdict,
+    "covered",
+  );
+  const wrong = assessStructuredPayload(
+    "true_false", { answer: !task.solution.expected }, task.solution,
+  );
+  assert.equal(wrong.verdict, "missing");
+  assert.equal(
+    assessStructuredPayload("true_false", {}, task.solution).verdict,
+    "not_assessable",
+  );
+});
+
+test("generateMatchingTask：public 只给两列，连线关系留在私有解里", () => {
+  const task = requireTask(generateMatchingTask(matchingInput));
+  assert.deepEqual(Object.keys(task.interaction).sort(), [
+    "kind", "publicLabels", "publicLeftIds", "publicRightIds",
+  ]);
+  // 两列各自按内容哈希定序：列内顺序与配对关系无关，所以"第 i 个对第 i 个"
+  // 这种一眼看穿的排布不会出现（作者按 pairs 顺序写也一样）。
+  assert.deepEqual(
+    [...task.interaction.publicLeftIds].sort(),
+    task.interaction.publicLeftIds,
+  );
+  assert.deepEqual(
+    [...task.interaction.publicRightIds].sort(),
+    task.interaction.publicRightIds,
+  );
+  for (const pair of task.solution.correctPairs) {
+    assert.ok(task.interaction.publicLeftIds.includes(pair.leftId));
+    assert.ok(task.interaction.publicRightIds.includes(pair.rightId));
+  }
+});
+
+test("assessStructuredPayload：matching 全对 covered、部分 partial、错配不涨", () => {
+  const task = requireTask(generateMatchingTask(matchingInput));
+  assert.equal(
+    assessStructuredPayload("matching", { assignments: task.solution.correctPairs }, task.solution).verdict,
+    "covered",
+  );
+  const swapped = task.solution.correctPairs.map((pair, index) => ({
+    leftId: pair.leftId,
+    rightId: task.solution.correctPairs[(index + 1) % task.solution.correctPairs.length].rightId,
+  }));
+  const partial = assessStructuredPayload("matching", { assignments: swapped }, task.solution);
+  assert.ok(["partial", "missing"].includes(partial.verdict));
+  assert.equal(
+    assessStructuredPayload("matching", { assignments: [] }, task.solution).verdict,
+    "not_assessable",
+  );
 });
 
 test("assessStructuredPayload：ordering 全对/部分/空", () => {

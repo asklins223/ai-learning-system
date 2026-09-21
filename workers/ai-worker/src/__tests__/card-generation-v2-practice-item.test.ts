@@ -1,0 +1,129 @@
+/**
+ * v23 练习件的两道确定性闸（sanitizePracticeItem）。
+ *
+ * 全部不花模型：这里验的是"模型交来的东西能不能留"，不是"模型会不会交"。
+ * 后者要靠 §5 那一次真跑验收。
+ */
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import { sanitizePracticeItem, authorObjectiveDraftSchema } from "../card-generation-v2/providers.ts";
+import type { PracticeItemV2 } from "@ailearn/shared/card-generation-v2-contracts";
+
+/** author 输出的最小合法 objective（v24 验收只用它的 practiceItem 键）。 */
+const objectiveFixture = {
+  objectiveStatement: "复述灭火器的四个使用步骤",
+  publicSummary: "提、拔、握、压四步的顺序与含义",
+  conceptLabel: "灭火器使用四步",
+  knowledgeForm: "procedure",
+  preferredTaskIntents: ["recall"],
+  canonicalAnswer: {
+    kind: "ordered_steps",
+    steps: [
+      { unitId: "s1", text: "提起灭火器" },
+      { unitId: "s2", text: "拔掉保险销" },
+    ],
+  },
+  learningSupport: { explanation: "四步顺序不可颠倒" },
+  rubric: {
+    version: 2,
+    units: [{
+      rubricUnitId: "r1", facet: "recall", criterion: "顺序正确", required: true,
+      answerUnitIds: ["s1"],
+    }],
+    passingPolicy: { requireAllRequiredUnits: true, allowContradiction: false },
+  },
+  relations: [],
+  difficulty: "introductory",
+  evidenceRefIds: [],
+  practiceItem: null,
+};
+
+const EVID = "11111111-1111-4111-8111-111111111111";
+
+function choice(overrides: Partial<Extract<PracticeItemV2, { kind: "single_choice" }>> = {}) {
+  return {
+    kind: "single_choice" as const,
+    options: [
+      { unitId: "opt-1", text: "主动回忆更能延长保持", evidenceRefIds: [EVID] },
+      { unitId: "opt-2", text: "重复阅读更能延长保持", evidenceRefIds: [EVID] },
+    ],
+    correctUnitId: "opt-1",
+    ...overrides,
+  };
+}
+
+/**
+ * v24：practiceItem 从可省略改成**必填可空**。
+ * 这条测试就是那处改动的验收：省略键必须被拒，显式 null 必须通过。
+ */
+describe("authorObjectiveDraftSchema v24", () => {
+  it("交出合法的 objective 后，删掉 practiceItem 键就不通过", () => {
+    const withNull = { ...objectiveFixture, practiceItem: null };
+    assert.equal(authorObjectiveDraftSchema.safeParse(withNull).success, true, "显式 null 应当通过");
+
+    const withoutKey: Record<string, unknown> = { ...objectiveFixture };
+    delete withoutKey.practiceItem;
+    const parsed = authorObjectiveDraftSchema.safeParse(withoutKey);
+    assert.equal(parsed.success, false, "省略 practiceItem 键必须被拒（v24 的核心）");
+    if (!parsed.success) {
+      assert.ok(
+        parsed.error.issues.some((issue) => issue.path.join(".") === "practiceItem"),
+        "拒绝原因必须指到 practiceItem 本身",
+      );
+    }
+  });
+});
+
+describe("sanitizePracticeItem", () => {
+  it("没交练习件就是没有，不报错也不伪造", () => {
+    assert.equal(sanitizePracticeItem(undefined, {}), undefined);
+  });
+
+  it("干扰项都有证据出处的选择题原样留下", () => {
+    const item = choice();
+    assert.equal(sanitizePracticeItem(item, {}), item);
+  });
+
+  it("正确项指向一个没给出过的选项 → 整件丢掉（这种题永远判不对）", () => {
+    assert.equal(sanitizePracticeItem(choice({ correctUnitId: "opt-9" }), {}), undefined);
+  });
+
+  it("干扰项既无证据、本卡也没有 misconception → 丢掉", () => {
+    const item = choice({
+      options: [
+        { unitId: "opt-1", text: "甲", evidenceRefIds: [EVID] },
+        { unitId: "opt-2", text: "乙", evidenceRefIds: [] },
+      ],
+    });
+    assert.equal(sanitizePracticeItem(item, {}), undefined);
+  });
+
+  it("干扰项没写证据，但本卡有 misconception（有证据的常见误解）→ 留下", () => {
+    const item = choice({
+      options: [
+        { unitId: "opt-1", text: "甲", evidenceRefIds: [EVID] },
+        { unitId: "opt-2", text: "乙" },
+      ],
+    });
+    assert.equal(sanitizePracticeItem(item, { misconception: "常见误解是把重读当成回忆" }), item);
+  });
+
+  it("排序题的正确顺序不是单元集合的全排列 → 丢掉", () => {
+    const item = {
+      kind: "ordering" as const,
+      units: [
+        { unitId: "u1", text: "第一步", evidenceRefIds: [EVID] },
+        { unitId: "u2", text: "第二步", evidenceRefIds: [EVID] },
+      ],
+      correctUnitOrder: ["u1", "u3"],
+    };
+    assert.equal(sanitizePracticeItem(item, {}), undefined);
+  });
+
+  it("判断题的命题没有证据 → 丢掉（一条无出处的断言不该拿去判对错）", () => {
+    const noEvidence = { kind: "true_false" as const, proposition: "间隔越长一定越好", expected: false };
+    assert.equal(sanitizePracticeItem(noEvidence, {}), undefined);
+    const withEvidence = { ...noEvidence, evidenceRefIds: [EVID] };
+    assert.deepEqual(sanitizePracticeItem(withEvidence, {}), withEvidence);
+  });
+});

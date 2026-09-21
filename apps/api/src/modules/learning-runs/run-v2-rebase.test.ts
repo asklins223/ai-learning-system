@@ -47,6 +47,7 @@ function makeV2Target(overrides: Partial<PlannerV2Target> = {}): PlannerV2Target
     canonicalAnswer: answer,
     scoringRubric: makeRubric(),
     relations,
+    practiceItem: null,
     evidence: [{ bindingId: "11111111-1111-4111-8111-111111111111", targetUnit: { kind: "answer", answerUnitId: "a1" }, evidenceSnapshotId: "22222222-2222-4222-8222-222222222222", evidenceSnapshotHash: "c".repeat(64), expectedEvidenceEligibilityEpoch: 1, relation: "entails", supportStrength: "direct", bindingHash: "d".repeat(64), semanticSupportReportId: "33333333-3333-4333-8333-333333333333", semanticSupportReportHash: "e".repeat(64) }],
     publishedTargetEligibility: "eligible",
     ...overrides,
@@ -100,6 +101,64 @@ test("planRun v2：结构题只作练习，不能用单一结构验证换取 mas
   assert.equal(plan.primaryVariant.interaction.kind, "ordering");
   assert.equal(plan.tasks[0].purpose, "practice");
   assert.equal(plan.tasks[0].templateTrustCeiling, "practice_only");
+});
+
+test("planRun v2：作者练习件在客户端默认偏好下就成为选择题变体", () => {
+  // 这是 2026-09-21 那条"从没见过非主观题"的正题：客户端一律发 adaptive/text
+  // （action-resolver.ts:39 硬编码），所以练习件**不能**只在 responsePreference
+  // === "structured" 时才生效，否则它永远见天无日。
+  const plan = planRun(makeBaseTarget(makeV2Target({
+    practiceItem: {
+      kind: "single_choice",
+      options: [
+        { unitId: "u1", text: "主动回忆比重复阅读更能延长保持" },
+        { unitId: "u2", text: "重复阅读比重复提取更能延长保持" },
+      ],
+      correctUnitId: "u1",
+    },
+  })), {
+    runId: "55555555-5555-4555-8555-555555555555",
+    goal: "stabilize",
+    responsePreference: "text",
+    timeBudgetSeconds: 180,
+  });
+
+  const choice = plan.alternativeVariants.find(
+    (variant) => variant.interaction.kind === "single_choice",
+  );
+  assert.ok(choice, "练习件存在时必须给出选择题变体");
+  // 正式任务仍是产出型：选择题只作练习，不换掌握（文档 §2 硬约束）。
+  assert.equal(plan.primaryVariant.interaction.kind, "text_response");
+  // 正确项只活在私有闭包里，public 载荷里只有选项本身。
+  const closure = plan.closures[choice.variantId];
+  assert.equal(
+    Object.keys(choice.interaction).sort().join(","),
+    "kind,publicOptionIds,publicOptionLabels",
+  );
+  assert.ok(closure.solution && (closure.solution as { kind?: string }).kind === "choice");
+});
+
+test("planRun v2：自相矛盾的练习件不出题（宁可没有，也不给一道判不对的题）", () => {
+  const plan = planRun(makeBaseTarget(makeV2Target({
+    practiceItem: {
+      kind: "single_choice",
+      options: [
+        { unitId: "u1", text: "甲" },
+        { unitId: "u2", text: "乙" },
+      ],
+      // 正确项指向一个根本没给出的选项
+      correctUnitId: "u9",
+    },
+  })), {
+    runId: "66666666-6666-4666-8666-666666666666",
+    goal: "stabilize",
+    responsePreference: "text",
+    timeBudgetSeconds: 180,
+  });
+  assert.equal(
+    plan.alternativeVariants.some((variant) => variant.interaction.kind === "single_choice"),
+    false,
+  );
 });
 
 test("planRun v2：只把 required rubric 写入必须覆盖的评估合同", () => {

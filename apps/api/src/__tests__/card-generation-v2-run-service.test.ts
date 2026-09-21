@@ -240,6 +240,9 @@ describe("createGenerationRunV2", () => {
                 limit: async () => [], // no existing
                 // 「上一个已激活批次」查询走 orderBy().limit()
                 orderBy: () => ({ limit: async () => [] }),
+                // 在制守卫现在直接 await where()（一次取回全部在制行），
+                // 所以这条链本身也要可 await。
+                then: (resolve: (value: unknown) => void) => Promise.resolve([]).then(resolve),
               }),
             };
           }
@@ -391,6 +394,27 @@ describe("createGenerationRunV2", () => {
     assert.ok(
       inserted.some((values) => values.table === cardGenerationRunsV2),
       "上一个批次已经救不回来时，应当允许重新生成",
+    );
+  });
+
+  it("在审的旧批次和已死的批次并存时，仍然算在制", async () => {
+    // 2026-09-21 真实生成实测抓到：守卫原先只取**一行**判死活，而这一行是 Postgres
+    // 任意给的（无 ORDER BY）。同篇笔记既有救不回来的失败批次、又有一批还没审完的
+    // 候选时，只要先摸到失败那行就放行，于是新旧两批 review_ready 并存——正是用户
+    // 抱怨的"旧卡不废弃"。判据必须看**全部**在制行：只要有一行还活着就挡住。
+    setupRunQuerySequence([[], [], [
+      { id: RUN_ID, status: "needs_attention", errorCode: "generation_failed" },
+      { id: "run-review-ready", status: "review_ready", errorCode: null },
+    ], []]);
+
+    await assert.rejects(
+      () => createGenerationRunV2(
+        { workspaceId: WORKSPACE_ID, userId: USER_ID },
+        NOTE_VERSION_ID,
+        makeBaseRequest(),
+        "test-key-mixed-batches",
+      ),
+      (error: unknown) => (error as { code?: string }).code === "note_generation_in_flight",
     );
   });
 
