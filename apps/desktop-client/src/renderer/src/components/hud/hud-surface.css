@@ -6038,3 +6038,102 @@
   .hud-surface .notebook .note-image-upload__name { max-width: 32%; }
   .hud-surface .notebook .note-image-upload__size { display: none; }
 }
+
+/* ── 常驻空间胶囊 + 共享外发明示（批次 5 / 3）────────────────────────────
+   这两组规则原本被写在文件里一个 @media 块的内部，1440 视口下整段不生效：
+   胶囊拿不到自己的宽度与底色，文字溢出到药丸外面；明示条也退化成无样式段落。
+   这里在顶层重写一遍（同一选择器、源码顺序在后，因此稳定覆盖媒体查询里那份）。
+   教训记进注释本身：这段的位置是量出来的，不是读样式表读出来的。 */
+.hud-surface .room-control > button.room-control-space {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-start;
+  width: auto;
+  max-width: 240px;
+  /* 药丸容器是定宽的 flex row，槽位默认会被压缩；`flex: 0 0 auto` 实测挡不住
+     （胶囊仍被压到 88px、文字溢出到胶囊外）。`min-width: max-content` 才是硬保证。 */
+  min-width: max-content;
+  padding: 0 13px 0 9px;
+  border: 1px solid rgba(255, 244, 226, 0.22);
+  border-radius: 999px;
+  background: rgba(41, 29, 22, 0.86);
+  box-shadow: var(--hud-shadow-small);
+  color: rgba(255, 246, 234, 0.92);
+}
+
+.hud-surface .room-control > button.room-control-space:hover {
+  background: rgba(52, 37, 27, 0.92);
+}
+
+.hud-surface .room-control > button.room-control-space.active {
+  border-color: rgba(255, 241, 168, 0.5);
+  background: rgba(255, 241, 168, 0.14);
+}
+
+.hud-surface .room-control-space__seal {
+  display: grid;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  color: rgba(255, 231, 178, 0.9);
+}
+
+.hud-surface .room-control-space__seal > svg {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+}
+
+/* 两行都不许换行：名字长了用省略号；角色是一段不可拆的话。 */
+.hud-surface .room-control-space__text {
+  display: grid;
+  min-width: max-content;
+  justify-items: start;
+  gap: 1px;
+  line-height: 1.15;
+  text-align: left;
+}
+
+.hud-surface .room-control-space__text b {
+  max-width: 168px;
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hud-surface .room-control-space__text small {
+  font-size: 8.5px;
+  opacity: 0.74;
+  white-space: nowrap;
+}
+
+/* 只读态转冷色，但角色文字始终在——a11y 合同要求颜色不能是唯一载体。 */
+.hud-surface .room-control > button.room-control-space[data-readonly="true"] {
+  border-color: rgba(159, 192, 216, 0.34);
+  color: #dfe9f2;
+}
+
+.hud-surface .room-control > button.room-control-space[data-readonly="true"] .room-control-space__seal {
+  color: #9fc0d8;
+}
+
+.hud-surface .space-sharing-notice {
+  margin: 8px 0 0;
+  padding: 7px 10px;
+  border-left: 3px solid rgba(255, 231, 178, 0.55);
+  border-radius: 0 10px 10px 0;
+  background: rgba(255, 247, 220, 0.09);
+  color: rgba(255, 246, 234, 0.8);
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.hud-surface .space-sharing-notice b {
+  color: #fff1a8;
+  font-weight: 700;
+}
