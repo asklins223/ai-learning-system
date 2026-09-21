@@ -1631,3 +1631,28 @@ parse 不过就是用户屏幕上一片错误，不是"少个数"，所以必须
 而 **2 道选择题里有 1 道只有 2 个选项**（`6f0047e2` 的「间隔重复的核心机制与判断标准」）。
 两个选项的选择题与判断题在作答上是同一件事——点名 `single_choice` 的意义（干扰项要靠证据）
 在这里被写空了。作者侧的选项数量目前没有下限约束，只有 `optionCount ≤ 12` 的上限。
+
+## 45. 这一串收口：本树此刻为真的东西，以及三条判据
+
+三个会话共用一个工作树、共享一个 dev 库，但**代码树不是同一份**。这一节只记"在本树里
+可复跑核对"的结论，避免把别人消息里的状态当成本树的事实。
+
+**本树此刻为真（每条都有命令可复跑）**
+
+| 主张 | 怎么再量一次 |
+|---|---|
+| 候选幂等键已落地并被库接受：`cg_v2_cand_plan_objective_revision_idx (workspace_id, run_id, plan_version, plan_objective_local_id, revision)` | `SELECT indexdef FROM pg_indexes WHERE indexname='cg_v2_cand_plan_objective_revision_idx'` |
+| 头部练习件读数已真机量到：`候选 1 / 6 · 6 张还没决定 · 该配练习件的 3 张都配上了` | 应用入口 书桌 →「恢复候选审核」，读 `.candidate-card__meta`；或 `curl …/candidates` 看 `practiceQuota` |
+| repair 尾段有测试钉住（含两处变异检查） | `workers/ai-worker/src/integration-tests/card-generation-v2-bounded-repair-postgres.integration.ts` |
+| **A1（逐候选落盘）在本树不存在** | `grep -n "ON CONFLICT" workers/ai-worker/src/handlers/card-generation-v2-handler.ts` → 只有读数 upsert 与激活回执两处；候选表没有按目标的冲突目标 |
+| 四列写法的 `ON CONFLICT` 打在本库会失败 | 在回滚事务里对现有行插一次 → `42P10: there is no unique or exclusion constraint matching the ON CONFLICT specification` |
+| 三份消费者 typecheck 为 0 | `apps/api` / `apps/desktop-client`(web) / `workers/ai-worker` 各跑 `npm run typecheck` |
+| api 套件当前 1 失败，且不是本主题引入 | 红在 `note-visibility-read-sites.test.ts`：4 个目标读点没带可见性判据（activity/service.ts:187、companion-conversation/memory-star-map.ts:94、learning-objectives/surface-service.ts:533/597、review/consumer-eligibility.ts:16） |
+
+**三条今天反复救命的判据**（写下来是因为每次都是靠它们才没认错人/没认错树）：
+
+1. **别人报的 commit 号先 `git cat-file -t`**。今天出现的 `0053e388`/`59967fdd`/`42d86a13`/`ddf4d5d5`/`78d7830f` 等在本树 `git log --all` 全部查无——共享的只有那个 dev 库，不共享代码树。凡是"已经落地"的主张，都要落成本树的一条命令。
+2. **迁移与索引以库为准，不以文件清单为准**。`db:migrate` 说 "0 to run" 不代表库对齐：把 journal 每条的 SQL 文件 sha256 与 `__drizzle_migrations.hash` 逐条对，才算真对过。
+3. **唯一键要读未来的写入方**。§38 第一版少了 `plan_version`，"1600 行建得起来"只证明那条路没被走过； replan / repair / 重放三类写者都要过一遍，键才算选对。
+
+**还欠的（不写成已完）**：#33 的下半小节（驱动整条 `critiqueAndFinalizeCandidates`，钉"谁该被修、修复卡被踢出 deck gate 名单、排出 `card_generation_recheck_candidate`"，需要去掉门里 `useLLM` 那一项 + 脚本 pedagogy 判一次 `rewrite`）；`single_choice` 的选项数没有下限（今天量到 2 选项的一道，等于把点名选择题写回判断题）；`⌈N/2⌉` 在 1–2 张小批是否该免；库里两批 D6 的 6 张候选仍未决定。
