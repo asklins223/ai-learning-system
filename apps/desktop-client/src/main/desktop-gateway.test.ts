@@ -1973,8 +1973,18 @@ describe("DesktopGateway · 笔记正文的离线提交（批次 4.4）", () => 
     return contents;
   }
 
-  function harness(options: { offline?: boolean; failStatus?: number; shareScope?: "private" | "shared" } = {}) {
-    const base = baseUpdate();
+  function harness(options: {
+    offline?: boolean;
+    failStatus?: number;
+    shareScope?: "private" | "shared";
+    /**
+     * 复用同一份服务端起点。跨重启的两个网关必须对着**同一份**编码差分：
+     * 各造一份的话两份文档没有共同祖先，合并出来的就是两篇拼在一起，
+     * 那测的是"两个事实源"而不是"重启"。
+     */
+    base?: string;
+  } = {}) {
+    const base = options.base ?? baseUpdate();
     const uploaded: string[] = [];
     let docStateReads = 0;
     let offline = options.offline ?? false;
@@ -2135,5 +2145,79 @@ describe("DesktopGateway · 笔记正文的离线提交（批次 4.4）", () => 
     const receipt = await gateway.syncNoteDocBlocks(NOTE_ID, null, { title: "改了名", titleSource: "manual" });
     expect(receipt.via).toBe("uploaded");
     expect(contentsAfter(base, uploaded[0]!)).toEqual(["标题", "第一段"]);
+  });
+
+  // ─── 本机那一份能跨过重启（决定 7）────────────────────────────────
+
+  it("落盘的那一份接回来后，改出来的增量并回服务端起点上仍是同一篇", async () => {
+    // 这是"重启 = 换一台空机器"的模拟：第二个网关没有任何起点，只拿到盘上那份。
+    // 断言的不是"调用了 seed"，而是**增量并到服务端那份起点上之后不复制块**——
+    // 4.0 实测过的失败模式就是两个没有共同祖先的副本一改就变四块。
+    const first = harness();
+    await first.gateway.connect();
+    await first.gateway.getNoteDocState(NOTE_ID);
+    const saved = first.gateway.noteDocLocalSnapshot(NOTE_ID);
+    expect(saved).not.toBeNull();
+
+    const reopened = harness({ base: first.base });
+    await reopened.gateway.connect();
+    reopened.gateway.restoreNoteDocLocal(NOTE_ID, saved!);
+    await reopened.gateway.syncNoteDocBlocks(NOTE_ID, blocksWith("第一段，重启后又改了"), undefined);
+
+    expect(reopened.uploaded).toHaveLength(1);
+    expect(contentsAfter(reopened.base, reopened.uploaded[0]!)).toEqual([
+      "标题",
+      "第一段，重启后又改了",
+    ]);
+  });
+
+  it("没拿到起点之前没有可落盘的一份：不凭空造一个祖先", async () => {
+    const { gateway } = harness();
+    await gateway.connect();
+    expect(gateway.noteDocLocalSnapshot(NOTE_ID)).toBeNull();
+  });
+
+  it("盘上那份不覆盖已经取到的服务端起点", async () => {
+    const { base, gateway, uploaded } = harness();
+    await gateway.connect();
+    await gateway.getNoteDocState(NOTE_ID);
+    // 一份来自上一次运行的状态：正文是"旧的那一句"。已经拿到过服务端起点时，
+    // 接回来那一步必须被跳过，否则本机旧副本会盖掉服务端的现状——正是这一轮要
+    // 消灭的那类覆盖。
+    const staleDoc = emptyNoteDoc();
+    syncNoteBlocksForEditor(staleDoc, [{ type: "paragraph", content: "旧的那一句" }]);
+    gateway.restoreNoteDocLocal(NOTE_ID, {
+      docState: Buffer.from(snapshotOf(staleDoc)).toString("base64"),
+      pending: [],
+      revision: 1,
+      savedAt: "2026-09-19T00:00:00.000Z",
+      shareScope: "shared",
+    });
+    staleDoc.destroy();
+
+    // 旧副本没进来时，这一次写的增量并回服务端起点上仍是"标题 + 这一句"；
+    // 进了的话会多出一段旧正文，或被差分掉一段——两种都不是这个结果。
+    await gateway.syncNoteDocBlocks(NOTE_ID, blocksWith("第一段，之后改的"), undefined);
+    expect(contentsAfter(base, uploaded[0]!)).toEqual(["标题", "第一段，之后改的"]);
+  });
+
+  it("重启前欠的那几条，接回来之后一次交清", async () => {
+    const { base, gateway, uploaded, goOffline } = harness();
+    await gateway.connect();
+    await gateway.getNoteDocState(NOTE_ID);
+    goOffline();
+    await gateway.syncNoteDocBlocks(NOTE_ID, blocksWith("断网期间改的那一段"), undefined);
+    const saved = gateway.noteDocLocalSnapshot(NOTE_ID)!;
+    expect(saved.pending).toHaveLength(1);
+
+    const reopened = harness({ base });
+    await reopened.gateway.connect();
+    reopened.gateway.restoreNoteDocLocal(NOTE_ID, saved);
+    await reopened.gateway.flushNoteDocPending(NOTE_ID);
+
+    expect(reopened.uploaded).toHaveLength(1);
+    expect(contentsAfter(base, reopened.uploaded[0]!)).toEqual(["标题", "断网期间改的那一段"]);
+    // 交清之后不该再有欠的：否则下一次重启还会把同一批重新发一遍。
+    expect(reopened.gateway.noteDocLocalSnapshot(NOTE_ID)?.pending).toEqual([]);
   });
 });

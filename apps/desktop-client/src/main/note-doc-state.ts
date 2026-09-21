@@ -60,6 +60,13 @@ export type NoteDocState = {
   submitBlocks: (blocks: NoteDocBlock[] | null, title?: { title: string; titleSource: string }) => string | null;
   /** 界面要看的样子：从文档投影，不是从界面状态回推。 */
   view: () => NoteDocView;
+  /**
+   * 整份状态编出来，给本机落盘用（重启后靠它接着差分）。
+   *
+   * 注意这**不是**一条待发送增量：它是"这一篇现在本机看到的样子"。两者弄混的话，
+   * 开机时会把整个空间的正文重送一遍，而其中别人的那部分是远端写的。
+   */
+  encodeState: () => string;
   dispose: () => void;
 };
 
@@ -129,6 +136,7 @@ export function createNoteDocState(): NoteDocState {
         titleSource: title?.titleSource ?? "auto",
       };
     },
+    encodeState: () => b64(Y.encodeStateAsUpdate(doc)),
     dispose: () => {
       collecting = false;
       batch = [];

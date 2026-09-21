@@ -28,6 +28,7 @@ import {
 } from '../shared/window-geometry'
 import { registerM1DesktopIpc } from './desktop-ipc'
 import { FilePendingReturnMarkerStore } from './pending-return-marker-store'
+import { FileNoteDocCacheStore } from './note-doc-cache-store'
 import { guardProcessOutputStreams } from './output-stream-guard'
 
 // 主进程的第一件事：stdout/stderr 的写失败（终端关掉后的 EIO/EPIPE）不能再升级成
@@ -468,6 +469,10 @@ app.whenReady().then(async () => {
     },
     pendingReturnMarkerStore: new FilePendingReturnMarkerStore(
       resolve(app.getPath('userData'), 'pending-return-markers-v2.json')
+    ),
+    // 决定 7：断网可编辑要能跨过重启，所以这份是本机的那一篇正文，落盘。
+    noteDocCache: new FileNoteDocCacheStore(
+      resolve(app.getPath('userData'), 'note-doc-cache-v1.json')
     )
   })
 

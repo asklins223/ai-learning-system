@@ -81,6 +81,7 @@ import {
   createNoteDocState,
   mergeNoteDocUpdates,
   type NoteDocState,
+  type NoteDocView,
 } from "./note-doc-state.ts";
 import type { NoteDocBlock } from "./note-doc-blocks.ts";
 import {
@@ -438,6 +439,11 @@ type NoteDocLocalSession = {
   savedAt: string;
   /** 攒着待重发的增量，按提交顺序。 */
   pending: string[];
+  /**
+   * 最后一次看到这篇归属时留下的那一位。离线打开这篇时"要不要建长连接"以它为准——
+   * 猜不得：猜成 shared 会给一篇「仅自己可见」的笔记开一条实时连接。
+   */
+  shareScope: NoteShareScopeV1 | null;
 };
 
 /**
@@ -453,6 +459,7 @@ export type NoteDocSyncOutcome = {
   savedAt: string;
 };
 
+/** 没网与"服务在但没应答"是同一类：本机那份还能接着写，权限类错误不能。 */
 function isOfflineFailure(error: unknown): boolean {
   return error instanceof DesktopGatewayFailure
     && (error.code === "api_unavailable" || error.code === "network_timeout");
@@ -3880,6 +3887,9 @@ export class DesktopGateway {
       session.revision = parsed.data.revision;
       session.savedAt = parsed.data.savedAt;
     }
+    // 归属每次都记：一篇从 shared 撤回成 private 的笔记，本机下一次离线打开时
+    // 要按最新那一位决定建不建连接。
+    session.shareScope = parsed.data.shareScope;
     return {
       ...session.state.view(),
       revision: parsed.data.revision,
@@ -3926,6 +3936,9 @@ export class DesktopGateway {
       session.seeded = true;
       session.revision = parsed.data.revision;
       session.savedAt = parsed.data.savedAt;
+      // 归属也一并留下：这条路上没走过 `getNoteDocState`，不落这一位的话，
+      // 本机那份永远"不可持久化"，离线队列又只能在内存里活一次。
+      session.shareScope = parsed.data.shareScope;
     }
     const update = session.state.submitBlocks(blocks, title);
     if (update !== null) {
@@ -3976,6 +3989,60 @@ export class DesktopGateway {
     }
   }
 
+  /**
+   * 本机这一篇的持久快照：整份文档状态 + 还没交出去的增量。
+   *
+   * 由 IPC 那一侧落盘——身份（哪个账号、哪个空间）只有边界层知道，网关不该自己
+   * 持有一份可能过期的判据（这一轮审查里同类的问题出现过好几次）。
+   */
+  noteDocLocalSnapshot(noteId: string): {
+    docState: string;
+    pending: string[];
+    revision: number;
+    savedAt: string;
+    shareScope: NoteShareScopeV1;
+  } | null {
+    const session = this.noteDocLocalSessions.get(this.safeUuid(noteId));
+    // 认的是"这一份有没有一个来自服务端的祖先"（`shareScope` 只在拿到服务端起点
+    // 或从盘上接回来时才有值），不认 `seeded`：从盘上接回来的那份同样该被再次落盘，
+    // 否则第一次重启就把欠的增量弄丢了。
+    if (!session || !session.shareScope) return null;
+    return {
+      docState: session.state.encodeState(),
+      pending: [...session.pending],
+      revision: session.revision,
+      savedAt: session.savedAt,
+      shareScope: session.shareScope,
+    };
+  }
+
+  /**
+   * 开机后把本机那一份接回来。
+   *
+   * 顺序上是"先并本机、再并服务端给的起点"，两个方向都是 CRDT 合并，不是谁覆盖谁：
+   * 断网期间别人改过的部分会从服务端进来，我改的部分在 `pending` 里等着交。
+   * 因此这里**不**把 `seeded` 置真——服务端的起点随后仍要并一次。
+   */
+  restoreNoteDocLocal(
+    noteId: string,
+    snapshot: {
+      docState: string;
+      pending: string[];
+      revision: number;
+      savedAt: string;
+      shareScope: NoteShareScopeV1;
+    },
+  ): void {
+    const safeNoteId = this.safeUuid(noteId);
+    const session = this.noteDocLocalSession(safeNoteId);
+    if (session.seeded) return;
+    session.state.seed(snapshot.docState);
+    session.pending = snapshot.pending.slice(0, NOTE_DOC_PENDING_MAX);
+    session.revision = snapshot.revision;
+    session.savedAt = snapshot.savedAt;
+    session.shareScope = snapshot.shareScope;
+  }
+
   /** 切空间 / 被移出时调用：另一个空间的正文绝不能接着往这篇上差分。 */
   dropNoteDocLocalSessions(): void {
     for (const session of this.noteDocLocalSessions.values()) session.state.dispose();
@@ -3991,6 +4058,7 @@ export class DesktopGateway {
       revision: 0,
       savedAt: "",
       pending: [],
+      shareScope: null,
     };
     this.noteDocLocalSessions.set(noteId, created);
     return created;

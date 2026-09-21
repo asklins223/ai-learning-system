@@ -15,6 +15,11 @@ import {
   type RequestMetaV1,
 } from "@ailearn/shared/desktop-ipc-contracts";
 import type { DesktopGateway } from "./desktop-gateway";
+import {
+  MemoryNoteDocCacheStore,
+  type NoteDocCacheEntryV1,
+  type NoteDocCacheStore,
+} from "./note-doc-cache-store.ts";
 
 type InvokeHandler = (
   event: { readonly sender: unknown; readonly senderFrame?: { readonly url: string } },
@@ -60,11 +65,16 @@ function handler(channel: string): InvokeHandler {
  * `workspaceType` / `role` 是门控的两条判据；`send` 收的是 renderer 那一侧真正收到的
  * 事件信封，所以断言落在"送达"而不是"调用"。
  */
-async function setup(session: { workspaceType: "personal" | "collaborative"; role: "owner" | "member" }) {
+async function setup(session: {
+  workspaceType: "personal" | "collaborative";
+  role: "owner" | "member";
+  noteDocCache?: NoteDocCacheStore;
+}) {
   // `registerM1DesktopIpc` 一个模块实例只准注册一次（重复注册会抛错，这是有意的），
   // 所以每个用例换一个干净的模块实例，而不是共享同一张订阅表。
   vi.resetModules();
   const { registerM1DesktopIpc } = await import("./desktop-ipc");
+  const noteDocCache = session.noteDocCache ?? new MemoryNoteDocCacheStore();
   const streamHandle = {
     // 返回一条增量 = 这次提交确实改了文档（回执 `stream`）；返回 null 是"没改动"。
     applyBlocks: vi.fn(() => "AA==" as string | null),
@@ -87,6 +97,17 @@ async function setup(session: { workspaceType: "personal" | "collaborative"; rol
     // 默认给 shared，让"该建连的场景"继续测到建连；不放心的地方另有专门用例。
     shareScope: "shared" as const,
   }));
+  // 本机那一份的样子由网关管，这里给一套能记账的替身：网关侧的真实行为在
+  // `desktop-gateway.test.ts` 里对着网关本身验，这里只验边界层用对了它。
+  const localDoc = {
+    docState: "GIVERAIAggISAEugEIggEiuAQ=" as string,
+    pending: [] as string[],
+    revision: 3,
+    savedAt: "2026-09-21T00:00:00.000Z",
+    shareScope: "shared" as const,
+  };
+  const restored: Array<{ noteId: string; snapshot: Record<string, unknown> }> = [];
+  const noteDocLocalSnapshot = vi.fn(() => ({ ...localDoc }));
   const syncViaGateway = vi.fn(async () => ({ via: "uploaded" as const, revision: 11, savedAt: "2026-09-21T00:00:00.000Z" }));
   const send = vi.fn();
   const fakeWindow = {
@@ -123,11 +144,17 @@ async function setup(session: { workspaceType: "personal" | "collaborative"; rol
     // 在 `desktop-gateway.test.ts` 里对着网关本身验。
     flushNoteDocPending: vi.fn(async () => undefined),
     dropNoteDocLocalSessions: vi.fn(() => undefined),
+    logout: vi.fn(async () => ({ loggedOut: true as const, serverRevoked: true })),
     getNoteDocState,
+    noteDocLocalSnapshot,
+    restoreNoteDocLocal: vi.fn((noteId: string, snapshot: Record<string, unknown>) => {
+      restored.push({ noteId, snapshot });
+    }),
   } as unknown as DesktopGateway;
 
   registerM1DesktopIpc({
     gateway,
+    noteDocCache,
     env: { AILEARN_DOMAIN_SCHEMA_REVISION: "domain-v2-test" },
     resolveWindow: () => fakeWindow,
     getWindowState: () => ({ state: "visible", revision: 1 }),
@@ -136,7 +163,18 @@ async function setup(session: { workspaceType: "personal" | "collaborative"; rol
 
   const event = { sender: {}, senderFrame: { url: "ailearn://renderer/" } };
   await handler(DESKTOP_IPC_CHANNELS.authGetState)(event, { meta });
-  return { event, streamHandle, watchNoteDocument, uploadNoteDocUpdate, syncViaGateway, getNoteDocState, send };
+  return {
+    event,
+    streamHandle,
+    watchNoteDocument,
+    uploadNoteDocUpdate,
+    syncViaGateway,
+    getNoteDocState,
+    send,
+    noteDocCache,
+    localDoc,
+    restored,
+  };
 }
 
 const settle = () => new Promise((resolve) => setImmediate(resolve));
@@ -305,5 +343,89 @@ describe("笔记协同的 IPC 通道", () => {
     });
     expect(oversized.ok).toBe(false);
     expect(uploadNoteDocUpdate).not.toHaveBeenCalled();
+  });
+
+  // ─── 本机那一份的落盘（决定 7：断网可编辑要能跨过重启）───────────────
+
+  const SUBJECT_ID = "11111111-1111-4111-8111-111111111111";
+  const SPACE_ID = "22222222-2222-4222-8222-222222222222";
+  const cacheKey = { subjectId: SUBJECT_ID, workspaceId: SPACE_ID, noteId: NOTE_ID };
+
+  const seedEntry = async (over: Partial<NoteDocCacheEntryV1> = {}): Promise<NoteDocCacheEntryV1> => ({
+    docState: "3P9s6f7v0d0zq3K0ZjBvbw==",
+    pending: ["kQQBoAEKYAAAAAAAAAAAAAA="],
+    revision: 2,
+    savedAt: "2026-09-20T00:00:00.000Z",
+    shareScope: "shared",
+    epochAtRest: 4,
+    updatedAt: "2026-09-20T00:00:00.000Z",
+    ...over,
+  });
+
+  const seedCache = async (store: NoteDocCacheStore, over: Partial<NoteDocCacheEntryV1> = {}) => {
+    await store.set(cacheKey, await seedEntry(over));
+  };
+
+  it("打开一篇：读到的是服务端那份，落盘的也是这一份的状态", async () => {
+    const store = new MemoryNoteDocCacheStore();
+    const { event, noteDocCache } = await setup({ workspaceType: "personal", role: "owner", noteDocCache: store });
+    const opened = await handler(DESKTOP_IPC_CHANNELS.noteDocState)(event, { meta, noteId: NOTE_ID });
+    expect(JSON.stringify(requireData(opened).blocks)).toContain("正文");
+
+    const stored = await store.get(cacheKey);
+    expect(stored?.docState).toBeTruthy();
+    expect(stored?.shareScope).toBe("shared");
+    // 刚跟服务端对过一次账，队列必须是空的——留着旧队列会让重启后白重发一批。
+    expect(stored?.pending).toEqual([]);
+  });
+
+  it("盘上已经有一份时，先把它接回本机文档，再并服务端的起点", async () => {
+    const store = new MemoryNoteDocCacheStore();
+    await seedCache(store);
+    const { event, restored } = await setup({ workspaceType: "collaborative", role: "owner", noteDocCache: store });
+    await handler(DESKTOP_IPC_CHANNELS.noteDocState)(event, { meta, noteId: NOTE_ID });
+
+    expect(restored).toHaveLength(1);
+    expect(restored[0].snapshot).toMatchObject({ docState: "3P9s6f7v0d0zq3K0ZjBvbw==", pending: ["kQQBoAEKYAAAAAAAAAAAAAA="] });
+  });
+
+
+
+
+  it("写一次就把本机那份重写一遍：queued 的那些不留在内存里过夜", async () => {
+    const store = new MemoryNoteDocCacheStore();
+    const { event } = await setup({ workspaceType: "personal", role: "owner", noteDocCache: store });
+    await handler(DESKTOP_IPC_CHANNELS.noteDocSyncBlocks)(event, {
+      meta,
+      commandId: "command-sync-persist",
+      noteId: NOTE_ID,
+      blocks: [{ type: "paragraph", content: "断网期间改的那一段" }],
+    });
+    expect(await store.get(cacheKey)).not.toBeNull();
+  });
+
+  it("退登把这台机器上的正文清掉", async () => {
+    const store = new MemoryNoteDocCacheStore();
+    await seedCache(store);
+    const { event } = await setup({ workspaceType: "personal", role: "owner", noteDocCache: store });
+    await handler(DESKTOP_IPC_CHANNELS.authLogout)(event, { meta });
+    expect(await store.get(cacheKey)).toBeNull();
+  });
+
+  it("上一次是别人留下的那一份，不会被接进这次的文档", async () => {
+    // 这台机器的 userData 是共用的：缓存键少了 subjectId 的话，另一个人打开同一篇
+    // 就会把别人断网期间写的正文接进自己的文档，然后当作自己的改动交回服务端。
+    // 归属判据（批次 4.5）在服务器上挡得住读，挡不住这条本机路径。
+    const store = new MemoryNoteDocCacheStore();
+    await store.set({ ...cacheKey, subjectId: "88888888-8888-4888-8888-888888888888" }, await seedEntry());
+    const { event, restored } = await setup({ workspaceType: "personal", role: "owner", noteDocCache: store });
+    await handler(DESKTOP_IPC_CHANNELS.noteDocState)(event, { meta, noteId: NOTE_ID });
+    expect(restored).toHaveLength(0);
+    // 正向对照：同一篇换个身份（自己的那份）时确实会接回来，上一条不是因为根本没读盘。
+    const own = new MemoryNoteDocCacheStore();
+    await own.set(cacheKey, await seedEntry());
+    const second = await setup({ workspaceType: "personal", role: "owner", noteDocCache: own });
+    await handler(DESKTOP_IPC_CHANNELS.noteDocState)(second.event, { meta, noteId: NOTE_ID });
+    expect(second.restored).toHaveLength(1);
   });
 });

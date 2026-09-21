@@ -245,6 +245,12 @@ import { createSessionCredentialStore } from "./session-credential-store";
 import { FormalAssessmentGuard, type CompanionDeliveryKind } from "./formal-assessment-guard";
 import { recoverPendingReturnMarker, resolveLearningRunReturn, routeForLearningRunReturn } from "./learning-run-return-resolver";
 import { MemoryPendingReturnMarkerStore, type PendingReturnMarkerStore } from "./pending-return-marker-store";
+import {
+  MemoryNoteDocCacheStore,
+  type NoteDocCacheEntryV1,
+  type NoteDocCacheKey,
+  type NoteDocCacheStore,
+} from "./note-doc-cache-store.ts";
 import type { WindowStateSnapshot } from "../shared/window-state";
 
 type WindowResolver = (contents: WebContents, sourceUrl: string) => BrowserWindow | null;
@@ -259,6 +265,8 @@ export type DesktopIpcRegistrationOptions = {
   readonly env?: NodeJS.ProcessEnv;
   readonly formalAssessmentGuard?: FormalAssessmentGuard;
   readonly pendingReturnMarkerStore?: PendingReturnMarkerStore;
+  /** 本机那份笔记文档的落盘口（决定 7：断网可编辑要能跨过重启）。 */
+  readonly noteDocCache?: NoteDocCacheStore;
 };
 
 const m1InputBase = { meta: requestMetaSchema };
@@ -960,6 +968,22 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     };
   }
   const pendingReturnMarkerStore = options.pendingReturnMarkerStore ?? new MemoryPendingReturnMarkerStore();
+  const noteDocCache = options.noteDocCache ?? new MemoryNoteDocCacheStore();
+  /**
+   * 本机那份文档的键。身份不全时返回 null，调用方一律"不读也不写"——
+   * 缓存的边界就是身份的边界：没有 subjectId 的一份缓存，等于给下一个人留着
+   * 上一个人的私有笔记正文。
+   */
+  const noteDocCacheKey = (noteId: string): NoteDocCacheKey | null =>
+    activeSubjectId && activeWorkspaceId ? { subjectId: activeSubjectId, workspaceId: activeWorkspaceId, noteId } : null;
+
+  const persistNoteDocLocal = async (noteId: string): Promise<void> => {
+    const key = noteDocCacheKey(noteId);
+    if (!key) return;
+    const snapshot = gateway.noteDocLocalSnapshot(noteId);
+    if (!snapshot) return;
+    await noteDocCache.set(key, { ...snapshot, epochAtRest: activeWorkspaceEpoch, updatedAt: new Date().toISOString() });
+  };
   let activeWorkspaceEpoch = 0;
   let activeSubjectId: string | null = null;
   let activeWorkspaceId: string | null = null;
@@ -1294,7 +1318,11 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     const streamWorkspaceEpoch = activeWorkspaceEpoch;
     // 连上了还压着一批离线增量，界面上就是"已经同步"的假象：先把欠的交清再建连接。
     // 交不掉（还是没网）不挡建连——那条链自己也会失败，而队列仍然原样留着。
-    void gateway.flushNoteDocPending(noteId).catch(() => undefined).then(() => gateway.watchNoteDocument(noteId, ({ noteId: _framedByGateway, ...event }) => {
+    void gateway.flushNoteDocPending(noteId).catch(() => undefined)
+      // 交完就把本机那份重写一遍：不然"已经交出去了"这件事只活在内存里，重启后又
+      // 会把同一批当成还没交，白重发一遍（服务端会当空操作，但界面上的等待是真的）。
+      .then(() => persistNoteDocLocal(noteId))
+      .then(() => gateway.watchNoteDocument(noteId, ({ noteId: _framedByGateway, ...event }) => {
       if (streamWorkspaceEpoch !== activeWorkspaceEpoch) return;
       emit("noteDoc", { kind: "note_doc_event", noteId, event }, activeWorkspaceEpoch);
     })).then((handle) => {
@@ -1595,6 +1623,9 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
       stopCompanionLifecycle();
       activeWorkspaceEpoch = 0;
       if (activeSubjectId) await pendingReturnMarkerStore.clearSubject(activeSubjectId);
+      // 退登要连本机那份正文一起清掉：它存的是笔记内容，不是可以留给下一个登录者的
+      // 元数据。缓存键里的 subjectId 挡住了别人读到，但账号换到人这一侧也要主动删。
+      if (activeSubjectId) await noteDocCache.clearSubject(activeSubjectId);
       activeSubjectId = null;
       activeWorkspaceId = null;
       clearSubscriptionsForWindow(window);
@@ -1610,6 +1641,9 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
       stopCompanionChatStreams();
       stopCompanionLifecycle();
       if (activeSubjectId) await pendingReturnMarkerStore.clearSubject(activeSubjectId);
+      // 退登要连本机那份正文一起清掉：它存的是笔记内容，不是可以留给下一个登录者的
+      // 元数据。缓存键里的 subjectId 挡住了别人读到，但账号换到人这一侧也要主动删。
+      if (activeSubjectId) await noteDocCache.clearSubject(activeSubjectId);
       activeSubjectId = null;
       activeWorkspaceId = null;
       clearSubscriptionsForWindow(window);
@@ -1759,6 +1793,9 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
   installHandler(DESKTOP_IPC_CHANNELS.authLeaveWorkspace, authLeaveWorkspaceInputSchema, options, async (_event, _window, input) => {
     assertEpochBoundaryExempt(input.meta, activeWorkspaceEpoch);
     const session = await gateway.leaveWorkspace(input.workspaceId, input.meta.requestId);
+    // 退出这个空间：这个空间的本机副本一起作废。留在盘上等下一次进来，是一次没有
+    // 承诺的复活——成员被移出后不该还能翻出里面的正文。
+    if (activeSubjectId) await noteDocCache.clearWorkspace(activeSubjectId, input.workspaceId);
     activeWorkspaceEpoch = session.workspaceEpoch;
     rememberSession(session);
     emit("workspace", { kind: "snapshot_invalidated", scope: "workspace" }, activeWorkspaceEpoch);
@@ -2422,13 +2459,19 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     return receipt;
   }, undefined, noteSaveReceiptV1Schema);
 
-  // ─── 笔记协同（批次 4.3）──────────────────────────────────────────
+  // ─── 笔记协同（批次 4.3 / 决定 7 的落盘部分）─────────────────────────
   installHandler(DESKTOP_IPC_CHANNELS.noteDocState, noteDocStateInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "note.detail");
     assertEpoch(input.meta, activeWorkspaceEpoch);
-    // 编辑起点必须来自服务端那份编码：用 note.detail 的 blocks 自己拼一棵文档树，
-    // 与库里那份没有共同祖先，两边一改就复制块。
-    return await gateway.getNoteDocState(input.noteId, input.meta.requestId);
+    const cacheKey = noteDocCacheKey(input.noteId);
+    const cached = cacheKey ? await noteDocCache.get(cacheKey) : null;
+    // 编辑起点必须有共同祖先：用 note.detail 的 blocks 自己拼一棵文档树，与库里那份
+    // 没有祖先关系，两边一改就复制块。本机那份是从服务端编码长出来的，所以先把它
+    // 接回来，再让服务端这次给的起点并进去。
+    if (cached) gateway.restoreNoteDocLocal(input.noteId, cached);
+    const result = await gateway.getNoteDocState(input.noteId, input.meta.requestId);
+    await persistNoteDocLocal(input.noteId);
+    return result;
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, noteDocStateResultV1Schema);
 
   installHandler(DESKTOP_IPC_CHANNELS.noteDocSyncBlocks, noteDocSyncBlocksInputSchema, options, async (_event, _window, input): Promise<NoteDocWriteResultV1> => {
@@ -2455,6 +2498,8 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
       input.title,
       input.meta.requestId,
     );
+    // 落盘跟着这次写走：`queued` 的那几条不留在内存里过夜就又没了。
+    await persistNoteDocLocal(input.noteId);
     return { via: receipt.via, revision: receipt.revision, savedAt: receipt.savedAt };
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, noteDocWriteResultV1Schema);
 

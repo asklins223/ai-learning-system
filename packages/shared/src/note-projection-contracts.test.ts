@@ -24,7 +24,14 @@ function fixture(role: "owner" | "member" = "member") {
       updatedAt: "2026-08-23T00:00:01.000Z",
       blocks: [{ ordinal: 0, type: "paragraph" as const, content: "正文" }],
     },
-    permissions: { canRead: true as const, canEdit: role === "owner", canSave: role === "owner" },
+    permissions: {
+      canRead: true as const,
+      canEdit: role === "owner",
+      canSave: role === "owner",
+      // 作者判据，不是角色判据；这里只是夹具值，规则本身在服务端那一处。
+      canShare: true,
+    },
+    shareScope: "private" as const,
     revision: VERSION_ID,
     snapshotAt: "2026-08-23T00:00:02.000Z",
   };
@@ -38,6 +45,14 @@ test("NoteDetailV1 accepts the safe Owner/Member read shape", () => {
 test("NoteDetailV1 rejects private or unknown fields", () => {
   const value = { ...fixture(), currentVersion: { ...fixture().currentVersion, imageAssetId: VERSION_ID } };
   assert.equal(noteDetailV1Schema.safeParse(value).success, false);
+});
+
+test("少了归属的那一份读形不放行", () => {
+  // 「仅自己可见 / 已共享给空间」是界面要常驻显示的一位。投影漏带一次的话，
+  // 表现不是报错而是界面上那一篇悄悄没有状态——所以契约必须硬要。
+  const { shareScope: _omitted, ...withoutScope } = fixture();
+  assert.equal(noteDetailV1Schema.safeParse(withoutScope).success, false);
+  assert.equal(noteDetailV1Schema.safeParse({ ...fixture(), shareScope: "everyone" }).success, false);
 });
 
 test("NoteDetailV1 binds the OCC revision to the current version", () => {
