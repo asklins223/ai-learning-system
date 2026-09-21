@@ -98,8 +98,14 @@ export async function applyNoteDocUpdate(
   scope: NoteDocScope,
   versionId: string,
   mutate: (doc: NoteDoc) => void,
+  /**
+   * 调用方已经握着目标内容时传进来（恢复历史版本就是这种）：省掉一次读，也避免
+   * 在已经持锁的事务里再绕回去读 `notes`。
+   */
+  preload?: NoteDocBlock[],
 ): Promise<{ blocks: NoteDocBlock[]; doc: NoteDoc }> {
-  const { doc } = await loadNoteDoc(tx, scope);
+  const doc = preload ? emptyNoteDoc() : (await loadNoteDoc(tx, scope)).doc;
+  if (preload) writeNoteBlocks(doc, preload);
   doc.transact(() => mutate(doc));
   await saveNoteDoc(tx, scope, doc);
   const projected = projectNoteBlocks(doc);

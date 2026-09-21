@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
 import { closeDatabase, withWorkspaceTransaction } from "../db/client.ts";
-import { createNote } from "../modules/note/service.ts";
+import { createNote, restoreNoteVersion } from "../modules/note/service.ts";
 import { applyNoteDocUpdate, loadNoteDoc } from "../modules/note/document-state.ts";
 import { importMarkdownNotes, prepareMarkdownImport } from "../modules/import/markdown-import-service.ts";
 import {
@@ -292,4 +292,40 @@ test("批量 Markdown 导入：每个新建笔记都有快照，且投影与解�
       );
     }
   }
+});
+
+/**
+ * 恢复历史版本的"文档要跟指针一起走"守卫。
+ *
+ * `restoreNoteVersion` 不重写块，它把 `currentVersionId` 指回旧版本——所以只要文档
+ * 没跟着改，快照就还是恢复前的正文，而下一次读优先用快照，界面会拿到两套内容里的
+ * 另一套。这条断言测的就是那个分叉。
+ */
+test("恢复历史版本后，文档快照与新的当前版本一致", async () => {
+  const historyContent = `旧版正文 ${tag}`;
+  const [older] = await sql`
+    INSERT INTO note_versions (note_id, workspace_id, version_no, content_json, content_hash, created_by)
+    VALUES (${noteId}, ${workspaceId}, 99, ${sql.json({ blocks: [{ type: "paragraph", content: historyContent }] })}, 'older-hash', ${userId})
+    RETURNING id
+  `;
+  const olderId = String(older.id);
+  await sql`
+    INSERT INTO note_blocks (version_id, workspace_id, ordinal, type, content)
+    VALUES (${olderId}, ${workspaceId}, 0, 'paragraph', ${historyContent})
+  `;
+
+  const current = await sql`SELECT current_version_id FROM notes WHERE id = ${noteId}`;
+  await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
+    restoreNoteVersion(tx, noteId, olderId, workspaceId, userId, String(current[0].current_version_id)),
+  );
+
+  const after = await sql`SELECT current_version_id FROM notes WHERE id = ${noteId}`;
+  assert.equal(String(after[0].current_version_id), olderId, "指针没切过去");
+
+  const { doc } = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
+    loadNoteDoc(tx, { workspaceId, noteId }),
+  );
+  const contents = projectNoteBlocks(doc).map((block) => block.content);
+  doc.destroy();
+  assert.deepEqual(contents, [historyContent], "指针切到旧版了，文档还是恢复前的正文（两套事实源）");
 });
