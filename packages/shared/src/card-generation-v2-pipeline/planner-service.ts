@@ -675,7 +675,8 @@ export interface PracticeFormAllocation {
  *    这些形态不会被硬凑成别的形状——形态边界优先于铺开。
  *
  * 凑不满不强造（D4）：这里只决定"要求谁交"，作者给不出有证据的干扰项时照样交 null，
- * 缺额由 `practice_quota_short` 记账，而不是伪造一道题。
+ * 缺额由下面的 `summarizePracticeQuotaV2` 结算（管道落一条
+ * `card_generation.practice_quota_short` 事件），而不是伪造一道题。
  */
 export function allocatePracticeForms(
   forms: readonly KnowledgeFormV2[],
@@ -695,6 +696,54 @@ export function allocatePracticeForms(
     used.set(pick, (used.get(pick) ?? 0) + 1);
     return { form: pick, reasonCode: "practice_quota_required" };
   });
+}
+
+/** 一条被点名却没按形状交上的记录。 */
+export interface PracticeQuotaMissV2 {
+  objectiveLocalId: string;
+  requiredForm: PracticeItemFormV2;
+  /** 作者实际交出的形状；null = 什么都没交。 */
+  deliveredForm: PracticeItemFormV2 | null;
+}
+
+export interface PracticeQuotaReportV2 {
+  /** planner 点名的张数。 */
+  requiredCount: number;
+  /** 其中**形状对上**的张数。 */
+  metCount: number;
+  misses: PracticeQuotaMissV2[];
+}
+
+/**
+ * D6 的另一半：配额点名之后，必须有人回答"到底交没交上"。
+ *
+ * 少了这一步，"这一批一道练习件都没有"和"配额被无声跳过"在数据上完全同形——
+ * 那正是 v24 之前那个"可选字段没人填、供给与没看见分不开"的坑换个位置重演。
+ * 判据是**形状对上才算兑现**：要求 `single_choice` 却交了 `ordering`，
+ * 整批的模态铺开并没有发生，不能算数。
+ *
+ * 只算被点名的那些：作者自愿多交的不计入 `metCount`（它没有承担配额）。
+ */
+export function summarizePracticeQuotaV2(
+  objectives: readonly { objectiveLocalId: string; practiceForm: PracticeItemFormV2 | null }[],
+  deliveredFormByObjective: ReadonlyMap<string, PracticeItemFormV2 | null>,
+): PracticeQuotaReportV2 {
+  const misses: PracticeQuotaMissV2[] = [];
+  let requiredCount = 0;
+  for (const objective of objectives) {
+    const required = objective.practiceForm;
+    if (!required) continue;
+    requiredCount += 1;
+    const delivered = deliveredFormByObjective.get(objective.objectiveLocalId) ?? null;
+    if (delivered !== required) {
+      misses.push({
+        objectiveLocalId: objective.objectiveLocalId,
+        requiredForm: required,
+        deliveredForm: delivered,
+      });
+    }
+  }
+  return { requiredCount, metCount: requiredCount - misses.length, misses };
 }
 
 /** 供 author 提示使用：全部题型枚举。 */

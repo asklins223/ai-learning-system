@@ -17,8 +17,9 @@ import {
   allocatePracticeForms,
   allocateStrategies,
   strategyForKnowledgeForm,
+  summarizePracticeQuotaV2,
 } from "./index.ts";
-import type { CardStrategyV2, KnowledgeFormV2 } from "../card-generation-v2-contracts.ts";
+import type { CardStrategyV2, KnowledgeFormV2, PracticeItemFormV2 } from "../card-generation-v2-contracts.ts";
 
 const strategiesOf = (
   forms: KnowledgeFormV2[],
@@ -124,4 +125,54 @@ test("练习件配额：至少一半的卡被点名，形状在本批铺开，�
 
   // 空批次不炸。
   assert.deepEqual(allocatePracticeForms([]), []);
+});
+
+/**
+ * D6 的另一半：配额点名之后**有没有真的兑现**（`summarizePracticeQuotaV2`）。
+ *
+ * 缺了这一步，"这批一道练习件都没有"和"配额被无声跳过"在数据上完全同形——
+ * 就是本文件开头那条"preferredStrategies 是死配置"的同一种失效形状。
+ */
+const quotaObjectives = [
+  { objectiveLocalId: "obj-a", practiceForm: "single_choice" as const },
+  { objectiveLocalId: "obj-b", practiceForm: "true_false" as const },
+  { objectiveLocalId: "obj-c", practiceForm: null },
+];
+
+test("练习件配额：形状对上才算兑现，交 null 与交错形状都要记账", () => {
+  // 全兑现。
+  const met = summarizePracticeQuotaV2(quotaObjectives, new Map<string, PracticeItemFormV2 | null>([
+    ["obj-a", "single_choice"], ["obj-b", "true_false"],
+  ]));
+  assert.deepEqual(met, { requiredCount: 2, metCount: 2, misses: [] });
+
+  // 交错形状：要求 true_false 却交了 matching——整批的模态铺开没有发生，不算兑现。
+  const wrongShape = summarizePracticeQuotaV2(quotaObjectives, new Map<string, PracticeItemFormV2 | null>([
+    ["obj-a", "single_choice"], ["obj-b", "matching"],
+  ]));
+  assert.equal(wrongShape.metCount, 1);
+  assert.deepEqual(wrongShape.misses, [{
+    objectiveLocalId: "obj-b", requiredForm: "true_false", deliveredForm: "matching",
+  }]);
+
+  // 什么都没交（作者按合同老实写 null）与"候选被门禁淘汰"（映射里根本没有这个 id）
+  // 都落进缺额、`deliveredForm` 都是 null：两者在事件里同形是有意的，但
+  // requiredCount/metCount 让"配额被无声跳过"再也读不出错。
+  const nothing = summarizePracticeQuotaV2(quotaObjectives, new Map<string, PracticeItemFormV2 | null>([
+    ["obj-a", null],
+  ]));
+  assert.deepEqual(nothing.misses, [
+    { objectiveLocalId: "obj-a", requiredForm: "single_choice", deliveredForm: null },
+    { objectiveLocalId: "obj-b", requiredForm: "true_false", deliveredForm: null },
+  ]);
+  assert.equal(nothing.requiredCount, 2);
+  assert.equal(nothing.metCount, 0);
+});
+
+test("练习件配额：没被点名的卡自愿多交，不占别人的名额", () => {
+  const report = summarizePracticeQuotaV2(quotaObjectives, new Map<string, PracticeItemFormV2 | null>([
+    ["obj-a", null], ["obj-b", null], ["obj-c", "ordering"],
+  ]));
+  assert.equal(report.requiredCount, 2, "只有被点名的两张算配额");
+  assert.equal(report.metCount, 0, "未被点名那张交的形状不能替别人抵账");
 });

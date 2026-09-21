@@ -52,6 +52,7 @@ import {
   executeAuthor,
   authorCandidateForObjective,
   budgetedPlanObjectives,
+  summarizePracticeQuotaV2,
   DeterministicAuthoringProvider,
   type AuthoringProvider,
 } from "@ailearn/shared/card-generation-v2-pipeline";
@@ -2375,6 +2376,26 @@ async function critiqueAndFinalizeCandidates(
 
     // 16. 终态判定
     const survivors = afterRepair;
+    // D6 的另一半：配额点名之后必须有人回答"到底交没交上"。缺额落成一条事件，
+    // 否则"这批一道练习件都没有"与"配额被无声跳过"在数据上同形（v24 之前那个
+    // 读不出供给的坑换个位置重演）。只算**形状对上**的：要求 single_choice 却交了
+    // ordering，整批的模态铺开并没有发生。
+    if (survivors.length > 0) {
+      const quota = summarizePracticeQuotaV2(
+        budgetedPlanObjectives(plan),
+        new Map(survivors.map((candidate) => [
+          candidate.planObjectiveLocalId,
+          candidate.objective.practiceItem?.kind ?? null,
+        ])),
+      );
+      if (quota.misses.length > 0) {
+        await insertEvent(tx, workspaceId, runId, "card_generation.practice_quota_short", {
+          requiredCount: quota.requiredCount,
+          metCount: quota.metCount,
+          misses: quota.misses,
+        });
+      }
+    }
     // R35/§12.5：pedagogy set-level `no_cards` 结论 → 成功终态
     // no_cards_recommended（不落 needs_attention；0 卡是可解释的成功结果）。
     const pedagogyNoCards = pedagogyReport?.verdict === "no_cards";

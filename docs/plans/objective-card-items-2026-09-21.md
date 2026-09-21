@@ -863,3 +863,43 @@ GitHub - asklins223/… → 已就绪 / 还没生成笔记        （没有第�
   此刻是红的，都是并行 agent 在途的笔记协同/内容哈希改动，本批未触碰。
 
 
+
+## 26. 复核 D6：配额点名了，但没人回答"到底交没交上"（已补）
+
+§25 之后回看 D6（`4432fe90` + `b76fb759`，别的会话落的）。分配那一半是对的
+（⌈N/2⌉、形态边界优先于铺开、`practice_quota_required` 进 reasonCodes），但**结项那一半只在
+注释里存在**：`planner-service.ts:678` 写着"缺额由 `practice_quota_short` 记账"，而全仓库
+grep 这个词只命中这一行注释——没有任何代码发出它。author 提示又明确要求"证据不支持时写
+null"（这条本身是对的，D4 不许造题），于是结果就是：**点名之后交没交、交的是不是被要求的
+形状，数据上完全读不出来**。
+
+这和 `strategy-allocation.test.ts` 文件头记的那个老缺陷同形——"题型勾选写进 spec 却没人读"，
+配置存在而闭环不存在。所以补的不是"更硬的配额"，是**结算**：
+
+- `summarizePracticeQuotaV2(objectives, deliveredFormByObjective)`（planner-service，纯函数）
+  返回 `{ requiredCount, metCount, misses[] }`。三条判据都有用例：
+  **形状对上才算兑现**（要求 `true_false` 交了 `matching` 记缺额——铺开没发生就不算数）、
+  **候选被淘汰也算缺额**（映射里没有这个 localId → `deliveredForm: null`）、
+  **没被点名的卡自愿多交不占别人的名额**（`metCount` 只数被点名的）。
+- 管道在终态判定前（handler `:2377` `survivors` 之后）发一条
+  `card_generation.practice_quota_short`，载荷就是上面三个数加逐条 miss。
+  事件载荷的 key 不在 `BLOCKED_EVENT_PAYLOAD_KEYS` 里（那几个键不带内容，只带形状名），
+  出口过滤照旧通过；`survivors.length === 0` 时不发（那条路径已有
+  `deck_gate_report` / `no_cards_recommended` 说明为什么是零）。
+- 注释改成指向真正的发出点，不留"注释承诺、代码不做"的下一次。
+
+**没做的**：这条事件目前只在库里，界面上没有"配额缺 N 张"的读数。要不要显、显在哪
+（生成完成回执？审核页头部？）是产品决定，不在这次顺手加。
+
+### 复核过别人的三批改动（不采信提交信息，逐条重跑）
+
+| 改动 | 我的复核 |
+|---|---|
+| `2d6d102e` A2 缺陷（tick 加进了管道大事务） | 成立。`withWorkerWorkspaceTransaction` 命中 ambient scope 是 `db.ts` 的既有语义，我的两个 tick 就开在那条分钟级事务里；我原来的三条"可见性"用例都是**在作用域外**调用写入函数，所以全绿却什么都没测。他们新增的「外层回滚、读数仍在」正是缺的那条——我复跑 7/7 绿，并确认 `{ isolated: true }` 只被 tick 使用。真跑复测 `[0,1,2,3,5,6,8]` 有 `ai_audit_log` 09:14:06–09:15:30 的 18 次 success 佐证。 |
+| `a90bcf8f` 客观题判分第二份逐字枚举 | 成立且是**我的**遗留：上一批我只把路由那一侧改成共用表，`finishStructuredAssessment` 里还留着第二份 kind 枚举，choice/true_false/matching 走到这里必然 fail closed → `not_assessable`。补的"七种结构化载荷全部为 true"断言是对的修法。 |
+| `b76fb759` D6 分配 | 分配正确、正交于 strategy；缺结算（本节已补）。另注意 `4432fe90` 与它是同一标题的两个提交（后者只改 1 行测试），读历史时别当成两件事。 |
+
+回归（我自己重跑，不看提交信息）：shared 全量 337/338、worker 单测 698/698、
+api card-generation 237/237、四端 typecheck；那 1 条 shared 红是**别人未提交的**
+`note-projection-contracts.ts` 在途改动（`git status` 里它是 M，测试文件却是旧提交里的），
+不在本批范围内，只报不改。
