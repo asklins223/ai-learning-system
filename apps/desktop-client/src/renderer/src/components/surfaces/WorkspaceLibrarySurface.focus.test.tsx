@@ -48,11 +48,14 @@ function listItem(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function installApi(items: Array<Record<string, unknown>>) {
+function installApi(items: Array<Record<string, unknown>>, page: { total?: number; nextCursor?: string | null } = {}) {
   const api = {
     auth: { getState: vi.fn(async () => ok({ status: "authenticated", workspace: { workspaceId: "ws-1", name: "W" }, workspaceEpoch: 1 })) },
     objective: {
-      list: vi.fn(async () => ok({ version: 3, items, total: items.length, nextCursor: null, snapshotAt: new Date().toISOString() })),
+      list: vi.fn(async () => ok({
+        version: 3, items, total: page.total ?? items.length,
+        nextCursor: page.nextCursor ?? null, snapshotAt: new Date().toISOString(),
+      })),
       get: vi.fn(async () => ok({})),
     },
     room: { getProjection: vi.fn(async () => ok({ primaryFocus: { state: "empty" } })) },
@@ -153,5 +156,37 @@ describe("列表焦点卡的主行动", () => {
     expect(next).toContain("进入详情");
     // 服务端的动词只该出现在焦点卡那颗真会执行它的按钮上。
     expect(next).not.toContain("开始首次验证");
+  });
+});
+
+describe("读取计数的说法", () => {
+  /**
+   * 31 号文档 P12 撤回后留下的那一条：`已载入 16 / 16 条` 里的斜杠让人以为外面
+   * 还有一个更大的池子没读进来，而 `nextCursor` 为 null 时并没有。搜索框的
+   * placeholder 同理——它承诺的范围要跟着实际范围走。
+   */
+  const counter = async () => {
+    await waitFor(() => expect(document.querySelector(".v3-goal-ledger__header p")).not.toBeNull());
+    return document.querySelector(".v3-goal-ledger__header p")?.textContent ?? "";
+  };
+
+  it("全部读完时只说总数，不再摆一个 16 / 16", async () => {
+    installApi([listItem(), listItem({ objectiveId: "00000000-0000-4000-8000-000000000002" })]);
+    render(<ObjectiveLibrarySurface />);
+
+    const text = await counter();
+    expect(text).toContain("共 2 条");
+    expect(text).not.toContain("已载入");
+    expect(document.querySelector(".v3-goal-search input")?.getAttribute("placeholder")).toBe("搜索全部理解目标");
+  });
+
+  it("确实还有下一页时才报「已载入 X / Y」，placeholder 也收回已载入范围", async () => {
+    installApi([listItem()], { total: 40, nextCursor: "cursor-2" });
+    render(<ObjectiveLibrarySurface />);
+
+    const text = await counter();
+    expect(text).toContain("已载入 1 / 40 条");
+    expect(text).not.toContain("共 40 条");
+    expect(document.querySelector(".v3-goal-search input")?.getAttribute("placeholder")).toBe("搜索已载入目标");
   });
 });

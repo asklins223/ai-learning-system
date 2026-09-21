@@ -426,12 +426,15 @@ export function ObjectiveLibrarySurface() {
             <header className="v3-goal-ledger__header">
               <div>
                 <h3 id="goal-ledger-title">全部理解目标</h3>
-                <p>已载入 {page?.items.length ?? 0} / {page?.total ?? 0} 条{page?.snapshotAt ? ` · 更新于 ${formatObjectiveDateTime(page.snapshotAt)}` : ""}</p>
+                {/* 「已载入 16 / 16」在全部读完时是一个误导的写法：那个斜杠让人以为
+                    外面还有一个更大的池子没读进来（31 号文档 P12 撤回后留下的这一条）。
+                    读完就说总数；确实还有下一页时才报"已载入 X / Y"。 */}
+                <p>{page?.nextCursor ? `已载入 ${page.items.length} / ${page.total ?? 0} 条` : `共 ${page?.total ?? 0} 条`}{page?.snapshotAt ? ` · 更新于 ${formatObjectiveDateTime(page.snapshotAt)}` : ""}</p>
               </div>
               <label className="v3-goal-search">
                 <Search size={14} aria-hidden="true" />
                 <span className="sr-only">搜索理解目标</span>
-                <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索已载入目标" />
+                <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={page?.nextCursor ? "搜索已载入目标" : "搜索全部理解目标"} />
               </label>
             </header>
             <div className="v3-goal-filters" role="group" aria-label="筛选理解目标">
