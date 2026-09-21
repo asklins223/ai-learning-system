@@ -340,7 +340,10 @@ export function serializeCandidatePublic(row: typeof cardGenerationCandidatesV2.
  */
 export function summarizePlanPracticeQuotaV2(
   planResult: unknown,
-  candidates: readonly { planObjectiveLocalId: string; practiceItem: { kind: PracticeItemFormV2 } | null }[],
+  candidates: readonly {
+    planObjectiveLocalId: string;
+    practiceItem: { kind: PracticeItemFormV2; optionCount?: number } | null;
+  }[],
 ): { requiredCount: number; metCount: number } {
   const parsed = cardPlanResultV2Schema.safeParse(planResult ?? null);
   if (!parsed.success) return { requiredCount: 0, metCount: 0 };
@@ -348,7 +351,10 @@ export function summarizePlanPracticeQuotaV2(
     budgetedPlanObjectives({ result: parsed.data }),
     new Map(candidates.map((candidate) => [
       candidate.planObjectiveLocalId,
-      candidate.practiceItem?.kind ?? null,
+      {
+        form: candidate.practiceItem?.kind ?? null,
+        optionCount: candidate.practiceItem?.optionCount ?? 0,
+      },
     ])),
   );
   return { requiredCount, metCount };

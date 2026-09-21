@@ -698,18 +698,33 @@ export function allocatePracticeForms(
   });
 }
 
+/**
+ * 作者对某个目标**实际交出**的东西：形状 + 选择题的宽度。
+ *
+ * 宽度必须是输入之一，否则"点名 single_choice 却只交两个选项"在结算里读起来
+ * 与兑现完全一样——而两个选项没有干扰项可言，那正是点名这个形状要防的事
+ * （§44 实测：两批里 2 道选择题有 1 道只有 2 个选项）。
+ */
+export interface DeliveredPracticeV2 {
+  form: PracticeItemFormV2 | null;
+  /** 仅对 `single_choice` / `matching` 有意义：选项数 / 配对数。缺省按 0 处理。 */
+  optionCount?: number;
+}
+
 /** 一条被点名却没按形状交上的记录。 */
 export interface PracticeQuotaMissV2 {
   objectiveLocalId: string;
   requiredForm: PracticeItemFormV2;
-  /** 作者实际交出的形状；null = 什么都没交。 */
+  /** 作者实际交出的形状；null = 什么都没交（或被门禁淘汰，映射里没有这个 id）。 */
   deliveredForm: PracticeItemFormV2 | null;
+  /** 为什么没兑现——三种必须分得开，否则"没看见供给"又会换地方重演一次。 */
+  missReason: "nothing_delivered" | "wrong_form" | "too_few_options";
 }
 
 export interface PracticeQuotaReportV2 {
   /** planner 点名的张数。 */
   requiredCount: number;
-  /** 其中**形状对上**的张数。 */
+  /** 其中**形状对上且宽度达标**的张数。 */
   metCount: number;
   misses: PracticeQuotaMissV2[];
 }
@@ -726,7 +741,7 @@ export interface PracticeQuotaReportV2 {
  */
 export function summarizePracticeQuotaV2(
   objectives: readonly { objectiveLocalId: string; practiceForm: PracticeItemFormV2 | null }[],
-  deliveredFormByObjective: ReadonlyMap<string, PracticeItemFormV2 | null>,
+  deliveredByObjective: ReadonlyMap<string, DeliveredPracticeV2>,
 ): PracticeQuotaReportV2 {
   const misses: PracticeQuotaMissV2[] = [];
   let requiredCount = 0;
@@ -734,16 +749,40 @@ export function summarizePracticeQuotaV2(
     const required = objective.practiceForm;
     if (!required) continue;
     requiredCount += 1;
-    const delivered = deliveredFormByObjective.get(objective.objectiveLocalId) ?? null;
-    if (delivered !== required) {
+    const delivered = deliveredByObjective.get(objective.objectiveLocalId) ?? { form: null };
+    const missReason = delivered.form === null
+      ? "nothing_delivered" as const
+      : delivered.form !== required
+        ? "wrong_form" as const
+        : isPracticeFormWideEnough(required, delivered.optionCount ?? 0)
+          ? null
+          : "too_few_options" as const;
+    if (missReason) {
       misses.push({
         objectiveLocalId: objective.objectiveLocalId,
         requiredForm: required,
-        deliveredForm: delivered,
+        deliveredForm: delivered.form,
+        missReason,
       });
     }
   }
   return { requiredCount, metCount: requiredCount - misses.length, misses };
+}
+
+/**
+ * 形状对了还要宽度够：选择题少于 3 个选项就没有干扰项可言（等于判断题换了个壳），
+ * 配对题少于 2 对则没有"配"这件事。合同侧不能把这些下限抬进
+ * `practiceItemV2Schema`——同一份 schema 也用于解析已落库的 revision，
+ * 抬下限会当场打断现网卡（§46 实测有 1 张 active 的选择题正是 2 选项）。
+ * 所以下限只在这里生效：不挡写入，只挡"算不算兑现配额"。
+ */
+function isPracticeFormWideEnough(
+  form: PracticeItemFormV2,
+  optionCount: number,
+): boolean {
+  if (form === "single_choice") return optionCount >= 3;
+  if (form === "matching") return optionCount >= 2;
+  return true;
 }
 
 /** 供 author 提示使用：全部题型枚举。 */

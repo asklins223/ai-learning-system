@@ -18,8 +18,9 @@ import {
   allocateStrategies,
   strategyForKnowledgeForm,
   summarizePracticeQuotaV2,
+  type DeliveredPracticeV2,
 } from "./index.ts";
-import type { CardStrategyV2, KnowledgeFormV2, PracticeItemFormV2 } from "../card-generation-v2-contracts.ts";
+import type { CardStrategyV2, KnowledgeFormV2 } from "../card-generation-v2-contracts.ts";
 
 const strategiesOf = (
   forms: KnowledgeFormV2[],
@@ -141,38 +142,78 @@ const quotaObjectives = [
 
 test("练习件配额：形状对上才算兑现，交 null 与交错形状都要记账", () => {
   // 全兑现。
-  const met = summarizePracticeQuotaV2(quotaObjectives, new Map<string, PracticeItemFormV2 | null>([
-    ["obj-a", "single_choice"], ["obj-b", "true_false"],
+  const met = summarizePracticeQuotaV2(quotaObjectives, new Map<string, DeliveredPracticeV2>([
+    ["obj-a", { form: "single_choice", optionCount: 4 }], ["obj-b", { form: "true_false" }],
   ]));
   assert.deepEqual(met, { requiredCount: 2, metCount: 2, misses: [] });
 
   // 交错形状：要求 true_false 却交了 matching——整批的模态铺开没有发生，不算兑现。
-  const wrongShape = summarizePracticeQuotaV2(quotaObjectives, new Map<string, PracticeItemFormV2 | null>([
-    ["obj-a", "single_choice"], ["obj-b", "matching"],
+  const wrongShape = summarizePracticeQuotaV2(quotaObjectives, new Map<string, DeliveredPracticeV2>([
+    ["obj-a", { form: "single_choice", optionCount: 4 }], ["obj-b", { form: "matching", optionCount: 3 }],
   ]));
   assert.equal(wrongShape.metCount, 1);
   assert.deepEqual(wrongShape.misses, [{
     objectiveLocalId: "obj-b", requiredForm: "true_false", deliveredForm: "matching",
+    missReason: "wrong_form",
   }]);
 
   // 什么都没交（作者按合同老实写 null）与"候选被门禁淘汰"（映射里根本没有这个 id）
   // 都落进缺额、`deliveredForm` 都是 null：两者在事件里同形是有意的，但
   // requiredCount/metCount 让"配额被无声跳过"再也读不出错。
-  const nothing = summarizePracticeQuotaV2(quotaObjectives, new Map<string, PracticeItemFormV2 | null>([
-    ["obj-a", null],
+  const nothing = summarizePracticeQuotaV2(quotaObjectives, new Map<string, DeliveredPracticeV2>([
+    ["obj-a", { form: null }],
   ]));
   assert.deepEqual(nothing.misses, [
-    { objectiveLocalId: "obj-a", requiredForm: "single_choice", deliveredForm: null },
-    { objectiveLocalId: "obj-b", requiredForm: "true_false", deliveredForm: null },
+    { objectiveLocalId: "obj-a", requiredForm: "single_choice", deliveredForm: null, missReason: "nothing_delivered" },
+    { objectiveLocalId: "obj-b", requiredForm: "true_false", deliveredForm: null, missReason: "nothing_delivered" },
   ]);
   assert.equal(nothing.requiredCount, 2);
   assert.equal(nothing.metCount, 0);
 });
 
 test("练习件配额：没被点名的卡自愿多交，不占别人的名额", () => {
-  const report = summarizePracticeQuotaV2(quotaObjectives, new Map<string, PracticeItemFormV2 | null>([
-    ["obj-a", null], ["obj-b", null], ["obj-c", "ordering"],
+  const report = summarizePracticeQuotaV2(quotaObjectives, new Map<string, DeliveredPracticeV2>([
+    ["obj-a", { form: null }], ["obj-b", { form: null }], ["obj-c", { form: "ordering", optionCount: 4 }],
   ]));
   assert.equal(report.requiredCount, 2, "只有被点名的两张算配额");
   assert.equal(report.metCount, 0, "未被点名那张交的形状不能替别人抵账");
+});
+
+/**
+ * 形状对上还不够宽：这是 §44 那次实测直接带来的规则——两批里 2 道 `single_choice`
+ * 有 1 道只有 2 个选项，而两个选项没有干扰项可言，等于把点名判断题换成点名选择题
+ * 之后又原地换回去。合同侧不能抬下限（会打断已落库的卡，见 §46），所以下限只作用在
+ * "算不算兑现配额"这一处。
+ */
+test("练习件配额：选择题少于 3 个选项不算兑现，且记账要说清是宽度不够", () => {
+  const narrow = summarizePracticeQuotaV2(quotaObjectives, new Map<string, DeliveredPracticeV2>([
+    ["obj-a", { form: "single_choice", optionCount: 2 }],
+    ["obj-b", { form: "true_false" }],
+  ]));
+  assert.equal(narrow.metCount, 1, "2 选项的选择题被当成兑现了 single_choice 的点名");
+  assert.deepEqual(narrow.misses, [{
+    objectiveLocalId: "obj-a", requiredForm: "single_choice", deliveredForm: "single_choice",
+    missReason: "too_few_options",
+  }]);
+
+  // 刚好 3 个选项就兑现——下限必须是闭区间，不能顺手写成 > 3。
+  const justEnough = summarizePracticeQuotaV2(quotaObjectives, new Map<string, DeliveredPracticeV2>([
+    ["obj-a", { form: "single_choice", optionCount: 3 }],
+    ["obj-b", { form: "true_false" }],
+  ]));
+  assert.equal(justEnough.metCount, 2);
+
+  // 没给宽度（自愿交的、或映射里只有形状）不能蒙混过关：缺省按 0 处理。
+  const noWidth = summarizePracticeQuotaV2(quotaObjectives, new Map<string, DeliveredPracticeV2>([
+    ["obj-a", { form: "single_choice" }],
+    ["obj-b", { form: "true_false" }],
+  ]));
+  assert.equal(noWidth.metCount, 1);
+
+  // 判断题没有选项集合可数，不许被这条下限误伤。
+  const tfOnly = summarizePracticeQuotaV2(
+    [{ objectiveLocalId: "obj-b", practiceForm: "true_false" as const }],
+    new Map<string, DeliveredPracticeV2>([["obj-b", { form: "true_false" }]]),
+  );
+  assert.deepEqual(tfOnly.misses, []);
 });

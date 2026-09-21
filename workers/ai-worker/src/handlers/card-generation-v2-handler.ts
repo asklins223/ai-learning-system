@@ -2384,10 +2384,16 @@ async function critiqueAndFinalizeCandidates(
     if (survivors.length > 0) {
       const quota = summarizePracticeQuotaV2(
         budgetedPlanObjectives(plan),
-        new Map(survivors.map((candidate) => [
-          candidate.planObjectiveLocalId,
-          candidate.objective.practiceItem?.kind ?? null,
-        ])),
+        new Map(survivors.map((candidate) => {
+          const item = candidate.objective.practiceItem;
+          return [candidate.planObjectiveLocalId, {
+            form: item?.kind ?? null,
+            // 宽度按形状取：选择题数选项、配对题数配对（判断题/排序题没有下限）。
+            optionCount: item
+              ? item.options?.length ?? item.pairs?.length ?? 0
+              : 0,
+          }];
+        })),
       );
       if (quota.misses.length > 0) {
         await insertEvent(tx, workspaceId, runId, "card_generation.practice_quota_short", {
