@@ -170,7 +170,10 @@ import { taskIntentsForStrategy } from "@ailearn/shared/card-generation-v2-pipel
  * v26（方案 D6）：同一件事再做一次，对象换成**客观练习件的配额**——planner 按整批
  * 分配"哪几张必须交、交哪种形状"（`allocatePracticeForms`），author 提示里点名。
  */
-export const CARD_GENERATION_V2_PROMPT_VERSION = "card-generation-v2/v26";
+/** v27：点名 `single_choice` 时把选项宽度写进提示（至少 3 个 = 1 正确项 + ≥2 个有出处的干扰项）。
+ *  起因是 §44/§46 的实测：合同侧不能抬 `options` 下限（读侧共用同一份 schema），
+ *  所以这条约束只能从供给端说清楚，而"说了什么"必须能从版本上读出来。 */
+export const CARD_GENERATION_V2_PROMPT_VERSION = "card-generation-v2/v27";
 
 export const PLANNER_PROMPT_VERSION = `${CARD_GENERATION_V2_PROMPT_VERSION}/planner`;
 export const AUTHOR_PROMPT_VERSION = `${CARD_GENERATION_V2_PROMPT_VERSION}/author`;
@@ -578,7 +581,13 @@ export const buildAuthorSystemPrompt = (
         ? "- **这一批要求本卡必须交出一道 " + requiredPracticeForm + " 练习件**（整批口径："
           + "至少一半的卡带练习件，形状在这一批里铺开）。只要能从证据里给出有出处的"
           + "干扰项/配对项就必须交；证据确实不支持时仍然写 null —— "
-          + "配额不是伪造干扰项的理由。\n"
+          + "配额不是伪造干扰项的理由。"
+          // 宽度写在点名里：合同侧不能抬 `options` 下限（读侧共用同一份 schema，
+          // 会把已激活的两选项卡当场打断，§46 实测），所以这条只能从供给侧说清。
+          + (requiredPracticeForm === "single_choice"
+            ? "本题型至少 3 个选项：1 个正确项 + 至少 2 个各有出处的干扰项——"
+              + "只有 2 个选项的那是判断题换了个壳，不算兑现配额。\n"
+            : "\n")
         : "- 本卡不在配额点名之列：能给出有证据的干扰项就交，给不出就写 null。\n")
     : "";
   return `
