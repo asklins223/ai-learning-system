@@ -292,7 +292,7 @@
 |---|---|---|
 | **B0** | 结算页溢出 + 出口槽 + 印章裁切（P5/P27） | ✅ 已上线，见 §14。**口径改过**：原写「report 不再 `overflow-y:auto`」是错的——纸面高度固定时总得有一列可滚，病在出口落在那一列里。改成三条可判定的：主按钮下沿离纸面下沿 ≥8px、出口不在任何 `scrollHeight>clientHeight` 的祖先内、`__seal` `scrollHeight <= clientHeight` |
 | **B1** | 结算页自相矛盾（P1/P6/P30） | ✅ 已上线（除「接下来」便签里的真按钮，见下），见 §14。口径：同一次 `covered` 判定下「还需补上」不出现该 facet；「这次说清 N 条」数判定行；`skipped`/`declared_unable` 时 DOM 里**没有** `__seal` 节点。**「接下来」便签的可点动作没做**——它需要在结算页起一次新 Run，而 start 命令只在目标详情的 `primaryAction` 里，属于新功能不是修复，单独留出来 |
-| **B2** | `data-outcome` 真的驱动视觉 + 一次性压印（P2/P32） | 三种 outcome（demonstrated / partial / not_assessable）截图像素差异 ≥ 背景色与印章区两处；`[data-outcome]` 在 CSS 里 ≥ 3 条规则；动效只改 `transform/opacity`，`data-motion-mode="off"` 时 `getAnimations().length === 0` |
+| **B2** | `data-outcome` 真的驱动视觉 + 一次性压印（P2/P32） | 🟡 **代码与守卫已上线，实机像素对比待补**（环境把客户端打回门禁，见 §14）。已满足：`[data-outcome]` 在 CSS 里有 8 条规则分三档、压印只动 `transform`/`opacity`、`data-motion-mode="off"` 与 `prefers-reduced-motion` 都关。未满足：三种 outcome 的截图差异——需要一条真跑到 `demonstrated` 的正式作答 |
 | **B3** | 「下次到期 刚刚」（P4） | ✅ 已上线，见 §14。没有新增 `formatDue`——`objective-state-copy.ts:114` 的 `formatObjectiveDay` 已经是「今天/昨天/明天/N 天后/M月D日」且被列表行在用，直接复用；另在 `surface-data.test.tsx` 钉住 `formatRelative` 的「只量过去」契约 |
 | **B4** | 字号地板（P7/P13/P21/P33） | 列表 / 详情 / 结算三屏 `<11px` 文本段占比 = 0；提示惩罚说明 ≥12px；720×405 视口下 `.button` ≥ 11px、`.meta` ≥ 9px、`.run-confirmation p` ≥ 9px |
 | **B5** | 空带与骨架（P8/P14/P28） | 焦点卡内最大连续空白 ≤ 64px；四屏内容左边界一致（`x` 差 ≤ 2px）；结算绿栏空带 ≤ 80px |
@@ -392,3 +392,13 @@ UI 侧三处：① 新增「这次说清了」行与「这次说清 N 条」计�
 - `learning-run-surface.result.test.tsx` 新增两条：三天后的复习写「3 天后」、明天的写「明天」，并断言那行**不含**「刚刚」。fixture 里的 `dueAt` 改成按今天算（`dayOffset(3)`），不写死日期，免得断言随日历腐烂。
 
 **一次无效的自我打脸**：第一次跑变异检验我用 sed 只把调用点换回 `formatRelative`，忘了它已经从 import 里删掉——模块直接 `ReferenceError`，10 条测试全红、每条 5 秒超时。那证明的是"代码崩了"，不是"断言有效"。重做时把 import 一起加回去，结果才是**恰好 2 条转红、其余 8 条保持绿**。变异检验要移的是**被测行为**，不是让被测对象起不来。
+
+### B2 `data-outcome` 驱动视觉 + 一次性压印 — 代码已上线，实机像素对比待补（2026-09-22）
+
+`objective-flow.css` 加了 8 条 `[data-outcome=…]` 规则，分三档：成立（绿栏描金边 + 印章转 `--hud-butter`）、练习（印章降一档透明度，它不是验证）、不成立（`not_assessable` / `needs_repair` / `skipped` / `declared_unable` 整栏转 `--hud-blue`）。全部用 `hud-pages.css:15-21` 已有的 token，没新增（DESIGN.md:197）。
+
+压印挂在 **`data-acknowledgement="active"`** 而不是 `data-outcome="demonstrated"` 上——前者本身就只有"本次会话真跑完且判成 demonstrated"才为真（`learning-run-result-policy.ts:123`），回看历史结果时它是 `idle`。挂在 outcome 上会让每次重进结算页都庆祝一遍，直接违反 DESIGN.md:20「关键结果只反馈一次」。240ms，只动 `transform`/`opacity`，`off` 档与 `prefers-reduced-motion` 各自关掉。
+
+**新增 `src/main/objective-flow-css-guard.test.ts`（7 例）**，因为 P2 这类毛病的定义就是"属性发出去了没人接"——组件测试断言的是文字，CSS 缺位时它照样全绿。守卫扫的是文件本身：`[data-outcome]` 规则数与档位覆盖、keyframe 声明的属性集合、动画的触发属性、两个降级开关、以及 **`main.tsx` 里 `objective-flow.css` 必须排在 `hud-surface.css` 之后**（这条是整个修正层生效的前提，谁调了顺序就会静默失效）。三条变异检验各自恰好打红一条。
+
+**没做完的那半**：三种 outcome 的截图差异。要量就得真跑出一条 `demonstrated`（库里出现过 8 次，所以可达，但需要一次正式文本作答）。我这边连续两次被环境打断——两个客户端实例共用一个开发库，另一个会话登录/切空间会把这台会话打回「学习服务暂时不可用」门禁，连点理解进列表都进不去。**这一条留给环境安静时补，别当成已验。**

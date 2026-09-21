@@ -41,3 +41,61 @@
 /* P1：这次真说清的条数排在理解账本之前——它是这次作答的成品，账本只是它够不够格
  * 写进长期记录。两者此前共用同一个「已经证明」的说法，用户分不清。 */
 .hud-surface .learning-run-result-evidence [data-role="proved-this-time"] b { color: var(--hud-green); }
+
+/* ── B2：让 data-outcome 真的驱动视觉（P2）───────────────────────────────
+ *
+ * 这两个属性此前从 JSX 发出去、全仓没有任何一条 CSS 接手，所以「已理解」和
+ * 「无法评估」是像素级相同的一张纸——outcome 完全靠那三个字扛。现在分三档：
+ * 成立（暖金印章 + 绿栏转深）、练习（绿栏保留但印章降一档，它不是验证）、
+ * 不成立（去饱和到石板绿，不出庆祝）。
+ * 只用 hud-pages.css:15-21 已有的 token，不新增（DESIGN.md:197）。        */
+.hud-surface .learning-run-result-board[data-outcome="demonstrated"] .learning-run-result-summary {
+  background: var(--hud-green);
+  box-shadow: inset 0 0 0 2px var(--hud-gold);
+}
+.hud-surface .learning-run-result-board[data-outcome="demonstrated"] .learning-run-result-summary__seal {
+  color: var(--hud-butter);
+}
+.hud-surface .learning-run-result-board[data-outcome="demonstrated"] .learning-run-result-report h2 {
+  color: var(--hud-ink);
+}
+/* 练习不是验证：印章降成与主张同级的墨色，靠 kicker 说明白它是什么。 */
+.hud-surface .learning-run-result-board[data-outcome="practice_completed"] .learning-run-result-summary__seal {
+  color: rgba(255, 248, 232, 0.82);
+}
+/* 不成立的三档共用一张安静的纸。 */
+.hud-surface .learning-run-result-board[data-outcome="not_assessable"] .learning-run-result-summary,
+.hud-surface .learning-run-result-board[data-outcome="needs_repair"] .learning-run-result-summary,
+.hud-surface .learning-run-result-board[data-outcome="skipped"] .learning-run-result-summary,
+.hud-surface .learning-run-result-board[data-outcome="declared_unable"] .learning-run-result-summary {
+  background: var(--hud-blue);
+}
+.hud-surface .learning-run-result-board[data-outcome="no_result"] .learning-run-result-summary {
+  background: var(--hud-soft);
+}
+/* partial 是唯一"两半都要看清"的档：说清的走绿、没说清的走陶土，
+ * 靠颜色之外的位置与标签区分（DESIGN.md:142 不许只用颜色说明）。 */
+.hud-surface .learning-run-result-board[data-outcome="partial"] .learning-run-result-evidence [data-role="proved-this-time"] b {
+  color: var(--hud-green);
+}
+
+/* 一次性压印：只在 data-acknowledgement="active" 上跑，而那个属性本身就只有
+ * demonstrated 且本次会话真跑完才为真（learning-run-result-policy.ts:123），
+ * 所以"只反馈一次"由状态保证，不是靠动画时长凑。只动 transform/opacity。 */
+@keyframes objective-seal-press {
+  from { opacity: 0; transform: scale(1.16) rotate(-3.5deg); }
+  to { opacity: 1; transform: none; }
+}
+.hud-surface .learning-run-result-board[data-acknowledgement="active"] .learning-run-result-summary__seal {
+  animation: objective-seal-press 240ms var(--hud-ease-out) both;
+}
+/* 减少动效不等于没有反馈：印章照样在，只是直接落在终态。
+ * data-motion-mode 挂在 .desktop-app 上（App.tsx），与 styles.css:1278 同一写法。 */
+.desktop-app[data-motion-mode="off"] .learning-run-result-board[data-acknowledgement="active"] .learning-run-result-summary__seal {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .hud-surface .learning-run-result-board[data-acknowledgement="active"] .learning-run-result-summary__seal {
+    animation: none;
+  }
+}
