@@ -1171,3 +1171,40 @@ TypeError: Cannot read properties of undefined (reading 'label')
 
 **还没被真跑验到的部分**：修复路径本身。这次是第二次尝试 pedagogy 没再判 repair，
 所以"修好之后修复真能跑通"仍然只是类型与单测层面的结论，得等下一次真出现 `repair` 判定的批次。
+
+## 32. 那张真实配对题走完了出题到判分（纯函数层，六种答卷）
+
+§31 只证明"作者交得出 matching"，没证明"它出得了题、判得了分"。把库里那张
+`dbf061fb` 的 `practice_item` 原样取出来，喂给生产构造函数与判分器：
+
+```
+出题：左 3 右 3，标签 6 条
+公开载荷里出现正确答案吗: false
+判分路由（不该花钱调 critic）: true
+  全部配对         → covered        「全部 3 对都配对了」
+  错开一位         → partial        「1/3 对正确」
+  只对一个         → partial        「1/3 对正确」
+  多交一条噪声边      → partial        「有左端配了多条，只算一次」
+  一个左端配两条      → partial        「有左端配了多条，只算一次」
+  空提交          → not_assessable 「没有提交配对」
+```
+
+读出来的四件事：作者自报的 `leftId/rightId` 过得了交叉引用检查（`practiceItemCrossRefError` 返回 null）；
+两列各自按内容哈希定序，所以"第 i 个对第 i 个"这种一眼看穿的排布没有出现；公开载荷里
+没有 `correctPairs`、也没有任何 `rightId` 字段；判分走 `isDeterministicStructuredPayload`，
+不需要 critic。反穷举那两条（多交、一个左端配两条）在真数据上也按预期只算一次。
+
+写脚本时自己踩了两个小坑，都记下来免得下次再犯：`assessStructuredPayload` 是**位置参数**
+（`kind, payload, solution`），我一开始传了一个对象，结果六种答卷全判 `not_assessable`，
+差点误报成产品缺陷；`practiceItemCrossRefError` 合法时返回的是 `null` 不是 `undefined`。
+"错开一位"拿到 1/3 而不是 0/3 也不是 bug——正确映射的顺序与公开左列顺序不同，循环错开
+会碰巧对上一对。
+
+### 界面那一处仍然只差一张图
+
+这轮试过一次：造好活租约与读数（`planned=8 authored=3`）准备进生成中那一屏，
+点进去发现应用停在**伴星中心的日记页**——有人正在用它。那就抢界面了：立刻把造出来的
+状态还原（run 回 `review_ready`、outbox 回 `completed`、我插的读数行删掉）。
+库里现在唯一剩下的读数行是 `dbf061fb` 那次真跑的最后一次 tick（`authored=6`，run 已是
+`review_ready`，读取端按设计忽略它）——留着当证据，也顺带说明这张表"到终态不删"的取舍。
+等应用空闲我再补这张图，或者你在界面上自己看一眼：造一次生成就能看到"已写出 N / M 张"。
