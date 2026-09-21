@@ -35,6 +35,8 @@ const NOTE_CONTENT =
   "OSI 模型把网络通信分为七层：物理层负责比特流传输；数据链路层负责帧与纠错；网络层负责路由；传输层负责端到端传输；会话层负责会话管理；表示层负责数据格式转换；应用层提供应用接口。";
 
 let runId = "";
+/** 用例 5 真跑过的那条 run（含候选），给用例 8 的重放用。 */
+let pipelineRunId = "";
 
 before(async () => {
   await admin.begin(async (tx) => {
@@ -272,7 +274,7 @@ test("真跑一遍确定性管道：作者循环里的 tick 确实落了盘", as
     },
     `live-progress-pipeline-${randomUUID()}`,
   );
-  const pipelineRunId = created.runId;
+  pipelineRunId = created.runId;
 
   // 只从 pending 认领：dev 容器里的 worker 也在轮询同一张库，被它抢走时这条断言
   // 会明确喊出来（而不是把"谁的租约"当成测试前提）。
@@ -347,4 +349,64 @@ test("交还租约：迟到的完成写不进去，reaper 当场就能重投", a
   `;
   assert.equal(takeable.length, 1,
     "交还后的行必须正好落在 reaper 的认领条件里，否则'秒级接管'只是说法");
+});
+
+/**
+ * 重放防护的现状（§21 的 A1 必须连这条一起改写，而不是把它删掉当没看见）。
+ *
+ * 今天"同一个 run 不被跑两遍、候选不被写两份"靠的是两样东西：入口守卫
+ * `run.status !== 'planning' 就 return`，加上覆盖整条管道的 `FOR UPDATE`。
+ * 逐候选提交会把前者打掉（提交过的 `authoring` 会让重投的 job 静默空转、run 永远卡住），
+ * 所以 A1 换机制时，这条用例断言的**结果**必须照样成立：重投不新增候选、
+ * 不新增 authored 事件、也不把终态挪走。
+ */
+test("重投同一个 run 的 job：不新增候选、不新增 authored 事件、不动终态", async () => {
+  assert.ok(pipelineRunId, "用例 5 没跑成，这条无从判断");
+  const probe = (id: string) => admin`
+    SELECT
+      (SELECT COUNT(*) FROM card_generation_candidates_v2 WHERE run_id = ${id}) AS candidates,
+      (SELECT COUNT(*) FROM card_generation_events_v2 WHERE run_id = ${id}
+         AND event_type = 'card_candidate.authored') AS authored_events,
+      (SELECT status FROM card_generation_runs_v2 WHERE id = ${id}) AS status
+  `;
+  const baseline = (await probe(pipelineRunId))[0] as
+    { candidates: string; authored_events: string; status: string };
+  assert.ok(Number(baseline.candidates) >= 1, "用例 5 没落下候选，重放无从比对");
+
+  // 换一把新租约重新认领：等价于 reaper 回收之后另一个 worker 重投这条 job。
+  const freshToken = randomUUID();
+  const claimed = await admin`
+    UPDATE card_generation_run_outbox_v2
+    SET status = 'processing', started_at = now(),
+        lease_expires_at = now() + interval '30 minutes', lease_token = ${freshToken}
+    WHERE run_id = ${pipelineRunId} AND job_type = 'card_generation_plan'
+    RETURNING id, workspace_id, run_id, job_type, payload
+  `;
+  assert.equal(claimed.length, 1);
+  const row = claimed[0] as { id: string; workspace_id: string; run_id: string;
+    job_type: string; payload: Record<string, unknown> };
+  const { processV2OutboxJob } = await import("../handlers/card-generation-v2-handler.ts");
+  await processV2OutboxJob({
+    id: row.id, workspaceId: row.workspace_id, runId: row.run_id,
+    jobType: row.job_type, payload: row.payload, leaseToken: freshToken,
+  });
+
+  const now = (await probe(pipelineRunId))[0] as
+    { candidates: string; authored_events: string; status: string };
+  assert.equal(now.candidates, baseline.candidates, "重投写出了第二份候选");
+  assert.equal(now.authored_events, baseline.authored_events, "重投又发了一遍 authored 事件");
+  assert.equal(now.status, baseline.status, "重投把已经定下来的终态挪走了");
+
+  // 上面三条都不够判："重投安静让路"与"重投半路炸了"读数一样（这点是实测出来的：
+  // 只加前三条时，把入口守卫摘掉这条用例照样全绿）。所以必须断言它走的是哪条路——
+  // 守卫认出 run 已不在 planning 就 return，job 正常结算为 completed。
+  // 判别力验证过：摘掉守卫后第二次执行会去撞同一个 plan_version，job 退回
+  // pending 并带一条失败的查询（即"没有守卫就会进重试循环"），这条立刻红。
+  const jobState = await admin`
+    SELECT status, attempts, last_error FROM card_generation_run_outbox_v2
+    WHERE run_id = ${pipelineRunId} AND job_type = 'card_generation_plan'
+  `;
+  const job = jobState[0] as { status: string; attempts: number; last_error: string | null };
+  assert.equal(job.status, "completed",
+    `重投没有被安静让路，而是停在 ${job.status}：${job.last_error ?? "无错误信息"}`);
 });

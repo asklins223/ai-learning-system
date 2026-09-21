@@ -1037,3 +1037,30 @@ ORDER BY n.created_at DESC;
 **`dropped` 与 `wrong_shape` 分开数**——被淘汰的候选和交错形状的缺额是两回事，只有后者才说明
 "要求 true_false 却交了 matching"。事件侧另查 `card_generation_events_v2` 里那条
 `card_generation.practice_quota_short`（注释里带了语句）。
+
+## 29. 重放防护有了用例，但它顺手纠正了 §21 的一处推断
+
+新用例 8（`card-generation-v2-live-progress-postgres.integration.ts`）钉的是今天的现状：
+同一个 run 的 job 换一把新租约重投之后，**不新增候选、不新增 authored 事件、不动终态**，
+并且 job 必须被正常结算为 `completed`（守卫认出 run 已不在 `planning`，安静让路）。
+
+写它的时候差点留下一条空测试：只断言前三件"没变"的事，我把入口守卫
+（`card-generation-v2-handler.ts:1250` `if (run.status !== "planning") return;`）整段摘掉，
+用例**照样全绿**——因为"重投炸在半路"和"重投安静让路"在候选数与事件数上完全同形。
+补上"job 必须 completed"之后，同一个变异立刻让它变红。这条教训另存了一份记忆
+（否定式断言必须配一条肯定式）。
+
+红的时候报出来的东西比"守卫很重要"更有用，它纠正了 §21 里我的一句话：
+
+- §21 写的是"逐候选提交等于把重复候选放出来"。今天实测的边界是：**只拿掉入口守卫并不会双写候选**，
+  第二次执行会去撞同一个 `plan_version`（唯一索引），失败后 job 退回 `pending`。
+  也就是说，缺守卫得到的不是"两批卡"，而是**重试循环**（每轮再付一次钱）。
+- 所以 A1 的前置要这样改：入口守卫是现在**唯一**让重投安静下来的机制。换成"可续跑的状态机"时，
+  如果只加幂等的候选写入而没给守卫一个等价替代，得到的是重复计费的重试风暴，不是重复卡片。
+  候选幂等仍然是必需的（防的是另一件事：同一目标被写两遍），但它不是全部。
+
+用例 8 之后这个文件共 8 条，全绿；两次变异（摘守卫、放松形状判据）都验证过会红。
+
+另记一条现场：`workers/ai-worker` 的 typecheck 现在有一条红在别人的在途文件上
+（`src/handlers/companion-daily-summary.test.ts:3` 要 `buildSummaryText`，
+`companion-daily-summary.ts` 已不导出）。不在本批范围，只报不改。
