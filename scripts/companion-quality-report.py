@@ -576,6 +576,42 @@ def collect(since: str | None) -> dict:
         GROUP BY 1 ORDER BY 2 DESC;
     """)
 
+    # 同一窗口里**每个块型的生产端工具成功过几个 run**（§13 D1）。
+    # 加这一侧的理由：原来那条 ⚠ 写着"生产端都接在线上，所以不是需求少，是链没走到"，
+    # 而按 run 对齐一量就知道它对 nav 是错的——现 regime 里 4 次产 nav 的工具成功
+    # 对应 4 个 nav 块，一个都没丢；少，是因为**这窗口里她只被给了 4 次那种场景**。
+    # 真正该由这条抓的是"工具成功了却没有块"（card 那六周就是这个形状）。
+    producer_since = since_clause(since, "created_at")
+
+    def producer_branch(kind: str, names: str) -> str:
+        listed = ", ".join(f"'{name}'" for name in names)
+        return f"""
+              SELECT '{kind}' kind, count(DISTINCT run_id) n,
+                     left(string_agg(to_char(created_at,'MM-DD HH24:MI')||' run:'
+                                     ||left(run_id::text, 8), ' ' ORDER BY created_at), 70) runs
+                FROM companion_agent_tool_calls
+               WHERE status = 'succeeded' AND name IN ({listed}) {producer_since}
+        """
+
+    producer_rows = rows(f"""
+        SELECT * FROM ({
+            " UNION ALL ".join([
+                producer_branch("nav", ["companion_open_card", "companion_open_page",
+                                        "companion_open_note", "companion_focus_graph",
+                                        "companion_list_task_queue"]),
+                producer_branch("card", ["companion_open_card"]),
+                producer_branch("quote", ["companion_read_note", "companion_search_notes"]),
+                producer_branch("image", ["companion_show_image"]),
+                producer_branch("diagram", ["companion_render_diagram"]),
+            ])
+        }) producers;
+    """)
+    block_producers = {r["kind"]: int(r["n"]) for r in producer_rows}
+    # 把是**哪几个 run** 一起带出来：告警要能被当场核对，而不是让人去猜。
+    # 实机就有一个边界样本——09-22 01:05 那次 task_queue 成功却没 nav 块，因为
+    # 给它加 route 的那一笔在 3 分钟后才上线；看见 run 时刻就知道不是链断了。
+    producer_runs = {r["kind"]: r["runs"] for r in producer_rows}
+
     return {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "since": since,
@@ -627,6 +663,8 @@ def collect(since: str | None) -> dict:
             "advance_chat_rate": (round(by_class["chat"][1] / by_class["chat"][0], 3)
                                   if by_class["chat"][0] else 0),
             "block_kinds": {r["kind"]: int(r["n"]) for r in block_kinds},
+            "block_producers": block_producers,
+            "producer_runs": producer_runs,
             "advance_tool_n": by_class["tool"][0],
             "advance_tool_rate": (round(by_class["tool"][1] / by_class["tool"][0], 3)
                                   if by_class["tool"][0] else 0),
@@ -792,13 +830,22 @@ def render(metrics: dict) -> None:
           "退化没归零前，不要去动推进率那条 prompt 规则。）")
     print(f"  回声率(照抄用户那句) = {shape['echo_rate']:.1%}   开场重复率 = {shape['opener_repeat_rate']:.1%}")
     kinds = shape["block_kinds"]
+    producers = shape["block_producers"]
     print("  富输出块供给 = " + "   ".join(
-        f"{k} {kinds.get(k, 0)}" for k in ("nav", "quote", "diagram", "card", "image"))
-        + f"   （text {kinds.get('text', 0)} 不计）")
-    zero = [k for k in ("nav", "quote", "diagram", "card", "image") if not kinds.get(k)]
-    if zero:
-        print(f"  ⚠ {'、'.join(zero)} 一条都没有。生产端都接在线上，所以这**不是需求少**，"
-              f"是那条链没走到过——先查工具的键与返回（card 就是这么静默了六周，见 §9.48）。")
+        f"{k} {kinds.get(k, 0)}/{producers.get(k, 0)}产" for k in ("nav", "quote", "diagram", "card", "image"))
+        + f"   （块数/同窗内生产端工具成功的 run 数；text {kinds.get('text', 0)} 不计）")
+    # 只有"生产端成功过、块却是 0"才是链断了（card 那六周正是这个形状，§9.48）。
+    # 两侧都为 0 不是缺陷，是这一窗口里没有那种场景——不要替它编一个原因。
+    broken = [k for k in ("nav", "quote", "diagram", "card", "image")
+              if producers.get(k, 0) > 0 and not kinds.get(k)]
+    absent = [k for k in ("nav", "quote", "diagram", "card", "image")
+              if not kinds.get(k) and producers.get(k, 0) == 0]
+    if broken:
+        for kind in broken:
+            print(f"  ⚠ {kind}：生产端成功 {producers[kind]} 个 run，块却是 0 —— 查工具的键与返回"
+                  f"（run: {shape['producer_runs'].get(kind) or '-'}；card 那六周就是这个形状，见 §9.48）")
+    if absent:
+        print(f"    （{'、'.join(absent)} 这一窗口两侧都是 0：没有一次生产端调用，不是链断了）")
 
     # §8.8 一票否决：不足 6 字 <10%，且以句末标点收尾 >85%。
     veto = shape["veto"]
