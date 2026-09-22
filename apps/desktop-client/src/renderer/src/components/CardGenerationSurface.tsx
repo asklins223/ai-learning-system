@@ -880,9 +880,10 @@ export function CardGenerationSurface() {
               一条都没有时整块不出现：亮一个"已写好 0 张"的空壳是拿没发生的事报数。 */}
           {progressInFlight && landedCandidates.length > 0 ? (
             <section className="card-generation-landing" aria-label="已经写好的卡">
-              <h3 className="card-generation-landing__title">
-                已经写好 <span data-testid="card-generation-landing-count">{landedCandidates.length}</span> 张，后面的还在写
-              </h3>
+              {/* 标题**不再重复一个张数**：进度头条那一行已经在说「已写出 N / 共 M 张」，
+                  而且它与服务端候选计数同源。这里再报一个数就是同一屏两个答案——
+                  列表本身就是答案，数几条看见几条。 */}
+              <h3 className="card-generation-landing__title">已经写好的卡，后面的还在写</h3>
               <ol className="card-generation-landing__list">
                 {landedCandidates.map((candidate) => (
                   <li key={candidate.candidateId} data-testid="card-generation-landing-item" className="card-generation-landing__item">

@@ -176,7 +176,11 @@ describe("生成中的那一屏：已经写好的卡要一张张出现", () => {
     expect(await screen.findByText("第一次提取时要先想起什么？")).toBeTruthy();
     expect(screen.getByText("为什么延迟会变高？")).toBeTruthy();
     expect(screen.getAllByTestId("card-generation-landing-item")).toHaveLength(2);
-    expect(screen.getByTestId("card-generation-landing-count").textContent).toBe("2");
+    // 同一屏只准有一个"已写几张"的数：它必须来自进度头条（与服务端候选计数同源），
+    // 列表自己不再报第二个数。
+    const countLines = screen.getAllByText(/已写出 \d+ \/ \d+ 张候选/);
+    expect(countLines).toHaveLength(1);
+    expect(screen.queryByText(/已经写好 \d+ 张/)).toBeNull();
   });
 
   it("被门禁判掉或被丢弃的那几张不算\"写好的卡\"", async () => {
@@ -201,8 +205,8 @@ describe("生成中的那一屏：已经写好的卡要一张张出现", () => {
     renderSurface();
 
     await waitFor(() => expect(screen.getByLabelText("生成进度")).toBeTruthy());
-    expect(screen.queryByTestId("card-generation-landing-count")).toBeNull();
     expect(screen.queryByTestId("card-generation-landing-item")).toBeNull();
+    expect(screen.queryByText("已经写好的卡，后面的还在写")).toBeNull();
   });
 
   it("在途时不给审核动作：决定要等这一批走完", async () => {
@@ -228,7 +232,7 @@ describe("生成中的那一屏：已经写好的卡要一张张出现", () => {
 
     expect(await screen.findByRole("button", { name: /^保留/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: /不保留/ })).toBeTruthy();
-    // 到了审核阶段，"写好了几张"那个逐张清单就让位给逐张审核卡片。
-    expect(screen.queryByTestId("card-generation-landing-count")).toBeNull();
+    // 到了审核阶段，逐张清单让位给逐张审核卡片。
+    expect(screen.queryByTestId("card-generation-landing-item")).toBeNull();
   });
 });

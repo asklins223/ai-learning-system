@@ -116,7 +116,8 @@ export function cardGenerationProgressView(
    * 可见（2026-09-21 两次真跑实测都是 planning → 终态一步跨完）。0249 把**候选计数**
    * 挪出了那个事务（进度读数表），所以"已写 3 / 8 张"现在是真的、会一格格走；
    * 但"第几步"仍要等状态真的提交——提前报等于把同一屏上的两个读数对不上。
-   * 真要做到逐张出卡（连阶段一起活），前置是 §21 的 A1：重放语义 + 候选幂等。
+   * 逐张出卡（A1）已经落地：计划与每张候选各自提交，所以 `authoring` 期间
+   * 这个 `authored` 与库里的行数同源，"第几步"也一起活了（方案 §59–§62）。
    */
   const inFlight = status === "planning" || status === "authoring" || status === "checking";
   const eyebrow = inFlight
