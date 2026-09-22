@@ -605,6 +605,50 @@ describe("getGenerationRunCandidatesV2", () => {
   });
 
   /**
+   * §56：读路径只数进了牌堆的那些。牌堆外的那张（`dropped`）行上虽然也带着
+   * 形状正确的练习件，但它不是这一批要交付的东西 —— 把它算进 metCount，
+   * 头部就会与管道内结算给出两个答案（真跑 4938cf7f 实测 {3,3} vs {3,1}）。
+   */
+  it("counts the quota over deck members only, not over every stored revision", async () => {
+    const planResult = {
+      kind: "author_candidates",
+      recommendedCardCount: 2,
+      activationHardMax: 2,
+      existingActions: [],
+      objectives: [
+        makePlanObjective("obj-1", "single_choice"),
+        makePlanObjective("obj-2", "true_false"),
+      ],
+    };
+    const base = makeBaseCandidateRow();
+    const candidates = [
+      { ...base, candidateId: "c1", planObjectiveLocalId: "obj-1", objectiveDraft: { ...base.objectiveDraft, practiceItem: { kind: "single_choice", options: [{ unitId: "u1", text: "甲" }, { unitId: "u2", text: "乙" }, { unitId: "u3", text: "丙" }] } } },
+      // 形状对、内容也对，但 pedagogy 把它丢出了牌堆。
+      { ...base, candidateId: "c2", planObjectiveLocalId: "obj-2", qualityState: "dropped", objectiveDraft: { ...base.objectiveDraft, practiceItem: { kind: "true_false", proposition: "乙", expected: true } } },
+    ];
+    setupTx({
+      select: () => ({
+        from: (table: unknown) => {
+          if (table === cardGenerationRunsV2) {
+            return { where: () => ({ limit: async () => [{ id: RUN_ID, currentPlanVersion: 1 }] }) };
+          }
+          if (table === cardGenerationPlansV2) {
+            return { where: () => ({ limit: async () => [{ result: planResult }] }) };
+          }
+          return { where: () => ({ orderBy: () => candidates }) };
+        },
+      }),
+    });
+
+    const result = await getGenerationRunCandidatesV2(
+      { workspaceId: WORKSPACE_ID, userId: USER_ID },
+      RUN_ID,
+    );
+    assert.ok(result);
+    assert.deepEqual(result!.practiceQuota, { requiredCount: 2, metCount: 1 });
+  });
+
+  /**
    * D6 之前封存的 plan 行没有 `practiceForm`。这种批次不能被报成"缺额 0"以外的
    * 任何数——更准确地说，它压根没有过这个要求，头部就不该出现这一行。
    */
