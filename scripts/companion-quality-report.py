@@ -435,7 +435,11 @@ def collect(since: str | None) -> dict:
     """)
     playback_totals = rows(f"""
         SELECT count(*) n,
+               -- 播出率的分母**不含 dropped**：用户打断是正常行为，算进分母就等于
+               -- 让"打字快慢"决定这条门过不过（刚加的 dropped 一定会踩到这个坑）。
+               count(*) FILTER (WHERE error_code IS DISTINCT FROM 'dropped') n_gate,
                count(*) FILTER (WHERE outcome='ok') played,
+               count(*) FILTER (WHERE error_code='dropped') dropped,
                count(*) FILTER (WHERE error_code='deadline') deadline,
                count(*) FILTER (WHERE error_code='synth_failed') synth_failed
         FROM companion_tts_outcomes
@@ -642,11 +646,13 @@ def collect(since: str | None) -> dict:
                 # fetch_ratio 与 silent_after_bytes_delivered。
                 "playback": {
                     "reported": int(num(playback_totals[0]["n"])) if playback_totals else 0,
+                    "n_gate": int(num(playback_totals[0]["n_gate"])) if playback_totals else 0,
+                    "dropped": int(num(playback_totals[0]["dropped"])) if playback_totals else 0,
                     "played": int(num(playback_totals[0]["played"])) if playback_totals else 0,
                     "deadline": int(num(playback_totals[0]["deadline"])) if playback_totals else 0,
                     "synth_failed": int(num(playback_totals[0]["synth_failed"])) if playback_totals else 0,
-                    "played_ratio": (round(num(playback_totals[0]["played"]) / num(playback_totals[0]["n"]), 3)
-                                     if playback_totals and num(playback_totals[0]["n"]) > 0 else None),
+                    "played_ratio": (round(num(playback_totals[0]["played"]) / num(playback_totals[0]["n_gate"]), 3)
+                                     if playback_totals and num(playback_totals[0]["n_gate"]) > 0 else None),
                     "by_reason": [
                         {"reason": r["reason"], "n": int(num(r["n"])),
                          "p50_ms": round(num(r["p50_ms"])), "p90_ms": round(num(r["p90_ms"]))}
@@ -805,6 +811,9 @@ def render(metrics: dict) -> None:
         print(f"  播放上报 = {playback['reported']} 段：播完 {playback['played']}"
               f" / 等到超时 {playback['deadline']} / 取段失败 {playback['synth_failed']}"
               f"   播出率 = {playback['played_ratio']}")
+        if playback.get("dropped"):
+            print(f"  ⚠ 另有 {playback['dropped']} 段字节到手却没播（dropped）——"
+                  f"不计进上面的播出率，但它们就是那条"给了音频没响"的证据。")
         for r in playback["by_reason"]:
             print(f"    {r['reason']:<14} n={r['n']:<4} p50={r['p50_ms']}ms p90={r['p90_ms']}ms")
     print(f"  音频已交付却零上报 = {playback['bytes_delivered_but_silent']} 段"
