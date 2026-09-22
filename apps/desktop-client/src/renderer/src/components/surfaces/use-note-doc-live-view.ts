@@ -4,7 +4,7 @@ import { yXmlFragmentToProsemirrorJSON } from "y-prosemirror";
 import { pmNodesToNoteBlocks } from "@ailearn/shared/note-doc-schema";
 import type { NoteDocStreamEventV1 } from "@ailearn/shared/desktop-ipc-contracts";
 import { noteBlockTypeV1Schema, type NoteBlockProjectionV1 } from "@ailearn/shared/note-projection-contracts";
-import { createRequestMeta } from "../../app/desktop-client";
+import { createCommandId, createRequestMeta, unwrapGatewayResult } from "../../app/desktop-client";
 
 /**
  * 一篇笔记在**渲染进程**里的那份共享文档（批次 C2）。
@@ -257,18 +257,22 @@ export function useNoteDocLiveView(
     const merged = Y.mergeUpdates(pendingRef.current.map((item) => unB64(item)));
     const submitted = await api.note.doc.syncUpdate({
       meta: createRequestMeta(epochRef?.current ?? undefined),
-      commandId: `note-doc:${noteId}:${Date.now()}`,
+      // 必须是 `createCommandId` 那一种：IPC 边界上 `commandIdSchema` 是不带冒号的
+      // opaque id，自己拼 `note-doc:<uuid>:<ts>` 会被整条拒成 invalid_request——而那件事
+      // 在渲染层读起来跟"什么都没改"一模一样（见下面那句 throw）。
+      commandId: createCommandId("note-doc"),
       noteId,
       update: b64(merged),
     });
     if (submitted.workspaceEpoch && epochRef) epochRef.current = submitted.workspaceEpoch;
-    const written = submitted.ok ? submitted.data.via : null;
+    // 被拒要喊出来，不能当成"没改动"：吞掉的失败在屏上只剩一个永远下不来的「草稿」。
+    const via = unwrapGatewayResult(submitted).via;
     // queued 要留着这一批：没网时它们是"改完还没交出去"的全部内容，清了就是丢掉。
-    if (written && written !== "queued") {
+    if (via && via !== "queued") {
       pendingRef.current = [];
       setDirty(false);
     }
-    return written;
+    return via;
   }, [noteId]);
 
   const setLocalTitle = useCallback((title: string, titleSource: "auto" | "manual"): void => {

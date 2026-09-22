@@ -26,7 +26,7 @@ missing = [key for key in WANT if not env.get(key)]
 if missing:
     raise SystemExit(f"仓库根 .env 里缺这几个键：{missing}")
 
-instances = [("a", 9321), ("b", 9322)]
+instances = [("a", 9321)] if os.environ.get("ONLY_A") == "1" else [("a", 9321), ("b", 9322)]
 for name, port in instances:
     data_dir = f"/tmp/clob-{name}"
     log = open(f"/tmp/clob-{name}.log", "w")
@@ -37,7 +37,7 @@ for name, port in instances:
     )
     print(f"起 clob-{name} 端口 {port}（日志 /tmp/clob-{name}.log）")
 
-for port, _ in [(9321, None), (9322, None)]:
+for _name, port in instances:
     deadline = time.time() + 60
     while time.time() < deadline:
         code = subprocess.run(["curl", "-s", "-m", "2", "-o", "/dev/null", "-w", "%{http_code}",

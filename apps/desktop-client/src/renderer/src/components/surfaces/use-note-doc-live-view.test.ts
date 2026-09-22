@@ -126,9 +126,34 @@ describe("渲染进程那份文档", () => {
     expect(via).toBe("stream");
     expect(api.syncUpdate).toHaveBeenCalledTimes(1);
     // 交出去的那条必须是**增量**而不是整篇：载荷里不该有起点里那几个字的完整快照。
-    const sent = api.syncUpdate.mock.calls[0]![0] as { update: string };
+    const sent = api.syncUpdate.mock.calls[0]![0] as { update: string; commandId: string };
     expect(sent.update.length).toBeLessThan(300);
+    // 命令号要过得了 IPC 边界那把尺（`commandIdSchema` 是不带冒号的 opaque id）。
+    // 真窗口里踩过：自己拼 `note-doc:<uuid>:<ts>` 被整条拒成 invalid_request，而渲染层
+    // 把"被拒"读成"什么都没改"，于是屏上永远是一个下不来的「草稿」。
+    expect(sent.commandId).toMatch(/^[A-Za-z0-9_-]{1,128}$/);
     expect(result.current.dirty).toBe(false);
+  });
+
+  it("主进程拒收那一次时要喊出来，不许读成「这台机器什么都没改」", async () => {
+    installApi();
+    // 装完之后再把那一个口换掉：钩子是在要交的那一刻从 `window.ailearn` 上取的，
+    // 只改外面那个变量改不动已经装上去的那一份。
+    const refused = vi.fn(async () => ({
+      ok: false as const,
+      error: { code: "invalid_request" as const, safeMessageKey: "error.invalid_request", retry: "never" as const },
+    }));
+    ((window as unknown as { ailearn: { note: { doc: { syncUpdate: unknown } } } }).ailearn.note.doc).syncUpdate = refused;
+    const { result } = renderHook(() => useNoteDocLiveView(NOTE_ID, true, () => undefined));
+    await settle();
+    act(() => {
+      const fragment = result.current.fragment!;
+      ((fragment.get(0) as Y.XmlElement).get(0) as Y.XmlText).insert(3, "被拒的那一次");
+    });
+    await expect(result.current.flush()).rejects.toThrow();
+    // 被拒的这批必须留着：下一次按键还要能再交一次，清了就是那几句话凭空没了。
+    expect(result.current.dirty).toBe(true);
+    expect(refused).toHaveBeenCalledTimes(1);
   });
 
   it("换一篇：上一篇的正文与文档都不留在这一屏上", async () => {
