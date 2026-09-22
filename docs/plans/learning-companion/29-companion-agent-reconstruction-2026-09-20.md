@@ -4004,3 +4004,84 @@ unverifiedQuoteClaims(正文, 本轮出处)  // 出处 = baseMessages + 本轮 r
 一处诚实边界：运行时的接线只有三行、typecheck 过、复用的是数字那条已经跑通过的
 同一条 steer 路径，但**没有单独观测到它触发过**（要观测得再制造一次"她编原文"，
 而那不可强求）。
+
+### 12.8 §8 的头号 INTERNAL_ERROR 找到了：她要在最后一步调工具，系统就把整轮判死（同日 12:20）
+
+**先更正我自己写错的前提。** §11 里我把这三条失败记成"run 已终态、事件流却停在
+`character.cue`，客户端没被告知任何终态"。按 `run_id` 把事件逐条读出来之后，这条
+是**错的**：三条都有终态事件——
+
+```
+afecc8d2  seq 2950 error / 2951 character.cue   message: companion agent execution failed
+2b1bee75  seq 3310 error / 3311 character.cue   message: stream_full_text_diverged
+9e484924  seq 3623 error / 3624 character.cue   message: companion agent execution failed
+```
+
+我当时是按"最后一条事件的 type"读的，而 `markCompanionRunFailed` 写的正是
+error + cue **一对**，cue 排在后面，于是把"写了终态"读成了"没写终态"。
+`next_event_seq - 2` 也不是硬算偏移：它是 `UPDATE … +2 RETURNING` 之后的原子取号。
+这两条都不需要修。
+
+**真因**（worker 日志按 run_id 抓 `job error detail`，两条都是同一句）：
+
+```
+provider returned tool calls on a tools-disabled final step
+```
+
+`finalAnswerOnly` 是 `stepCount >= 步数预算`，也就是被强制收尾的那一步——工具面在
+那一步是收起的。provider 仍然回 tool_calls 时，原来的处理是 `finishStep(failed)` +
+抛错，**整轮判死**。而她报错前已经把话说出去了：afecc8d2 已下发 82 字、9e484924
+已下发 149 字。用户看到的就是"事情差一步做成，结果弹报错"。3 次 INTERNAL_ERROR
+里 2 次是这一条，即当前失败率的第一号成因。
+
+**改法**：`planWithheldFinalStepCalls()` 两条出口，都不执行她没被给到的工具。
+
+- `grace`：整轮一次，多给 **2 步**（不是 1 步——判据是 `stepCount >= 预算`，只加一步
+  的那一步依旧收起工具，等于白走），把她要的那次查询真跑掉再强制收尾；
+- `deliver`：额度用尽 / 剩余时间 < 20s / 步数会越过合同上限 8 / 工具名不在面上，
+  任一命中就丢掉这些调用，用她已经产出的文本交付。文本为空仍走既有的
+  `EMPTY_AGENT_RESPONSE`——不为了"看起来成功"伪造内容。
+
+时间线那条判据写在这里的理由：宽限回合是**两次** provider 调用（实机单次 1.5–4s），
+剩余时间不够时给宽限只会把"能交付的半句"变成"跑到一半被拦停"，那是更贵的失败。
+
+**顺带核掉的两条**（都不是我改的，但都在同一批读数里）：
+`companion_open_card` 的两次 `not_found` 已由并行会话的 `card_id OR objective_id`
+修法覆盖——那两个失败 id 现在都能在 `learning_cards_v2.objective_id` 上命中；
+`stream_full_text_diverged` 那条已由 §12.7 之前的 `joinVisibleSegmentsDeduped` 处理。
+
+**验证**：worker 全量单测 763/763；伴星两条实库集测 14/14。新增的集测用例用 mock 的
+剧本标记复现违约（`chatCompletionStream` 也要能带回 tool_calls——终答步**恒走流式**，
+只在 `executeAgentTurn` 那侧加剧本的话这条路径根本到不了，这一点是本次实测出来的）。
+断言钉在 `step_count = 6`（声明 4 + 宽限 2）、`succeeded`、有 `assistant.final`、
+**没有** `error` 帧、工具执行数 ≥ 4。变异检查：把调用点换回原来那句 `throw`，
+用例红在 `provider returned tool calls on a tools-disabled final step`；
+纯函数那两条把 `grace` 改成恒 `deliver`，用例红 2 条。
+
+### 12.9 音频终态 `dropped` 在真窗口量到了（同日 12:12，用户批准的桌面端重启）
+
+按 §11 之前记下的配方开的是**独立实例**：`--user-data-dir=/tmp/audio-verify-udd`
++ `--remote-debugging-port=9222`，:9331 上那个属于并行验收会话的实例没动过，
+验完把这个实例关掉（:9222 现在无监听）。
+
+念长回答的过程中再发一轮，库里当场出现：
+
+```
+04:12:41  playback rejected dropped  ord=8   run 2d883c74
+04:12:41  playback rejected dropped  ord=10  run 2d883c74
+04:12:41  playback rejected dropped  ord=11  run 2d883c74
+04:12:44  synth ok … 04:12:46 playback ok played ord=1/2   run a7188140（新一轮照常念）
+```
+
+ordinal 9 没有 `dropped`——它当时还没轮到合成，字节没到手，本来就不该报；
+这与"只报**已到手**的当前段与预取段"的设计一致。报表侧同一份数据读成
+`另有 6 段字节到手却没播（dropped）：不计进上面的播出率`，播出率仍是 0.982，
+新终态没把分母污染。富输出块供给这一项也已不再是 0：`nav 4 / quote 9 / diagram 1 /
+card 2 / image 1`。#32 到此可以结。
+
+同一批读数里另外两条不是这次的目标，但记下来：**ordinal 2 报了一次 `deadline`**
+（段间 1.2s 截止在真窗口里确实会命中，p50=3001ms），以及
+`音频已交付却零上报 = 4 段`——后者仍是"给了音频但没响"的口径，与 dropped 不同源。
+
+一处边界：这些探针轮次留在了 owner 的连续会话里（文本都是普通对话，没有假事实），
+没有删。要清就按 §12 C3 那次的做法来，先备份再删。
