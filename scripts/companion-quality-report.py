@@ -150,12 +150,23 @@ def collect(since: str | None) -> dict:
     # 集成测试夹具的签名（测试会现造没签同意的工作区），不是产品在线失败率。
     # 实测被这一条救过一次：since=04:06 的窗口里 5 条 AI_CONSENT_REQUIRED 撑起
     # "失败率 55.6%"，实为 4 个工作区在 04:54:55~04:55:51 一分钟内的一次测试跑。
+    #
+    # 只数 `status='failed'`。原来这里连着 cancelled/superseded 一起数，于是"失败原因"
+    # 那本账的总数（82）与上面失败率的分母（55）不是同一批行，而排第一的
+    # "(no code) 30" 里 **27 条是用户自己打断或又发了一轮**——一个不是失败的东西
+    # 坐在了失败原因的头把交椅上。打断本身是有用的信号，所以它单独一行（见 interrupts）。
     failures = rows(f"""
         SELECT coalesce(nullif(error_code,''),'(no code)') k, count(*) n,
                count(DISTINCT workspace_id) distinct_ws,
                floor(extract(epoch FROM (max(created_at) - min(created_at))) / 60)::int span_min
         FROM companion_turn_runs
-        WHERE status IN ('failed','cancelled','superseded') {where} GROUP BY 1 ORDER BY 2 DESC;
+        WHERE status = 'failed' {where} GROUP BY 1 ORDER BY 2 DESC;
+    """)
+
+    interrupts = rows(f"""
+        SELECT status, count(*) n
+        FROM companion_turn_runs
+        WHERE status IN ('cancelled','superseded') {where} GROUP BY 1;
     """)
 
     # 正文长度分布：按用户输入长短分桶——「闲聊该短」是人格第 19 行的既定主张，
@@ -560,6 +571,15 @@ def collect(since: str | None) -> dict:
             "by_mode": {m["k"]: {"n": int(m["n"]), "max_steps": int(m["max_steps"]),
                                  "zero_tool": int(m["zero_tool"])} for m in modes},
             "zero_tool_ratio": round(zero_tool / mem_runs_total, 3) if mem_runs_total else 0,
+            # 只算**有权限档**的行。`permission_level` 为空的那批是 0239 删除技能层之前
+            # 的历史行——那时"这一轮有没有工具"取决于命中哪个技能（基线 90.7% 天生为 0），
+            # 混进来这条数就永远降不下来，也不指向现在的系统。
+            "zero_tool_ratio_current": (
+                round(sum(int(m["zero_tool"]) for m in modes if m["k"] != "(unset)")
+                      / sum(int(m["n"]) for m in modes if m["k"] != "(unset)"), 3)
+                if sum(int(m["n"]) for m in modes if m["k"] != "(unset)") else 0),
+            "unset_permission_rows": sum(int(m["n"]) for m in modes if m["k"] == "(unset)"),
+            "interrupted": {i["status"]: int(i["n"]) for i in interrupts},
             "failure_ratio": round(sum(by_status.get(k, 0) for k in ("failed",)) / run_total, 3) if run_total else 0,
             "failure_codes": {f["k"]: int(f["n"]) for f in failures},
             # 每条错误码带上"像不像测试夹具"：跨多个工作区、挤在两三分钟内 = 夹具签名。
@@ -705,8 +725,16 @@ def render(metrics: dict) -> None:
     print("\n【能力是否被给到】方案 RC1 的直接读数")
     for mode, stat in runs["by_mode"].items():
         print(f"  权限档={mode:<12} n={stat['n']:<4} 最大步数={stat['max_steps']} 零工具={stat['zero_tool']}")
-    print(f"  零工具轮占比 = {runs['zero_tool_ratio']:.1%}   ← 目标 <10%")
+    # 这条**不再挂目标值**。原目标"<10%"在 §9.12 已经作废：工具面每轮都给之后，
+    # "她这一轮调没调工具"取决于问题需不需要调，拿它当 KPI 只会反向逼系统做无用调用。
+    # 留着是因为它仍是一个形态读数（她是不是几乎什么都不查），但要看现 regime 的那一条。
+    print(f"  零工具轮占比 = {runs['zero_tool_ratio_current']:.1%}"
+          f"（现 regime，已排除权限档为空的 {runs['unset_permission_rows']} 条历史行）"
+          f"  全时段含历史 = {runs['zero_tool_ratio']:.1%}")
     print(f"  失败率 = {runs['failure_ratio']:.1%}  原因 = {runs['failure_codes']}")
+    print(f"  用户打断 = {runs['interrupted'].get('cancelled', 0)} 取消"
+          f" + {runs['interrupted'].get('superseded', 0)} 被新一轮取代"
+          "   ← 不是失败，所以不进上面的分母；它自己是一条有用的形态读数")
     for code, detail in runs["failure_detail"].items():
         if detail["fixture_shaped"]:
             print(f"  ⚠ {code} 这 {detail['n']} 条来自 {detail['workspaces']} 个工作区、"
