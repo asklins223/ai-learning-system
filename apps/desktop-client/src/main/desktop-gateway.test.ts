@@ -6,7 +6,7 @@ import {
   setNoteTitle,
   snapshotOf,
   syncNoteBlocksForEditor,
-} from "./note-doc-blocks";
+} from "./note-doc-fragment";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DESKTOP_API_SERVICE_ID,

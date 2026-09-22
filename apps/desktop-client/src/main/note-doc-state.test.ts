@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { createNoteDocState } from "./note-doc-state";
-import { emptyNoteDoc, setNoteTitle, snapshotOf, syncNoteBlocksForEditor } from "./note-doc-blocks";
+import { emptyNoteDoc, setNoteTitle, snapshotOf, syncNoteBlocksForEditor } from "./note-doc-fragment";
 
 function baseBytes() {
   const doc = emptyNoteDoc();

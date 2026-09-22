@@ -8,20 +8,19 @@
  * 这是"两份实现悄悄分叉"唯一能被机器发现的地方：两边没法共用源码，因为同一个进程里
  * 出现两份 yjs 会让 `instanceof Y.Text` 静默判假（原因写在那两份内核的文件头）。
  *
- * **这一串字节是 `Y.Array<Y.Map>` 那一版的形状**（批次 C 之前的内核产的）。服务端换到
- * `Y.XmlFragment` 之后，正文那一半对不上了：用新内核解它会得到 0 块，而"解出 0 块"正是
- * 两边被混在同一条路上读的信号，所以用例现在把这件事**当断言写出来**而不是改掉期望值。
- * 重新生成向量的条件是两端都在 fragment 上（批次 C2 之后），届时 `expectedBlocks` 与
- * `snapshotBase64` 一起换。
+ * **这一串字节是 `Y.XmlFragment` 那一版的形状**（批次 C 之后），而且是由**主进程那份**
+ * 内核产的：服务端解它必须得到 `expectedBlocks`，两边各自断言一次。哪一份实现改坏了
+ * （字段、属性、块容器、行内标记的序列化），它那一条用例就红——比"两边各自生成一次
+ * 再看像不像"强，因为字节是同一份。
  *
  * 不要为了让用例变绿而重新生成这串字节——那等于把分叉重新遮回去。确实要换向量时，
  * 必须同时改 `expectedBlocks` / `expectedTitle`，并确认两边用例都还成立。
  */
 export const NOTE_DOC_CONFORMANCE = {
   /** 生成时的字节数，只用于诊断。 */
-  snapshotBytes: 588,
+  snapshotBytes: 567,
   snapshotBase64:
-    "ARO8wcHeBQAHAQZibG9ja3MBKAC8wcHeBQAEdHlwZQF3B2hlYWRpbmcnALzBwd4FAAdjb250ZW50AgQAvMHB3gUCHyMg5qCH6aKY6YeM55qE5Lit5paH5LiOIEVuZ2xpc2iHvMHB3gUAASgAvMHB3gUUBHR5cGUBdwlwYXJhZ3JhcGgnALzBwd4FFAdjb250ZW50AgQAvMHB3gUWLeesrOS4gOaute+8muaUueS4gOWkhOS4jeivpemhtuaOieWPpuS4gOWkhOOAgigAvMHB3gUUCXNvdXJjZVJlZgF2Aghzb3VyY2VJZHckMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTExCXNlZ21lbnRJZHckMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyh7zBwd4FFAEoALzBwd4FJwR0eXBlAXcEY29kZScAvMHB3gUnB2NvbnRlbnQCBAC8wcHeBSk1Y29uc3QgYSA9IDE7CmNvbnN0IGIgPSAyOyAvLyDlpJrooYzkuI3og73ljovmiJDkuIDooYyHvMHB3gUnASgAvMHB3gVPBHR5cGUBdwVpbWFnZScAvMHB3gVPB2NvbnRlbnQCKAC8wcHeBU8MaW1hZ2VBc3NldElkAXckMzMzMzMzMzMtMzMzMy00MzMzLTgzMzMtMzMzMzMzMzMzMzMzKAEEbWV0YQV0aXRsZQF3DOWQkemHj+agh+mimCgBBG1ldGELdGl0bGVTb3VyY2UBdwZtYW51YWwA",
+    "ARH2lLCjCgAoAQRtZXRhBXRpdGxlAXcM5ZCR6YeP5qCH6aKYKAEEbWV0YQt0aXRsZVNvdXJjZQF3Bm1hbnVhbAcBB2NvbnRlbnQDB2hlYWRpbmcHAPaUsKMKAgYEAPaUsKMKAx8jIOagh+mimOmHjOeahOS4reaWh+S4jiBFbmdsaXNoKAD2lLCjCgIFbGV2ZWwBfQKH9pSwowoCAwlwYXJhZ3JhcGgHAPaUsKMKFgYEAPaUsKMKFy3nrKzkuIDmrrXvvJrmlLnkuIDlpITkuI3or6Xpobbmjonlj6bkuIDlpITjgIIoAPaUsKMKFglzb3VyY2VSZWYBdgIIc291cmNlSWR3JDExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMQlzZWdtZW50SWR3JDIyMjIyMjIyLTIyMjItNDIyMi04MjIyLTIyMjIyMjIyMjIyMof2lLCjChYDCmNvZGVfYmxvY2sHAPaUsKMKKAYEAPaUsKMKKTVjb25zdCBhID0gMTsKY29uc3QgYiA9IDI7IC8vIOWkmuihjOS4jeiDveWOi+aIkOS4gOihjIf2lLCjCigDBWltYWdlKAD2lLCjCk8Dc3JjAXcUL2FwaS91cGxvYWRzL2FiYy5wbmcoAPaUsKMKTwNhbHQBdwbphY3lm74oAPaUsKMKTwxpbWFnZUFzc2V0SWQBdyQzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMA",
   expectedBlocks: [
     {
       "ordinal": 0,
@@ -45,7 +44,7 @@ export const NOTE_DOC_CONFORMANCE = {
     {
       "ordinal": 3,
       "type": "image",
-      "content": "",
+      "content": "![配图](/api/uploads/abc.png)",
       "imageAssetId": "33333333-3333-4333-8333-333333333333"
     }
   ],

@@ -2,7 +2,7 @@ import { HocuspocusProvider, HocuspocusProviderWebsocket } from "@hocuspocus/pro
 import WebSocketPolyfill from "ws";
 import { NOTE_DOC_BLOCKS_MAX_JSON_CHARS, type NoteDocStreamEventV1 } from "@ailearn/shared/desktop-ipc-contracts";
 import { createNoteDocState, type NoteDocState, type NoteDocView } from "./note-doc-state.ts";
-import type { NoteDocBlock } from "./note-doc-blocks.ts";
+import type { NoteDocBlock } from "./note-doc-fragment.ts";
 
 /**
  * 笔记协同的本机传输（4.3 建立；4.4 起它持有文档，provider 只是文档的一个出口）。

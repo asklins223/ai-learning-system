@@ -1,12 +1,13 @@
 import * as Y from "yjs";
 import {
+  NOTE_DOC_FRAGMENT_KEY,
   projectNoteBlocks,
   readNoteTitle,
   setNoteTitle,
   syncNoteBlocksForEditor,
   type NoteDocBlock,
   type ProjectedNoteBlock,
-} from "./note-doc-blocks.ts";
+} from "./note-doc-fragment.ts";
 
 /**
  * 一篇笔记在本机的那份文档（批次 4.4）。
@@ -77,9 +78,9 @@ export function mergeNoteDocUpdates(updates: readonly string[]): string {
 }
 
 export function createNoteDocState(): NoteDocState {
+  // 形状（`meta` + `content` 的 Y.XmlFragment）由 `note-doc-fragment.ts` 定义；
+  // 与服务端那份不一致的后果不是报错，是服务端把这一版的 `note_blocks` 行投成空。
   const doc = new Y.Doc();
-  doc.getMap("meta");
-  doc.getArray("blocks");
 
   let remoteOrigin: unknown = null;
   let collecting = true;

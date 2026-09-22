@@ -83,7 +83,7 @@ import {
   type NoteDocState,
   type NoteDocView,
 } from "./note-doc-state.ts";
-import type { NoteDocBlock } from "./note-doc-blocks.ts";
+import type { NoteDocBlock } from "./note-doc-fragment.ts";
 import {
   NOTE_DOC_PREFIX,
   defaultNoteDocTransport,

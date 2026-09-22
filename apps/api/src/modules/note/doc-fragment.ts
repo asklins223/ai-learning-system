@@ -64,12 +64,11 @@ export function noteDocSchema(): Schema {
 }
 
 export function emptyFragmentNoteDoc(): Y.Doc {
-  const doc = new Y.Doc();
-  // 提前建好两个共享类型：空文档和"没有这两个 key"在编码上不同，
-  // 快照恢复时不想依赖第一次写入的顺序。
-  doc.getMap("meta");
-  doc.getXmlFragment(NOTE_DOC_FRAGMENT_KEY);
-  return doc;
+  // 就是 `new Y.Doc()`。旧内核那份注释说"要提前建好 meta 与正文容器，否则空文档和
+  // 没有这两个 key 的文档在编码上不同"——换到 fragment 之后实测不成立：预建的编码是
+  // 2 字节，与裸 `new Y.Doc()` 一字不差，而读写两侧都是 `doc.get…(key)` 按需取。
+  // `docFromSnapshot` 仍然先过这里：为的是形状由一处定义，不是为了编码差别。
+  return new Y.Doc();
 }
 
 /**
