@@ -4085,3 +4085,44 @@ card 2 / image 1`。#32 到此可以结。
 
 一处边界：这些探针轮次留在了 owner 的连续会话里（文本都是普通对话，没有假事实），
 没有删。要清就按 §12 C3 那次的做法来，先备份再删。
+
+### 12.10 「音频已交付却零上报 = 4 段」追到底：`await host.play()` 没有上限，整轮就此停住（同日 12:40）
+
+§12.9 之后报表里仍留着这一行。按段查回去，四段里只有一段是旧的：
+
+```
+09-21 12:20:21  fd8489e4 ord=1            ← 播放上报能力上线之前，结构上不可能有结局行
+09-22 03:59:44  328b1acf ord=17/18/19    ← 三条都在我那个实例里，服务端留着 synth ok，playback 零行
+```
+
+同一条 run 的播放时间线给了决定性形状：`played` 14/15/16 **三条挤在同一秒（03:59:42）**，
+紧接着 17/18/19 的字节在 03:59:44–46 到手，然后再没有任何一行。那不是"没在线"，
+也不是我先前猜的"停在等下一段的 `wake` 上"——队列空时 `prefetched` 必然也是空的
+（预取只从 `queue.segments` 里取），那种状态报不出东西是设计使然。真正的形状是
+**整条音频钟停住，循环停在 `await host.play()` 那一行**：那一行后面再没有 generation
+检查，于是那一轮所有已到手却没播的段永远没有结局。
+
+修法两刀，都在 `runQueuedSpeech`：
+
+1. **播放这一等封顶**：上限 = 这段音频自身的时长 + `COMPANION_SPEECH_PLAY_STALL_MS`（5s）。
+   命中即 `reportAbandoned({本段})` 并 `stopCompanionSpeech()` 放开整轮——后半句不是顺手：
+   `isCompanionSpeechActive()` 是主动提示音让路的判据，不放开她就永远"在说话"，
+   背景提示音会一直给这条不存在的朗读让路。
+2. **`dropped` 只报字节真的到手的段**：预取条目加 `delivered` 标志（合成的 `.then` 里置位），
+   `reportAbandoned()` 跳过没到手的。原来那三条"裸 return"的 generation 出口
+   （等字节的截止 catch、外层 catch）也补上了上报。
+
+**没做的**：把 `wake` 那条改成限时轮询。它能修的是"被打断且停在等下一段的那一轮
+泄漏一个 pending promise"，没有任何用户可见后果，也没有可断言的行为——不写。
+
+测试 26/26 绿，三条变异各自红过：封顶换成 `Number.POSITIVE_INFINITY` →
+`waitUntil 超时`；去掉 `stopCompanionSpeech()` → `expected true to be false`；
+去掉 `delivered` 过滤 → `expected [3,4] to deeply equal [3]`（正是那条会被编出来的证据）。
+顺带修一处**测试自身**的写法：`等到超时的段上报 deadline` 那条用了 `runAllTimersAsync()`，
+封顶计时器一上线它就把第 2 段也判成停住，改成按需要的量推进。
+
+桌面端全量 159 files / 1328 tests 绿。`npm run typecheck` 有 **2 个不是我造成的错**，
+在 `CardGenerationSurface.live-cards.test.tsx`（提交于 `fd166b89`）：renderer 工程里
+`import "node:crypto"`（TS2307），以及一个对象字面量里写了两个同名键（TS1117——
+那意味着其中一个值是静默失效的）。这两条会让这个包所有人的 typecheck 都是红的，
+但那是卡片线的夹具，我没有替他们改。
