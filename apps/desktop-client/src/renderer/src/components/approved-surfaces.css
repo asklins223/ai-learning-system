@@ -557,3 +557,40 @@
 @media (prefers-reduced-motion: reduce) {
   .approved-surface * { animation-duration: 1ms !important; transition-duration: 1ms !important; }
 }
+
+/* 生成中的逐张落地（A1·B4）。字阶与既有进度头条同一档（__label 13px / __meta 12px），
+   不另起一套：这条列表就长在进度块下面，读起来必须是同一个东西。 */
+.card-generation-landing {
+  margin: 0;
+  padding: 10px 0 0;
+  border-top: 1px solid var(--hud-line, rgba(255, 255, 255, .08));
+}
+.card-generation-landing__title {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.card-generation-landing__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+.card-generation-landing__item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.card-generation-landing__concept {
+  flex: 0 0 auto;
+  font-size: 12px;
+}
+.card-generation-landing__prompt {
+  font-size: 12px;
+  color: var(--hud-text-dim, rgba(255, 255, 255, .62));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

@@ -170,6 +170,17 @@ export function isCardGenerationReviewStage(status: string): boolean {
   return reviewStageStatuses.has(status);
 }
 
+/**
+ * 已经落进库里、可以算作「写好的卡」的候选。
+ *
+ * 被门禁判掉（`failed`）与牌堆定论后被丢弃（`dropped`）的那几张不算：把它们也列进来，
+ * 这一行就在替一个并不存在的结果报数——§52 那个 `quality_state` 撒谎的缺陷，落到界面上
+ * 就是这个形状。
+ */
+export function isLandedCandidate(qualityState: string): boolean {
+  return qualityState !== "failed" && qualityState !== "dropped";
+}
+
 export const cardGenerationRecoveryReasonLabels: Record<string, string> = {
   provider_unavailable: "生成服务暂时不可用",
   quality_gate_failed: "候选没有通过质量检查",

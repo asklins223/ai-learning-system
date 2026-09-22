@@ -2108,3 +2108,41 @@ worker 套件 758/758、worker `tsc --noEmit` 全绿（含我这份新测试文�
 `-redaction-quota` 三份集测的夹具还在 `INSERT INTO workspaces (… ai_consent_version …)`，
 而该列早在 0237 就被 `DROP COLUMN` 掉了 → 三条文件全部在夹具阶段就 42703 挂死，
 最后改动是 `258144d5`。改法是删掉那三列，我没动（不是本批范围，且要先确认它们是别人的在途活）。
+
+## 61. A1 · B4：生成中那一屏真的逐张列出来 —— 之前"逐张可见"只存在于数据库里
+
+B2 之后候选一张一个事务提交，另一条连接立刻读得到；但 `CardGenerationSurface.load()` 里
+那句 `if (isCardGenerationReviewStage(status))` 让界面**在途期间根本不去拉**候选列表，
+非审核态还把 `candidates` 清空。也就是说 #26 要的"第 1 张就能看见"在库里成立、在屏幕上
+不成立。这一批补的就是这一格。
+
+**改了三处**
+1. 取数条件：审核阶段 **或在途阶段** 都读列表（服务端路由本来就没设阶段门槛，
+   `GET …/candidates` 一直可读——先确认这点才动手，不然会变成给 api 加豁免）。
+2. 在途时渲染 `已经写好 N 张，后面的还在写` + 逐张列表（只有概念名与题面；答案与来源
+   证据仍要走审核阶段的主动查看，这条线没动）。张数的唯一来源是服务端返回的那一份列表，
+   不拿 `run.progress.authored` 当张数用——那两个数在逐张提交之前会长期不一致。
+3. 一份新的读数不能把落选的算进来：`isLandedCandidate` 排除 `failed`/`dropped`。
+   §52 那个 `quality_state` 撒谎的缺陷，落到界面上就是这个形状。
+
+**样式没有放进 `hud-surface.css`**：那是并行会话此刻正在改的文件（113 行在途改动），
+我那段追加会被他们整文件写回时吞掉。改放 `components/approved-surfaces.css`
+（`main.tsx` 早已导入，且没人在改）。字阶照既有进度头条同一档（13px 标题 / 12px 次级），
+不自定新规格。
+
+**新用例 5 条（jsdom，`CardGenerationSurface.live-candidates.test.tsx`）与它们的牙齿**
+先红后绿：在实现之前跑，前三条各红在"没渲染 / 没去拉"上。两条否定式断言各配了对照：
+- "在途时不给审核动作"配了第 5 条正向对照（同批候选到了 `review_ready` 就**有**
+  「保留（进入激活队列）」与「不保留」两个按钮）——没有这条正向，那条否定永远是空的。
+- "不落空壳"（`planning`、0 张时整块不出现）：把 `landedCandidates.length > 0` 去掉 → 红。
+- 落选不算写好的：把 `isLandedCandidate` 改成恒真 → 红。
+两次变异一起跑，红的正好是预测的那两条，其余三条照绿。
+
+组件 stub 一开始把 `candidateId` 写成 `"c-1"` 也不影响，因为桌面测试是直接架
+`window.ailearn`、不过网关解析；顺手还是把 stub 对齐了服务端的投影形状（uuid + 64hex +
+`isReviewReady` 按 `isCandidateReviewReadyV2` 的判据算），免得以后有人拿它当"服务端就长这样"。
+
+验证：新用例 5/5；`CardGenerationSurface` 三份 + 状态纯函数 + 两份 copy-guard 一起 48/48；
+桌面全量 1326/1326（159 文件）、`tsc --noEmit` 干净。
+**没有实机量过**：桌面端没有 HMR，而"逐张出现"要一次真在飞的批次才看得见——那正是 B5
+（一次真模型跑，量第 1 张出现的时刻与整批提交时刻之差）要做的事，届时一并量。

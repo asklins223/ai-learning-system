@@ -34,6 +34,7 @@ import {
   isCardGenerationReviewOpen,
   isCardGenerationReviewStage,
   isCardGenerationStopped,
+  isLandedCandidate,
 } from "./surfaces/card-generation-status";
 import { HudPage } from "./hud/HudPage";
 import { useHudPage } from "./hud/use-hud-page";
@@ -253,6 +254,8 @@ export function CardGenerationSurface() {
   const setReturnTarget = useRoomStore((state) => state.setReturnTarget);
   const [run, setRun] = useState<CardGenerationRunSnapshotV1 | null>(null);
   const [candidates, setCandidates] = useState<CardGenerationCandidateV1[]>([]);
+  /** 生成中已经落库的那几张（A1·B4）。到审核阶段就换人：那时逐张审核卡片接管。 */
+  const [landedCandidates, setLandedCandidates] = useState<CardGenerationCandidateV1[]>([]);
   const [practiceQuota, setPracticeQuota] = useState<CardGenerationPracticeQuotaV1 | null>(null);
   const [activeCandidateId, setActiveCandidateId] = useState<string | null>(null);
   const [receipt, setReceipt] = useState<CardActivationReceiptDesktopV1 | null>(null);
@@ -344,7 +347,9 @@ export function CardGenerationSurface() {
       const nextRun = unwrapGatewayResult(runResponse);
       setRun(nextRun);
 
-      if (isCardGenerationReviewStage(nextRun.status)) {
+      // 候选自 A1·B2 起是一张一个事务提交的，所以"在途"期间已经能读到落地的几张：
+      // 这里必须去拉，否则"逐张可见"只存在于数据库里，屏幕上依旧只有一条百分比。
+      if (isCardGenerationReviewStage(nextRun.status) || isCardGenerationInFlight(nextRun.status)) {
         const candidateResponse = await window.ailearn.note.cardGeneration.getCandidates({
           meta: createRequestMeta(epochRef.current),
           runId,
@@ -352,13 +357,20 @@ export function CardGenerationSurface() {
         if (candidateResponse.workspaceEpoch) epochRef.current = candidateResponse.workspaceEpoch;
         const nextList = unwrapGatewayResult(candidateResponse);
         const nextCandidates = nextList.candidates;
+        // 张数只有一个来源：审核阶段用服务端返回的那一份列表逐张审核；在途阶段列出的
+        // 是"已经落地的"，而被门禁判掉/被丢弃的那几张不是写好的卡（它们不该混在
+        // 一份读数里——那正是 §52 那个 quality_state 撒谎缺陷在界面上的形状）。
         setCandidates(nextCandidates);
+        setLandedCandidates(isCardGenerationReviewStage(nextRun.status)
+          ? []
+          : nextCandidates.filter((candidate) => isLandedCandidate(candidate.qualityState)));
         setPracticeQuota(nextList.practiceQuota);
         setActiveCandidateId((current) => nextCandidates.some((candidate) => candidate.candidateId === current)
           ? current
           : nextCandidates.find((candidate) => candidate.reviewDecision === "undecided")?.candidateId ?? nextCandidates[0]?.candidateId ?? null);
       } else {
         setCandidates([]);
+        setLandedCandidates([]);
         setPracticeQuota(null);
         setActiveCandidateId(null);
       }
@@ -392,6 +404,7 @@ export function CardGenerationSurface() {
   useEffect(() => {
     setRun(null);
     setCandidates([]);
+    setLandedCandidates([]);
     setPracticeQuota(null);
     setActiveCandidateId(null);
     setReceipt(null);
@@ -858,6 +871,25 @@ export function CardGenerationSurface() {
                     </li>
                   );
                 })}
+              </ol>
+            </section>
+          ) : null}
+
+          {/* 生成中的逐张落地（A1 · B4）：候选现在一张一个事务提交，写完的那张就能在这里
+              看到——只有题面与概念名，答案与来源证据仍要走审核阶段的主动查看。
+              一条都没有时整块不出现：亮一个"已写好 0 张"的空壳是拿没发生的事报数。 */}
+          {progressInFlight && landedCandidates.length > 0 ? (
+            <section className="card-generation-landing" aria-label="已经写好的卡">
+              <h3 className="card-generation-landing__title">
+                已经写好 <span data-testid="card-generation-landing-count">{landedCandidates.length}</span> 张，后面的还在写
+              </h3>
+              <ol className="card-generation-landing__list">
+                {landedCandidates.map((candidate) => (
+                  <li key={candidate.candidateId} data-testid="card-generation-landing-item" className="card-generation-landing__item">
+                    <strong className="card-generation-landing__concept">{candidate.objective.publicSummary}</strong>
+                    <span className="card-generation-landing__prompt">{candidate.front.prompt}</span>
+                  </li>
+                ))}
               </ol>
             </section>
           ) : null}
