@@ -60,6 +60,7 @@ export * from "./companion-persona.ts";
 export * from "./pet-persona-presets.ts";
 export * from "./card-quality-v2-contracts.ts";
 export * from "./voice-expression-tags.ts";
+export * from "./tts-voice-catalog.ts";
 export * from "./learning-objective-surface-contracts.ts";
 export * from "./understanding-topology-v3-contracts.ts";
 export * from "./desktop-surface-contracts.ts";

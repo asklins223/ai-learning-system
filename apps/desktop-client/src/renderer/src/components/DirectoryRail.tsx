@@ -271,18 +271,25 @@ function animateRailMorph(
 
   const duration = motionMode === "full" ? 560 : 300;
   if (ghost) {
+    // 收起时"小岛长出来"的进度与"整列被吃掉"的进度必须是同一条曲线。
+    // 分成两条时实测有 ~200ms 里上半截已经不画、小岛还停在 opacity 0（190ms 处
+    // 幽灵已被吃掉 60%，真目录栏 opacity 0.00），用户看到的不是收起动画而是闪一下。
+    const collapseReveal = (time: number) => springProgress(clamp01((time - 0.38) / 0.62), 5.8);
     if (after.collapsed) {
       const inset = Math.max(0, beforeRail.height - afterRail.height);
       const translateX = afterRail.left - beforeRail.left;
       const translateY = afterRail.bottom - beforeRail.bottom;
       const scaleX = afterRail.width / beforeRail.width;
       const oldAnimation = ghost.animate(
-        springFrames((progress, time) => ({
-          transformOrigin: "left bottom",
-          transform: `translate(${translateX * progress}px, ${translateY * progress}px) scaleX(${1 + (scaleX - 1) * progress})`,
-          clipPath: `inset(${inset * progress}px 0 0 0 round ${22 - 7 * progress}px)`,
-          opacity: String(1 - clamp01((time - 0.7) / 0.3)),
-        }),
+        springFrames((_progress, time) => {
+          const reveal = collapseReveal(time);
+          return {
+            transformOrigin: "left bottom",
+            transform: `translate(${translateX * reveal}px, ${translateY * reveal}px) scaleX(${1 + (scaleX - 1) * reveal})`,
+            clipPath: `inset(${inset * reveal}px 0 0 0 round ${22 - 7 * reveal}px)`,
+            opacity: String(1 - clamp01((time - 0.7) / 0.3)),
+          };
+        },
         42,
       ),
         { duration, easing: "linear", fill: "both" },
@@ -291,7 +298,7 @@ function animateRailMorph(
 
       const revealAnimation = rail.animate(
         springFrames((_, time) => {
-          const reveal = springProgress(clamp01((time - 0.38) / 0.62), 5.8);
+          const reveal = collapseReveal(time);
           return {
             transformOrigin: "left bottom",
             transform: `scale(${0.9 + 0.1 * reveal})`,
@@ -413,7 +420,12 @@ export function DirectoryRail({ readOnly = false }: { readonly readOnly?: boolea
   }, []);
 
   useEffect(() => {
-    if (mode !== "auto") {
+    // 「自动」是给书房首页让位用的：收起后场景才露得出来。任务页开着时整列
+    // 只值 30px（笔记详情页正文左缘实测 expanded 365px / collapsed 335px），
+    // 换到的空间没有东西可露，代价却是每次跳页都把这一列展开、1.9 秒后再收起——
+    // 实窗量到一趟导航两次形变，用户读到的就是"目录栏一直闪"。所以有页面开着时
+    // 不自动收，回书房才收。
+    if (mode !== "auto" || surface) {
       setAutoCollapsed(false);
       return undefined;
     }

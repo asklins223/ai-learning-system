@@ -14,6 +14,7 @@
  */
 
 import { z } from "zod";
+import { isTtsVoiceAllowed, ttsEngineV1Schema } from "./tts-voice-catalog.ts";
 import {
   companionAgentPermissionLevelSchema,
   companionAgentSettingsV1Schema,
@@ -338,3 +339,46 @@ export const companionAnswerModePreferencePatchV1Schema = z.object({
   preference: answerModePreferenceV1Schema,
 }).strict();
 export type CompanionAnswerModePreferencePatchV1 = z.infer<typeof companionAnswerModePreferencePatchV1Schema>;
+
+// ─── 语音音色偏好（设置 → 语音与伴星，账号级跨设备一致）───────────────────
+
+/**
+ * 用户选的合成引擎与音色。
+ *
+ * 存 account 级（与作答模态偏好同一行、同一套读写），因为它是"她的声音"这件事，
+ * 属于人而不属于某个空间。未设置时服务端回落到 config 的 `tts.*`，
+ * 所以这里不出现"未设置"这个第三态——GET 永远回一对目录内的合法值。
+ */
+export const companionVoicePreferenceV1Schema = z.object({
+  version: z.literal(1),
+  engine: ttsEngineV1Schema,
+  /** 一定落在该引擎的音色目录内：目录外的存量值由服务端回落成该引擎默认音色。 */
+  voice: z.string().min(1).max(120),
+  /** 用户没有显式保存过时为 null（此时 engine/voice 是 config 默认，不是用户的选择）。 */
+  explicit: z.boolean(),
+  updatedAt: z.string().datetime().nullable(),
+}).strict();
+export type CompanionVoicePreferenceV1 = z.infer<typeof companionVoicePreferenceV1Schema>;
+
+/**
+ * 写入。voice 必须属于所选引擎的目录——这条跨字段校验放在合同层而不是 service 里，
+ * 是因为 `voice` 会原样进上游的计费接口：放一个引擎与音色不匹配的组合过去，
+ * 上游只回一句 `[cosyvoice:]Engine error [411]`，用户看到的是"点了没反应"。
+ */
+export const companionVoicePreferencePatchV1Schema = z
+  .object({
+    version: z.literal(1),
+    engine: ttsEngineV1Schema,
+    voice: z.string().min(1).max(120),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (!isTtsVoiceAllowed(value.engine, value.voice)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["voice"],
+        message: `voice ${value.voice} 不在引擎 ${value.engine} 的音色目录内`,
+      });
+    }
+  });
+export type CompanionVoicePreferencePatchV1 = z.infer<typeof companionVoicePreferencePatchV1Schema>;

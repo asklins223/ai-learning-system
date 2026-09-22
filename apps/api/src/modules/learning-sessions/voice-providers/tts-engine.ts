@@ -18,6 +18,7 @@
 import { stripVoiceExpressionTags } from "@ailearn/shared/voice-expression-tags";
 import { edgeTtsSynthesize, type EdgeTtsProviderOptions } from "./edge-tts.ts";
 import { loadTtsEngineConfig } from "./tts-config.ts";
+import type { ResolvedTtsSelection } from "./tts-preference.ts";
 import { qwenTtsSynthesizeStreamForUser, type QwenTtsOptions } from "./qwen-tts.ts";
 
 export interface TtsBytesResult {
@@ -65,6 +66,14 @@ export interface SynthesizeTtsBytesArgs {
   queueKey: string;
   /** qwen 降级 edge 时的观测钩子（日志/测试断言）。 */
   onQwenFallback?: (error: unknown) => void;
+  /**
+   * 这次用哪个引擎、哪一身（见 tts-preference.ts 的 resolveTtsSelection）。
+   *
+   * 不传就退回 config 默认。传了则整条分支按它走：`engine === "edge"` 时**根本不
+   * 碰 qwen**——用户明确挑了 edge，让 qwen 先试一遍再把 qwen 的音色播出去，等于
+   * 设置里那个选择没有发生过。
+   */
+  selection?: ResolvedTtsSelection;
   deps?: TtsEngineDeps;
 }
 
@@ -82,16 +91,19 @@ export async function synthesizeTtsBytes(args: SynthesizeTtsBytesArgs): Promise<
   const loadConfig = deps.loadConfig ?? loadTtsEngineConfig;
   const collectStream = deps.collectStream ?? defaultCollectStream;
   const cfg = loadConfig();
+  // 引擎与音色优先取这次的 selection（用户偏好），缺省才回 config。
+  const engine = args.selection?.engine ?? cfg.engine;
+  const qwenVoice = args.selection?.qwenVoice ?? cfg.qwen.voice;
 
   const edgeOptions: EdgeTtsProviderOptions = {
     ...(args.edgeRate ? { rate: args.edgeRate } : {}),
   };
 
-  if (cfg.engine === "qwen" && cfg.qwen.workspaceId) {
+  if (engine === "qwen" && cfg.qwen.workspaceId) {
     const qwenOptions: QwenTtsOptions = {
       workspaceId: cfg.qwen.workspaceId,
       apiKey: process.env.DASHSCOPE_API_KEY ?? "",
-      voice: cfg.qwen.voice,
+      voice: qwenVoice,
       model: cfg.qwen.model,
       format: cfg.qwen.format,
       sampleRate: cfg.qwen.sampleRate,

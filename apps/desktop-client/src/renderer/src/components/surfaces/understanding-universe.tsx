@@ -14,7 +14,14 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 
-import { UNIVERSE_STATE_LABEL, type GraphEdge, type GraphNode } from "./understanding-universe-data";
+import {
+  UNIVERSE_STATE_LABEL,
+  isWholeLabel,
+  labelLeader,
+  labelSafeBox,
+  type GraphEdge,
+  type GraphNode,
+} from "./understanding-universe-data";
 
 const MIN_ZOOM = 0.12;
 const MAX_ZOOM = 4.6;
@@ -100,6 +107,15 @@ export interface UnderstandingUniverseProps {
   summaryLabel?: string;
   /** Disables decorative pulses/particles while preserving direct drag feedback. */
   staticMotion?: boolean;
+  /**
+   * 默认给谁画标签。
+   * - `density`（理解星图那 19 页）：按缩放层级铺一批，装不下就省略号收尾。
+   * - `pinned`（伴星中心）：只给**值得读**的节点画默认标签——固定记忆与实体锚点，
+   *   加上选中/悬停/高亮；而且**整句装不下就不画**，不画带省略号的半句。
+   *   2026-09-22 评审 P11：默认视图 26 条标签里 24 条是「用户明确要求：不要主动…」
+   *   这种半句，彼此还几乎一样，读起来是噪声而不是信息。
+   */
+  labelPolicy?: "density" | "pinned";
 }
 
 const NO_INSETS: UniverseInsets = { top: 0, bottom: 0, left: 0, right: 0 };
@@ -186,12 +202,18 @@ interface UniverseCluster {
   seed: number;
 }
 
+const LABEL_PLATE_HEIGHT = 20;
+
 interface LabelPlacement {
   nodeId: string;
   text: string;
   x: number;
   y: number;
   width: number;
+  /** 引线要从哪个节点连过来；不记节点就只能让标签悬空。 */
+  nodeX: number;
+  nodeY: number;
+  nodeRadius: number;
   alpha: number;
   color: string;
   dynamic: boolean;
@@ -476,6 +498,45 @@ function fitLabelText(
 function snap(px: number, context: CanvasRenderingContext2D) {
   const scale = context.getTransform().a || 1;
   return Math.round(px * scale) / scale;
+}
+
+/**
+ * 标签 + 引线 + 命中环。
+ *
+ * 评审 P11 的第二条：标签离它指的那颗星 20-60px 又没有任何连线，画面上「一条标签
+ * 该归哪颗星」只能猜——尤其当周围同时有五六颗星时。引线从节点边缘连到牌子靠它的
+ * 那一侧，命中环则把「点这颗星」的范围画到牌子这边来。
+ */
+function drawLabelWithLeader(
+  context: CanvasRenderingContext2D,
+  label: LabelPlacement,
+  palette: Palette,
+) {
+  const plate = { x: label.x, y: label.y, width: label.width, height: LABEL_PLATE_HEIGHT };
+  const line = labelLeader({ x: label.nodeX, y: label.nodeY, radius: label.nodeRadius }, plate);
+  context.save();
+  context.globalAlpha = label.alpha;
+  context.strokeStyle = label.color;
+  context.lineWidth = 1;
+  context.beginPath();
+  context.moveTo(snap(line.x1, context), snap(line.y1, context));
+  context.lineTo(snap(line.x2, context), snap(line.y2, context));
+  context.stroke();
+  context.globalAlpha = label.alpha * 0.45;
+  context.beginPath();
+  context.arc(label.nodeX, label.nodeY, label.nodeRadius + 5, 0, Math.PI * 2);
+  context.stroke();
+  context.restore();
+  drawRoundedLabel(
+    context,
+    label.text,
+    label.x,
+    label.y,
+    label.width,
+    label.color,
+    palette.labelBackdrop,
+    label.alpha,
+  );
 }
 
 function canvasLayer(width: number, height: number, dpr: number) {
@@ -1070,6 +1131,7 @@ export const UnderstandingUniverse = forwardRef<
     stateLabels = STATE_LABEL,
     summaryLabel = "知识节点",
     staticMotion = false,
+    labelPolicy = "density",
   },
   ref,
 ) {
@@ -1943,6 +2005,9 @@ export const UnderstandingUniverse = forwardRef<
           : quality === "balanced"
             ? clamp(Math.floor((width * height) / 18_000), 18, 56)
             : clamp(Math.floor((width * height) / 10_500), 28, 110);
+      // 标签只能待在浮层让出来的矩形里；原来它跟画布比，于是会从节点一侧爬到
+      // 工作台或右栏底下（伴星中心实测压掉两条）。
+      const labelBox = labelSafeBox(width, height, resolvedInsets);
       if (layerContext && labelBudget > 0) {
         layerContext.font = '500 12px "Noto Sans SC", "PingFang SC", sans-serif';
         for (const screenNode of labelCandidates) {
@@ -1953,14 +2018,24 @@ export const UnderstandingUniverse = forwardRef<
           const highlighted = highlightedNodeSet.has(node.id);
           const representative = clusterModel.representativeIds.has(node.id);
           const forced = selected || hovered || highlighted;
-          const eligible = forced ||
-            (quality === "overview" && representative) ||
-            (quality === "balanced" && (representative || node.type === "card")) ||
-            quality === "detail";
+          // `pinned` 不是字面只有固定记忆：实体（笔记 / 来源 / 知识点）是这张图的
+          // 方位锚，「消防疏散笔记」这种短标签留着才知道自己在看哪一片。记忆正文
+          // 才需要门槛——固定过的、且整句装得下的那几条。
+          const eligible = forced || (labelPolicy === "pinned"
+            ? node.state === "pinned" || node.type !== "card"
+            : (quality === "overview" && representative)
+              || (quality === "balanced" && (representative || node.type === "card"))
+              || quality === "detail");
           if (!eligible) continue;
-          const maxLength = quality === "overview" ? 12 : node.type === "key_point" ? 16 : 21;
-          const plateCap = forced ? LABEL_FORCED_MAX_WIDTH : LABEL_PLATE_MAX_WIDTH;
+          // `pinned` 下不能沿用缩略层的字数上限（overview 只有 12 字）：那条上限
+          // 与「整句才画」的规则叠加，会把默认视图清成 0 条标签——我把噪声换成了
+          // 空白，同样是错的。这里改成按牌子像素宽度量整句，装得下才画。
+          const maxLength = labelPolicy === "pinned"
+            ? Number.POSITIVE_INFINITY
+            : quality === "overview" ? 12 : node.type === "key_point" ? 16 : 21;
+          const plateCap = forced || labelPolicy === "pinned" ? LABEL_FORCED_MAX_WIDTH : LABEL_PLATE_MAX_WIDTH;
           const text = fitLabelText(layerContext, node.label, maxLength, plateCap);
+          if (labelPolicy === "pinned" && !isWholeLabel(node.label, text)) continue;
           // Keyed by the plate cap as well as the text: a forced label is the
           // same string measured against a wider budget.
           const cacheKey = `${plateCap}|${text}`;
@@ -1986,7 +2061,10 @@ export const UnderstandingUniverse = forwardRef<
           for (const candidate of candidates) {
             const left = candidate.x - labelWidth / 2;
             const top = candidate.y - 10;
-            if (left < 8 || left + labelWidth > width - 8 || top < 8 || top + 20 > height - 8) {
+            if (
+              left < labelBox.left || left + labelWidth > labelBox.right
+              || top < labelBox.top || top + LABEL_PLATE_HEIGHT > labelBox.bottom
+            ) {
               continue;
             }
             const cells = rectCells(left - 5, top - 3, labelWidth + 10, 26);
@@ -1998,8 +2076,8 @@ export const UnderstandingUniverse = forwardRef<
           }
           if (!placement && forced) {
             placement = {
-              x: clamp(x, labelWidth / 2 + 8, width - labelWidth / 2 - 8),
-              y: clamp(y + gap, 18, height - 18),
+              x: clamp(x, labelBox.left + labelWidth / 2, labelBox.right - labelWidth / 2),
+              y: clamp(y + gap, labelBox.top + LABEL_PLATE_HEIGHT / 2, labelBox.bottom - LABEL_PLATE_HEIGHT / 2),
             };
             placementCells = rectCells(
               placement.x - labelWidth / 2,
@@ -2017,6 +2095,9 @@ export const UnderstandingUniverse = forwardRef<
             x: placement.x,
             y: placement.y,
             width: labelWidth,
+            nodeX: x,
+            nodeY: y,
+            nodeRadius: radius,
             alpha: dimmed ? 0.36 : forced ? 1 : quality === "overview" ? 0.82 : 0.92,
             color: selected ? palette.selected : palette.text,
             dynamic: dynamicNodeIds.has(node.id),
@@ -2043,16 +2124,7 @@ export const UnderstandingUniverse = forwardRef<
         }
         for (const label of labelPlacements) {
           if (label.dynamic) continue;
-          drawRoundedLabel(
-            layerContext,
-            label.text,
-            label.x,
-            label.y,
-            label.width,
-            label.color,
-            palette.labelBackdrop,
-            label.alpha,
-          );
+          drawLabelWithLeader(layerContext, label, palette);
         }
       }
       scene = {
@@ -2162,16 +2234,7 @@ export const UnderstandingUniverse = forwardRef<
       }
     }
     for (const label of scene.dynamicLabels) {
-      drawRoundedLabel(
-        context,
-        label.text,
-        label.x,
-        label.y,
-        label.width,
-        label.color,
-        palette.labelBackdrop,
-        label.alpha,
-      );
+      drawLabelWithLeader(context, label, palette);
     }
   };
 

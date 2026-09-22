@@ -3,6 +3,9 @@ import {
   createUniverseLayout,
   filterUnderstandingGraph,
   getSelectedGraphPath,
+  isWholeLabel,
+  labelLeader,
+  labelSafeBox,
   normalizeUnderstandingGraph,
   STAR_MAP_NODE_RADIUS,
   type GraphEdge,
@@ -157,5 +160,47 @@ describe("createUniverseLayout", () => {
         expect(distance).toBeGreaterThanOrEqual(minimum - 2);
       }
     }
+  });
+});
+
+describe("星图标签的几何（评审 P11 / B5）", () => {
+  const chrome = { top: 150, bottom: 90, left: 400, right: 270 };
+
+  it("安全矩形把浮层让出来的空间排除在外，并留 12px 内边距", () => {
+    const box = labelSafeBox(1440, 900, chrome);
+    expect(box).toEqual({ left: 412, top: 162, right: 1158, bottom: 798 });
+  });
+
+  it("浮层比画布还宽时不翻负——否则一条标签都画不出来", () => {
+    const box = labelSafeBox(600, 400, { top: 300, bottom: 300, left: 500, right: 500 });
+    expect(box.right).toBeGreaterThanOrEqual(box.left);
+    expect(box.bottom).toBeGreaterThanOrEqual(box.top);
+  });
+
+  it("引线从节点边缘连到牌子靠它那一侧，不从圆心起、也不插进牌子", () => {
+    const below = labelLeader({ x: 500, y: 300, radius: 14 }, { x: 500, y: 331, width: 120, height: 20 });
+    expect(below).toEqual({ x1: 500, y1: 314, x2: 500, y2: 321 });
+
+    const right = labelLeader({ x: 500, y: 300, radius: 14 }, { x: 531 + 60, y: 300, width: 120, height: 20 });
+    expect(right).toEqual({ x1: 514, y1: 300, x2: 531, y2: 300 });
+
+    const left = labelLeader({ x: 500, y: 300, radius: 14 }, { x: 500 - 77, y: 300, width: 120, height: 20 });
+    expect(left.x1).toBe(486);
+    // 牌子在节点左侧：线终于牌子的**右**边缘
+    expect(left).toEqual({ x1: 486, y1: 300, x2: 483, y2: 300 });
+  });
+
+  it("主轴更斜时按斜的那条边走，不会画出斜穿的长线", () => {
+    const line = labelLeader({ x: 0, y: 0, radius: 10 }, { x: 90, y: 12, width: 100, height: 20 });
+    expect(line.y1).toBe(0);
+    expect(line.y2).toBe(12);
+  });
+
+  it("`pinned` 只画整句：装不下就不画，而不是留个省略号", () => {
+    expect(isWholeLabel("习惯在图书馆三楼复习", "习惯在图书馆三楼复习")).toBe(true);
+    expect(isWholeLabel("  习惯在图书馆三楼复习  ", "习惯在图书馆三楼复习")).toBe(true);
+    expect(isWholeLabel("用户明确要求：不要主动催促复习，除非用户主动询问。", "用户明确要求：不要主动…")).toBe(false);
+    // 空正文走的是占位名，不是省略号
+    expect(isWholeLabel("   ", "未命名对象")).toBe(true);
   });
 });

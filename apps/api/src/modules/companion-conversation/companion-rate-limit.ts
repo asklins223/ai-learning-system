@@ -124,6 +124,10 @@ export const COMPANION_RATE_LIMITS = Object.freeze({
   asrPerMinute: { limit: 10, windowMs: 60_000 },
   asrPerHour: { limit: 60, windowMs: 3_600_000 },
   ttsPerMinute: { limit: 60, windowMs: 60_000 },
+  // 设置里的音色试听：目录一共 6 条，一分钟全听一遍再加几遍重听够用。
+  // 单列一个限额是因为它和真实朗读的预算不同——朗读是"陪她说话"，试听是"挑声音"，
+  // 共用 60/min 时一边会把另一边的余量吃掉，报表里也分不出是哪一种。
+  ttsPreviewPerMinute: { limit: 20, windowMs: 60_000 },
   exportPerHour: { limit: 3, windowMs: 3_600_000 },
   // companion bridge context 发布/续租/撤销（§14.2）：与其余 companion 路由
   // 一致的 per-(workspace,user) 内存固定窗口限流，防认证客户端滥用端点。

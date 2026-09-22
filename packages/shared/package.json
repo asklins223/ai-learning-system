@@ -366,6 +366,11 @@
       "import": "./src/voice-expression-tags.ts",
       "default": "./src/voice-expression-tags.ts"
     },
+    "./tts-voice-catalog": {
+      "types": "./src/tts-voice-catalog.ts",
+      "import": "./src/tts-voice-catalog.ts",
+      "default": "./src/tts-voice-catalog.ts"
+    },
     "./workspace-transaction": {
       "types": "./src/workspace-transaction.ts",
       "import": "./src/workspace-transaction.ts",

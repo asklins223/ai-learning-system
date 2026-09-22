@@ -57,9 +57,9 @@ async function scenarioNormal(): Promise<void> {
   const runMsg = ws.sent.find((m) => (m as { header?: { action?: string } }).header?.action === "run-task") as {
     payload?: { parameters?: Record<string, unknown>; model?: string };
   };
-  assert.equal(runMsg.payload?.parameters?.voice, "longanlingxi");
+  assert.equal(runMsg.payload?.parameters?.voice, "longanlingxi_v3.1");
   assert.equal(runMsg.payload?.parameters?.instruction, "可爱的年轻女性声音");
-  assert.equal(runMsg.payload?.model, "qwen-audio-3.0-tts-flash");
+  assert.equal(runMsg.payload?.model, "qwen-audio-3.1-tts-flash");
 }
 
 // ─── 场景 2：task-finished 后连接复用 ─────────────────────────────────────

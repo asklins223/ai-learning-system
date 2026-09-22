@@ -190,6 +190,7 @@ function installApi() {
       memory: {
         starMap: vi.fn(async () => ok(starMap())),
         list: vi.fn(async () => ok({ version: 2, items: [memoryItem()] })),
+        create: vi.fn(async (): Promise<GatewayResultV1<CompanionMemoryItemV1>> => ok(memoryItem())),
       },
       persona: { get: vi.fn(async () => ok(persona())) },
       history: { list: vi.fn(async () => ok({ version: 1, items: [historyItem()], nextCursor: null })) },
@@ -608,5 +609,42 @@ describe("the companion center reads the shell's companion session", () => {
     // fireEvent 会把更新包进 act，并且「preventDefault 被调用过」时返回 false。
     expect(fireEvent.keyDown(document, { key: "Escape" })).toBe(false);
     expect(document.querySelector(".companion-record__calendar")).toBeNull();
+  });
+
+  /**
+   * B6（评审 P18）：进行中要有看得见的反馈。以前点下去只有一行字变成「正在保存…」，
+   * 界面像没反应。`data-busy` 只挂在**自己知道在忙**的那颗按钮上。
+   */
+  it("puts the spinner on the button that is actually working, not on the whole row", async () => {
+    const api = installApi();
+    api.companion.memory.create.mockImplementation(() => new Promise(() => undefined));
+    renderCompanionCenter();
+    fireEvent.click(await screen.findByRole("tab", { name: "记忆" }));
+    fireEvent.click(screen.getByRole("button", { name: "手动添加" }));
+    fireEvent.change(screen.getByLabelText("新记忆内容"), { target: { value: "我习惯先看例子" } });
+
+    const save = screen.getByRole("button", { name: "保存记忆" });
+    fireEvent.click(save);
+
+    await waitFor(() => expect(save.getAttribute("data-busy")).toBe("true"));
+    expect(document.querySelectorAll('.companion-inline-form button[data-busy="true"]')).toHaveLength(1);
+  });
+
+  /**
+   * B6（评审 P17）：换页以前是硬切。入场动画挂在面板上，而 React 默认**复用**同一个
+   * DOM 节点（只改 id），动画就不会重放——所以面板必须按页签换身份。
+   * 这条钉的是那个 `key`，不是 CSS。
+   */
+  it("hands the stage panel to a fresh node when the tab changes, so the entrance replays", async () => {
+    installApi();
+    renderCompanionCenter();
+    fireEvent.click(await screen.findByRole("tab", { name: "对话" }));
+    const first = document.querySelector(".companion-stage .companion-tab-panel");
+    expect(first).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("tab", { name: "动态" }));
+    await screen.findByRole("heading", { name: "动态", level: 3 });
+    const second = document.querySelector(".companion-stage .companion-tab-panel");
+    expect(second).not.toBe(first);
   });
 });

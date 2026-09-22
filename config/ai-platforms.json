@@ -87,8 +87,8 @@
   "tts": {
     "engine": "qwen",
     "qwen": {
-      "model": "qwen-audio-3.0-tts-flash",
-      "voice": "longanlingxi",
+      "model": "qwen-audio-3.1-tts-flash",
+      "voice": "longhua_v3.1",
       "format": "mp3",
       "sampleRate": 22050,
       "workspaceId": "llm-55ujpy2wafojbdp8",

@@ -847,3 +847,96 @@ export function createUniverseLayout(graph: UnderstandingGraph): UniverseLayout 
     clusterCenters,
   };
 }
+
+export interface LabelSafeBox {
+  readonly left: number;
+  readonly top: number;
+  readonly right: number;
+  readonly bottom: number;
+}
+
+export interface UniverseInsetsLike {
+  readonly top: number;
+  readonly bottom: number;
+  readonly left: number;
+  readonly right: number;
+}
+
+/**
+ * 标签允许待的矩形：画布减去四周浮层，再留 `margin` 的内边距。
+ *
+ * 原来标签越界只跟画布本身比（`< 8` / `> width - 8`），可节点是**已经**按 `insets`
+ * 排开的——标签从节点往左右一推，就爬到工作台或右栏底下去了。伴星中心实测有两条
+ * 标签被面板压掉一半（2026-09-22 评审 B5）。
+ */
+export function labelSafeBox(
+  width: number,
+  height: number,
+  insets: UniverseInsetsLike,
+  margin = 12,
+): LabelSafeBox {
+  const left = insets.left + margin;
+  const top = insets.top + margin;
+  return {
+    left,
+    top,
+    // 浮层比画布还宽时不能翻负——那样 `right > left` 会恒假，标签一条都画不出来。
+    right: Math.max(left, width - insets.right - margin),
+    bottom: Math.max(top, height - insets.bottom - margin),
+  };
+}
+
+export interface LabelLeader {
+  readonly x1: number;
+  readonly y1: number;
+  readonly x2: number;
+  readonly y2: number;
+}
+
+/**
+ * 引线的两端：从节点的**边缘**出发，落在标签牌靠节点那一边的中点。
+ *
+ * 从圆心画起会被节点自己的光晕吃掉；插到牌子中间则像穿过牌子。方向按主轴取，
+ * 与放置候选的顺序一致（下、右、上、左）。
+ */
+export function labelLeader(
+  node: { x: number; y: number; radius: number },
+  plate: { x: number; y: number; width: number; height: number },
+): LabelLeader {
+  const dx = plate.x - node.x;
+  const dy = plate.y - node.y;
+  const half = { w: plate.width / 2, h: plate.height / 2 };
+  if (Math.abs(dx) > Math.abs(dy)) {
+    const towardRight = dx > 0;
+    return {
+      x1: node.x + (towardRight ? node.radius : -node.radius),
+      y1: node.y,
+      x2: plate.x + (towardRight ? -half.w : half.w),
+      y2: plate.y,
+    };
+  }
+  const towardBottom = dy > 0;
+  return {
+    x1: node.x,
+    y1: node.y + (towardBottom ? node.radius : -node.radius),
+    x2: plate.x,
+    y2: plate.y + (towardBottom ? -half.h : half.h),
+  };
+}
+
+/**
+ * `pinned` 策略的门槛：**整句装得下才画**。
+ *
+ * 装不下就不画，而不是画一条带省略号的半句——星图上的标签没有「点开看全文」的
+ * 落点（正文在右栏和左列里都有），一条半句除了占位置不传达任何信息，还会让相邻
+ * 的几条看起来一模一样（实测「用户明确要求：不要主动…」同时出现三条）。
+ *
+ * 不要在这里加「末尾是省略号就不画」这类额外判定：2026-09-22 我差点为一条**根本不
+ * 存在**的缺陷加上它——探针自己 `label.slice(0, 24) + '…'` 打出来的省略号被我当成了
+ * 被测对象的毛病。真截图上两条标签都是整句（`.impeccable/cc-audit/b5-default-view.png`），
+ * 74 条节点标签里 0 条以省略号结尾。要看画出来的字，只能看像素。
+ */
+export function isWholeLabel(label: string, fitted: string): boolean {
+  const full = label.trim() || "未命名对象";
+  return fitted === full;
+}

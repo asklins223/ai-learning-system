@@ -102,6 +102,14 @@ function installApi(options: {
   readonly role?: "owner" | "member";
   readonly ai?: WorkspaceAiSettingsV1;
   readonly companionAllowed?: boolean;
+  /** 声音偏好的读取结果；null = 这个账号没设过（服务端回默认并标 explicit:false）。 */
+  readonly voice?: {
+    readonly version: 1;
+    readonly engine: "qwen" | "edge";
+    readonly voice: string;
+    readonly explicit: boolean;
+    readonly updatedAt: string | null;
+  };
   readonly switchRejects?: boolean;
   readonly exportResult?: {
     readonly version: 1;
@@ -129,6 +137,41 @@ function installApi(options: {
         get: vi.fn(async () => ok({ version: 1 as const, preference: "any" as const, updatedAt: null })),
         patch: vi.fn(async (input: { preference: "voice" | "silent" | "text" | "any" }) =>
           ok({ version: 1 as const, preference: input.preference, updatedAt: "2026-09-18T00:00:00.000Z" })),
+      },
+      // 声音：默认回"没用过"，用例自己改成显式偏好。
+      voicePreference: {
+        get: vi.fn(async () => ok(
+          options.voice ?? {
+            version: 1 as const,
+            engine: "qwen" as const,
+            voice: "longhua_v3.1",
+            explicit: false,
+            updatedAt: null,
+          },
+        )),
+        patch: vi.fn(async (input: { engine: "qwen" | "edge"; voice: string }) => {
+          calls.push({ method: "voicePreference.patch", input });
+          return ok({
+            version: 1 as const,
+            engine: input.engine,
+            voice: input.voice,
+            explicit: true,
+            updatedAt: "2026-09-22T00:00:00.000Z",
+          });
+        }),
+      },
+      voicePreview: {
+        synthesize: vi.fn(async (input: { engine: "qwen" | "edge"; voice: string }) => {
+          calls.push({ method: "voicePreview.synthesize", input });
+          return ok({
+            version: 1 as const,
+            mimeType: "audio/mpeg" as const,
+            // 一段合法 mp3 帧的 base64：内容不被解析，只要求 atob 得给出字节。
+            audioBase64: "fRwAeACRgAgAAAAAAAD/",
+            byteLength: 12,
+            voice: input.voice,
+          });
+        }),
       },
     },
     invites: {
@@ -210,7 +253,20 @@ function openSection(label: string) {
   fireEvent.click(screen.getByRole("button", { name: label }));
 }
 
+const createdObjectUrls: string[] = [];
+
 beforeEach(() => {
+  // jsdom 不实现 createObjectURL；试听要把 base64 变成可播的源，就得给它一个。
+  Object.defineProperty(URL, "createObjectURL", {
+    configurable: true,
+    value: (blob: Blob) => {
+      const url = `blob:mock/${createdObjectUrls.length}`;
+      createdObjectUrls.push(url);
+      void blob;
+      return url;
+    },
+  });
+  Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: () => {} });
   // The surface measures its body to decide whether to show the overflow fade.
   Object.defineProperty(window, "ResizeObserver", {
     configurable: true,
@@ -223,6 +279,9 @@ beforeEach(() => {
   useRoomStore.setState({ settingsSection: "account", surface: "settings" });
 });
 
+  Reflect.deleteProperty(URL, "createObjectURL");
+  Reflect.deleteProperty(URL, "revokeObjectURL");
+  createdObjectUrls.length = 0;
 afterEach(() => {
   cleanup();
   Reflect.deleteProperty(window, "ailearn");
@@ -721,4 +780,105 @@ describe("设置页的退出登录", () => {
 
     expect(peekAccountSignOutNotice()).toContain("没能通知学习服务撤销");
   });
+});
+
+// ─── 设置 → 语音与伴星：引擎、音色与试听 ─────────────────────────────────
+
+async function openVoiceSection(
+  voice?: Parameters<typeof installApi>[0]["voice"],
+) {
+  // installApi 自己会把桩挂到 window.ailearn（那个属性不可重新赋值），用例只改它的成员。
+  const { api, calls } = installApi(voice ? { voice } : {});
+  render(<SettingsSurface />);
+  await screen.findByText("理解空间", { selector: ".space-identity h3" });
+  openSection("语音与伴星");
+  await waitFor(() => expect(screen.getByText("用哪套声音合成")).toBeTruthy());
+  return { api, calls };
+}
+
+it("声音分组：千问下画满目录里的 5 个音色，并在用的那一条标出来", async () => {
+  await openVoiceSection();
+  for (const name of ["龙华", "龙安灵希", "龙安灵心", "龙安风悦", "龙安欢"]) {
+    expect(screen.getAllByText(name).length).toBeGreaterThan(0);
+  }
+  // 默认那条（服务端回 longhua_v3.1）必须带"在用"，其余行不带。
+  expect(screen.getAllByText("在用").length).toBe(1);
+  expect(screen.getAllByText("试听").length).toBe(5);
+});
+
+it("切到 Edge-TTS：列表只剩固定那一条，写入带成对的引擎与音色", async () => {
+  const { calls } = await openVoiceSection();
+  fireEvent.click(screen.getByRole("button", { name: "Edge-TTS" }));
+  await waitFor(() => {
+    const write = calls.find((call) => call.method === "voicePreference.patch");
+    expect(write?.input).toEqual({
+      meta: expect.objectContaining({ version: 1 }),
+      engine: "edge",
+      voice: "zh-CN-XiaoxiaoNeural",
+    });
+  });
+  await waitFor(() => {
+    expect(screen.queryByText("龙安灵希")).toBeNull();
+    expect(screen.getAllByText("试听").length).toBe(1);
+  });
+});
+
+it("点某一行「用这一身」：写进去的就是那一行的 voice", async () => {
+  const { calls } = await openVoiceSection();
+  const rows = screen.getAllByText("用这一身");
+  // 默认那条自己不给出这个按钮，所以 5 行里是 4 个。
+  expect(rows.length).toBe(4);
+  fireEvent.click(rows[1]);
+  await waitFor(() => {
+    const write = calls.find((call) => call.method === "voicePreference.patch");
+    expect((write?.input as { voice: string }).voice).toBe("longanlingxi_v3.1");
+    expect((write?.input as { engine: string }).engine).toBe("qwen");
+  });
+});
+
+it("试听：调合成、把返回的字节挂上播放器并发声", async () => {
+  const { calls } = await openVoiceSection();
+  const audio = document.querySelector("audio.settings-voice__player") as HTMLAudioElement | null;
+  expect(audio).not.toBeNull();
+  const played: string[] = [];
+  audio.play = () => {
+    played.push(audio.src);
+    return Promise.resolve();
+  };
+  fireEvent.click(screen.getAllByText("试听")[2]);
+  await waitFor(() => {
+    expect(calls.some((call) => call.method === "voicePreview.synthesize")).toBe(true);
+    expect(played.length).toBe(1);
+  });
+  const call = calls.find((item) => item.method === "voicePreview.synthesize");
+  expect((call?.input as { voice: string }).voice).toBe("longanlingxin_v3.1");
+  expect(createdObjectUrls.length).toBe(1);
+  expect(audio.src).toContain("blob:mock/");
+});
+
+it("试听失败：给出这一句的失败读数，不把选择改掉", async () => {
+  const { api, calls } = await openVoiceSection();
+  api.companion.voicePreview.synthesize = vi.fn(async () => {
+    calls.push({ method: "voicePreview.synthesize", input: "boom" });
+    throw new Error("gateway down");
+  }) as never;
+  const before = (calls.filter((c) => c.method === "voicePreference.patch")).length;
+  fireEvent.click(screen.getAllByText("试听")[0]);
+  await waitFor(() => expect(screen.getByText("这一段没试听成")).toBeTruthy());
+  expect((calls.filter((c) => c.method === "voicePreference.patch")).length).toBe(before);
+});
+
+it("没读到偏好：不画音色列表，也不把默认值演成用户的选择", async () => {
+  const { api } = await openVoiceSection();
+  api.companion.voicePreference.get = vi.fn(async () => {
+    throw new Error("nope");
+  }) as never;
+  // 重读一次：把"读不到"这一态真正推到界面上。
+  api.companion.voicePreference.get = vi.fn(async () => {
+    throw new Error("nope");
+  }) as never;
+  fireEvent.click(screen.getByText("作答方式"));
+  openSection("语音与伴星");
+  expect(screen.getByText("未读到")).toBeTruthy();
+  expect(screen.queryByText("试听")).toBeNull();
 });

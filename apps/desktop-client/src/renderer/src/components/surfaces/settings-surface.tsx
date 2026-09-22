@@ -41,7 +41,13 @@ import {
   type WorkspaceAiSettingsV1,
   type WorkspaceSummaryV1,
 } from "@ailearn/shared/desktop-ipc-contracts";
-import type { CompanionAnswerModePreferenceV1 } from "@ailearn/shared/companion-shell-contracts";
+import type { CompanionAnswerModePreferenceV1, CompanionVoicePreferenceV1 } from "@ailearn/shared/companion-shell-contracts";
+import {
+  EDGE_TTS_VOICE_OPTIONS,
+  QWEN_TTS_VOICE_OPTIONS,
+  type TtsEngineV1,
+  type TtsVoiceOptionV1,
+} from "@ailearn/shared/tts-voice-catalog";
 import type { MotionMode } from "../../app/room-machine";
 import {
   MAX_COMPANION_SCALE,
@@ -204,8 +210,16 @@ const DATA_POLICY_FIELDS: ReadonlyArray<readonly [keyof AiDataPolicyV1, string, 
   ["auditLogging", "记录 AI 审计日志", "每次外发都留下可追溯的记录，供你回看。"],
 ];
 
-const ANSWER_MODE_OPTIONS: ReadonlyArray<readonly [CompanionAnswerModePreferenceV1["preference"], string]> = [
-  ["any", "跟随安排"],
+const TTS_ENGINE_OPTIONS: ReadonlyArray<readonly [TtsEngineV1, string]> = [
+  ["qwen", "千问"],
+  ["edge", "Edge-TTS"],
+];
+
+/** 切引擎时一起落定的音色：edge 只有一条，千问取目录第一条。 */
+const ttsDefaultVoiceFor = (engine: TtsEngineV1): string =>
+  engine === "qwen" ? QWEN_TTS_VOICE_OPTIONS[0].voice : EDGE_TTS_VOICE_OPTIONS[0].voice;
+
+const ANSWER_MODE_OPTIONS: ReadonlyArray<readonly [CompanionAnswerModePreferenceV1["preference"], string]> = [  ["any", "跟随安排"],
   ["voice", "语音"],
   ["silent", "静默结构"],
   ["text", "文字"],
@@ -386,6 +400,16 @@ export function SettingsSurface() {
   /** 作答方式是账号级偏好，读取失败时不能把「跟随安排」当成服务端答案展示。 */
   const [answerModeRead, setAnswerModeRead] = useState(false);
   const [answerModeSaving, setAnswerModeSaving] = useState(false);
+  // 声音：引擎 + 音色（账号级）。与作答方式同样"读到才画选项"，没读到不能把默认值演成用户的选择。
+  const [voicePreference, setVoicePreference] = useState<CompanionVoicePreferenceV1 | null>(null);
+  const [voicePreferenceRead, setVoicePreferenceRead] = useState(false);
+  const [voiceSaving, setVoiceSaving] = useState(false);
+  /** 正在试听的 voice（null = 没有）；用来禁用按钮并给出"正在合成"的读数。 */
+  const [voicePreviewing, setVoicePreviewing] = useState<string | null>(null);
+  const [voicePreviewError, setVoicePreviewError] = useState<string | null>(null);
+  const voiceAudioRef = useRef<HTMLAudioElement | null>(null);
+  /** 上一次的 blob URL：换试听就回收，不然每点一次漏一段音频在内存里。 */
+  const voicePreviewUrlRef = useRef<string | null>(null);
   const [inventoryEpoch, setInventoryEpoch] = useState(0);
   const [auxiliaryEpoch, setAuxiliaryEpoch] = useState(0);
   const epochRef = useRef<number | undefined>(undefined);
@@ -1000,6 +1024,63 @@ export function SettingsSurface() {
     }
   };
 
+  /**
+   * 保存"这一身"。引擎与音色成对写：切到 edge 时把 edge 那条固定音色一起写下去，
+   * 库里不留"引擎=edge + 音色是千问的"的半套状态（服务端读到不配对会整条回默认，
+   * 但那是兜底，不该由界面产生）。
+   */
+  const changeVoice = async (engine: TtsEngineV1, voice: string) => {
+    if (voiceSaving) return;
+    setVoiceSaving(true);
+    setFailureNotice(null);
+    try {
+      const response = await window.ailearn.companion.voicePreference.patch({
+        meta: createRequestMeta(epochRef.current),
+        engine,
+        voice,
+      });
+      setVoicePreference(unwrapGatewayResult(response));
+    } catch (error) {
+      setFailureNotice(gatewayErrorMessage(error));
+    } finally {
+      setVoiceSaving(false);
+    }
+  };
+
+  /**
+   * 试听：服务端用目录里那句固定话合成一段，回来直接响。
+   *
+   * 文本不在这里拼——试听句只有目录里那一份，界面听到的就是它。渲染进程没有
+   * Buffer，所以 base64 走 atob 再包成 Blob；上一次的 URL 在换新的一段时回收。
+   */
+  const previewVoice = async (engine: TtsEngineV1, voice: string) => {
+    if (voicePreviewing !== null) return;
+    setVoicePreviewing(voice);
+    setVoicePreviewError(null);
+    try {
+      const response = await window.ailearn.companion.voicePreview.synthesize({
+        meta: createRequestMeta(epochRef.current),
+        engine,
+        voice,
+      });
+      const result = unwrapGatewayResult(response);
+      const bytes = Uint8Array.from(atob(result.audioBase64), (ch) => ch.charCodeAt(0));
+      const url = URL.createObjectURL(new Blob([bytes], { type: result.mimeType }));
+      if (voicePreviewUrlRef.current) URL.revokeObjectURL(voicePreviewUrlRef.current);
+      voicePreviewUrlRef.current = url;
+      const element = voiceAudioRef.current;
+      if (element) {
+        element.src = url;
+        // 用户点的就是"放给我听"，不再要求二次点击；自动播放被拦时静默留着控件。
+        await element.play().catch(() => undefined);
+      }
+    } catch (error) {
+      setVoicePreviewError(gatewayErrorMessage(error));
+    } finally {
+      setVoicePreviewing(null);
+    }
+  };
+
   const copyInviteToken = async (token: string) => {
     setCopiedCode(false);
     setFailureNotice(null);
@@ -1070,6 +1151,19 @@ export function SettingsSurface() {
         if (active) setAnswerMode(null);
       } finally {
         if (active) setAnswerModeRead(true);
+      }
+    })();
+
+    void (async () => {
+      try {
+        const result = unwrapGatewayResult(
+          await window.ailearn.companion.voicePreference.get({ meta: meta() }),
+        );
+        if (active) setVoicePreference(result);
+      } catch {
+        if (active) setVoicePreference(null);
+      } finally {
+        if (active) setVoicePreferenceRead(true);
       }
     })();
 
@@ -1664,6 +1758,38 @@ export function SettingsSurface() {
     footerNote: "主题、动效、目录行为与入场引导都只影响这台设备，不写入工作区。",
   });
 
+  /**
+   * 一行一个音色：名字与说明直接用官方口径（声线特质、试听语种），不自己形容音质。
+   * 「试听」不要求先选中——挑声音本来就是先听再定。
+   */
+  const voiceRow = (option: TtsVoiceOptionV1, inUse: boolean) => (
+    <SettingRow
+      key={option.voice}
+      title={option.name}
+      detail={option.note || "官方没有给这一条额外的说明，听上面的试听。"}
+    >
+      <span className="settings-voice__actions">
+        {inUse ? <span className="tag green">在用</span> : null}
+        <button
+          type="button"
+          className="ghost"
+          disabled={inUse || voiceSaving}
+          onClick={() => void changeVoice(option.engine, option.voice)}
+        >
+          用这一身
+        </button>
+        <button
+          type="button"
+          className="button"
+          disabled={voicePreviewing !== null}
+          onClick={() => void previewVoice(option.engine, option.voice)}
+        >
+          {voicePreviewing === option.voice ? "正在合成" : "试听"}
+        </button>
+      </span>
+    </SettingRow>
+  );
+
   /** A control block, then what the companion is currently allowed to do. */
   const companionPanel = (): SettingsPanel => ({
     title: "语音与伴星",
@@ -1736,6 +1862,45 @@ export function SettingsSurface() {
               )}
             </SettingRow>
           </div>
+        </section>
+
+        <section className="settings-group">
+          <h3 className="settings-group__title">声音</h3>
+          <div className="settings-rows">
+            <SettingRow
+              title="用哪套声音合成"
+              detail={voicePreference
+                ? "换的是她说话用的合成引擎；跟着账号走，换设备也在。"
+                : "正在读取这个账号的声音设置。"}
+            >
+              {voicePreference ? (
+                <HudSegmented
+                  label="合成引擎"
+                  value={voicePreference.engine}
+                  options={TTS_ENGINE_OPTIONS}
+                  compact
+                  disabled={voiceSaving}
+                  onChange={(next) => void changeVoice(next, ttsDefaultVoiceFor(next))}
+                />
+              ) : (
+                <span className="tag">{voicePreferenceRead ? "未读到" : "读取中…"}</span>
+              )}
+            </SettingRow>
+
+            {/* 只画当前引擎下的那一份名单：两套引擎的音色名不通用，混在一张列表里
+                会让人以为"龙安灵希"和"晓晓"是可以互换了再听的同一批。 */}
+            {voicePreference
+              ? (voicePreference.engine === "qwen" ? QWEN_TTS_VOICE_OPTIONS : EDGE_TTS_VOICE_OPTIONS).map(
+                  (option) => voiceRow(option, voicePreference.voice === option.voice),
+                )
+              : null}
+          </div>
+
+          {/* 一个播放器反复换源，而不是每条一个 audio：试听多了会留下一排进度各异的控件。 */}
+          <audio ref={voiceAudioRef} className="settings-voice__player" controls />
+          {voicePreviewError ? (
+            <SettingsInlineState title="这一段没试听成" detail={voicePreviewError} tone="error" />
+          ) : null}
         </section>
 
         <section className="settings-group">

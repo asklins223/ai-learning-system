@@ -4341,3 +4341,31 @@ seq 分配点都是 `UPDATE … RETURNING` 原子取号，能撞号说明还有�
 头号嫌疑是跨会话扫描的孤儿回收（`ailearn_reclaim_orphaned_companion_runs`）。
 立为 **D6**，判据：列出每一个写 `companion_stream_events` 的入口，逐个看它是取号还是算号；
 在证明之前不再写生产结论。
+
+#### D6 结果（同日 15:10）：没有任何一条产品在"算号"，撞号的是测试自己写死的字面量
+
+枚举了**每一个**写 `companion_stream_events` 的入口（TS 侧 8 处 + 迁移里的 SQL 函数 2 个，
+含 drizzle 的对象字面量写法与 `insert(companionStreamEvents)`，不只 grep SQL 文本）：
+
+| 写者 | seq 来源 |
+| --- | --- |
+| `turn-service.ts` / `companion-cancel.ts` / `learning-action-bridge.ts` / `companion-proposal-expiry.ts` | `UPDATE … next_event_seq + n … RETURNING` 再减偏移 |
+| worker：`companion-dialogue-store.ts`（含 `insertStreamEvent`、TTS 批量）、`-deltas.ts`、`-stream.ts`、`companion-dialogue.ts`、`companion-agent-runtime.ts` | 同上，全部同一条事务内取号 |
+| 迁移 0217 过期清扫、0232 孤儿回收 | `UPDATE … RETURNING next_event_seq - n INTO v_start_seq` + `row_number()` 分配批内偏移 |
+
+**没有一条是先读 counter 再算。** 那 Postgres 日志里反复出现的
+`duplicate key ... (conversation_id, seq)=(…, 2)` 是谁写的？日志的 `STATEMENT` 直接点名：
+`INSERT INTO companion_stream_events (conversation_id, seq, …) VALUES (…, 2, …)`
+——**列清单就是测试文件里那条手写 INSERT**（`P2 SSE` 用例为了造"游标缺口"写死了 seq=2）。
+同一个连接号还顺手执行了 `DELETE FROM companion_turn_runs`，即它跑在测试进程里。
+开发栈上的 worker 把这条会话的 job 认领走之后写了 seq=2，字面量就撞上了。
+
+修法：那条 fixture 改成**跟产品一样取号**（`UPDATE … RETURNING next_event_seq - 1`），
+语义不变（仍然是"过期事件之后存在一条未过期事件 → after=0 报 CURSOR_EXPIRED"），
+但不再假设"这条会话里除了我没人写过事件"。
+
+结果：`companion-conversation` 整文件 **17/17 连跑三次全绿**，跑的时候
+`ailearn-dev-worker-1` 是 healthy 且在消费 job。D3 与 D6 一起关掉。
+一条诚实边界：这条修复**没法做变异检查**（把 seq 换回字面量 2 只在 worker 恰好写过
+seq=2 时才红，实测频率约 1/3 的运行），所以它的证据是日志里那 4 次真实撞号的
+`STATEMENT` 与改后 3/3 全绿，不是"改坏会红"。

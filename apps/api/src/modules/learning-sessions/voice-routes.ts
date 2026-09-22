@@ -26,6 +26,16 @@ import { stripVoiceExpressionTags } from "@ailearn/shared/voice-expression-tags"
 import { qwenTtsSynthesizeStreamForUser, QwenTtsError } from "./voice-providers/qwen-tts.ts";
 import { loadTtsEngineConfig } from "./voice-providers/tts-config.ts";
 import { synthesizeTtsBytes } from "./voice-providers/tts-engine.ts";
+import { resolveTtsSelection, type ResolvedTtsSelection } from "./voice-providers/tts-preference.ts";
+import {
+  getStoredVoicePreference,
+  setVoicePreference,
+} from "../companion-shell/service.ts";
+import { TTS_PREVIEW_TEXT } from "@ailearn/shared/tts-voice-catalog";
+import {
+  companionVoicePreferencePatchV1Schema,
+  companionVoicePreviewRequestV1Schema,
+} from "@ailearn/shared";
 import { companionTtsStreamRequestV1Schema } from "@ailearn/shared";
 import {
   companionVoicePlaybackOutcomeRequestV1Schema,
@@ -250,6 +260,100 @@ export async function voiceRoutes(app: FastifyInstance) {
   });
 
   // POST /voice/tts：朗读（TTS 合成 → mp3），经 edge-tts Docker 容器。
+  // ─── 音色偏好与试听（设置 → 语音与伴星）───────────────────────────────
+  //
+  // 正文语音**不接受**请求体指定 engine/voice：那等于任何一段语音的实际音色由
+  // 客户端说了算，也守不住"两个人听到的是同一身"。正文只按"这个账号存着什么"来选。
+
+  /**
+   * 合成侧解析当前账号该用哪一身。
+   *
+   * 读失败退回 config 默认而不是抛错：语音比"这一句恰好是用户选的那身"更要紧，
+   * 一次库抖动不该让伴星没声音。设置页的读法故意不一样（见下面 GET，那里出错要
+   * 让人看见并重试，不能把默认值演成用户的选择）。
+   */
+  async function resolveSelectionForSynthesis(
+    session: { workspaceId: string; userId: string },
+    log: { warn: (obj: unknown, msg: string) => void },
+  ): Promise<ResolvedTtsSelection> {
+    const cfg = loadTtsEngineConfig();
+    try {
+      const { stored } = await getStoredVoicePreference(session.userId, session.workspaceId);
+      return resolveTtsSelection(stored, cfg);
+    } catch (err) {
+      log.warn({ err }, "tts voice preference unavailable; using config default");
+      return resolveTtsSelection(null, cfg);
+    }
+  }
+
+  // GET /voice/preference — 这个账号的引擎与音色（未设置时回 config 默认并标 explicit:false）。
+  app.get("/voice/preference", { preHandler: [requireSession] }, async (req) => {
+    const session = req.session!;
+    const { stored, updatedAt } = await getStoredVoicePreference(session.userId, session.workspaceId);
+    const selection = resolveTtsSelection(stored, loadTtsEngineConfig());
+    return {
+      version: 1,
+      engine: selection.engine,
+      voice: selection.engine === "qwen" ? selection.qwenVoice : selection.edgeVoice,
+      explicit: selection.explicit,
+      updatedAt: selection.explicit ? updatedAt : null,
+    };
+  });
+
+  // PATCH /voice/preference — 保存选择。engine 与 voice 的搭配由合同层白名单把关。
+  app.patch("/voice/preference", { preHandler: [requireSession] }, async (req) => {
+    const body = parseBody(app, companionVoicePreferencePatchV1Schema, req.body);
+    const session = req.session!;
+    await setVoicePreference(session.userId, session.workspaceId, body.engine, body.voice);
+    return {
+      version: 1,
+      engine: body.engine,
+      voice: body.voice,
+      explicit: true,
+      updatedAt: new Date().toISOString(),
+    };
+  });
+
+  // POST /voice/tts/preview — 用固定的一句话试听某个音色，不等用户先把她设为默认。
+  //
+  // 文本写死在服务端：这条路由会真金白银地打上游合成接口，收自由文本就是给任意
+  // 内容开一条计费通道。voice 同样只能取目录内的值（合同层 superRefine 把关）。
+  app.post("/voice/tts/preview", { preHandler: [requireSession] }, async (req, reply) => {
+    const session = req.session!;
+    const body = parseBody(app, companionVoicePreviewRequestV1Schema, req.body);
+    if (!rateLimitVoice(
+      reply, req.id,
+      `${session.workspaceId}:${session.userId}:tts-preview`,
+      COMPANION_RATE_LIMITS.ttsPreviewPerMinute.limit,
+      COMPANION_RATE_LIMITS.ttsPreviewPerMinute.windowMs,
+    )) return;
+    try {
+      const result = await synthesizeTtsBytes({
+        text: TTS_PREVIEW_TEXT,
+        // 试听的就是用户点的那一条，不借 config 的 edge 默认——否则 config 与目录
+        // 哪天对不上，用户听到的就不是他选的那个了。
+        edgeVoice: body.voice,
+        queueKey: `${session.workspaceId}:${session.userId}:preview`,
+        selection: {
+          engine: body.engine,
+          qwenVoice: body.voice,
+          edgeVoice: body.voice,
+          explicit: true,
+        },
+        onQwenFallback: (error) => req.log.warn({ err: error }, "qwen tts preview failed; falling back to edge-tts"),
+      });
+      return reply
+        .type(result.contentType)
+        .header("Cache-Control", "no-store")
+        .send(Buffer.from(result.audio));
+    } catch (err) {
+      if (err instanceof EdgeTtsError) {
+        return reply.code(502).send({ error: err.code, message: "语音合成服务暂不可用，请稍后重试" });
+      }
+      throw err;
+    }
+  });
+
   // Companion branch（§11.3）：请求含 conversationId/runId/...（strict ref）时，重读
   // voice.segment.ready 事件验证后合成；普通朗读请求直接走固定 profile。
   app.post("/voice/tts", { preHandler: [requireSession] }, async (req, reply) => {
@@ -264,6 +368,9 @@ export async function voiceRoutes(app: FastifyInstance) {
         });
       }
       const session = req.session!;
+      // 这一整轮分段朗读用同一身：逐段重读偏好会让一次回复里的各段音色不一致
+      // （中途另一次会话改了设置就会出现），听起来像她忽男忽女。
+      const selection = await resolveSelectionForSynthesis(session, req.log);
       if (!rateLimitVoice(reply, req.id, `${session.workspaceId}:${session.userId}:tts`, COMPANION_RATE_LIMITS.ttsPerMinute.limit, COMPANION_RATE_LIMITS.ttsPerMinute.windowMs)) return;
       const result = await synthesizeCompanionTtsSegment({
         workspaceId: session.workspaceId,
@@ -291,6 +398,7 @@ export async function voiceRoutes(app: FastifyInstance) {
               text,
               edgeVoice: voice,
               queueKey: `${session.workspaceId}:${session.userId}`,
+              selection,
               onQwenFallback: (error) => {
                 attempted = "edge";
                 req.log.warn({ err: error, ordinal: parsed.data.ordinal }, "qwen tts failed; falling back to edge-tts");
@@ -326,6 +434,7 @@ export async function voiceRoutes(app: FastifyInstance) {
         text: body.text,
         edgeVoice: body.voice ?? "zh-CN-XiaoxiaoNeural",
         queueKey: `${req.session!.workspaceId}:${req.session!.userId}`,
+        selection: await resolveSelectionForSynthesis(req.session!, req.log),
         onQwenFallback: (error) => req.log.warn({ err: error }, "qwen tts failed; falling back to edge-tts"),
       });
       return reply

@@ -1,5 +1,5 @@
 /**
- * 15b：qwen-audio-3.0-tts-flash 实时语音合成 provider（阿里百炼）。
+ * 15b：qwen-audio-3.1-tts-flash 实时语音合成 provider（阿里百炼）。
  *
  * 协议（WebSocket 原始协议，见阿里百炼《实时语音合成-Qwen-Audio-TTS》文档）：
  *   run-task（streaming: duplex，parameters 含 voice/format/sample_rate 等）
@@ -24,9 +24,9 @@ export interface QwenTtsOptions {
   workspaceId: string;
   /** DASHSCOPE_API_KEY */
   apiKey: string;
-  /** 模型（默认 qwen-audio-3.0-tts-flash） */
+  /** 模型（默认 qwen-audio-3.1-tts-flash） */
   model?: string;
-  /** 音色（如 longanlingxi 龙安灵希） */
+  /** 音色（如 longhua_v3.1 龙华；音色名带模型版本后缀，不能跨模型混用） */
   voice: string;
   /** 音频格式（默认 mp3） */
   format?: string;
@@ -38,7 +38,7 @@ export interface QwenTtsOptions {
   rate?: number;
   /** 音调（默认 1） */
   pitch?: number;
-  /** 指令控制（高质量声音描述，可选；qwen-audio-3.0-tts-flash 系统音色支持任意指令） */
+  /** 指令控制（高质量声音描述，可选；qwen-audio-3.1-tts-flash 系统音色支持任意指令） */
   instruction?: string;
   /** 连接/任务超时 ms（默认 30s） */
   timeoutMs?: number;
@@ -209,7 +209,7 @@ export async function qwenTtsSynthesizeStreamForUser(
   }
 }
 
-const DEFAULT_MODEL = "qwen-audio-3.0-tts-flash";
+const DEFAULT_MODEL = "qwen-audio-3.1-tts-flash";
 const DEFAULT_FORMAT = "mp3";
 const DEFAULT_SAMPLE_RATE = 22050;
 const DEFAULT_TIMEOUT_MS = 30_000;

@@ -92,7 +92,7 @@ export class MockWebSocket {
 export const QWEN_TEST_BASE_OPTS = {
   workspaceId: "llm-test-workspace",
   apiKey: "sk-test",
-  voice: "longanlingxi",
+  voice: "longanlingxi_v3.1",
   instruction: "可爱的年轻女性声音",
   WebSocketImpl: MockWebSocket as unknown as typeof import("ws").default,
 } satisfies QwenTtsOptions;

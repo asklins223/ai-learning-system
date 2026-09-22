@@ -15,8 +15,8 @@ function makeConfig(engine: "qwen" | "edge", workspaceId: string): TtsEngineConf
     engine,
     qwen: {
       workspaceId,
-      model: "qwen-audio-3.0-tts-flash",
-      voice: "longanlingxi",
+      model: "qwen-audio-3.1-tts-flash",
+      voice: "longanlingxi_v3.1",
       format: "mp3",
       sampleRate: 22050,
       instruction: "",
@@ -134,4 +134,70 @@ test("engine=edge：qwen 完全不参与", async () => {
   });
   assert.equal(result.engine, "edge");
   assert.equal(qwenCalls, 0);
+});
+
+// ─── 用户音色偏好（selection 覆盖 config）───────────────────────────────
+
+test("selection 指定 qwen 音色：进上游的是这一身，不是 config 那条", async () => {
+  let seenVoice = "";
+  const result = await synthesizeTtsBytes({
+    text: "你好",
+    edgeVoice: "zh-CN-XiaoxiaoNeural",
+    queueKey: "ws:user",
+    selection: { engine: "qwen", qwenVoice: "longanlingxi_v3.1", edgeVoice: "zh-CN-XiaoxiaoNeural", explicit: true },
+    deps: baseDeps({
+      loadConfig: () => makeConfig("qwen", "ws-123"),
+      qwenSynthesize: async (_key, _text, options) => {
+        seenVoice = options.voice;
+        return { stream: streamOf("qwen"), contentType: "audio/mpeg" };
+      },
+      edgeSynthesize: async () => {
+        throw new Error("edge must not be called");
+      },
+    }),
+  });
+  assert.equal(result.engine, "qwen");
+  assert.equal(seenVoice, "longanlingxi_v3.1");
+});
+
+test("selection 说 edge：config 是 qwen 也不碰 qwen，不做'先试千问再降级'", async () => {
+  // 用户明确挑了 edge，让 qwen 先试一遍等于把设置里那个选择演成没发生过
+  // （而且 qwen 成功时根本不会降级，播出去的还是千问的声音）。
+  let qwenCalls = 0;
+  const result = await synthesizeTtsBytes({
+    text: "你好",
+    edgeVoice: "zh-CN-XiaoxiaoNeural",
+    queueKey: "ws:user",
+    selection: { engine: "edge", qwenVoice: "longhua_v3.1", edgeVoice: "zh-CN-XiaoxiaoNeural", explicit: true },
+    deps: baseDeps({
+      loadConfig: () => makeConfig("qwen", "ws-123"),
+      qwenSynthesize: async () => {
+        qwenCalls += 1;
+        return { stream: streamOf("qwen"), contentType: "audio/mpeg" };
+      },
+      edgeSynthesize: async () => ({ audio: bytes("edge"), contentType: "audio/mpeg" }),
+    }),
+  });
+  assert.equal(result.engine, "edge");
+  assert.equal(qwenCalls, 0);
+});
+
+test("不传 selection：仍旧用 config 那条音色（默认行为没被动过）", async () => {
+  let seenVoice = "";
+  await synthesizeTtsBytes({
+    text: "你好",
+    edgeVoice: "zh-CN-XiaoxiaoNeural",
+    queueKey: "ws:user",
+    deps: baseDeps({
+      loadConfig: () => makeConfig("qwen", "ws-123"),
+      qwenSynthesize: async (_key, _text, options) => {
+        seenVoice = options.voice;
+        return { stream: streamOf("qwen"), contentType: "audio/mpeg" };
+      },
+      edgeSynthesize: async () => {
+        throw new Error("edge must not be called");
+      },
+    }),
+  });
+  assert.equal(seenVoice, makeConfig("qwen", "ws-123").qwen.voice);
 });

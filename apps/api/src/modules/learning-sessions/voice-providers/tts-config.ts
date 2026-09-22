@@ -21,7 +21,7 @@ export interface QwenTtsConfig {
   voice: string;
   format: string;
   sampleRate: number;
-  /** 指令控制（高质量声音描述，≤100 字符；qwen-audio-3.0-tts-flash 系统音色支持任意指令） */
+  /** 指令控制（高质量声音描述，≤100 字符；qwen-audio-3.1-tts-flash 系统音色支持任意指令） */
   instruction: string;
 }
 export interface TtsEngineConfig {
@@ -34,8 +34,8 @@ const DEFAULTS: TtsEngineConfig = {
   engine: "qwen",
   qwen: {
     workspaceId: "",
-    model: "qwen-audio-3.0-tts-flash",
-    voice: "longanlingxi",
+    model: "qwen-audio-3.1-tts-flash",
+    voice: "longhua_v3.1",
     format: "mp3",
     sampleRate: 22050,
     instruction: "可爱的年轻女性声音，25 岁左右，声音甜美温柔、略带活泼，语速自然适中，适合轻松陪伴式对话",

@@ -385,13 +385,22 @@ test("P2 SSE：replay turn.accepted + after 推进 + INVALID_CURSOR/CURSOR_EXPIR
     assert.equal(tooFar.statusCode, 400);
     if ("error" in tooFar) assert.equal(tooFar.error.code, "INVALID_CURSOR");
 
-    // 造缺口：把 turn.accepted 过期 + 手动写一条未过期 seq=2 → after=0 → 409 CURSOR_EXPIRED
+    // 造缺口：把 turn.accepted 过期 + 手动写一条未过期事件 → after=0 → 409 CURSOR_EXPIRED
+    //
+    // seq 必须**取号**，不能写死 2：这条会话的 job 可能已经被开发栈上那个活着的 worker
+    // 认领并写了事件（实机 2026-09-22 的 `duplicate key ... companion_stream_events_pkey`
+    // 就是这个字面量 2 撞上的）。查过全部生产写者——8 处 TS 与 2 个 SQL 函数
+    // （0217 过期清扫、0232 孤儿回收）都是 `UPDATE … RETURNING next_event_seq - n`
+    // 原子取号，**没有一条在算号**，所以这条撞号从来不是产品缺陷。
     await sql.begin(async (tx) => {
       await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
       await tx`SELECT set_config('app.user_id', ${userId}, true)`;
       await tx`UPDATE companion_stream_events SET expires_at = now() - interval '1 hour' WHERE conversation_id = ${conversationId}`;
+      const allocated = await tx`
+        UPDATE companion_conversations SET next_event_seq = next_event_seq + 1
+        WHERE id = ${conversationId} RETURNING next_event_seq - 1 AS seq`;
       await tx`INSERT INTO companion_stream_events (conversation_id, seq, workspace_id, user_id, run_id, generation, account_epoch, type, payload, expires_at)
-               VALUES (${conversationId}, 2, ${workspaceId}, ${userId}, NULL, 0, 0, 'character.cue', ${{ cue: { type: "idle" } } as never}, now() + interval '1 hour')`;
+               VALUES (${conversationId}, ${Number(allocated[0].seq)}, ${workspaceId}, ${userId}, NULL, 0, 0, 'character.cue', ${{ cue: { type: "idle" } } as never}, now() + interval '1 hour')`;
     });
     const expired = await openCompanionEventStream({
       workspaceId, userId, conversationId,

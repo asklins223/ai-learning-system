@@ -28,6 +28,8 @@ import {
   type ApiTransaction,
 } from "../../db/client.ts";
 import { COMPANION_ACCOUNT_NOTIFY_CHANNEL } from "../companion-conversation/companion-notify.ts";
+import { type StoredVoicePreference } from "../learning-sessions/voice-providers/tts-preference.ts";
+import { type TtsEngineV1 } from "@ailearn/shared/tts-voice-catalog";
 import {
   companionRuntimeFences,
   type CompanionAnimationVoiceOff,
@@ -987,5 +989,92 @@ export async function setAnswerModePreference(
         .where(eq(userLearningPreferencesTable.id, row.id));
     }
     return { preference, updatedAt: now.toISOString() };
+  });
+}
+
+// ─── 语音音色偏好（设置 → 语音与伴星，账号级跨设备一致）───────────────────
+
+/**
+ * 与上面作答模态偏好同形状（同一行 jsonb，另两个键）。
+ *
+ * 没有把两者抽成一个通用 upsert：那要改动正在被另一条会话使用的
+ * setAnswerModePreference，而这个功能只是往同一行里多写两个键。
+ * 键名的含义与回落规则全部在 resolveTtsSelection 里判定，这里只存原样。
+ */
+const TTS_ENGINE_KEY = "tts_engine" as const;
+const TTS_VOICE_KEY = "tts_voice" as const;
+
+/**
+ * 读库里的音色偏好**原样**（未校验）。
+ *
+ * 返回 null = 这个账号从来没设过。校验交给 resolveTtsSelection：这里能拿到行但
+ * 值对不上目录（音色下架、只写了半个键）的情形，判据在目录那一侧，不在这里再写一遍。
+ */
+export async function getStoredVoicePreference(
+  userId: string,
+  workspaceId: string,
+): Promise<{ stored: StoredVoicePreference | null; updatedAt: string | null }> {
+  return withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
+    const rows = await tx
+      .select({
+        explicitPreferences: userLearningPreferencesTable.explicitPreferences,
+        updatedAt: userLearningPreferencesTable.updatedAt,
+      })
+      .from(userLearningPreferencesTable)
+      .where(and(
+        eq(userLearningPreferencesTable.userId, userId),
+        sql`${userLearningPreferencesTable.workspaceId} IS NULL`,
+      ))
+      .limit(1);
+    const row = rows[0];
+    const explicit = row?.explicitPreferences;
+    const storedAt = row?.updatedAt ? row.updatedAt.toISOString() : null;
+    if (!explicit) return { stored: null, updatedAt: null };
+    if (explicit[TTS_ENGINE_KEY] === undefined && explicit[TTS_VOICE_KEY] === undefined) {
+      return { stored: null, updatedAt: null };
+    }
+    return {
+      stored: { engine: explicit[TTS_ENGINE_KEY], voice: explicit[TTS_VOICE_KEY] },
+      updatedAt: storedAt,
+    };
+  });
+}
+
+/** 写音色偏好（两个键一起写，不留半套状态）。 */
+export async function setVoicePreference(
+  userId: string,
+  workspaceId: string,
+  engine: TtsEngineV1,
+  voice: string,
+): Promise<{ engine: TtsEngineV1; voice: string; updatedAt: string }> {
+  return withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
+    const now = new Date();
+    const existing = await tx
+      .select()
+      .from(userLearningPreferencesTable)
+      .where(and(
+        eq(userLearningPreferencesTable.userId, userId),
+        sql`${userLearningPreferencesTable.workspaceId} IS NULL`,
+      ))
+      .for("update");
+    const row = existing[0];
+    // 只动这两个键：default_input_priority 等同行的其他偏好必须原样留着。
+    const explicit = { ...(row?.explicitPreferences ?? {}) };
+    explicit[TTS_ENGINE_KEY] = engine;
+    explicit[TTS_VOICE_KEY] = voice;
+    if (!row) {
+      await tx.insert(userLearningPreferencesTable).values({
+        userId,
+        explicitPreferences: explicit,
+        suggestedPreferences: {},
+        updatedAt: now,
+      });
+    } else {
+      await tx
+        .update(userLearningPreferencesTable)
+        .set({ explicitPreferences: explicit, updatedAt: now })
+        .where(eq(userLearningPreferencesTable.id, row.id));
+    }
+    return { engine, voice, updatedAt: now.toISOString() };
   });
 }

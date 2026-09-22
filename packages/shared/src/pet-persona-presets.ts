@@ -28,7 +28,7 @@ export interface PetPersonaPreset {
   boundaries: PetPersonaPresetBoundaries;
 }
 
-/** 系统默认 5 套人格预设（§2.1.1）。 */
+/** 系统默认人格预设（§2.1.1 要求至少 5 套，当前 6 套）。 */
 export const PET_PERSONA_PRESETS: readonly PetPersonaPreset[] = [
   {
     presetId: "energetic-cat",
@@ -89,6 +89,26 @@ export const PET_PERSONA_PRESETS: readonly PetPersonaPreset[] = [
     ],
     activeness: "quiet",
     boundaries: { allowPlayful: false, allowNudgeLearning: true, allowVoiceTags: false },
+  },
+  {
+    // 全表里唯一「话多但不催学习」的一套：积极都用在吃饭和唠嗑上，正是要的摸鱼感。
+    presetId: "hungry-fish",
+    name: "爱吃白饭的大肥鱼",
+    personalityTags: ["慵懒", "贪吃", "爱摸鱼"],
+    speakingStyle: "慵懒贪吃，话都围着吃转；干活能摸就摸，一到饭点立刻来精神。",
+    examples: [
+      { text: "干饭不积极，思想有问题。这题先放一放，午饭吃什么更要紧。" },
+      { text: "我这岗位主打一个吃白饭，你把饭备好，什么都好说。" },
+      { text: "摸鱼不是偷懒，是给脑子留点胃口。我去吃两口就回来。" },
+      { text: "刚在后台偷偷猜了个词，没猜明白。你就当我去吃饭了吧。" },
+    ],
+    activeness: "active",
+    boundaries: {
+      allowPlayful: true,
+      allowNudgeLearning: false,
+      allowVoiceTags: true,
+      catchphrase: "我去吃饭了",
+    },
   },
 ] as const;
 

@@ -1309,6 +1309,11 @@
    edge. */
 .hud-surface .settings-rows { display: grid; gap: 5px; margin-top: 10px; }
 .hud-surface .settings-rows--split { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px 14px; }
+
+/* 音色那一组：行内「在用 + 用这一身 + 试听」三个动作排一行；播放器只画一只、
+   反复换源，所以它占满整行，不挤在某一行的控件位里。 */
+.hud-surface .settings-voice__actions { display: inline-flex; align-items: center; gap: 6px; }
+.hud-surface .settings-voice__player { display: block; width: 100%; height: 34px; margin-top: 9px; }
 .hud-surface .settings-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -2493,13 +2498,19 @@
   --companion-card-glass: rgba(255, 255, 255, 0.07);
   --companion-card-border: 1.5px solid rgba(255, 252, 235, 0.3);
   --companion-card-shadow: 0 6px 18px rgba(1, 12, 25, 0.3);
-  /* 圆角三档：签（chip）< 卡（card）< 盘（plate）。同角色元素只用所属那一档。
-     B4（评审 P15）：三档原本都是四角不等的值，而 120 个元素共用同一组「不对称」——
-     手绘感要成立，得让每个元素歪得不一样；共用的不对称读起来只是没对齐。非对称现在
-     只剩一处，且是有语义的那一处：气泡的指向角（.companion-thread article）。 */
-  --companion-radius-chip: 8px;
-  --companion-radius-card: 12px;
-  --companion-radius-plate: 16px;
+  /* 圆角档位。B4 一度把它们全拍平成对称的 8/12/16，用户 2026-09-22 看真机判
+     「按钮和卡片都太方，没跟项目风格」——那次改反了方向。项目的卡片语言本来就是
+     **宽松的不对称**：HUD 面板 26px 30px 24px 28px、历史条目 17px 20px 17px 6px
+     （带指向角）、home-v2 的卡片 4px 20px 5px 5px；控件才用胶囊与正圆
+     （999px 与 50% 在 home-v2 各出现 6 次与 5 次）。P15 真正的问题不是「不对称」，
+     而是「四档之外还有六处各自手写的值」——现在全部收进下面这一族。 */
+  --companion-radius-chip: 11px 14px 10px 13px;
+  --companion-radius-card: 14px 18px 13px 16px;
+  --companion-radius-plate: 19px 24px 17px 21px;
+  /* 最大的两层容器（工作台、右区舞台）：与 .companion-hud__panel 同一族。 */
+  --companion-radius-shell: 26px 30px 24px 28px;
+  /* 控件档：按钮、页签、下拉、搜索框。44px 高的东西用 8-14px 圆角读起来就是方盒。 */
+  --companion-radius-control: 999px;
   /* 间距刻度（4 的倍数）：一档一个角色，不再逐处手写 px。 */
   --companion-gap-inline: 5px;
   --companion-gap-row: 8px;
@@ -2521,6 +2532,16 @@
   --companion-font-panel: 18px;
   --companion-font-page: 24px;
   --companion-leading: 1.6;
+  /* 动效只有两档。B6（评审 P17）实测伴星段并存 130 / 140 / 160 三档微反馈时长，
+     差别看不出来，只是让每条规则各写各的。微反馈统一走 140ms（现有 9 处就是它，
+     不为凑整数把 16 处一起挪），结构变化走 240ms。缓动本来就只有一个
+     `--hud-ease-out`（18 处），不动。
+     这两个 token 定义在 `.companion-center` 上，**中心之外读不到**：读不到时不是
+     退回 140ms，而是整条 transition 变成 `all 0s`（hover 从此瞬变，源码看不出来）。
+     所以全 HUD 共用的规则（`.chip` / `button.source-sheet` / `.editor-tools` 那几条）
+     继续写 140ms 字面值。实机口径见 tmp-cc-b6.mjs 的「token 作用域」那条断言。 */
+  --companion-motion-micro: 140ms;
+  --companion-motion-structure: 240ms;
   /* 浮层堆叠序：从星空到菜单一路向上，同区不取等值，避免靠 DOM 顺序决胜。 */
   --companion-z-bench: 30;
   --companion-z-legend: 31;
@@ -2583,7 +2604,7 @@
   grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
   border: 4px solid rgba(255, 252, 235, 0.7);
-  border-radius: var(--companion-radius-plate);
+  border-radius: var(--companion-radius-shell);
   box-shadow: var(--companion-plate-shadow);
   background: var(--companion-glass);
   backdrop-filter: var(--companion-glass-blur);
@@ -2619,11 +2640,11 @@
   height: 44px;
   place-items: center;
   border: 1.5px solid rgba(255, 252, 235, 0.3);
-  border-radius: var(--companion-radius-chip);
+  border-radius: 50%;
   background: rgba(255, 255, 255, 0.08);
   color: var(--companion-glass-soft);
   cursor: pointer;
-  transition: background-color 140ms var(--hud-ease-out), color 140ms var(--hud-ease-out);
+  transition: background-color var(--companion-motion-micro) var(--hud-ease-out), color var(--companion-motion-micro) var(--hud-ease-out);
 }
 
 .hud-surface .companion-icon-button:hover { background: rgba(255, 255, 255, 0.16); color: #fff3df; }
@@ -2644,7 +2665,7 @@
   min-width: 0;
   min-height: 44px;
   border: 0;
-  border-radius: var(--companion-radius-chip);
+  border-radius: var(--companion-radius-control);
   background: transparent;
   color: var(--companion-glass-soft);
   font-size: var(--companion-font-body);
@@ -2654,7 +2675,7 @@
   padding-inline: var(--companion-gap-row);
   white-space: nowrap;
   cursor: pointer;
-  transition: background-color 160ms var(--hud-ease-out), color 160ms var(--hud-ease-out), box-shadow 160ms var(--hud-ease-out);
+  transition: background-color var(--companion-motion-micro) var(--hud-ease-out), color var(--companion-motion-micro) var(--hud-ease-out), box-shadow var(--companion-motion-micro) var(--hud-ease-out);
 }
 
 .hud-surface .companion-tabs button:hover { background: rgba(255, 255, 255, 0.08); color: #fff3df; }
@@ -2710,12 +2731,12 @@
   min-height: 44px;
   padding: var(--companion-gap-inline) var(--companion-gap-block);
   border: 1.5px solid rgba(255, 252, 235, 0.3);
-  border-radius: var(--companion-radius-chip);
+  border-radius: var(--companion-radius-control);
   background: rgba(255, 255, 255, 0.1);
   color: var(--companion-glass-ink);
   font-size: var(--companion-font-body);
   cursor: pointer;
-  transition: background-color 140ms var(--hud-ease-out), border-color 140ms var(--hud-ease-out), transform 140ms var(--hud-ease-out), box-shadow 140ms var(--hud-ease-out);
+  transition: background-color var(--companion-motion-micro) var(--hud-ease-out), border-color var(--companion-motion-micro) var(--hud-ease-out), transform var(--companion-motion-micro) var(--hud-ease-out), box-shadow var(--companion-motion-micro) var(--hud-ease-out);
 }
 
 .hud-surface .companion-workbench button.primary,
@@ -2838,7 +2859,7 @@
   min-width: 0;
   min-height: 44px;
   border: 1.5px solid rgba(255, 252, 235, 0.25);
-  border-radius: var(--companion-radius-chip);
+  border-radius: var(--companion-radius-control);
   padding: var(--companion-gap-inline) var(--companion-gap-row) var(--companion-gap-inline) 34px;
   background: rgba(255, 255, 255, 0.09);
   color: var(--companion-glass-ink);
@@ -2928,10 +2949,10 @@
 .hud-surface .companion-record-list { display: grid; gap: var(--companion-gap-row); }
 .hud-surface .companion-record-list > button {
   display: grid;
-  gap: 3px;
+  gap: 6px;
   width: 100%;
   min-height: 0;
-  padding: var(--companion-gap-row) 10px;
+  padding: 11px 13px;
   text-align: left;
   align-items: start;
   /* 基础按钮规则带 justify-content:center；卡片是 grid，不显式拉开就会把正文
@@ -3201,7 +3222,7 @@
   border: 1.5px solid rgba(255, 252, 235, 0.28);
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.12);
-  transition: background-color 160ms var(--hud-ease-out), border-color 160ms var(--hud-ease-out);
+  transition: background-color var(--companion-motion-micro) var(--hud-ease-out), border-color var(--companion-motion-micro) var(--hud-ease-out);
 }
 
 .hud-surface .companion-switch i {
@@ -3213,7 +3234,7 @@
   border-radius: 50%;
   background: #f3e2c0;
   box-shadow: 0 2px 6px rgba(1, 12, 25, 0.45);
-  transition: transform 160ms var(--hud-ease-out);
+  transition: transform var(--companion-motion-micro) var(--hud-ease-out);
 }
 
 .hud-surface .companion-switch[data-on] {
@@ -3242,7 +3263,7 @@
   gap: var(--companion-gap-row);
   padding: var(--companion-gap-inline) var(--companion-gap-row);
   border: 1.5px solid rgba(255, 252, 235, 0.3);
-  border-radius: var(--companion-radius-chip);
+  border-radius: var(--companion-radius-control);
   background: rgba(255, 255, 255, 0.1);
   color: var(--companion-glass-ink);
   font-size: var(--companion-font-body);
@@ -3281,7 +3302,7 @@
   align-items: center;
   gap: var(--companion-gap-row);
   border: 0;
-  border-radius: var(--companion-radius-chip);
+  border-radius: var(--companion-radius-control);
   padding: var(--companion-gap-inline) var(--companion-gap-row);
   background: transparent;
   color: var(--companion-glass-ink);
@@ -3371,7 +3392,9 @@
   top: 84px;
   right: 25px;
   display: grid;
-  gap: 1px;
+  /* 1px 是 B4 为了「一屏 ≥10 条」压出来的；用户看真机判定太密——两行文字的记录之间
+     几乎没有缝，读起来是一整块而不是多条。呼吸优先于条数。 */
+  gap: var(--companion-gap-inline);
   width: clamp(200px, 19vw, 236px);
   min-width: 200px;
   max-height: min(calc(100% - 200px), 620px);
@@ -3406,7 +3429,7 @@
 }
 .hud-surface .companion-map-index > div[role="group"] > h4 span { margin-inline-start: auto; font-variant-numeric: tabular-nums; }
 .hud-surface .companion-map-index > div[role="group"] + div[role="group"] > h4 { margin-top: var(--companion-gap-row); }
-.hud-surface .companion-map-index > div[role="group"] { display: grid; gap: 1px; min-width: 0; }
+.hud-surface .companion-map-index > div[role="group"] { display: grid; gap: var(--companion-gap-inline); min-width: 0; }
 
 /* 行：32px 是这一行的下限，不是上限。原来固定 min-height 44px 只装得下一行
    11px 且 43/48 条被横向截断的文字——命中区留给了稀疏操作，密集跳转列表要的是
@@ -3419,12 +3442,12 @@
   gap: var(--companion-gap-row);
   border: 0;
   border-radius: var(--companion-radius-chip);
-  padding: 3px 6px;
+  padding: 5px 8px;
   background: transparent;
   color: rgba(214, 235, 235, 0.88);
   text-align: left;
   cursor: pointer;
-  transition: background-color 130ms var(--hud-ease-out), box-shadow 130ms var(--hud-ease-out);
+  transition: background-color var(--companion-motion-micro) var(--hud-ease-out), box-shadow var(--companion-motion-micro) var(--hud-ease-out);
 }
 
 /* 颜色点与星图图例、记忆卡共用同一组状态 token。 */
@@ -3445,7 +3468,7 @@
   min-width: 0;
   overflow: hidden;
   font-size: var(--companion-font-micro);
-  line-height: 1.3;
+  line-height: 1.4;
   overflow-wrap: anywhere;
 }
 .hud-surface .companion-map-index button span em { color: var(--companion-glass-faint); font-style: normal; }
@@ -3544,9 +3567,17 @@
 @media (max-width: 940px) {
   .hud-surface .companion-center {
     --companion-bench-w: 252px;
-    --companion-bench-left: 20px;
+    /* 原来这里是 20px：目录栏在 900 宽时是 `left:22px; width:58px`（右缘 80），
+       20px 等于把工作台整块塞到它底下——实测两者重叠 24,940px²，第一颗页签
+       （x 40..95）有 40px 被栏压住，看上去就是「页签少了一个」。
+       让开目录栏（96px，与宽屏同一档），要省宽度靠收窄工作台本身。 */
+    --companion-bench-left: 96px;
+    /* 星图标题盘的右界要躲开**静息态**的灵动岛（岛 184 宽、右边距 ~21，左缘 = 视口 − 196）。
+       原来留 150px：900 宽时盘子右缘 750、岛左缘 691，实测重叠 2,832px²，
+       「记忆关联星图 · 74 个节点」那一条被压掉一截。留到 224 才错得开。
+       （展开态的岛按 B0 合同就是覆盖层，不在这一条口径里。） */
+    --companion-seat-strip-right: 224px;
     --companion-bench-gap: 14px;
-    --companion-seat-strip-right: 150px;
   }
   .hud-surface .companion-map-index { right: 20px; width: 190px; max-height: min(calc(100% - 210px), 380px); }
   .hud-surface .companion-map-legend { max-width: calc(100% - 420px); }
@@ -3558,7 +3589,10 @@
   .hud-surface .companion-center {
     --companion-bench-w: auto;
     --companion-bench-left: 56px;
-    --companion-seat-strip-right: 176px;
+    /* 桌宠那一排快捷钮（语音/文字/更多，`.companion-hud__controls`）贴着宠物排，
+       720 宽时它们落在 x 514..558；原来让位 176px 时工作台右缘是 544，
+       三颗钮各压进来 30×44px。留到 210px 才真正错开（实测重叠归 0）。 */
+    --companion-seat-strip-right: 210px;
     --companion-universe-bar-bottom: 58px;
     /* 视图切换条带：top 10 + 44 触控高 + 8 内缩 + 6 描边 = 58，下缘落在 68。
        工作台与星图盘都从它下面另起一条，不再压住它的描边。 */
@@ -6507,7 +6541,7 @@
   right: var(--companion-seat-strip-right);
   overflow: hidden;
   border: 4px solid rgba(255, 252, 235, 0.7);
-  border-radius: var(--companion-radius-plate);
+  border-radius: var(--companion-radius-shell);
   box-shadow: var(--companion-plate-shadow);
   background: var(--companion-glass);
   backdrop-filter: var(--companion-glass-blur);
@@ -6545,7 +6579,9 @@
   font-size: var(--companion-font-body);
   text-align: left;
   cursor: pointer;
-  transition: background-color 140ms var(--hud-ease-out), color 140ms ease;
+  transition:
+    background-color var(--companion-motion-micro) var(--hud-ease-out),
+    color var(--companion-motion-micro) var(--hud-ease-out);
 }
 .hud-surface .companion-glance-list > button:hover { background: rgba(255, 255, 255, 0.1); color: #fff3df; }
 .hud-surface .companion-glance-list > button > span { min-width: 0; }
@@ -6725,9 +6761,10 @@
   border: 1.5px solid rgba(255, 252, 235, 0.3);
   background: transparent;
   color: var(--companion-glass-soft);
-  /* 通用控件规则给的是「稀疏按钮」的 44px 命中区，会把月历的换月箭头撑大。
-     这里显式收回面板自己的尺寸——密集网格不是稀疏按钮。 */
+  /* 通用控件规则给的是「稀疏按钮」的 44px 命中区与 8px 档，会把换月箭头撑大成方盒。
+     这里显式收回面板自己的形状与尺寸——密集网格不是稀疏按钮。 */
   min-height: 0;
+  border-radius: 50%;
 }
 .hud-surface .companion-center .companion-record__calendar-wd { color: var(--companion-glass-faint); font-size: var(--companion-font-micro); }
 .hud-surface .companion-center .companion-record__calendar-grid button {
@@ -6766,7 +6803,7 @@
 }
 .hud-surface .companion-center .companion-record__calendar-grid button:hover:not(:disabled) { background: rgba(255, 255, 255, 0.13); }
 .hud-surface .companion-center .companion-record__calendar-grid button:disabled { color: rgba(165, 188, 194, 0.34); }
-.hud-surface .companion-center .companion-record__calendar-grid button[data-today] { box-shadow: inset 0 0 0 1.5px var(--universe-state-entity); }
+.hud-surface .companion-center .companion-record__calendar-grid button[data-today] { box-shadow: inset 0 0 0 1.5px var(--universe-state-linked); }
 .hud-surface .companion-center .companion-record__calendar-grid button[data-selected] {
   box-shadow: inset 0 0 0 1.5px rgba(255, 228, 163, 0.55);
   background: rgba(255, 228, 163, 0.14);
@@ -6774,8 +6811,156 @@
 }
 /* 日记侧没有「哪几天写过」的数据（daily.get 一次只给一天），所以这里不会有角标；
    规则留着，是为了让聊天纪录那边在深底上仍然读得出来。 */
-.hud-surface .companion-center .companion-record__calendar-grid button i { color: var(--universe-state-entity); }
+.hud-surface .companion-center .companion-record__calendar-grid button i { color: var(--universe-state-linked); }
 
 @media (prefers-reduced-motion: reduce) {
   .hud-surface .companion-center .companion-record__calendar { animation: none; }
 }
+
+/* 控件形状的第二条：胶囊只给**单行**控件。数据页与边界页那些「标题 + 说明」的
+   行按钮（检查记忆冲突 / 导出记忆 / 清除…）和人格预设卡都是行状的东西，套 999px
+   会被拉成体育场形，两端各空出一截圆弧，读起来不像容器。它们要的是卡档的宽松不对称。
+   （2026-09-22 用户判「太方」修完第一轮，看真机又暴露出这一半。） */
+.hud-surface .companion-center :is(.companion-data-actions, .companion-boundaries) > button,
+.hud-surface .companion-center .companion-danger-action,
+.hud-surface .companion-center .companion-choice-grid button {
+  border-radius: var(--companion-radius-card);
+}
+
+/* ===========================================================================
+ * B6 转场与状态反馈（评审 §6 P17 / P18）
+ * ======================================================================== */
+
+/* 换页以前是硬切：实测整个伴星中心只有 1 个元素带入场动画。
+   旧内容不做退场——那要两套 DOM 同时挂着，代价比这 240ms 的观感大。 */
+.hud-surface .companion-tab-panel {
+  animation: companion-panel-in var(--companion-motion-structure) var(--hud-ease-out) backwards;
+}
+
+@keyframes companion-panel-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* 进行中：以前只有按钮文字在变（「整理中…」），点下去那一秒界面像没反应。
+   `data-busy` 只挂在**自己知道在忙**的那颗按钮上——面板上的 busy 是一个字符串，
+   给所有 disabled 按钮都加会一次转出好几个圈。 */
+.hud-surface .companion-center button[data-busy="true"]::before {
+  content: "";
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: companion-spin 700ms linear infinite;
+}
+
+@keyframes companion-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* 完成回执：提示条本来就在，但它出现得和别的东西一样没有轻重。
+   从稍亮的底色收回去，正好对上「这件事做完了」。 */
+.hud-surface .companion-notice {
+  animation: companion-notice-in var(--companion-motion-structure) var(--hud-ease-out) backwards;
+}
+
+@keyframes companion-notice-in {
+  from { opacity: 0; transform: translateY(-4px); background: rgba(143, 199, 167, 0.28); }
+  to { opacity: 1; transform: none; background: rgba(143, 199, 167, 0.14); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* 这三条是新加的，不走 `--motion-scale` 那类间接量——变量一旦没解析成功，
+     整条声明会静默失效（B0/B5 各栽过一次），这里直接写死关掉的动画。 */
+  .hud-surface .companion-tab-panel,
+  .hud-surface .companion-notice,
+  .hud-surface .companion-center button[data-busy="true"]::before { animation: none; }
+}
+
+/* ══ B7（评审 §7）：小尺寸下把高度还给内容区、把页签点得动 ══════════════
+   改前实量（1440×900 / 1024×640 / 900×560 / 720×405，`tmp-cc-b7.mjs`）：
+   · 页签在 1024 是 **37×44**、在 900 是 **31×44**——`repeat(6, minmax(0,96px))`
+     被压扁，31px 宽不是「紧凑」是点不准；
+   · 记忆页签在这三档**一张完整的卡都看不见**（0/4）：面板 277 / 239 / 158 高，
+     而面板自己的 chrome 就要 136 标题带 + 44 搜索 + 96 筛选（筛选在窄处折成两行）；
+   · 工作台写死 `top:100px; bottom:82px`，视口一矮它占的比例就吃掉整块内容区。
+   这一节只改「谁占高度、谁该点得着」，不删任何入口。 */
+
+/* 页签：窄屏改成横向可滑的 chip 条，每颗保底 44×44。滚动条藏掉但保留滚动，
+   因为六颗 × 44 在 252px 的工作台里本来就装不下——装不下就该能滑，不该压扁。 */
+@media (max-width: 1100px) {
+  .hud-surface .companion-tabs {
+    display: flex;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+  .hud-surface .companion-tabs::-webkit-scrollbar { display: none; }
+  .hud-surface .companion-tabs button { flex: 0 0 auto; min-width: 44px; padding-inline: 12px; }
+}
+
+/* 工作台的高度预算跟着视口收：100/82 是给顶栏岛和底栏留的，它们在矮视口里
+   并没有变高，留同样的绝对值是让内容区按比例变没。 */
+@media (max-height: 700px) {
+  .hud-surface .companion-workbench { top: 76px; bottom: 58px; }
+}
+@media (max-height: 560px) {
+  .hud-surface .companion-workbench { top: 64px; bottom: 46px; }
+}
+
+/* 面板自己的 chrome：说明句在矮视口里是第一个该让位的（它复述页签已经说过的事），
+   筛选条折行是第二个——折一行就是白丢 44px 列表高度。 */
+@media (max-height: 660px) {
+  /* 标题带里 h3 说的是页签已经说过的事（「伴星记忆」/ 页签「记忆」），
+     两个动作按钮是入口、不能动，所以这一行矮下来只能靠 h3 让位。 */
+  .hud-surface .companion-panel-heading h3,
+  .hud-surface .companion-panel-heading p { display: none; }
+  .hud-surface .companion-workbench-header p { display: none; }
+  /* 只收面板里那条筛选条。**不能写成全局的 `.companion-filter-group`**：
+     星图 chrome 用的是同一个类，第一版这么写把「全部固定状态 / 全部实体」两颗下拉
+     顶出盘子右缘 82px 与 186px（盘子是 overflow:visible，控件直接飘到星空上）。 */
+  .hud-surface .companion-tab-panel .companion-filter-group { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .hud-surface .companion-tab-panel .companion-filter-group::-webkit-scrollbar { display: none; }
+  .hud-surface .companion-tab-panel .companion-filter-group > span { display: none; }
+  .hud-surface .companion-tab-panel .companion-filter-group .companion-select { flex: 0 0 auto; }
+  /* 标题带里的两个按钮在 244px 宽的列里会折成两行（96px），折一行就又是白丢的 44px：
+     收成一行、装不下就横向滑。h3 已经不在了，这一行就是这一屏的工具条——
+     它在网格里原本被钉在第 2 列（「标题在左、动作在右」那条给的 `grid-column: 2`），
+     所以既要跨回整行、又要左对齐，否则看起来像悬空的半截。 */
+  .hud-surface .companion-panel-heading > :is(.companion-heading-actions, button) { grid-column: 1 / -1; justify-self: start; }
+  .hud-surface .companion-heading-actions { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .hud-surface .companion-heading-actions::-webkit-scrollbar { display: none; }
+  .hud-surface .companion-heading-actions > button { flex: 0 0 auto; }
+  /* 工作台标题带里的名字在矮视口里用紧凑档那一号字（紧凑分支本来就是这么做的，
+     这里只是把同一件事扩展到「窗口矮但宽度没到 760」的情况）：78 → 56，
+     实测正好补上 900×560 那第二张卡差的 6px。 */
+  .hud-surface .companion-workbench-header { padding-block: var(--companion-gap-row) var(--companion-gap-inline); }
+  .hud-surface .companion-workbench-header h2 { font-size: var(--companion-font-panel); }
+  /* 列表至少留两张卡的高度：chrome 一旦长回来，被挤的是它自己，不是「看不见的那一屏」。 */
+  .hud-surface .companion-record-list { min-height: 152px; }
+}
+
+/* 紧凑模式的「资料」视图：底部那 58px 是留给星图缩放条的，而这一视图里星图
+   chrome 整块隐藏（`data-compact-view="content"`）——留着就是白占 58px，
+   实测正好是一张记忆卡加一条间距。 */
+@media (max-width: 760px), (max-height: 480px) {
+  .hud-surface .companion-center[data-compact-view="content"] {
+    --companion-universe-bar-bottom: 10px;
+    --companion-compact-top: 68px;
+  }
+  /* 紧凑档的列有 480px 宽（非紧凑的工作台只有 244-279，硬并一行会挤到看不清筛选值），
+     所以只在这里把「搜索 + 筛选」并成一行：chrome 从 132 降到 88，实测正好换回
+     一张完整记忆卡（卡片 67px 高，改前这一档能看见的完整卡是 0）。 */
+  .hud-surface .companion-center[data-active-tab="memory"] .companion-panel-stack {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .hud-surface .companion-center[data-active-tab="memory"] .companion-panel-heading,
+  .hud-surface .companion-center[data-active-tab="memory"] .companion-record-list {
+    grid-column: 1 / -1;
+  }
+  .hud-surface .companion-center[data-active-tab="memory"] .companion-search { grid-column: 1; grid-row: 2; }
+  .hud-surface .companion-center[data-active-tab="memory"] .companion-filter-group { grid-column: 2; grid-row: 2; }
+  .hud-surface .companion-center[data-active-tab="memory"] .companion-record-list { grid-row: 3; }
+}
+
