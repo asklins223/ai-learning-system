@@ -104,13 +104,14 @@ VETO_GATE_MIN_SAMPLE = 100
 # 全库第一条 playback 行 09:26 UTC）。早于这一行的段不可能有上报，不能算静音。
 PLAYBACK_REPORTING_SINCE = "2026-09-21 06:10:00+00"
 
-# "字节到手却零上报"已知成因的修复上线时刻：2026-09-22 12:40（本机）= 04:40 UTC。
-# 那一刻上线的是 `runQueuedSpeech` 的播放封顶（`await host.play()` 不再无上限）
-# + dropped 只报字节真的到手的段 + 三条裸 return 补上报（方案 29 §12.10）。
-# 再往后 2026-09-22 下午又补了外层 catch 那条出口（单测覆盖，见
-# companion-voice-playback.test.ts「意外异常也必须给已到手的段一个终态」）。
-# 切分点之前剩下的段是历史，不是现状；只报全时段会让一个修好的病天天显示成故障。
-AUDIO_SILENT_FIX_SINCE = "2026-09-22 04:40:00+00"
+# "字节到手却零上报"已知成因的修复上线时刻。两次：
+#   * 04:40 UTC（12:40 本机）——`runQueuedSpeech` 的播放封顶 + dropped 只报字节真的
+#     到手的段 + 三条裸 return 补上报（方案 29 §12.10）；
+#   * 11:39 UTC（19:39 本机）——外层 catch 那条出口补上报（§14.11 修复 ②的同批），
+#     并且这一次重建了桌面端产物，所以"跑在用户机器上的代码"从这一刻才真的换了。
+# 切分点取**最后一次**上线时刻：只报全时段会让一个修好的病天天显示成故障，而切分点
+# 落在中间那次修复之前，又会把已经修掉的那条出口算成现状。全时段那个数永远一起打。
+AUDIO_SILENT_FIX_SINCE = "2026-09-22 11:39:00+00"
 
 # `companion_stream_events` 有 TTL（迁移 0217 的过期清扫），旧事件会被真的删掉。
 # 于是"按事件数出来的"指标在保留窗口之前会读成 0——那不是"没下发"，是**证据没了**。
@@ -1146,7 +1147,7 @@ def render(metrics: dict) -> None:
         for r in playback["by_reason"]:
             print(f"    {r['reason']:<14} n={r['n']:<4} p50={r['p50_ms']}ms p90={r['p90_ms']}ms")
     print(f"  音频已交付却零上报 = {playback['bytes_delivered_but_silent']} 段（全时段）"
-          f" / {playback['bytes_delivered_but_silent_since_fix']} 段（切分点后 09-22 12:40 本机）"
+          f" / {playback['bytes_delivered_but_silent_since_fix']} 段（切分点后 09-22 19:39 本机）"
           "   ← 不为 0 就是「给了音频但根本没响」，与「慢」「引擎失败」是三种不同的病；"
           "看现状读**切分点后**那一半")
 

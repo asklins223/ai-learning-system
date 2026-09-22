@@ -22,6 +22,18 @@ export const TTS_MAX_SEGMENT_CHARS = 160;
  *  缓冲达到该长度即切出首段（不要求完整句），让 TTS 合成尽早开始，声音
  *  与文字感官同步（"字幕般"）；后续段仍按完整句切，朗读连贯性不受影响。 */
 export const TTS_FIRST_SEGMENT_MIN_CHARS = 14;
+/**
+ * 展示段的目标长度（方案 29 §14.11 修复 ④）。
+ *
+ * 一段一次合成，**合成时间与字数近似成正比**，而它必须在下一段的播放时间里跑完
+ * （引擎对同一用户是串行的）。实测段长 p50 = 19、p90 = 41、最长 97 字；那几条
+ * 90+ 字的段一次要合成 3 秒以上，一旦前一段的音频比它短，中间就是一段可听静音。
+ *
+ * 所以：一句之内如果没有句末标点、但已经攒过目标长度且有逗号级停顿，就先切出去
+ * （逗号本来就是朗读的自然停顿，切在这里不伤语气）。目标 48 字只影响 p90 之后
+ * 那条长尾——p50/p90 的段一个都不会被切开。
+ */
+export const TTS_DISPLAY_SEGMENT_TARGET_CHARS = 48;
 
 export interface CompanionTtsSegment {
   ordinal: number;
@@ -32,6 +44,13 @@ export interface CompanionTtsSegment {
 
 const SPLIT_PATTERN = /(?<=[。！？；\n.!?;])\s*/;
 const HARD_SPLIT_PATTERN = /(?<=[，,、])/;
+/** 目标长度内最后一个"逗号级停顿"之后的位置；没有就返回 -1。 */
+function lastSecondaryBoundary(text: string, limit: number): number {
+  for (let index = Math.min(text.length, limit) - 1; index >= 0; index -= 1) {
+    if (/[，,、]/.test(text[index] ?? "")) return index + 1;
+  }
+  return -1;
+}
 const MARKDOWN_BLOCK_PATTERN = /```[\s\S]*?```|`[^`\n]*`/g;
 const URL_PATTERN = /https?:\/\/[^\s，。！？；,.!?;]+/g;
 // 只剥离“行首标记/成对强调/链接语法”，不误删正文中的半角括号、连字符、
@@ -103,11 +122,21 @@ export function splitCommittedDisplaySegments(
   fullText: string,
   state: CompanionDisplaySegmentState,
   isFinal = false,
-  opts?: { readonly firstSegmentMinChars?: number; readonly maxSegmentChars?: number; readonly maxSegments?: number },
+  opts?: {
+    readonly firstSegmentMinChars?: number;
+    readonly maxSegmentChars?: number;
+    readonly maxSegments?: number;
+    /** 目标段长；超过它且句内没有句末标点时，在逗号级停顿处先切一段（§14.11 ④）。 */
+    readonly targetSegmentChars?: number;
+  },
 ): { readonly segments: CompanionDisplaySegment[]; readonly next: CompanionDisplaySegmentState } {
   const maxSegmentChars = opts?.maxSegmentChars ?? TTS_MAX_SEGMENT_CHARS;
   const maxSegments = opts?.maxSegments ?? TTS_MAX_SEGMENTS;
   const firstSegmentMinChars = opts?.firstSegmentMinChars ?? TTS_FIRST_SEGMENT_MIN_CHARS;
+  const targetSegmentChars = Math.min(
+    maxSegmentChars,
+    opts?.targetSegmentChars ?? TTS_DISPLAY_SEGMENT_TARGET_CHARS,
+  );
   let cursor = Math.min(Math.max(0, state.cursor), fullText.length);
   let ordinal = state.sentCount;
   const segments: CompanionDisplaySegment[] = [];
@@ -141,8 +170,26 @@ export function splitCommittedDisplaySegments(
     }
 
     if (boundary > cursor) {
+      // 句末标点**离得太远**（超过目标段长）而句内有逗号级停顿：先切在逗号上
+      // （§14.11 ④）。一段一次合成、同一用户的合成是串行的，段越长越可能跑不进
+      // 前一段的播放时间——那中间就是一段可听静音。切在逗号上是朗读的自然停顿。
+      if (boundary - cursor > targetSegmentChars) {
+        const secondary = lastSecondaryBoundary(remaining, targetSegmentChars);
+        if (secondary > 0) {
+          push(cursor, cursor + secondary);
+          continue;
+        }
+      }
       push(cursor, boundary);
       continue;
+    }
+    // 整段扫不到句末标点（超长句）：同样先在逗号处切，再退到 160 硬上限。
+    if (remaining.length > targetSegmentChars) {
+      const secondary = lastSecondaryBoundary(remaining, targetSegmentChars);
+      if (secondary > 0) {
+        push(cursor, cursor + secondary);
+        continue;
+      }
     }
     if (remaining.length >= maxSegmentChars) {
       push(cursor, hardEnd);

@@ -27,10 +27,18 @@ export const COMPANION_REVEAL_LEAD_CHARS = 6;
 /**
  * 多久没有音频动静就认为"这一路出不了声/home 是 silent"，退到阅读钟。
  *
- * 两个用途共用同一个数：第一段音频的看门狗（合成有网络往返），以及段间等待的上限
- * （某一段合成卡住时不能把气泡冻在那里）。
+ * **两个用途要分开**（方案 29 §14.11 修复 ②）：
+ *
+ * - `FIRST_AUDIO`：第一段音频的看门狗。合成有网络往返（实测 0.5–2.1s），在它到达前
+ *   让文字先跑会变成"字念完了声音才来"，所以给足 2 秒。
+ * - `GAP`：**已经在出声之后**，两次播放进度之间超过多久算"这一段卡住了"。
+ *   实测播放进度每 ~80ms 一次（宿主 rAF + 客户端 80ms 节流），所以 800ms 相当于
+ *   连丢十拍，正常播放不可能误触；而它决定了段间等待时文字最多冻多久。
+ *   以前两者共用一个 2000ms 的数，于是任何 <2 秒的段间静音都会让**文字和声音一起冻住**
+ *   （用户报的"内容和读音都卡住"）。
  */
-export const COMPANION_REVEAL_AUDIO_SILENCE_MS = 2_000;
+export const COMPANION_REVEAL_FIRST_AUDIO_SILENCE_MS = 2_000;
+export const COMPANION_REVEAL_GAP_SILENCE_MS = 800;
 
 /** 阅读钟的心跳间隔。60ms ≈ 16 字/秒，与 `estimateCompanionReadDurationMs` 同一条节奏。 */
 export const COMPANION_REVEAL_TICK_MS = COMPANION_READ_MS_PER_CHAR;
@@ -41,7 +49,10 @@ export interface CompanionRevealDriverOptions {
   readonly now?: () => number;
   readonly leadChars?: number;
   readonly msPerChar?: number;
-  readonly audioSilenceMs?: number;
+  /** 第一段音频的看门狗；缺省 `COMPANION_REVEAL_FIRST_AUDIO_SILENCE_MS`。 */
+  readonly firstAudioSilenceMs?: number;
+  /** 出声之后判定"卡住"的间隔；缺省 `COMPANION_REVEAL_GAP_SILENCE_MS`。 */
+  readonly gapSilenceMs?: number;
   readonly onReveal?: (revealed: number) => void;
 }
 
@@ -78,7 +89,11 @@ export function createCompanionRevealDriver(
   const now = options.now ?? ((): number => Date.now());
   const leadChars = Math.max(0, Math.floor(options.leadChars ?? COMPANION_REVEAL_LEAD_CHARS));
   const msPerChar = Math.max(1, Math.floor(options.msPerChar ?? COMPANION_READ_MS_PER_CHAR));
-  const audioSilenceMs = Math.max(0, Math.floor(options.audioSilenceMs ?? COMPANION_REVEAL_AUDIO_SILENCE_MS));
+  const firstAudioSilenceMs = Math.max(
+    0,
+    Math.floor(options.firstAudioSilenceMs ?? COMPANION_REVEAL_FIRST_AUDIO_SILENCE_MS),
+  );
+  const gapSilenceMs = Math.max(0, Math.floor(options.gapSilenceMs ?? COMPANION_REVEAL_GAP_SILENCE_MS));
   const listeners = new Set<() => void>();
 
   let arrived = 0;
@@ -102,8 +117,10 @@ export function createCompanionRevealDriver(
     options.onReveal?.(revealed);
   };
 
+  // 出声之后按"段间卡住"的短间隔判活；第一段还没来时 audioAt 为 null，这个判据不生效
+  // （第一段由 tick 里的 firstAudioSilenceMs 看门狗负责）。
   const audioLive = (at: number): boolean =>
-    !audioGaveUp && audioAt !== null && at - audioAt < audioSilenceMs;
+    !audioGaveUp && audioAt !== null && at - audioAt < gapSilenceMs;
 
   const completeIfDone = (): void => {
     if (completed || !turnFinal || revealed < arrived) return;
@@ -120,7 +137,7 @@ export function createCompanionRevealDriver(
       return;
     }
     const waitingFirstAudio = sessionMode === "voice" && audioAt === null && !audioGaveUp;
-    const waitedEnough = arrivedAt !== null && at - arrivedAt >= audioSilenceMs;
+    const waitedEnough = arrivedAt !== null && at - arrivedAt >= firstAudioSilenceMs;
     if (waitingFirstAudio && !waitedEnough) {
       // 第一段音频还在路上：只放行提前量，剩下的等声音。
       commit(Math.max(revealed, Math.min(arrived, leadChars)));

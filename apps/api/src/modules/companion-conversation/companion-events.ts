@@ -346,6 +346,61 @@ export function formatCompanionSse(event: StreamEventRow): string {
 
 // ─── SSE 处理器 ───────────────────────────────────────────────────────────
 
+/**
+ * 段预热钩子（方案 29 §14.11 修复 ③）。
+ *
+ * **注册式而不是 import**：语音栈在 `modules/learning-sessions`，而那个模块已经
+ * 反向 import 了本模块（`CompanionConversationError`）。这里再 import 回去就成环，
+ * 所以由语音侧在注册路由时把钩子挂上来，本模块只负责"把段事件交给它"。
+ *
+ * 钩子跑在推流循环里，**必须同步、必须不抛**：它只负责"发起"预热，不等待结果。
+ */
+export interface CompanionSegmentWarmNotice {
+  readonly conversationId: string;
+  readonly runId: string;
+  readonly generation: number;
+  readonly ordinal: number;
+  readonly segmentId: string;
+}
+
+export type CompanionSegmentWarmHook = (
+  scope: { workspaceId: string; userId: string },
+  segments: readonly CompanionSegmentWarmNotice[],
+) => void;
+
+let segmentWarmHook: CompanionSegmentWarmHook | null = null;
+
+export function setCompanionSegmentWarmHook(hook: CompanionSegmentWarmHook | null): void {
+  segmentWarmHook = hook;
+}
+
+/** 从一批事件里挑出 `voice.segment.ready`，交给钩子。形状不合的跳过，不整批失败。 */
+function notifySegmentWarm(scope: { workspaceId: string; userId: string }, events: readonly StreamEventRow[]): void {
+  if (!segmentWarmHook) return;
+  const notices: CompanionSegmentWarmNotice[] = [];
+  for (const event of events) {
+    if (event.type !== "voice.segment.ready") continue;
+    const payload = event.payload as { ordinal?: unknown; segmentId?: unknown } | null;
+    const ordinal = typeof payload?.ordinal === "number" ? payload.ordinal : null;
+    const segmentId = typeof payload?.segmentId === "string" ? payload.segmentId : null;
+    if (ordinal === null || segmentId === null || !event.run_id) continue;
+    notices.push({
+      conversationId: event.conversation_id,
+      runId: String(event.run_id),
+      generation: Number(event.generation ?? 0),
+      ordinal,
+      segmentId,
+    });
+  }
+  if (notices.length === 0) return;
+  try {
+    segmentWarmHook(scope, notices);
+  } catch (err) {
+    // 钩子是旁路：它炸了不能让 SSE 断。
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "companion segment warm hook failed");
+  }
+}
+
 export interface CompanionEventStreamWriter {
   /** 返回 false 表示 socket 背压/已关闭；void 仅兼容不暴露写状态的测试 writer。 */
   write(chunk: string): boolean | void;
@@ -598,6 +653,9 @@ export async function openCompanionEventStream(args: {
           dispose();
           return;
         }
+        // 先把这一批里的段交给预热，再推流：客户端收到事件时合成已经在跑，
+        // 它来取就是命中（同一段不会被合成两次，见 companion-tts-warm）。
+        notifySegmentWarm({ workspaceId: args.workspaceId, userId: args.userId }, events);
         // 连续窗口才推流并推进 cursor。
         for (const event of events) {
           if (args.writer.write(formatCompanionSse(event)) === false) {

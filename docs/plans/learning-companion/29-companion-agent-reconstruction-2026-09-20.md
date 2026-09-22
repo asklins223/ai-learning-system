@@ -4711,3 +4711,93 @@ companion_thought：dead 4 → 3（那 4 条里 1 条是 09-21 的旧账）
 **顺带记一条环境事实**：macOS 宿主上的文件改动**不会**触发容器里 `tsx watch` 的热重载
 （inotify 事件不跨 Docker Desktop 的文件共享）。所以"改了代码但 job 还在报旧错"不是没改对，
 是进程没重载——`docker restart ailearn-dev-worker-1` 之后才看得到真结果。
+
+### 14.11 语音"卡卡的"：段间静音是**客户端只在轮到某一段时才合成**（用户 2026-09-22 报）
+
+**症状**：第一句话出来之后停半秒多到一秒，之后文字与朗读一起一阵一阵地卡。
+
+**根因（读出来的，不是猜的）**：`prefetchUpcoming()` 全文件只有一个调用点——
+[companion-voice-playback.ts](../../../apps/desktop-client/src/renderer/src/app/companion-voice-playback.ts)
+里"某一段**出队之后**"。于是第 1 段到达时队列里只有它（预取无事可做），第 2…N 段在
+第 1 段**播放期间**到达却没人开始合成；等第 1 段播完、第 2 段出队才开始合成，**整段合成
+时间变成静音**。而文字显现由音频进度驱动（`noteAudioProgress`），所以文字跟着一起冻。
+
+两条真实回合的逐毫秒对齐（第 2 段合成的开始时刻 = 第 1 段播放结束时刻，差 3 毫秒）：
+
+```
+8afdf95f  19.317 第1段播完 → 21.463 第2段合成完成（2143ms 合成 = 2.15s 静音）
+63c2e4b0  13.059 第1段播完 → 14.075 第2段合成完成（1006ms 合成 = 1.02s 静音）
+48 小时 61 次段间切换：进入第 2 段的 22 次里 18 次（82%）有 >0.3s 静音，中位 0.58s
+第 3 段 1/8、第 4 段以后 0（第 2 段出队时会预取后面两段，所以只有第 2 段系统性中招）
+```
+
+四条修复，逐条带验证：
+
+**① 段一到就预取**（`companion-voice-playback.ts`）：队列加 `onSegmentQueued`，`feedSegment`
+与本地 `push` 推完就调它；循环退出后（`loopActive=false`）不再预取，免得白烧 TTS。
+验证：新增用例「服务端签发的第 2 段一到就开始合成，不等第 1 段播完」——变异（删掉那次
+调用）→ 红。
+
+**② 文字与音频解耦**（`companion-reveal-driver.ts`）：原来"第一段看门狗"和"段间卡住"共用
+一个 2000ms 的数，于是任何 <2 秒的段间静音都让文字冻满两秒。拆成
+`FIRST_AUDIO_SILENCE_MS = 2000`（第一段合成有网络往返，给足）与 `GAP_SILENCE_MS = 800`
+（出声之后；播放进度每 ~80ms 一次，800ms 等于连丢十拍，正常播放不会误触）。
+验证：新增用例「段间静音只有 0.9 秒时文字也要继续走」——变异（GAP 改回 2000）→ 红。
+
+**③ 服务端预合成**（`companion-tts-warm.ts` + SSE 钩子）：合成原来只由客户端发起。
+现在 SSE 把 `voice.segment.ready` 推给客户端**之前**就把合成发出去，客户端来取时命中缓存。
+三条不变量：同一段只合成一次（按 segmentId 去重 + join 在飞的 promise）、预热失败不外抛、
+有界（TTL 120s / 64 条 / 每用户同时在飞 ≤3）。钩子是**注册式**的——语音栈已经反向依赖
+SSE 模块，直接 import 会成环。
+
+**它顺手暴露了 0246 那张表的一个口径问题**：`stage='synth'` 的含义是"字节交给了客户端"，
+报表的"音频已交付却零上报"就是靠它减 `stage='playback'` 算的。预热会在**没人要**的时候
+合成（回合被打断、客户端关着），照记不误就会造出一批永远没有结局的"给了音频却没响"——
+正是这条读数最怕的假故障。所以预热走 `deferOutcome`：那一刻不记账，等客户端真的来取时
+由路由补记，耗时/引擎/字节数从缓存里带回来（读数不失真）。
+
+实机验证（dev 栈）：
+
+```
+预热：一轮 17 段，服务端自己合成了 10 段（在飞上限 3，其余留给客户端按需取），
+      客户端一个 /voice/tts 请求都没发（headless 实例不出声）
+命中：POST /voice/tts 取三段 → 8ms / 5ms / 2ms，23078 / 12629 / 30602 字节
+落库：每段恰好一行 stage='synth'，duration 807ms / 1025ms（真合成耗时，不是 0）
+```
+
+**④ 切段更细**（`workers/ai-worker/src/lib/tts-segments.ts`）：一段一次合成、同一用户的合成
+串行，段越长越可能跑不进前一段的播放时间。实测段长 p50 19 / p90 41 / **max 97**。加一条：
+句末标点离得太远（>48 字）而句内有逗号级停顿，就先切在逗号上（逗号本来就是朗读的自然
+停顿）。p50/p90 的段一个都不会被切开，只动那条长尾。用真库里的两条长段验：
+
+```
+71 字 → 48 + 23 段（切在"…好几个版本，"之后）   61 字 → 22 + 39 段
+两段拼回都逐字等于原文
+```
+
+同时给这个**生产路径的切段器**补了 4 条直接单测（它此前一条都没有，只有集成测试间接覆盖），
+含"`displayText` 必须逐字等于 `fullText.slice(displayStart, displayEnd)`"与增量不重不漏。
+变异（删掉逗号切分）→ 红。
+
+**测试账**：API `1459`（1 skip）、worker `773/773`、桌面端只余 `objective-flow-css-guard`
+那 5 条（别人的客观题流程 CSS 守卫）。renderer `tsc` 与 API `tsc` 均零报错。
+桌面端**已重建**（19:39），修复进了 `out/`——用户下次启动应用即生效。
+
+**一处诚实边界**：①②是纯客户端逻辑，只有单测 + 变异验证；headless 实例的 AudioContext
+起不来（`audible()` 为假 → 客户端根本不请求 TTS），所以没能在真机上量到"第 2 段不再静音"。
+真机口径已经备好，用户下一次真实对话后跑这一段就能前后对比：
+
+```sql
+WITH synth AS (SELECT run_id, ordinal, created_at AS ready_at FROM companion_tts_outcomes
+               WHERE stage='synth' AND outcome='ok'),
+     play  AS (SELECT run_id, ordinal, created_at AS ended_at FROM companion_tts_outcomes
+               WHERE stage='playback' AND outcome='ok' AND error_code IS DISTINCT FROM 'dropped')
+SELECT s.ordinal, round(extract(epoch FROM (s.ready_at - p.ended_at))::numeric, 2) AS silence_s
+FROM synth s JOIN play p ON p.run_id = s.run_id AND p.ordinal = s.ordinal - 1
+WHERE s.ready_at > now() - interval '1 hour' ORDER BY 1;
+```
+
+**又踩了一次备份卫生**：`tmp-clean-scripted-rounds.py` 第二次跑时把第一次的
+`messages.csv` / `runs.csv` **覆盖**掉了（那 294 条消息的备份因此只剩数据库里已删掉的那份）。
+脚本已改成按批次开时间戳子目录。这是同一类错误的第二次（第一次是 `WITH … COPY` 写在一起
+导致备份文件为空）——**可重复执行的清理脚本，备份路径必须每次唯一**。

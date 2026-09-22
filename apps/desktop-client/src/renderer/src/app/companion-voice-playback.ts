@@ -305,6 +305,16 @@ interface CompanionSpeechQueue {
   readonly segments: CompanionQueuedSpeechSegment[];
   finished: boolean;
   wake: (() => void) | null;
+  /**
+   * 队列里**新到一段**时的回调（方案 29 §14.11 修复 ①）。
+   *
+   * 预取原来只有一个触发点：某一段**出队之后**。于是第 1 段到达时队列里只有它，
+   * 预取无事可做；第 2…N 段在第 1 段**播放期间**到达，却没人开始它们的合成——
+   * 等第 1 段播完、第 2 段出队才开始合成，整段合成时间变成静音（实测 48 小时内
+   * 82% 的"第 2 段"切换有可听静音，中位 0.58s、最长 2.15s）。
+   * 挂上这个回调，段一到就开始合成，合成在上一段的播放时间里跑完。
+   */
+  onSegmentQueued: (() => void) | null;
 }
 
 interface CompanionQueuedSpeechSegment {
@@ -425,6 +435,17 @@ async function runQueuedSpeech(args: {
       entry.buffer.catch(() => undefined);
       prefetched.push(entry);
     }
+  };
+  /**
+   * 段一到就预取（方案 29 §14.11 修复 ①）。
+   *
+   * 循环退出后（整轮念完 / 被打断）不再预取：那时队列里剩下的段不会再被播，
+   * 提前合成只会白烧一次 TTS。
+   */
+  let loopActive = true;
+  queue.onSegmentQueued = () => {
+    if (!loopActive) return;
+    prefetchUpcoming();
   };
   /**
    * 预取已经发起、却没轮到播的段：被打断或宿主卸载时给它们一个终态。
@@ -596,6 +617,9 @@ async function runQueuedSpeech(args: {
       visibleChars: previousEnd,
       failure: gatewayErrorMessage(error),
     });
+  } finally {
+    // 循环真的退出了（念完 / 被打断 / 异常）：此后新到的段不再预取。
+    loopActive = false;
   }
 }
 
@@ -605,7 +629,7 @@ export function beginCompanionSpeechLine(options: { readonly strictSegments?: bo
   const planId = `speech-${(sequence += 1)}`;
   const activeHost = host;
   const mode: "voice" | "silent" = activeHost && activeHost.audible() ? "voice" : "silent";
-  const queue: CompanionSpeechQueue = { segments: [], finished: false, wake: null };
+  const queue: CompanionSpeechQueue = { segments: [], finished: false, wake: null, onSegmentQueued: null };
   let feedState: CompanionSpeechFeedState = COMPANION_SPEECH_FEED_INITIAL;
   /** 调用方喂进来的累积文本（feed/finish 收增量，这里拼成切段器要的全量）。 */
   let accumulated = "";
@@ -625,6 +649,8 @@ export function beginCompanionSpeechLine(options: { readonly strictSegments?: bo
     const wake = queue.wake;
     queue.wake = null;
     wake?.();
+    // 新段一到就预取（本地文本路径同样受益：句与句之间不再各等一次合成）。
+    queue.onSegmentQueued?.();
   };
 
   if (mode === "voice" && activeHost) {
@@ -656,6 +682,9 @@ export function beginCompanionSpeechLine(options: { readonly strictSegments?: bo
       const wake = queue.wake;
       queue.wake = null;
       wake?.();
+      // 服务端每签发一段，这里立刻把它的合成发出去——**不等它被轮到**。
+      // 这是第 1 段与第 2 段之间那 0.4–2.2 秒静音的根因修复。
+      queue.onSegmentQueued?.();
     },
     finish(text = ""): void {
       if (options.strictSegments) {

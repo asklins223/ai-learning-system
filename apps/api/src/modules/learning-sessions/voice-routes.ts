@@ -20,21 +20,21 @@ import { parseBody } from "../../lib/validate.ts";
 import { Readable } from "node:stream";
 import { requireSession } from "../identity/middleware.ts";
 import { CompanionConversationError } from "../companion-conversation/turn-service.ts";
+import { setCompanionSegmentWarmHook } from "../companion-conversation/companion-events.ts";
 import { assertSafeTtsInput, DEFAULT_VOICE_PROFILE } from "./voice-tts-policy.ts";
 import { edgeTtsSynthesizeStream, EdgeTtsError } from "./voice-providers/edge-tts.ts";
 import { stripVoiceExpressionTags } from "@ailearn/shared/voice-expression-tags";
 import { qwenTtsSynthesizeStreamForUser, QwenTtsError } from "./voice-providers/qwen-tts.ts";
 import { loadTtsEngineConfig } from "./voice-providers/tts-config.ts";
 import { synthesizeTtsBytes } from "./voice-providers/tts-engine.ts";
+import { takeWarmCompanionSegment, warmCompanionSegment } from "./companion-tts-warm.ts";
 import { resolveTtsSelection, type ResolvedTtsSelection } from "./voice-providers/tts-preference.ts";
 import {
   getStoredVoicePreference,
   setVoicePreference,
 } from "../companion-shell/service.ts";
-import { TTS_PREVIEW_TEXT } from "@ailearn/shared/tts-voice-catalog";
 import {
   companionVoicePreferencePatchV1Schema,
-  companionVoicePreviewRequestV1Schema,
 } from "@ailearn/shared";
 import { companionTtsStreamRequestV1Schema } from "@ailearn/shared";
 import {
@@ -56,6 +56,7 @@ function rateLimitVoice(reply: { code(statusCode: number): { send(body: unknown)
   return false;
 }
 import {
+  recordCompanionTtsSynthOutcome,
   synthesizeCompanionTtsSegment,
   recordCompanionTtsPlaybackOutcome,
   transcribeCompanionDialogueAudio,
@@ -158,6 +159,48 @@ function rejectDisabledCompanionVoice(reply: { code(statusCode: number): { send(
     recoverable: false,
   });
   return true;
+}
+
+/**
+ * 一段的合成（qwen WS 优先 + edge 兜底）。
+ *
+ * 抽成模块级函数是因为它现在有**两个**调用点：客户端按需来取（`POST /voice/tts`
+ * 的 companion 分支），以及服务端预热（`companion-tts-warm`）。两处必须逐字同一个
+ * 实现——否则音色、降级链、失败归因会在两条路径上分叉，而"同一个问题在两个地方
+ * 得到两个答案"正是这份方案一直在拆的东西。
+ *
+ * 语气/富语言标签是 qwen-audio 专属能力：qwen 原样传入（确定性语气层注入的
+ * `[excited]` 等控制标签由它理解），edge 合成前在引擎内剥离。
+ *
+ * "倒下去的是哪个引擎"必须带回去：失败没有返回值，所以挂在异常上（见
+ * CompanionTtsFailure）。判据用现成的信号——qwen 失败时一定先回调 onQwenFallback，
+ * 回调响过就说明最后尝试的是 edge。不带这一笔的话 `companion_tts_outcomes.engine`
+ * 只在成功时有值，报表里 "edge failed=0" 会和真实的 EdgeTtsError 同时成立。
+ */
+async function synthesizeCompanionSegmentBytes(args: {
+  text: string;
+  voice: string;
+  selection: ResolvedTtsSelection;
+  queueKey: string;
+  log: { warn: (obj: unknown, msg: string) => void };
+  ordinal: number;
+}): Promise<{ audio: Uint8Array; engine: "qwen" | "edge" }> {
+  let attempted: "qwen" | "edge" = "qwen";
+  try {
+    const r = await synthesizeTtsBytes({
+      text: args.text,
+      edgeVoice: args.voice,
+      queueKey: args.queueKey,
+      selection: args.selection,
+      onQwenFallback: (error) => {
+        attempted = "edge";
+        args.log.warn({ err: error, ordinal: args.ordinal }, "qwen tts failed; falling back to edge-tts");
+      },
+    });
+    return { audio: r.audio, engine: r.engine };
+  } catch (error) {
+    throw Object.assign(error instanceof Error ? error : new Error(String(error)), { ttsEngine: attempted });
+  }
 }
 
 export async function voiceRoutes(app: FastifyInstance) {
@@ -286,6 +329,51 @@ export async function voiceRoutes(app: FastifyInstance) {
     }
   }
 
+  /**
+   * 段预热（方案 29 §14.11 修复 ③）：服务端把段事件推给客户端**之前**就把合成发出去。
+   *
+   * 为什么值得：合成原来只由客户端发起，于是"这一段该用什么声音"要等一个来回才开始算。
+   * 预热让客户端来取时命中缓存（同一段仍然只合成一次，见 companion-tts-warm 的三条不变量）。
+   *
+   * 为什么挂在 SSE 上：那是服务端唯一"知道又有一段文本了"的时刻，而且它在推流之前。
+   * 注册式而不是让 SSE 侧 import 本模块——那会成环（本模块已经反向依赖它）。
+   */
+  setCompanionSegmentWarmHook((scope, notices) => {
+    void (async () => {
+      // 一身到底：同一批段共用一次偏好解析（逐段读库既慢又可能在半途换音色）。
+      const selection = await resolveSelectionForSynthesis(scope, app.log);
+      for (const notice of notices) {
+        warmCompanionSegment({
+          userId: scope.userId,
+          segmentId: notice.segmentId,
+          run: () => synthesizeCompanionTtsSegment({
+            workspaceId: scope.workspaceId,
+            userId: scope.userId,
+            ref: {
+              conversationId: notice.conversationId,
+              runId: notice.runId,
+              generation: notice.generation,
+              ordinal: notice.ordinal,
+              segmentId: notice.segmentId,
+            },
+            // deferOutcome：预热先不落合成结果，等客户端真来取时补记（见 warm 模块注释）。
+            deferOutcome: true,
+            synthesize: (text, voice) => synthesizeCompanionSegmentBytes({
+              text,
+              voice,
+              selection,
+              queueKey: `${scope.workspaceId}:${scope.userId}`,
+              log: app.log,
+              ordinal: notice.ordinal,
+            }),
+          }),
+        });
+      }
+    })().catch((err) => {
+      app.log.debug({ err: err instanceof Error ? err.message : String(err) }, "companion tts warm batch failed");
+    });
+  });
+
   // GET /voice/preference — 这个账号的引擎与音色（未设置时回 config 默认并标 explicit:false）。
   app.get("/voice/preference", { preHandler: [requireSession] }, async (req) => {
     const session = req.session!;
@@ -314,46 +402,6 @@ export async function voiceRoutes(app: FastifyInstance) {
     };
   });
 
-  // POST /voice/tts/preview — 用固定的一句话试听某个音色，不等用户先把她设为默认。
-  //
-  // 文本写死在服务端：这条路由会真金白银地打上游合成接口，收自由文本就是给任意
-  // 内容开一条计费通道。voice 同样只能取目录内的值（合同层 superRefine 把关）。
-  app.post("/voice/tts/preview", { preHandler: [requireSession] }, async (req, reply) => {
-    const session = req.session!;
-    const body = parseBody(app, companionVoicePreviewRequestV1Schema, req.body);
-    if (!rateLimitVoice(
-      reply, req.id,
-      `${session.workspaceId}:${session.userId}:tts-preview`,
-      COMPANION_RATE_LIMITS.ttsPreviewPerMinute.limit,
-      COMPANION_RATE_LIMITS.ttsPreviewPerMinute.windowMs,
-    )) return;
-    try {
-      const result = await synthesizeTtsBytes({
-        text: TTS_PREVIEW_TEXT,
-        // 试听的就是用户点的那一条，不借 config 的 edge 默认——否则 config 与目录
-        // 哪天对不上，用户听到的就不是他选的那个了。
-        edgeVoice: body.voice,
-        queueKey: `${session.workspaceId}:${session.userId}:preview`,
-        selection: {
-          engine: body.engine,
-          qwenVoice: body.voice,
-          edgeVoice: body.voice,
-          explicit: true,
-        },
-        onQwenFallback: (error) => req.log.warn({ err: error }, "qwen tts preview failed; falling back to edge-tts"),
-      });
-      return reply
-        .type(result.contentType)
-        .header("Cache-Control", "no-store")
-        .send(Buffer.from(result.audio));
-    } catch (err) {
-      if (err instanceof EdgeTtsError) {
-        return reply.code(502).send({ error: err.code, message: "语音合成服务暂不可用，请稍后重试" });
-      }
-      throw err;
-    }
-  });
-
   // Companion branch（§11.3）：请求含 conversationId/runId/...（strict ref）时，重读
   // voice.segment.ready 事件验证后合成；普通朗读请求直接走固定 profile。
   app.post("/voice/tts", { preHandler: [requireSession] }, async (req, reply) => {
@@ -370,8 +418,34 @@ export async function voiceRoutes(app: FastifyInstance) {
       const session = req.session!;
       // 这一整轮分段朗读用同一身：逐段重读偏好会让一次回复里的各段音色不一致
       // （中途另一次会话改了设置就会出现），听起来像她忽男忽女。
-      const selection = await resolveSelectionForSynthesis(session, req.log);
       if (!rateLimitVoice(reply, req.id, `${session.workspaceId}:${session.userId}:tts`, COMPANION_RATE_LIMITS.ttsPerMinute.limit, COMPANION_RATE_LIMITS.ttsPerMinute.windowMs)) return;
+      // 预热命中就直接给字节：这一段已经在服务端合成过（或正在合成），**不再合成第二遍**。
+      // 命中只影响"谁来等这一次合成"，不影响鉴权、限流与审计（预热那条路自己记过 outcome）。
+      const warmed = await takeWarmCompanionSegment(parsed.data.segmentId);
+      if (warmed && warmed.statusCode === 200 && warmed.audio) {
+        // 预热那一刻没记账（那时还没人要这段音频）。现在客户端真的来取了，
+        // 才补一条 `stage='synth'`：耗时/引擎/字节数从缓存里带回来，读数不失真。
+        await recordCompanionTtsSynthOutcome({
+          workspaceId: session.workspaceId,
+          userId: session.userId,
+          ref: {
+            conversationId: parsed.data.conversationId,
+            runId: parsed.data.runId,
+            generation: parsed.data.generation,
+            ordinal: parsed.data.ordinal,
+            segmentId: parsed.data.segmentId,
+          },
+          outcome: "ok",
+          durationMs: warmed.deferred?.durationMs ?? 0,
+          engine: warmed.deferred?.engine,
+          bytes: warmed.deferred?.bytes,
+        });
+        return reply
+          .type("audio/mpeg")
+          .header("Cache-Control", "no-store")
+          .send(Buffer.from(warmed.audio));
+      }
+      const selection = await resolveSelectionForSynthesis(session, req.log);
       const result = await synthesizeCompanionTtsSegment({
         workspaceId: session.workspaceId,
         userId: session.userId,
@@ -382,33 +456,14 @@ export async function voiceRoutes(app: FastifyInstance) {
           ordinal: parsed.data.ordinal,
           segmentId: parsed.data.segmentId,
         },
-        synthesize: async (text, voice) => {
-          // 2026-09-19 语音链路改造：ref 分段同样走「qwen WS 优先 + edge 兜底」。
-          // 语气/富语言标签是 qwen-audio 专属能力：qwen 原样传入（确定性语气层
-          // 注入的 [excited] 等控制标签由它理解），edge 合成前在引擎内剥离。
-          //
-          // "倒下去的是哪个引擎"必须带回去：失败没有返回值，所以挂在异常上
-          // （见 CompanionTtsFailure）。判据用现成的信号——qwen 失败时一定先回调
-          // onQwenFallback，回调响过就说明最后尝试的是 edge。不带这一笔的话
-          // `companion_tts_outcomes.engine` 只在成功时有值，报表里
-          // "edge failed=0" 会和真实的 3 条 EdgeTtsError 同时成立。
-          let attempted: "qwen" | "edge" = "qwen";
-          try {
-            const r = await synthesizeTtsBytes({
-              text,
-              edgeVoice: voice,
-              queueKey: `${session.workspaceId}:${session.userId}`,
-              selection,
-              onQwenFallback: (error) => {
-                attempted = "edge";
-                req.log.warn({ err: error, ordinal: parsed.data.ordinal }, "qwen tts failed; falling back to edge-tts");
-              },
-            });
-            return { audio: r.audio, engine: r.engine };
-          } catch (error) {
-            throw Object.assign(error instanceof Error ? error : new Error(String(error)), { ttsEngine: attempted });
-          }
-        },
+        synthesize: (text, voice) => synthesizeCompanionSegmentBytes({
+          text,
+          voice,
+          selection,
+          queueKey: `${session.workspaceId}:${session.userId}`,
+          log: req.log,
+          ordinal: parsed.data.ordinal,
+        }),
       });
       if (result.statusCode !== 200) {
         return reply.code(result.statusCode).send(result.error);

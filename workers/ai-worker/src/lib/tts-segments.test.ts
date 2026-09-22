@@ -5,6 +5,7 @@ import {
   splitCompanionTtsSegments,
   splitCompanionTtsSegmentsIncremental,
   companionSegmentId,
+  splitCommittedDisplaySegments,
   TTS_MAX_SEGMENTS,
   TTS_MAX_TOTAL_CHARS,
 } from "./tts-segments.ts";
@@ -250,4 +251,55 @@ test("首段提前：超长批次截到 160 上限，超出部分留 rest 不丢
   assert.ok(r.segments[0].text.length <= 160, "首段不超合同上限");
   assert.equal(r.next.rest.length, 300 - 160, "超出部分留在 rest 继续正常切句");
   assert.equal(r.segments[0].text + r.next.rest, big, "文本无丢失");
+});
+
+// ─── 展示段切分（splitCommittedDisplaySegments）──────────────────────────
+// 这是**生产路径**用的那个切段器（companion-dialogue.ts 的 emitVisibleVoiceSegments），
+// 而它此前一条直接单测都没有——只有集成测试间接覆盖。方案 29 §14.11 修复 ④ 改的就是
+// 它，所以先把不变量钉住：displayText 必须逐字等于 fullText.slice(displayStart, displayEnd)。
+
+test("展示段：句末标点成段，且 displayText 与绝对下标逐字对齐", () => {
+  const text = "第一句。第二句！第三句？";
+  const r = splitCommittedDisplaySegments(text, { cursor: 0, sentCount: 0 }, false);
+  assert.deepEqual(r.segments.map((s) => s.displayText), ["第一句。", "第二句！", "第三句？"]);
+  for (const seg of r.segments) {
+    assert.equal(seg.displayText, text.slice(seg.displayStart, seg.displayEnd), "下标与文本必须自洽");
+  }
+  assert.deepEqual(r.next, { cursor: text.length, sentCount: 3 });
+});
+
+test("展示段：没有句末标点时按目标长度在逗号处切，不切碎正常长度的句子", () => {
+  const long = `${"甲".repeat(30)}，${"乙".repeat(30)}，${"丙".repeat(30)}，尾巴。`;
+  const r = splitCommittedDisplaySegments(long, { cursor: 0, sentCount: 0 }, false, { targetSegmentChars: 48 });
+  assert.ok(r.segments.length >= 2, "长句被切开");
+  for (const seg of r.segments) {
+    assert.ok(seg.displayText.length <= 48, `每段不超目标长度：${seg.displayText.length}`);
+    assert.equal(seg.displayText, long.slice(seg.displayStart, seg.displayEnd));
+  }
+  assert.equal(r.segments.map((s) => s.displayText).join(""), long, "文本不丢不重");
+  // 短句一个都不该被切：p50/p90 的段（19/41 字）不受这条规则影响。
+  const short = "短句一。短句二，还没完。";
+  const s = splitCommittedDisplaySegments(short, { cursor: 0, sentCount: 0 }, false);
+  assert.deepEqual(s.segments.map((x) => x.displayText), ["短句一。", "短句二，还没完。"]);
+});
+
+test("展示段：句内没有逗号可切时仍按 160 硬上限切，不越合同", () => {
+  const text = "甲".repeat(400);
+  // isFinal=true：尾部不足 160 的那截也要切出来，否则它是在等后续文本（正常行为）。
+  const r = splitCommittedDisplaySegments(text, { cursor: 0, sentCount: 0 }, true);
+  assert.ok(r.segments.every((s) => s.displayText.length <= 160), "不越 160 上限");
+  assert.equal(r.segments.map((s) => s.displayText).join(""), text, "文本不丢");
+  assert.equal(r.next.cursor, text.length, "全部切完");
+});
+
+test("展示段：流式增量下不重复、不遗漏（cursor 只前进）", () => {
+  let state = { cursor: 0, sentCount: 0 };
+  const seen: string[] = [];
+  const full = "先写一句。再写一句，接着补完这一句。";
+  for (let i = 1; i <= full.length; i += 1) {
+    const r = splitCommittedDisplaySegments(full.slice(0, i), state, i === full.length);
+    state = r.next;
+    seen.push(...r.segments.map((s) => s.displayText));
+  }
+  assert.equal(seen.join(""), full, "增量切段拼起来正好是全文");
 });

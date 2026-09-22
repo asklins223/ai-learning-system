@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  COMPANION_REVEAL_AUDIO_SILENCE_MS,
+  COMPANION_REVEAL_FIRST_AUDIO_SILENCE_MS,
+  COMPANION_REVEAL_GAP_SILENCE_MS,
   COMPANION_REVEAL_LEAD_CHARS,
   createCompanionRevealDriver,
   type CompanionRevealDriver,
@@ -73,7 +74,7 @@ describe("companion-reveal-driver", () => {
     const { driver, advance } = harness();
     driver.noteSession("voice");
     driver.noteArrived(40);
-    advance(COMPANION_REVEAL_AUDIO_SILENCE_MS - 1);
+    advance(COMPANION_REVEAL_FIRST_AUDIO_SILENCE_MS - 1);
     driver.tick();
     expect(driver.revealed).toBe(COMPANION_REVEAL_LEAD_CHARS);
     advance(1);
@@ -94,20 +95,36 @@ describe("companion-reveal-driver", () => {
     expect(driver.revealed).toBe(5 + COMPANION_REVEAL_LEAD_CHARS);
   });
 
-  it("段间等待超过上限就交给阅读钟，音频回来后重新接管", () => {
+  it("段间等待超过 GAP 上限就交给阅读钟，音频回来后重新接管", () => {
     const { driver, advance } = harness();
     driver.noteSession("voice");
     driver.noteArrived(40);
     driver.noteAudioProgress(5);
-    advance(COMPANION_REVEAL_AUDIO_SILENCE_MS + 600);
+    advance(COMPANION_REVEAL_GAP_SILENCE_MS + 600);
     driver.tick();
-    // 这一拍只是让钟起算，不把等待的两秒一次性补出来。
+    // 这一拍只是让钟起算，不把等待的时间一次性补出来。
     expect(driver.revealed).toBe(5 + COMPANION_REVEAL_LEAD_CHARS);
     advance(600);
     driver.tick();
     expect(driver.revealed).toBe(5 + COMPANION_REVEAL_LEAD_CHARS + 10);
     driver.noteAudioProgress(20);
     expect(driver.revealed).toBe(20 + COMPANION_REVEAL_LEAD_CHARS);
+  });
+
+  // 方案 29 §14.11 修复 ②：段间静音原来要等满 2 秒才把文字交回阅读钟，于是任何
+  // <2s 的段间等待都是"文字和声音一起冻住"（用户报的"内容和读音都卡住"）。
+  // 现在出声之后按 800ms 判定，文字最多冻 0.8 秒。
+  it("段间静音只有 0.9 秒时文字也要继续走，不再冻满两秒", () => {
+    const { driver, advance } = harness();
+    driver.noteSession("voice");
+    driver.noteArrived(40);
+    driver.noteAudioProgress(5);
+    expect(COMPANION_REVEAL_GAP_SILENCE_MS).toBeLessThan(COMPANION_REVEAL_FIRST_AUDIO_SILENCE_MS);
+    advance(COMPANION_REVEAL_GAP_SILENCE_MS + 100);
+    driver.tick();          // 钟起算
+    advance(600);
+    driver.tick();          // 走了 10 个字
+    expect(driver.revealed).toBe(5 + COMPANION_REVEAL_LEAD_CHARS + 10);
   });
 
   it("音频失败/被停：立刻交回阅读钟", () => {

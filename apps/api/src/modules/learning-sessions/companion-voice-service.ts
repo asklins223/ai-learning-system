@@ -156,13 +156,70 @@ export interface CompanionTtsFailure {
   ttsEngine?: "qwen" | "edge";
 }
 
+/**
+ * 落一条 `stage='synth'` 的合成结果（0246）。
+ *
+ * **审计永远不能影响音频**：写不进去只 warn，不抛、不改返回值。抽成导出函数是因为
+ * 它现在有两个调用点——常规合成（合成完就记）与预热命中（合成发生在预热那一刻，
+ * 客户端来取时才记，读数从缓存里带回来）。两处必须同一张表、同一个形状。
+ */
+export async function recordCompanionTtsSynthOutcome(args: {
+  workspaceId: string;
+  userId: string;
+  ref: CompanionTtsSegmentRef;
+  outcome: "ok" | "rejected" | "failed";
+  durationMs: number;
+  errorCode?: string;
+  engine?: string;
+  bytes?: number;
+}): Promise<void> {
+  try {
+    await withWorkspaceTransaction(
+      { workspaceId: args.workspaceId, userId: args.userId },
+      async (tx) => {
+        await tx.execute(sql`
+          INSERT INTO companion_tts_outcomes
+            (workspace_id, user_id, conversation_id, run_id, segment_id, ordinal,
+             outcome, error_code, engine, duration_ms, bytes)
+          VALUES
+            (${args.workspaceId}, ${args.userId}, ${args.ref.conversationId}, ${args.ref.runId},
+             ${args.ref.segmentId}, ${args.ref.ordinal}, ${args.outcome},
+             ${args.errorCode ? args.errorCode.slice(0, 80) : null},
+             ${args.engine ?? null}, ${args.durationMs}, ${args.bytes ?? null})
+        `);
+      },
+    );
+  } catch (error) {
+    logger.warn(
+      { err: error, runId: args.ref.runId, ordinal: args.ref.ordinal },
+      "companion tts outcome could not be recorded; audio path unaffected",
+    );
+  }
+}
+
 export async function synthesizeCompanionTtsSegment(args: {
   workspaceId: string;
   userId: string;
   ref: CompanionTtsSegmentRef;
   synthesize: TtsSynthesizeFn;
   voice?: string;
-}): Promise<{ statusCode: number; audio?: Uint8Array; error?: { code: string; message: string } }> {
+  /**
+   * 服务端预热时传 true：**先不落 `companion_tts_outcomes`**，把这一次的读数带回去，
+   * 等客户端真的来取（命中缓存）时再由路由记一笔（方案 29 §14.11 修复 ③）。
+   *
+   * 为什么必须这样：那张表里 `stage='synth'` 的含义是"字节交给了客户端"，报表的
+   * "音频已交付却零上报"就是靠它减 `stage='playback'` 算出来的。预热会在**没人要**
+   * 的情况下合成（回合被打断、客户端关着），若照记不误，这些段会变成一条永远没有
+   * 结局的"给了音频却没响"——把这条最锋利的读数重新变成假故障。
+   */
+  deferOutcome?: boolean;
+}): Promise<{
+  statusCode: number;
+  audio?: Uint8Array;
+  error?: { code: string; message: string };
+  /** `deferOutcome` 时带回这一次合成的读数，供命中缓存的那条路补记。 */
+  deferred?: { durationMs: number; engine?: "qwen" | "edge"; bytes: number };
+}> {
   const startedAt = Date.now();
   /**
    * 逐段落一条合成结果（0246，方案 29 §4.9）。**审计永远不能影响音频**：写不进去
@@ -175,28 +232,17 @@ export async function synthesizeCompanionTtsSegment(args: {
     outcome: "ok" | "rejected" | "failed",
     extra: { errorCode?: string; engine?: string; bytes?: number } = {},
   ): Promise<void> => {
-    try {
-      await withWorkspaceTransaction(
-        { workspaceId: args.workspaceId, userId: args.userId },
-        async (tx) => {
-          await tx.execute(sql`
-            INSERT INTO companion_tts_outcomes
-              (workspace_id, user_id, conversation_id, run_id, segment_id, ordinal,
-               outcome, error_code, engine, duration_ms, bytes)
-            VALUES
-              (${args.workspaceId}, ${args.userId}, ${args.ref.conversationId}, ${args.ref.runId},
-               ${args.ref.segmentId}, ${args.ref.ordinal}, ${outcome},
-               ${extra.errorCode ? extra.errorCode.slice(0, 80) : null},
-               ${extra.engine ?? null}, ${Date.now() - startedAt}, ${extra.bytes ?? null})
-          `);
-        },
-      );
-    } catch (error) {
-      logger.warn(
-        { err: error, runId: args.ref.runId, ordinal: args.ref.ordinal },
-        "companion tts outcome could not be recorded; audio path unaffected",
-      );
-    }
+    // 预热路径先不记账：等客户端真来取（命中缓存）时由路由补记，
+    // 否则"没人要的合成"会变成一条没有结局的"给了音频却没响"。
+    if (args.deferOutcome) return;
+    await recordCompanionTtsSynthOutcome({
+      workspaceId: args.workspaceId,
+      userId: args.userId,
+      ref: args.ref,
+      outcome,
+      durationMs: Date.now() - startedAt,
+      ...extra,
+    });
   };
   // 第一阶段：事务内只做只读校验并取回文本（快路径，不持有长事务）。
   const staged = await withWorkspaceTransaction(
@@ -299,7 +345,13 @@ export async function synthesizeCompanionTtsSegment(args: {
     engine: synthesized.engine,
     bytes: synthesized.audio.byteLength,
   });
-  return { statusCode: 200, audio: synthesized.audio };
+  return {
+    statusCode: 200,
+    audio: synthesized.audio,
+    ...(args.deferOutcome
+      ? { deferred: { durationMs: Date.now() - startedAt, engine: synthesized.engine, bytes: synthesized.audio.byteLength } }
+      : {}),
+  };
 }
 
 /**

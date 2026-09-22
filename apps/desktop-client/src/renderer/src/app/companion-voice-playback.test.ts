@@ -498,6 +498,28 @@ describe("逐段播放结局上报", () => {
     return session;
   }
 
+  // 方案 29 §14.11 修复 ①：预取原来只有一个触发点——某一段**出队之后**。
+  // 于是第 1 段到达时队列里只有它（预取无事可做），第 2…N 段在第 1 段播放期间到达
+  // 却没人开始合成，等第 1 段播完才开始——整段合成时间变成静音。
+  // 实测（48h / 61 次段间切换）：进入第 2 段的切换 **82% 有 >0.3s 静音**，中位 0.58s。
+  it("服务端签发的第 2 段一到就开始合成，不等第 1 段播完", async () => {
+    const host = new FakeHost();
+    setCompanionVoiceHost(host);
+    const session = beginCompanionSpeechLine({ strictSegments: true });
+
+    session.feedSegment(refSegment(1, "第一句。"));
+    await waitUntil(() => host.played.length === 1);
+    expect(host.synthesized).toEqual([segmentIdFor(1)]);
+
+    // 第 1 段还在播（play() 没 resolve），第 2 段到了。
+    session.feedSegment(refSegment(2, "第二句。"));
+    await waitUntil(() => host.synthesized.length === 2);
+    expect(host.played).toHaveLength(1);           // 第 1 段确实还没播完
+    expect(host.synthesized[1]).toBe(segmentIdFor(2));
+
+    session.finish("");
+  });
+
   it("播完的段上报 played，并带上这段的身份", async () => {
     const host = new FakeHost();
     setCompanionVoiceHost(host);
