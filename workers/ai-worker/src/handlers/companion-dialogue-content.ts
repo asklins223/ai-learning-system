@@ -555,6 +555,39 @@ export function unverifiedNumericClaims(replyText: string, contextText: string):
  * 写成了 `learning_context`（见 companion-memory-extractor 的 isVolatileStatisticMemory），
  * 于是她下一轮"有依据"地复述自己的谎，而任何照上下文核对的判据都会判它合格。
  */
+/** 引用段的归一化：空格、Markdown 标记、引号与斜杠都不算差异。 */
+export function normalizeQuotedPassage(text: string): string {
+  return text.replace(/[\s>｜|*#「」“”‘’／/]+/g, "");
+}
+
+/** 短于此的"引用"是名字或词条，不是她声称念出来的原文。 */
+export const QUOTE_MIN_CHARS = 12;
+
+/** 她正文里"当成原文端出来"的那些段落：Markdown 引用块 + 「…」式直接引语。 */
+export function extractQuotedPassages(text: string): string[] {
+  const out: string[] = [];
+  const blockquote = [...text.matchAll(/^\s*>\s?(.+)$/gm)].map((m) => m[1].trim());
+  if (blockquote.length > 0) out.push(blockquote.join(""));
+  for (const m of text.matchAll(/[「“]([^」”\n]{12,})[」”]/g)) out.push(m[1].trim());
+  return out.filter((passage) => normalizeQuotedPassage(passage).length >= QUOTE_MIN_CHARS);
+}
+
+/**
+ * 她引的"原文"里，哪些在本轮真出处中逐字找不到（方案 29 §12.6 的 ②）。
+ *
+ * 这条刻意**不看措辞**：追"原文在这儿/我念给你"这种说法已经被证明是追不上的
+ * （同一个缺口，动词换一个就漏）。它只做一件事——把她当原文端出来的段落，
+ * 与本轮真实拿到的文本（工具结果、注入的开头、用户自己的话）做逐字比对。
+ * 实机 2026-09-22 AC 轮那段"欧姆定律：I = U / R。导体中的电流跟两端电压成正比…"
+ * 是课本话，笔记正文里一个字都没有；修好后她引的那段与正文两边都能对上。
+ */
+export function unverifiedQuoteClaims(replyText: string, sourcesText: string): string[] {
+  const haystack = normalizeQuotedPassage(sourcesText);
+  return extractQuotedPassages(replyText).filter(
+    (passage) => !haystack.includes(normalizeQuotedPassage(passage)),
+  );
+}
+
 export function keepRecomputedBlocks(text: string): string {
   return (text.match(
     /<(?:here_and_now|page_context|selection_data|grounded_target)[\s\S]*?<\/(?:here_and_now|page_context|selection_data|grounded_target)>/g,

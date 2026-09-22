@@ -23,6 +23,9 @@ import {
   claimsNothingDueAgainstFacts,
   companionOutputRejectionReason,
   containsCompanionInternalToken,
+  extractQuotedPassages,
+  normalizeQuotedPassage,
+  unverifiedQuoteClaims,
   keepRecomputedBlocks,
   TRUNCATED_REPLY_MIN_CHARS,
   sanitizeCompanionVisibleText,
@@ -889,4 +892,31 @@ test("claimsNothingDueAgainstFacts：真值在环境块里，她那句话就是�
   assert.equal(claimsNothingDueAgainstFacts("到期列表是空的。", "今日已学 12 分钟"), false);
   // 同一条真值下如实报数，不该命中（否则 steer 会被自己的闸反复烧掉）。
   assert.equal(claimsNothingDueAgainstFacts("到期待复习的有 25 项，先挑第一张？", facts), false);
+});
+
+// ─── §12.6 ②：她当"原文"端出来的段落，逐字比对本轮真出处 ─────────────────
+// 三段文本都是活库里的真东西（AC 轮修复前/后 + 那篇笔记的正文）。
+const NOTE_BODY = "欧姆定律\n欧姆定律说明，在电阻不变时，电流与电压成正比，公式为 I=U/R。\n例如电压增加一倍，电流也增加一倍。";
+const FABRICATED = "嗯，原文在这儿喵：\n\n> 欧姆定律：I = U / R。导体中的电流跟两端电压成正比，跟电阻成反比。";
+const GROUNDED = "我读到了喵，原文其实很短：\n\n> 欧姆定律\n>\n> 欧姆定律说明，在电阻不变时，电流与电压成正比，公式为 I=U/R。\n> 例如电压增加一倍，电流也增加一倍。";
+
+test("extractQuotedPassages：认出引用块与直接引语，忽略短词条", () => {
+  assert.equal(extractQuotedPassages(FABRICATED).length, 1);
+  assert.equal(extractQuotedPassages("好的喵。").length, 0);
+  assert.equal(extractQuotedPassages("> 短\n> 短").length, 0, "拼起来仍不够长的不算一段原文");
+  assert.equal(extractQuotedPassages("他说「今天不学了」然后走了").length, 0, "短的口语引语不拦");
+});
+
+test("unverifiedQuoteClaims：课本话冒充原文要红，真引文要绿", () => {
+  assert.equal(unverifiedQuoteClaims(FABRICATED, NOTE_BODY).length, 1,
+    "那段编出来的'原文'必须被抓到");
+  assert.deepEqual(unverifiedQuoteClaims(GROUNDED, NOTE_BODY), [],
+    "逐字对得上的引文不许误伤");
+  // 同样的字一旦真出现在本轮出处里（比如用户自己念过、或注入的开头就是这段），就不该红
+  assert.deepEqual(unverifiedQuoteClaims(
+    FABRICATED, NOTE_BODY + "欧姆定律：I = U / R。导体中的电流跟两端电压成正比，跟电阻成反比。"), []);
+});
+
+test("normalizeQuotedPassage：空格、Markdown 标记与斜杠不算差异", () => {
+  assert.equal(normalizeQuotedPassage("> I = U / R。"), normalizeQuotedPassage("I=U/R。"));
 });

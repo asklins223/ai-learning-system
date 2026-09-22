@@ -50,7 +50,7 @@ import { ProviderRequestError } from "../lib/provider-request-error.ts";
 import type { AIProvider } from "../lib/ai-provider.ts";
 import type { CompanionDialogueHandlerContext, ReadContext } from "./companion-dialogue-store.ts";
 import { insertStreamEvent } from "./companion-dialogue-store.ts";
-import { parsePageContext, looksTruncatedReply, looksLikeUnfulfilledActionNarration, looksLikeActionRequest, unverifiedNumericClaims, claimsLookupThatNeverRan, claimsNothingDueAgainstFacts, keepRecomputedBlocks, stripProviderControlTokens, TRUNCATED_REPLY_MIN_CHARS,
+import { parsePageContext, looksTruncatedReply, looksLikeUnfulfilledActionNarration, looksLikeActionRequest, unverifiedNumericClaims, unverifiedQuoteClaims, claimsLookupThatNeverRan, claimsNothingDueAgainstFacts, keepRecomputedBlocks, stripProviderControlTokens, TRUNCATED_REPLY_MIN_CHARS,
   noteSearchTerms } from "./companion-dialogue-content.ts";
 import { proposedLearningActionPayloadV1Schema } from "@ailearn/shared";
 import type { ProviderReasoningHandle } from "@ailearn/shared";
@@ -2941,6 +2941,15 @@ export async function runCompanionAgentLoop(args: {
     // 少这个注解，tsc 报 TS7022/TS18046 一长串，而看起来最无辜的改法都会"莫名"炸掉整个文件。
     const said: string = String(result.content ?? "");
     const unverifiedClaims = unverifiedNumericClaims(said, contextText);
+    // 引文的出处比数字宽：本轮的工具结果也算（她真的 read_note 过，引文就该在里面）。
+    // 仍然**不含她自己说过的话**——和数字那条同一个理由：历史里的编造不能自我洗白。
+    const quoteSources = [
+      contextText,
+      ...messages
+        .filter((message) => message.role === "tool")
+        .map((message) => (typeof message.content === "string" ? message.content : "")),
+    ].join("\n");
+    const unverifiedQuotes = unverifiedQuoteClaims(said, quoteSources);
     // "到期列表现在是空的"不报任何数字，上面那条看不见；它是一句可证伪的假阴性，
     // 直接对着环境块里服务端算出的那个数判（同一个 steer 额度、同一条 nudge：
     // 指出该调哪个工具，比指责她没调有用）。
@@ -2956,7 +2965,7 @@ export async function runCompanionAgentLoop(args: {
       finalAnswerOnly,
       withinBudget: stepCount < budget.maxSteps && Date.now() < deadlineAt,
       userAskedForAction,
-      hasUnverifiedClaims: unverifiedClaims.length > 0,
+      hasUnverifiedClaims: unverifiedClaims.length > 0 || unverifiedQuotes.length > 0,
       looksLikeUnfulfilledNarration: looksLikeUnfulfilledActionNarration(said),
       lookupClaim,
       actionSteerAttempts,
