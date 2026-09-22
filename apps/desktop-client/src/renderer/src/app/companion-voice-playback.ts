@@ -386,6 +386,21 @@ async function runQueuedSpeech(args: {
       prefetched.push({ key: upcoming.key, buffer: promise, startedAtMs });
     }
   };
+  /**
+   * 预取已经发起、却没轮到播的段：被打断或宿主卸载时给它们一个终态。
+   *
+   * 不报的话这些段在服务端只剩一条 `stage='synth'` 的成功行，于是"给了音频却没响"
+   * 与"客户端根本没在线"两种完全不同的病在同一张表里长得一模一样（实测只能靠
+   * 能力上线时刻切窗口把它们分开，见方案 29 §12 C4）。
+   */
+  const reportAbandoned = (current?: { segment: CompanionQueuedSpeechSegment; startedAtMs: number }): void => {
+    if (current) report(current.segment, "dropped", current.startedAtMs);
+    for (const entry of prefetched) {
+      const segment = queue.segments.find((item) => item.key === entry.key);
+      if (segment) report(segment, "dropped", entry.startedAtMs);
+    }
+    prefetched.length = 0;
+  };
   const visibleAt = (segment: CompanionQueuedSpeechSegment, fraction: number): number => {
     const start = Math.max(previousEnd, segment.startIndex);
     const span = Math.max(1, segment.endIndex - start);
@@ -394,7 +409,10 @@ async function runQueuedSpeech(args: {
   };
   try {
     for (;;) {
-      if (args.runGeneration !== generation) return;
+      if (args.runGeneration !== generation) {
+        reportAbandoned();
+        return;
+      }
       const segment = queue.segments.shift();
       if (!segment) {
         if (queue.finished) break;
@@ -423,7 +441,10 @@ async function runQueuedSpeech(args: {
         report(segment, deadlineHit ? "deadline" : "synth_failed", pending.startedAtMs);
         continue;
       }
-      if (args.runGeneration !== generation) return;
+      if (args.runGeneration !== generation) {
+        reportAbandoned({ segment, startedAtMs: pending.startedAtMs });
+        return;
+      }
 
       emit({
         planId: args.planId,
@@ -448,7 +469,12 @@ async function runQueuedSpeech(args: {
           visibleChars: visibleAt(segment, fraction),
         });
       });
-      if (args.runGeneration !== generation) return;
+      if (args.runGeneration !== generation) {
+        // play() 被 stop() 提前 resolve 时"到底听没听见"是不知道的，所以这里报 dropped
+        // 而不是 played：played 继续只由正常路径写，否则这条读数又开始替"没响"说话。
+        reportAbandoned({ segment, startedAtMs: pending.startedAtMs });
+        return;
+      }
       previousEnd = segment.endIndex;
       playedCount += 1;
       // 走到这里才算"播成了"：`play()` 被打断时同样 resolve，所以必须排在上面那道

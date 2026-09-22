@@ -553,6 +553,29 @@ describe("逐段播放结局上报", () => {
     expect(host.played).toEqual([]);
   });
 
+  // 实机 2026-09-22 为了一段"给了音频却没响"只能跨表反推：客户端在"字节到手又被打断"
+  // 这些分支上一个字都不报，于是"没在线"与"没响"在同一张表里长得一模一样。
+  it("被打断时已预取却没播的段上报 dropped，且记成 rejected 而不是失败", async () => {
+    const host = new FakeHost();
+    setCompanionVoiceHost(host);
+    strictSessionWithRef(host, 3);
+
+    await waitUntil(() => host.played.length === 1);
+    stopCompanionSpeech();
+    host.finishSegment();
+    await waitUntil(() => host.reports.some((report) => report.reason === "dropped"));
+
+    const dropped = host.reports
+      .filter((report) => report.reason === "dropped")
+      .map((report) => report.ordinal)
+      .sort();
+    // played 只由正常路径写：play() 被 stop() 提前 resolve 时没人能证明用户听见了。
+    // 预取深度 2：第 1 段在播时第 2、3 段的字节已经在路上，打断后它们永远不会有
+    // 第二条结局——这一段就是那条"没响"的证据。
+    expect(dropped).toEqual([1, 2, 3]);
+    expect(host.reports.filter((report) => report.reason === "played")).toEqual([]);
+  });
+
   it("本地文本路径（服务端没签段引用）不产生任何上报", async () => {
     const host = new FakeHost();
     setCompanionVoiceHost(host);

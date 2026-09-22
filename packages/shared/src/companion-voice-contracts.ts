@@ -60,6 +60,11 @@ export const COMPANION_TTS_PLAYBACK_REASONS = [
   "played",       // 播完了
   "deadline",     // 字节在路上，但首段/段间截止先到 → 这段被跳过
   "synth_failed", // 取段/合成请求本身失败（网络、502、解不出音频）
+  // 字节已经到手（或已在路上），但这一轮被打断/宿主卸载，段被丢掉。
+  // 它与 deadline 的区别是"没有超时这回事"：实机 2026-09-22 为了找那 1 段
+  // "给了音频却没响"，只能靠跨表反推，因为客户端在这些分支上一个字都不报。
+  // 记成 rejected 而不是 failed——用户打断是正常行为，不该进失败率（见下）。
+  "dropped",
 ] as const;
 export type CompanionTtsPlaybackReason = (typeof COMPANION_TTS_PLAYBACK_REASONS)[number];
 
@@ -71,6 +76,7 @@ export const COMPANION_TTS_PLAYBACK_REASON_TO_OUTCOME: Record<
   played: "ok",
   deadline: "failed",
   synth_failed: "failed",
+  dropped: "rejected",
 };
 
 export const companionVoicePlaybackOutcomeRequestV1Schema = z.strictObject({
