@@ -24,6 +24,7 @@ import {
   visibleAgentNodes,
   type CompanionAgentNode,
   type CompanionAgentNodes,
+  nodeLabel,
 } from "../../app/companion-agent-nodes";
 
 /**
@@ -181,7 +182,7 @@ export function CompanionAgentRail({
             return (
               <li key={node.key} data-state={node.state} data-kind={node.kind} title={node.summary ?? undefined}>
                 <span className="companion-hud__rail-icon"><Icon size={13} aria-hidden="true" /></span>
-                <span className="companion-hud__rail-label">{node.label}</span>
+                <span className="companion-hud__rail-label">{nodeLabel(node)}</span>
                 <span className="companion-hud__rail-mark">{nodeMark(node)}</span>
               </li>
             );

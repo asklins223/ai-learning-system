@@ -58,6 +58,7 @@ import {
   type CompanionRevealDriver,
 } from "../../app/companion-reveal-driver";
 import { subscribeHomeV2VoiceLevel } from "../../app/companion-voice-level";
+import { nodeLabel } from "../../app/companion-agent-nodes";
 import type {
   CompanionAgentNodeState,
   CompanionRunTrace,
@@ -553,6 +554,11 @@ export function CompanionHud({
       if (bubble && (bubble.matches(":hover") || bubble.contains(document.activeElement))) return true;
       if (pendingProposalIdRef.current !== null) return true;
       if (speakingRef.current) return true;
+      // **还没露完就不许收走**（2026-09-22 用户报"显示的时机只有那一会儿"）。
+      // 停留计时原来只看"朗读中"，而文字是跟着音频位置走的：她一句话说完、下一段
+      // 还没开口的那几秒里 `speaking` 是假，计时照走——气泡在正文只露了半句时就消失。
+      const driver = revealDriverRef.current;
+      if (driver && driver.revealed < driver.arrived) return true;
       return false;
     };
     holdTimer = window.setInterval(() => {
@@ -1240,6 +1246,17 @@ export function CompanionHud({
           <span className="companion-hud__presence-dot" ref={presenceRef} aria-hidden="true" />
           {/* 长回复的正文在它自己里面滚，新字钉在视野里（见上面的跟随 effect）。 */}
           <p ref={setBubbleBodyEl} onScroll={handleBubbleScroll}>{outputText}</p>
+          {/* 过程行（2026-09-22 用户报"有过程的时候完全看不到过程"）。
+              以前过程只在"正文还是空的"时占气泡位（slot 优先级），她一开始说话，
+              "正在查你的复习卡"这类信息就整个消失——用户只看到一句话停在那里，
+              不知道她是卡住了还是在干活。现在它挂在正文下面单独一行：只要这一轮还在
+              跑且当前有节点，就一直看得见。 */}
+          {chat.phase === "sending" && currentNode ? (
+            <p className="companion-hud__output-process" role="status">
+              <span className="companion-hud__output-process-dot" aria-hidden="true" />
+              {nodeLabel(currentNode)}
+            </p>
+          ) : null}
           {/* 视觉流式文本**不是**持续 live region（方案 §3 无障碍）：逐字更新会让读屏
               反复朗读碎片；回合终态的稳定摘要在下方 `companion-hud__sr-status` 发布。 */}
           {/* 被打断的原因就在这里说清楚——以前它只出现在输入面板里，

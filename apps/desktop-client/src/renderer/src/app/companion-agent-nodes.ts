@@ -62,6 +62,51 @@ export interface CompanionAgentNode {
 /** 只读快照，避免渲染层拿到可变数组。 */
 export type CompanionAgentNodes = readonly CompanionAgentNode[];
 
+/**
+ * 工具名 → **给人看的**一句话（2026-09-22 用户报"看不到过程"）。
+ *
+ * 为什么需要：服务端 `agent.tool` 的 `safeLabel` 现在装的是 `definition.description`
+ * ——那是**给模型看的**工具说明（"列出到期（或快到期）的复习卡，带卡片标题和到期
+ * 时间。用户问「有什么要复习的」时调用。"），落到界面上既长又不像人话，用户读到的是
+ * 一份工具文档而不是"她正在做什么"。
+ *
+ * 放在客户端、与 `TOOL_ICONS` 同一层：这是**显示**问题，和图标一样只影响渲染，
+ * 认不出的工具不猜语义，统一说"正在处理…"（猜错比不认识更坏）。
+ */
+const TOOL_LABELS: Record<string, string> = {
+  companion_read_context: "正在看你这一页",
+  companion_read_history: "正在翻之前的对话",
+  companion_recall_memory: "正在想你说过的事",
+  companion_search_notes: "正在翻你的笔记",
+  companion_read_note: "正在读那篇笔记",
+  companion_get_learning_stats: "正在看你的学习数据",
+  companion_list_task_queue: "正在看你的任务队列",
+  companion_list_due_reviews: "正在看到期复习",
+  companion_list_recent_activity: "正在看最近做了什么",
+  companion_open_card: "正在打开那张卡",
+  companion_open_note: "正在打开那篇笔记",
+  companion_open_page: "正在带你去那个页面",
+  companion_schedule_reminder: "正在记下这个提醒",
+  companion_list_reminders: "正在看你约过的提醒",
+  companion_cancel_reminder: "正在撤掉那个提醒",
+  companion_save_memory: "正在记住这件事",
+  companion_forget_memory: "正在忘掉那一条",
+  companion_set_activeness: "正在改活跃度",
+  companion_set_boundary: "正在改行为边界",
+  companion_start_learning: "正在开一轮学习",
+  companion_show_image: "正在把那张图调出来",
+  companion_read_image: "正在看那张图",
+  companion_render_diagram: "正在画流程图",
+  companion_focus_graph: "正在星图上定位",
+  companion_defer_review: "正在把复习往后挪",
+};
+
+/** 一个节点该显示的那句话。工具节点用上面的表；思考/动作节点的 label 本来就是人话。 */
+export function nodeLabel(node: CompanionAgentNode): string {
+  if (node.kind === "tool" && node.toolName) return TOOL_LABELS[node.toolName] ?? "正在处理…";
+  return node.label;
+}
+
 const TOOL_STATE: Record<string, CompanionAgentNodeState> = {
   requested: "running",
   executing: "running",
