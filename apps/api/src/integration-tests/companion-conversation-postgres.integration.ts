@@ -815,7 +815,7 @@ test("P3 §11.3：Companion TTS 合成（strict ref 重读 event）", async () =
       workspaceId, userId,
       ref: { conversationId, runId, generation: gen, ordinal: 1, segmentId },
       synthesize: async () => {
-        throw new Error("edge-tts 500 BrokenPipeError");
+        throw Object.assign(new Error("edge-tts 500 BrokenPipeError"), { ttsEngine: "edge" });
       },
     });
     assert.equal(failed.statusCode, 502);
@@ -839,6 +839,10 @@ test("P3 §11.3：Companion TTS 合成（strict ref 重读 event）", async () =
     const failedRow = outcomes.find((row) => row.outcome === "failed");
     assert.ok(failedRow, "引擎失败要留下一行 failed");
     assert.equal(failedRow.error_code, "Error");
+    // 失败行也必须带引擎。以前 `engine` 只在成功时写，于是报表里
+    // "edge ok=13 failed=0" 会和全库真存在的 3 条 EdgeTtsError **同时成立**——
+    // 按引擎分档那一行结构上看不见失败，而它正是"该不该换引擎/换音色"的判据。
+    assert.equal(failedRow.engine, "edge");
 
     // segmentId 不匹配 → 400
     const bad = await synthesizeCompanionTtsSegment({

@@ -144,6 +144,18 @@ export interface TtsSynthesizeFn {
   (text: string, voice: string): Promise<{ audio: Uint8Array | Buffer; engine?: "qwen" | "edge" }>;
 }
 
+/**
+ * 合成失败时，调用方可以把"倒下去的是哪个引擎"挂在异常上。
+ *
+ * 为什么挂在异常上而不是返回值：失败路径没有返回值。为什么这个信息必须留痕：
+ * `companion_tts_outcomes.engine` 以前只在成功时写，于是报表里
+ * `edge n=13 ok=13 failed=0` 与全库 3 条 `EdgeTtsError` 的失败**同时成立**——
+ * 按引擎分档的那行读数结构上看不见失败，而它正是"该不该换引擎/换音色"的判据。
+ */
+export interface CompanionTtsFailure {
+  ttsEngine?: "qwen" | "edge";
+}
+
 export async function synthesizeCompanionTtsSegment(args: {
   workspaceId: string;
   userId: string;
@@ -259,6 +271,7 @@ export async function synthesizeCompanionTtsSegment(args: {
   } catch (error) {
     await recordOutcome("failed", {
       errorCode: error instanceof Error ? error.constructor.name : "unknown",
+      engine: (error as (Error & CompanionTtsFailure) | undefined)?.ttsEngine,
     });
     logger.warn({ err: error, runId: args.ref.runId, ordinal: args.ref.ordinal }, "companion tts synthesis failed");
     return { statusCode: 502, error: { code: "TTS_FAILED", message: "语音合成失败（降级纯文字）" } };

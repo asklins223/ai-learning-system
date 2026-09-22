@@ -279,13 +279,27 @@ export async function voiceRoutes(app: FastifyInstance) {
           // 2026-09-19 语音链路改造：ref 分段同样走「qwen WS 优先 + edge 兜底」。
           // 语气/富语言标签是 qwen-audio 专属能力：qwen 原样传入（确定性语气层
           // 注入的 [excited] 等控制标签由它理解），edge 合成前在引擎内剥离。
-          const r = await synthesizeTtsBytes({
-            text,
-            edgeVoice: voice,
-            queueKey: `${session.workspaceId}:${session.userId}`,
-            onQwenFallback: (error) => req.log.warn({ err: error, ordinal: parsed.data.ordinal }, "qwen tts failed; falling back to edge-tts"),
-          });
-          return { audio: r.audio, engine: r.engine };
+          //
+          // "倒下去的是哪个引擎"必须带回去：失败没有返回值，所以挂在异常上
+          // （见 CompanionTtsFailure）。判据用现成的信号——qwen 失败时一定先回调
+          // onQwenFallback，回调响过就说明最后尝试的是 edge。不带这一笔的话
+          // `companion_tts_outcomes.engine` 只在成功时有值，报表里
+          // "edge failed=0" 会和真实的 3 条 EdgeTtsError 同时成立。
+          let attempted: "qwen" | "edge" = "qwen";
+          try {
+            const r = await synthesizeTtsBytes({
+              text,
+              edgeVoice: voice,
+              queueKey: `${session.workspaceId}:${session.userId}`,
+              onQwenFallback: (error) => {
+                attempted = "edge";
+                req.log.warn({ err: error, ordinal: parsed.data.ordinal }, "qwen tts failed; falling back to edge-tts");
+              },
+            });
+            return { audio: r.audio, engine: r.engine };
+          } catch (error) {
+            throw Object.assign(error instanceof Error ? error : new Error(String(error)), { ttsEngine: attempted });
+          }
         },
       });
       if (result.statusCode !== 200) {
