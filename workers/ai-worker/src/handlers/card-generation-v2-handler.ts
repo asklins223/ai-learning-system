@@ -1195,7 +1195,16 @@ async function loadSealedEvidence(tx: WorkerTransaction, workspaceId: string, so
 }
 
 /**
- * 执行完整的 V2 四阶段生成管道。
+ * 执行完整的 V2 四阶段生成管道（A1 · B1：计划与作者**分两次提交**）。
+ *
+ * 为什么拆：整条管道原先在同一个事务里，计划行、候选行、终态要么一起出现要么一起
+ * 消失——"崩在作者中途"等于整批作废、已付费的 planner 调用一起赔进去。拆成两段之后
+ * 计划先进库，重投只需读回它（§39 事实 2：`planRevisionId` 每次执行现造，
+ * 若重放时"复用上次候选 + 用这版新计划继续跑"，审计链当场断裂）。
+ *
+ * 代价与它的前置（§39 事实 3/4）：`run.status` 一旦提前提交，"看状态"的入口守卫就会把
+ * 重投变成**静默空转**（run 永远停在 authoring，这篇笔记此后每次生成都吃 409）。
+ * 所以判活改看**自己那条 outbox 租约**：每段事务提交前都核对一次，核对不过就停下不写。
  *
  * `signal`：job 级取消信号（租约丢失 / 墙钟预算耗尽）——透传到四个阶段的
  * LLM 调用与逐候选循环（H5/M1）。
@@ -1212,22 +1221,46 @@ async function processCardGenerationPlan(job: PendingOutboxJob, signal?: AbortSi
     ? await resolveCardGenerationGovernance(workspaceId, runId)
     : null;
 
-  await withWorkerWorkspaceTransaction({ workspaceId, userId: null }, async (tx) => {
+  const planPhase = await runV2PlanPhase(job, signal, governanceContext);
+  if (planPhase.kind !== "continued") {
+    // yielded = 别的租约已把这个批次跑到终态之后又重投；finished = 零卡是成功终态。
+    // 两种都不该继续花作者的钱。
+    if (planPhase.kind === "yielded") {
+      logger.info({ runId }, "[v2-pipeline] plan phase yielded (terminal state or already resumed elsewhere)");
+    }
+    return;
+  }
+  await runV2AuthoringPhase(job, signal, governanceContext);
+}
+
+/**
+ * 阶段一：规划 + 把计划提交出去（自己的短事务）。
+ *
+ * - `planning`（含尚未推进的 `queued`/`source_sealing`）→ 真规划一次，落计划行、
+ *   `current_plan_version`、`status='authoring'`，一次提交；
+ * - `authoring`/`checking` → 上一遍已把计划交出去了，**读回同一版**，不再规划；
+ * - 终态 → 让路（今天也是让路，这里是回归位）。
+ */
+async function runV2PlanPhase(
+  job: PendingOutboxJob,
+  signal: AbortSignal | undefined,
+  governanceContext: Awaited<ReturnType<typeof resolveCardGenerationGovernance>> | null,
+): Promise<{ kind: "continued" } | { kind: "yielded" } | { kind: "finished" }> {
+  const { workspaceId, runId } = job;
+  const useLLM = process.env.CARD_GENERATION_V2_LLM === "true";
+
+  return withWorkerWorkspaceTransaction({ workspaceId, userId: null }, async (tx) => {
     // 1. Load run（FOR UPDATE 行锁：防止同 run 的双 job 并发跑完整 LLM 管道，
     //    避免 TOCTOU 双份计费/双写终态。在 withWorkerWorkspaceTransaction 事务内
     //    持锁到提交，契合 W2。）
-    //    ── 激活前评估（第三轮 W#3，保持不拆）──────────────────────────────────
-    //    本锁覆盖整个四阶段 LLM 管道（planner→author→grounding→pedagogy，分钟级），
-    //    期间 DB 行锁 + 连接被长时间占用（long-held transaction 反模式），同 run 的
-    //    regenerate/replan/recheck job 需阻塞等待该锁至提交。这是"串行化同 run"的
-    //    W2 本意；**不在此拆分事务**——若把 LLM 调用移到事务外，会重新引入 TOCTOU
-    //    （双 worker 并发看同一 run.status → 双份计费/双写终态），需重构为状态机
-    //    门闩（如 run.status 乐观 CAS，或租约 token）方能豁免。
-    //    2026-09-15（管线评审 H4 部分缓解）：事务结构未变（见上），但新增了两条
-    //    硬边界——job 级墙钟预算（V2_PIPELINE_BUDGET_MS，到期 abort 并终结）与
-    //    租约丢失即时 abort（H5），使"分钟级长事务 + 行锁"的最坏占用有确定上界。
-    //    ──────────────────────────────────────────────────────────────────────
-const runRows = await tx.execute(sql`
+    //    ── A1 · B1 之后这把锁只覆盖**规划段**（此前覆盖四阶段全程）─────────────
+    //    双跑防护不再靠"锁住到作者跑完"，而是靠 outbox 租约：本函数第一句就核对
+    //    租约是不是自己的（`fenceV2OutboxLease`：status=processing + token 相同 +
+    //    未过期，并顺手续期），不是自己的就抛错、一个字都不写。锁只用来串行化
+    //    "同一 run 在同一时刻的两个提交"。
+    //    2026-09-15（管线评审 H4 部分缓解）：job 级墙钟预算（V2_PIPELINE_BUDGET_MS，
+    //    到期 abort 并终结）与租约丢失即时 abort（H5）仍在，最坏占用有确定上界。
+    const runRows = await tx.execute(sql`
       SELECT id, workspace_id, note_id, note_version_id, status, card_content_epoch,
              semantic_spec, input_snapshot, semantic_spec_hash, input_snapshot_hash,
              current_plan_version
@@ -1248,18 +1281,46 @@ const runRows = await tx.execute(sql`
       current_plan_version: number;
     };
 
-    if (run.status !== "planning") {
-      logger.info({ runId, status: run.status }, "V2 run not in planning state, skipping");
-      return;
+    // 入口门闩（§39 第 3 条）：判活看租约，不看 run.status。
+    // 它比提交前的那道同名核对多管一件事：**根本不发起已付费的规划调用**。
+    // 库里看不出差别（两道闩都挡写），差别在钱上——那一半只能由 B5 的真跑量出来。
+    await fenceV2OutboxLease(tx, job);
+
+    if (run.status === "authoring" || run.status === "checking") {
+      // 重放：上一遍已经把计划提交了（也许还有半成品候选）。这里**不重新规划**，
+      // 只确认这一版计划在库里可读回——读不到就是状态与数据矛盾，fail-closed。
+      const committed = await tx.execute(sql`
+        SELECT 1 AS ok FROM public.card_generation_plans_v2
+        WHERE workspace_id = ${workspaceId} AND run_id = ${runId}
+          AND plan_version = ${run.current_plan_version}
+        LIMIT 1
+      `);
+      if (committed.length === 0) {
+        throw new CardGenerationProviderErrorLike(
+          false,
+          `V2 run is ${run.status} but plan v${run.current_plan_version} is not committed`,
+        );
+      }
+      logger.info({
+        runId, status: run.status, planVersion: run.current_plan_version,
+      }, "[v2-pipeline] resuming from the committed plan (planner not re-run)");
+      return { kind: "continued" as const };
+    }
+
+    if (!["queued", "source_sealing", "planning"].includes(run.status)) {
+      // 终态（review_ready / needs_attention / no_cards_recommended / activated / …）：
+      // 重投安静让路，什么都不改。
+      logger.info({ runId, status: run.status }, "V2 run already settled, skipping");
+      return { kind: "yielded" as const };
     }
 
     const inputSnapshot = run.input_snapshot as unknown as GenerationInputSnapshotV2;
     const semanticSpec = run.semantic_spec as unknown as GenerationSemanticSpecV2;
     // 存储时 input_snapshot_hash/semantic_spec_hash 是对"无自引用字段"的对象计算的
-    // （§9.2），读回后补齐，保证 planner/hashing 拿到完整契约对象。
+    // （§9.2），读回后先补齐，再按 §24 做 zod 严格校验（非法 schema fail-closed，
+    // 违反契约直接以非重试错误失败 job，绝不带病生成）。
     inputSnapshot.inputSnapshotHash = run.input_snapshot_hash;
     semanticSpec.semanticSpecHash = run.semantic_spec_hash;
-    // §24：非法 schema fail-closed（与 loadV2RunInputs 同一口径）
     const specParse = generationSemanticSpecV2Schema.safeParse(semanticSpec);
     if (!specParse.success) {
       const paths = specParse.error.issues.map((i) => i.path.join(".")).join(",");
@@ -1275,10 +1336,10 @@ const runRows = await tx.execute(sql`
 
     // 2. Load sealed evidence + eligibility（不再直读 note_blocks 作为 closure；
     //    sourceScope 已在 seal 阶段体现）。
-const sealed = await loadSealedEvidence(tx, workspaceId, sourceSnapshotId);
+    const sealed = await loadSealedEvidence(tx, workspaceId, sourceSnapshotId);
 
     // 3. Load note blocks（filtered by sourceScope）作为 LLM 输入文本
-const blockRows = (await tx.execute(sql`
+    const blockRows = (await tx.execute(sql`
       SELECT id, type, content, ordinal
       FROM public.note_blocks
       WHERE version_id = ${run.note_version_id}
@@ -1323,13 +1384,9 @@ const blockRows = (await tx.execute(sql`
       evidenceCount: sealed.evidenceManifest.evidence.length,
       sourceTextLength: sourceContent.length,
     });
-    logger.info(
-      { runId, route: routeResult.route, reasons: routeResult.reasons },
-      "V2 pipeline route classified",
-    );
 
     // 4. Load existing active objectives for dedup
-const existingObjRows = (await tx.execute(sql`
+    const existingObjRows = (await tx.execute(sql`
       SELECT lor.objective_id, lor.semantic_target_fingerprint,
              lor.objective_statement, lor.public_summary
       FROM public.learning_objective_revisions_v2 lor
@@ -1424,8 +1481,54 @@ const existingObjRows = (await tx.execute(sql`
         reasonCodes: plan.result.reasonCodes,
       });
       await fenceV2OutboxLease(tx, job);
-      return;
+      return { kind: "finished" as const };
     }
+
+    // 8. 计划已冻结 → 状态推进到 authoring，并**在这里提交**。
+    //    界面上这一刻起就是"正在出卡"（`LIVE_PROGRESS_STATUSES` 含 authoring，A2 那句
+    //    "第几步"的读数因此也一起活了），而库里还没有任何候选行——这正是 A1 的起点。
+    await tx.execute(sql`
+      UPDATE public.card_generation_runs_v2
+      SET status = 'authoring', error_code = NULL, error_message = NULL, updated_at = now()
+      WHERE id = ${runId} AND workspace_id = ${workspaceId}
+    `);
+    await fenceV2OutboxLease(tx, job);
+    return { kind: "continued" as const };
+  });
+}
+
+/**
+ * 阶段二：作者 + 双 Critic + deck gate + 终态（自己的事务）。
+ *
+ * 入口用 `loadV2RunInputs`（与 regenerate/replan/recheck 同一个加载器）：它 FOR UPDATE
+ * 锁 run、按 `current_plan_version` 读回**那一版已提交的计划**，所以重放时作者拿到的是
+ * 同一套计划身份（§39 事实 2），不是重新规划的第二个 planRevisionId。
+ */
+async function runV2AuthoringPhase(
+  job: PendingOutboxJob,
+  signal: AbortSignal | undefined,
+  governanceContext: Awaited<ReturnType<typeof resolveCardGenerationGovernance>> | null,
+): Promise<void> {
+  const { workspaceId, runId } = job;
+  const useLLM = process.env.CARD_GENERATION_V2_LLM === "true";
+
+  await withWorkerWorkspaceTransaction({ workspaceId, userId: null }, async (tx) => {
+    const ctx = await loadV2RunInputs(tx, workspaceId, runId);
+    // 加载器把 run 行读成开放记录（它同时服务 regenerate/replan/recheck 三种口径），
+    // 本阶段只用到哈希闭包这两列。
+    const run = ctx.run as { input_snapshot_hash: string; semantic_spec_hash: string };
+    const semanticSpec = ctx.semanticSpec;
+    const sealed = ctx.sealed;
+    const sourceContent = ctx.sourceContent;
+    const existingObjectives = ctx.existingObjectives;
+    const plan = ctx.plan;
+    if (!plan) {
+      // 阶段一保证过计划已提交；读不到就是数据矛盾，非重试（绝不"没有计划也照样跑"）。
+      throw new CardGenerationProviderErrorLike(false, `V2 authoring phase has no committed plan: ${runId}`);
+    }
+    const providers = useLLM
+      ? await buildProvidersForRun({ workspaceId, job, semanticSpec, governanceContext })
+      : null;
 
     // 8+12. 按候选**流水线**执行 author → grounding（极限延迟改造）。
     //
@@ -1433,8 +1536,8 @@ const existingObjRows = (await tx.execute(sql`
     // 墙钟 = max(author_i) + max(grounding_i)——每个波的**最慢**一次调用被各付一次。
     // 现在每个候选自己串成一条链（author_i → precheck → grounding_i），候选之间
     // 并发：墙钟 = max(author_i + grounding_i) ≤ max(author_i) + max(grounding_i)。
-    // 调用次数、输入数据、候选顺序完全不变；单次延迟方差越大（实测 p50 7s /
-    // p90 12s / max 37s）收益越明显。
+    // 调用次数、输入数据、候选顺序完全不变；单次延迟方差越大（实测 p50 7s / p90 12s /
+    // max 37s）收益越明显。
     //
     // 注意：本阶段**只做 provider 调用与纯计算，不碰 tx**——所有落库、事件、
     // 顺序判定仍由下面的串行收尾阶段按计划顺序完成（事务内语句顺序与改造前一致）。
@@ -1464,15 +1567,6 @@ const existingObjRows = (await tx.execute(sql`
     // §8.5：作者预算 = plan.activationHardMax（**不得扩大**）。超出预算会让
     // deck gate 以 count_out_of_plan 硬失败整条 run——内容通过两道 critic 也交付不了。
     const planObjectives = budgetedPlanObjectives(plan);
-    /**
-     * 投机 pedagogy 的启动器：**最后一个候选 author 一完成**就发起集合级调用，
-     * 与仍在跑的 grounding 波并发（关键路径 4 阶段 → 3 阶段）。
-     *
-     * 时机：pedagogy 需要"全部候选"，所以只能在最后一个 author 返回后启动；
-     * 此时各候选的 grounding 还在进行，因此它天然与 grounding 波重叠。
-     * 占位 bindingPlanHash 用 candidateRevisionHash（形状合法的不透明标识，
-     * 模型只当下标对应的引用读），复用前会被替换为真实值（withBindingPlanHashes）。
-     */
     /**
      * 按下标（= 计划顺序）收集已 author 的候选。
      *
@@ -1579,12 +1673,6 @@ const existingObjRows = (await tx.execute(sql`
       candidatePipelines.map((outcome) => [outcome.candidate.candidateRevisionId, outcome] as const),
     );
 
-    // 9. Update run status to authoring
-    await tx.execute(sql`
-      UPDATE public.card_generation_runs_v2
-      SET status = 'authoring', updated_at = now()
-      WHERE id = ${runId} AND workspace_id = ${workspaceId}
-    `);
     // 2026-08-16（实机验证，溯源日志）：author 阶段结果摘要。
     logger.info({
       runId,
@@ -1610,7 +1698,7 @@ const existingObjRows = (await tx.execute(sql`
     await critiqueAndFinalizeCandidates(tx, {
       runId,
       workspaceId,
-      run,
+      run: run as unknown as { input_snapshot_hash: string; semantic_spec_hash: string },
       plan,
       candidates,
       sealed,
@@ -1623,7 +1711,7 @@ const existingObjRows = (await tx.execute(sql`
       precomputedGrounding,
       // 与 grounding 波并发算出的投机 pedagogy（集合未变则直接复用，省一个阶段）。
       precomputedPedagogy,
-      // M4：用户 generation 请求（semanticRequest）进入 Pedagogy Critic（`goal_mismatch` 判定输入）。
+      // M4：用户 generation 请求（semanticRequest），透传给 Pedagogy Critic。
       generationRequest: semanticSpec.semanticRequest,
     });
     await fenceV2OutboxLease(tx, job);

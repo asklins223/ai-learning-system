@@ -2022,3 +2022,43 @@ pedagogy 按"留 5 / 修 2 / 丢 1"裁决、author 只改题面。断言的是�
 worker 套件 758/758、worker `tsc --noEmit` 全绿（含我这份新测试文件）。
 剩下的仍是 #26/#36（A1 逐候选落盘）——那条至今在本树里查不到实现，`scripts/check-a1-landed.sh`
 的判据一条都没亮。
+
+## 59. A1 · B1 落地：计划与作者分成两次提交，入口门闩改看租约（`scripts/check-a1-landed.sh` 第③条从 1 变 0）
+
+§39 写下的四处事实到这里第一次变成代码。`processCardGenerationPlan` 拆成
+`runV2PlanPhase` + `runV2AuthoringPhase`（同一个 job 里顺序跑，各自一个
+`withWorkerWorkspaceTransaction`）：
+
+- **阶段一**：锁 run → `fenceV2OutboxLease`（入口门闩）→ 按状态三分
+  （`queued`/`source_sealing`/`planning` 真规划；`authoring`/`checking` **读回已提交那一版计划、
+  不再规划**；其余终态安静让路）→ 规划路径落计划行、`current_plan_version`、
+  `plan_completed` 事件、`status='authoring'`，提交。
+- **阶段二**：入口换成 `loadV2RunInputs`（regenerate/replan/recheck 早就是它），
+  于是作者拿到的 `planRevisionId` 与库里那一版**必然同一个**（§39 事实 2 断链的根因是
+  两个身份在同一趟里并存）；author/双 critic/deck gate/终态原样搬进来。
+  阶段二自己不再判状态——判活的职责已经在阶段一与每道 fence 上。
+
+**为什么用 `xmin` 而不是时间戳当证据**：事件行的 `created_at` 走 `now()`，是**事务**时间，
+同事务写下的行一模一样——听起来正好，但它只有毫秒精度，两个事务也可能撞上同一毫秒，
+这条断言就会时红时绿。`xmin`（写下这行的事务号）没有运气问题：同事务必等，不同事务必不等。
+
+**三条变异检查**（`workers/ai-worker/src/integration-tests/card-generation-v2-plan-commit-postgres.integration.ts`）：
+1. 把 `plan_completed` 事件从阶段一挪到阶段二（= 计划与候选同事务）→ 用例 1 红：
+   `plan_completed 与第一张 authored 出自同一个事务（xmin 104295）`。两提交这条性质有牙。
+2. 关掉"重放读回已提交计划"那条分支 → 用例 2 红：`重投什么也没补：守卫还是只看 run.status…`。
+   这正是 §21 担心的那种死法，断言挡得住。
+3. 用例 3（租约不是我的 → 一个字的写都不许留下）**单独拆掉入口那道 fence 不红**：阶段一末尾
+   与阶段二各还有一道同名核对，写照样进不去。也就是说这条用例现在是"过期租约不能留下写"的
+   **守卫**，不是"入口那道闩是唯一的闸"的证明。入口闩多管的那一半是**根本不发起已付费的
+   规划调用**——库里看不出差别，差别在钱上，只能等 B5 的真跑量。已在代码注释里写明，不假装。
+   另外为这条用例补了 `releaseV2OutboxLease` 的真库调用（持有者交还自己的租约）。
+
+**顺手收的一个环境事实**：用例起初用 `UPDATE … WHERE status='pending' RETURNING` 认领 job，
+被 dev 容器抢走过一次（它抢走=真跑一遍 LLM，断言对象就成了别人的批次）。改成
+**退回 pending 与认领写在同一事务**（回收器的判据：只让路给 token 在且没过期的持有者），
+18 条集测连跑全绿。用例之间不蹭彼此留下的状态：终态那条自己先把批次清回 planning。
+
+验证：worker `tsc --noEmit` 全绿、单元 761/761；四份 V2 集测 4 + 3 + 3 + 8 = **18/18**，
+其中 live-progress 那 8 条是 §39 B3 点名的回归（含"重投不新增候选、不新增事件、不动终态"）。
+`check-a1-landed.sh` 现状：③=0（旧守卫已消失），②=0（逐候选的按目标 `ON CONFLICT` 还没有）
+——**B1 完成，B2（逐候选提交 + 重放复用已提交候选）还没开始**，而 B2 才是"第 1 张就能看见"。
