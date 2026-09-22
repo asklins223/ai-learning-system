@@ -13,6 +13,7 @@ DESKTOP = Path("/Users/asklins/Documents/asklins_workspace/study/apps/desktop-cl
 HOOK = DESKTOP / "src/renderer/src/components/surfaces/use-note-doc-live-view.ts"
 SURFACE = DESKTOP / "src/renderer/src/components/surfaces/notebook-surface.tsx"
 SUITE = "src/renderer/src/components/surfaces/notebook-surface.live-frame.test.tsx"
+HOOK_SUITE = "src/renderer/src/components/surfaces/use-note-doc-live-view.test.ts"
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 MUTATIONS = [
@@ -40,11 +41,29 @@ MUTATIONS = [
      "  const readSourceBlocks = noteDocLive.blocks.length ? noteDocLive.blocks : (note?.currentVersion.blocks ?? []);",
      "  const readSourceBlocks: typeof noteDocLive.blocks = [];",
      ["对端改了那一段", "没有帧时画的就是这份文档"]),
+    # —— 下面四条跑的是 `use-note-doc-live-view` 那一份用例（见 run_suite 的分流）——
+    # M7（本地改动不推进投影版本号）摘掉之后这两份用例照样全绿 —— 那条变异
+    # 已经不复现，所以这里不放进来冒充"验过"。那一行代码留着的历史依据写在用例注释里。
+    ("M8 起点被重新取（换篇判断按\'这一屏没读到\'算）", HOOK,
+     "  if (noteId !== null && targetRef.current !== noteId) {",
+     "  if (targetRef.current !== noteId) {",
+     ["noteId 短暂为空"]),
+    ("M9 上行的命令号回到自己拼的那种（IPC 那把尺不放冒号）", HOOK,
+     '      commandId: createCommandId("note-doc"),',
+     "      commandId: `note-doc:${noteId}:${Date.now()}`,",
+     ["本机打的那几个字算待提交"]),
+    ("M10 被拒的写入重新读成「这台机器什么都没改」", HOOK,
+     "    const via = unwrapGatewayResult(submitted).via;",
+     "    const via = submitted.ok ? submitted.data.via : null;",
+     ["主进程拒收那一次"]),
 ]
 
+# 每条变异可以指定自己该跑哪份用例；不写就用默认那份（live-frame）。
+PER_MUTATION_SUITE = {"M7", "M8", "M9", "M10"}
 
-def run_suite():
-    proc = subprocess.run(["npx", "vitest", "run", SUITE], cwd=DESKTOP,
+
+def run_suite(hook_suite: bool = False):
+    proc = subprocess.run(["npx", "vitest", "run", HOOK_SUITE if hook_suite else SUITE], cwd=DESKTOP,
                           capture_output=True, text=True)
     out = ANSI.sub("", proc.stdout + proc.stderr)
     failed = set(re.findall(r"× (.+?)(?: \d+ms)?\n", out))
@@ -67,7 +86,7 @@ def check(name, path, anchor, replacement, expect_red):
         print(f"  {name}: 写盘后 git diff 为空 —— 变异没落盘，判红")
         return False
     try:
-        failed, crashed, out = run_suite()
+        failed, crashed, out = run_suite(name.split()[0] in PER_MUTATION_SUITE)
     finally:
         path.write_text(original)
     if crashed:
@@ -88,12 +107,15 @@ def main():
     ok = True
     for name, path, anchor, replacement, expect in MUTATIONS:
         ok &= check(name, path, anchor, replacement, expect)
-    failed, crashed, out = run_suite()
+    failed, crashed, _ = run_suite()
+    hook_failed, hook_crashed, _ = run_suite(True)
+    failed = failed | hook_failed
+    crashed = crashed or hook_crashed
     if failed or crashed:
         print(f"恢复之后仍然不绿：{sorted(failed)}")
         ok = False
     else:
-        print("恢复后全绿（4 条）")
+        print("恢复后全绿")
     print("结论：" + ("每条新断言都会喊" if ok else "有空断言"))
     sys.exit(0 if ok else 1)
 

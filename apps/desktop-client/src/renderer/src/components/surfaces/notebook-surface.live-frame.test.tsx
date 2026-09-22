@@ -269,4 +269,22 @@ describe("编辑态：标题跟着别人那份走，我改的那一段不被顶�
     expect(titleValue()).toBe(MINE);
     expect(stubbed.state).toHaveBeenCalledTimes(1);
   });
+
+  it("我刚交出去的那个标题，不能在下一次重画时被读回旧的那一份", async () => {
+    // 这一屏没有帧来"顺手刷一次投影"，量的就是投影自己跟不跟得上：`setLocalTitle` 刚把
+    // 标题写进文档，同一个 tick 里 `flush` 又把 `dirty` 从真拨回假 —— React 批量之后
+    // 一次渲染都不发生，靠 `dirty` 当依赖的 memo 就会继续交出改写之前那一份投影。
+    // 如实记一句：这句当初是靠"摘掉 `record()` 里那句 `setRevision` 就变红"立住的，
+    // 今天再用那个变异跑它**已经不复现**（异步 awaits 把 `dirty` 分成两次渲染，投影自己
+    // 就跟上了）。也就是说这一条量的是"标题不许被读回旧的"这个结果，而不是那行代码。
+    const stubbed = stub();
+    ownerRoom();
+    await open("edit");
+    const title = document.getElementById("notebook-surface-title") as HTMLInputElement;
+    fireEvent.input(title, { target: { value: MINE } });
+    await settle(30);
+    expect(stubbed.syncUpdate).toHaveBeenCalledTimes(1);
+    expect(titleValue()).toBe(MINE);
+    expect(saveTag()).toBe("已同步");
+  });
 });
