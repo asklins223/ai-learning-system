@@ -6,7 +6,6 @@ import {
   blocksToMarkdown,
   isHorizontalRule,
   markdownToBlocks,
-  parseInlineMarkdown,
   parseMarkdownTable,
 } from "./note-blocks";
 
@@ -178,21 +177,5 @@ describe("parseMarkdownTable", () => {
   });
 });
 
-describe("parseInlineMarkdown", () => {
-  it("splits the four inline syntaxes the reading page renders", () => {
-    expect(parseInlineMarkdown("**加粗** 和 *斜体* 与 `代码` 及 [链接](https://a.test)")).toEqual([
-      { kind: "strong", text: "加粗" },
-      { kind: "text", text: " 和 " },
-      { kind: "em", text: "斜体" },
-      { kind: "text", text: " 与 " },
-      { kind: "code", text: "代码" },
-      { kind: "text", text: " 及 " },
-      { kind: "link", text: "链接", href: "https://a.test" },
-    ]);
-  });
-
-  it("keeps syntax it cannot read as plain text instead of dropping it", () => {
-    expect(parseInlineMarkdown("普通的一句")).toEqual([{ kind: "text", text: "普通的一句" }]);
-    expect(parseInlineMarkdown("**未闭合的加粗")).toEqual([{ kind: "text", text: "**未闭合的加粗" }]);
-  });
-});
+// 行内解析器住在 `@ailearn/shared/note-doc-schema`（服务端写 fragment 要用同一个），
+// 它的用例在那边的 `note-doc-schema.test.ts`。
