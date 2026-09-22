@@ -74,6 +74,7 @@ function useStalenessClock(active: boolean): void {
 
 /** A decision's own label, in the vocabulary the server keeps. */
 function candidateDecisionLabel(candidate: CardGenerationCandidateV1): string {
+  if (candidate.qualityState === "dropped") return "没进这批牌堆";
   if (candidate.qualityState === "failed") return "质量检查未通过";
   if (candidate.qualityState === "checking" || candidate.qualityState === "authored") return "还在检查";
   if (candidate.publishState === "activated") return "已激活";

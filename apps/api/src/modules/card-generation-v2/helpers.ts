@@ -14,7 +14,7 @@ import {
 import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
 import { noteBlocks, notes } from "@ailearn/shared/db-schema/note";
 import { visibleNotesCondition } from "../note/visibility.ts";
-import { cardGenerationRunStatusV2Schema, cardGenerationLiveProgressV2Schema, cardPlanResultV2Schema, isCandidateReviewReadyV2, type PracticeItemFormV2 } from "@ailearn/shared/card-generation-v2-contracts";
+import { cardGenerationRunStatusV2Schema, cardGenerationLiveProgressV2Schema, cardPlanResultV2Schema, isCandidateReviewReadyV2, type CandidateQualityStateV2, type PracticeItemFormV2 } from "@ailearn/shared/card-generation-v2-contracts";
 import { projectCardGenerationRecoveryV1 } from "./desktop-projection.ts";
 import type { CardGenerationProgressV1 } from "@ailearn/shared/card-generation-desktop-contracts";
 // 2026-08-24（AI 设计审查 §4.4 第二批）：ServiceError 继承 shared 纯逻辑层的
@@ -318,7 +318,7 @@ export function serializeCandidatePublic(row: typeof cardGenerationCandidatesV2.
     reviewDecision: row.reviewDecision,
     publishState: row.publishState,
     isReviewReady: isCandidateReviewReadyV2({
-      qualityState: row.qualityState as "authored" | "checking" | "passed" | "failed",
+      qualityState: row.qualityState as CandidateQualityStateV2,
       reviewDecision: row.reviewDecision as "undecided" | "keep" | "reject" | "merged",
       publishState: row.publishState as "unpublished" | "activating" | "activated" | "activation_failed" | "superseded" | "expired",
     }),

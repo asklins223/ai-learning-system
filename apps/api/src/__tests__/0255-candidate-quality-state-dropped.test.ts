@@ -33,7 +33,23 @@ describe(`Migration ${TAG} — 候选 dropped 终态`, () => {
     if (position > 0) {
       assert.ok(entries[position].when > entries[position - 1].when, "when 必须单调，否则应用顺序会反");
     }
+  
+  /**
+   * 新状态必须有读者（§52 第 4 步）。这一条守的是"只加枚举不改读者"：
+   * 合同不收这个值，review 页会整屏报错而不是少一张卡。
+   */
+  it("每个会读 qualityState 的地方都认识这个新值", () => {
+    const readSites = [
+      ["packages/shared/src/card-generation-v2-contracts.ts", /CandidateQualityStateValuesV2[\s\S]{0,400}"dropped",/],
+      ["packages/shared/src/card-generation-desktop-contracts.ts", /qualityState: z\.enum\(\[[^\]]*"dropped"/],
+      ["apps/desktop-client/src/renderer/src/components/CardGenerationSurface.tsx", /qualityState === "dropped"/],
+    ] as const;
+    for (const [file, pattern] of readSites) {
+      const text = readFileSync(resolve(import.meta.dirname, "../../../..", file), "utf8");
+      assert.ok(pattern.test(text), `${file} 还不认识 dropped（要么会整屏报错，要么显示成"待审核"）`);
+    }
   });
+});
 
   it("替换的是同一条约束，值集合就是那五个", () => {
     const body = sqlText.replace(/--.*$/gm, "");
@@ -46,7 +62,23 @@ describe(`Migration ${TAG} — 候选 dropped 终态`, () => {
     for (const legacy of ["authored", "checking", "passed", "failed"]) {
       assert.ok(body.includes(`'${legacy}'`), `旧值 ${legacy} 被去掉了`);
     }
+  
+  /**
+   * 新状态必须有读者（§52 第 4 步）。这一条守的是"只加枚举不改读者"：
+   * 合同不收这个值，review 页会整屏报错而不是少一张卡。
+   */
+  it("每个会读 qualityState 的地方都认识这个新值", () => {
+    const readSites = [
+      ["packages/shared/src/card-generation-v2-contracts.ts", /CandidateQualityStateValuesV2[\s\S]{0,400}"dropped",/],
+      ["packages/shared/src/card-generation-desktop-contracts.ts", /qualityState: z\.enum\(\[[^\]]*"dropped"/],
+      ["apps/desktop-client/src/renderer/src/components/CardGenerationSurface.tsx", /qualityState === "dropped"/],
+    ] as const;
+    for (const [file, pattern] of readSites) {
+      const text = readFileSync(resolve(import.meta.dirname, "../../../..", file), "utf8");
+      assert.ok(pattern.test(text), `${file} 还不认识 dropped（要么会整屏报错，要么显示成"待审核"）`);
+    }
   });
+});
 
   it("drizzle schema 与迁移说的是同一件事", () => {
     const schema = readFileSync(
@@ -56,6 +88,22 @@ describe(`Migration ${TAG} — 候选 dropped 终态`, () => {
     const line = schema.split("\n").find((l) => l.includes("cg_v2_cand_quality_chk")) ?? "";
     for (const state of STATES) {
       assert.ok(line.includes(`'${state}'`), `schema 的 CHECK 里缺 ${state}（下一次 generate 会把它改回去）`);
+    }
+  });
+
+  /**
+   * 新状态必须有读者（§52 第 4 步）。这一条守的是"只加枚举不改读者"：
+   * 合同不收这个值，review 页会整屏报错而不是少一张卡。
+   */
+  it("每个会读 qualityState 的地方都认识这个新值", () => {
+    const readSites = [
+      ["packages/shared/src/card-generation-v2-contracts.ts", /CandidateQualityStateValuesV2[\s\S]{0,400}"dropped",/],
+      ["packages/shared/src/card-generation-desktop-contracts.ts", /qualityState: z\.enum\(\[[^\]]*"dropped"/],
+      ["apps/desktop-client/src/renderer/src/components/CardGenerationSurface.tsx", /qualityState === "dropped"/],
+    ] as const;
+    for (const [file, pattern] of readSites) {
+      const text = readFileSync(resolve(import.meta.dirname, "../../../..", file), "utf8");
+      assert.ok(pattern.test(text), `${file} 还不认识 dropped（要么会整屏报错，要么显示成"待审核"）`);
     }
   });
 });

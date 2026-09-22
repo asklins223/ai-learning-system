@@ -21,6 +21,7 @@ const RUN_ID = "aaaaaaa1-1111-4111-8111-111111111111";
 
 type CandidateState = {
   candidateId: string;
+  qualityState?: string;
   practiceItem?: { kind: string; optionCount?: number } | null;
   statement: string;
   reviewDecision: string;
@@ -69,10 +70,15 @@ function stubGateway(initial: readonly CandidateState[], runOverride: { status?:
     revision: 1,
     candidateRevisionHash: `hash-${index}`,
     reviewDecision: candidate.reviewDecision,
-    isReviewReady: true,
+    // 可审核判据按服务端那支函数算（packages/shared 的 isCandidateReviewReadyV2），
+    // 不从客户端组件反推——否则"服务端说不行"这一半永远测不到。
+    isReviewReady:
+      (candidate.qualityState ?? "passed") === "passed"
+      && candidate.reviewDecision === "undecided"
+      && candidate.publishState === "unpublished",
     candidateEvidenceBindingPlanHash: "plan-hash",
     publishState: candidate.publishState,
-    qualityState: "passed",
+    qualityState: candidate.qualityState ?? "passed",
     practiceItem: candidate.practiceItem ?? null,
     strategy: "why",
     transformationKind: "mechanism_reconstruction",
@@ -386,6 +392,28 @@ describe("CardGenerationSurface · 候选审核", () => {
     const meta = (document.querySelector(".candidate-card__meta")?.textContent ?? "");
     expect(meta).toContain("该配练习件的 2 张都配上了");
     expect(meta).not.toContain("没配上");
+  });
+
+  /**
+   * 牌堆外的卡（§52 的新终态）必须自己说清楚：它过了各自检查，但没进这一批，
+   * 所以既不能保留也不该被理解成"质量不合格"。
+   */
+  it("没进牌堆的卡说出'没进这批牌堆'，并且不给保留入口", async () => {
+    stubGateway([
+      {
+        candidateId: "cand-1",
+        statement: "被重复判掉的那张",
+        reviewDecision: "undecided",
+        publishState: "unpublished",
+        qualityState: "dropped",
+      },
+    ]);
+    useRoomStore.setState({ activeCardGenerationRunId: RUN_ID });
+    render(<CardGenerationSurface />);
+
+    await waitFor(() => expect(screen.getByText("被重复判掉的那张")).toBeTruthy());
+    expect(screen.getAllByText("没进这批牌堆").length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: /^保留（进入激活队列）/ })).toBeNull();
   });
 
   it("这批没点名要练习件时，头部不提练习件计数", async () => {

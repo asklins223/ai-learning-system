@@ -886,6 +886,9 @@ export const CandidateQualityStateValuesV2 = [
   "checking",
   "passed",
   "failed",
+  // "过了各自门禁、但没进这一批的最终牌堆"。审核判据要求 passed，所以它不会
+  // 被当成可保留/可激活（§52：不这么做，审核页就会把牌堆外的卡多发出来）。
+  "dropped",
 ] as const;
 export const candidateQualityStateV2Schema = z.enum(
   CandidateQualityStateValuesV2,

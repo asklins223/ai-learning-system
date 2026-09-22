@@ -362,7 +362,7 @@ export const cardGenerationCandidateV1Schema = z.strictObject({
   // this field strict in desktopCardGenerationActivationSelectionV1Schema.
   candidateEvidenceBindingPlanHash: hashSchema.nullable(),
   candidateRevisionHash: hashSchema,
-  qualityState: z.enum(["authored", "checking", "passed", "failed"]),
+  qualityState: z.enum(["authored", "checking", "passed", "failed", "dropped"]),
   /**
    * 审核页只需要"这张卡配了哪种客观题、几个候选"。选项文本与正确项**不下发**：
    * 它们属于判分内容，随列表下发等于绕过答案查看记账。
