@@ -2305,3 +2305,42 @@ run 换 id + 指向新笔记，计划行与 6 张候选原样搬，`candidate_re
 **下一轮的前置（写死，不再试运气）**：B4 的实机读数要么等笔记编辑那条链路能留住人，
 要么换一篇**有正文且不属于别人审核流程**的笔记做宿主——共享库里现在 11 篇活跃笔记，其中 4 个
 `review_ready` 批次属于别的会话。种子脚本已经可复跑，测量脚本的三条断言也已经就位。
+
+## 67. B4 的服务端那一半在真 HTTP 上量到了（PASS）；界面那一半仍被 §66 挡住
+
+`apps/api/src/probes/tmp-b4-http-probe.mts`：真登录 → 真打两个 GET → 拿**桌面端那份合同**去过
+服务端的真实返回。跑在 api 容器里（`docker exec -e OWNER_EMAIL=… -e OWNER_PASSWORD=… ailearn-dev-api-1
+npx tsx /app/src/probes/tmp-b4-http-probe.mts`）。零模型调用。
+
+把 B5 那批拨回 `authoring` 之后量到的（全部是同一次运行打印出来的）：
+
+| 断言 | 实测 |
+|---|---|
+| `GET /v2/card-generation-runs/:id` | 200，`status=authoring`，`recovery` 不存在 |
+| 在制时的进度读数 | `{plannedCards 6, authored 6, gatePassed 5, gateFailed 1}` |
+| `GET …/candidates`（**在制状态**） | 200，6 行，其中 landed 5 行 |
+| landed 行是否带着 B4 列表要显示的两样 | 6/6 都有 `objective.publicSummary` 与 `front.prompt` |
+| 判分内容与证据有没有随列表下发 | `canonicalAnswer`/`evidence` 命中 **0 张** |
+| 桌面端合同接得住这份返回 | `cardGenerationCandidateListV1Schema` 解析通过 |
+
+列表要显示的概念名，服务端此刻给的就是这六条：`双重编码的有效边界与失效情形`、
+`间隔重复基于遗忘曲线…`、`交错练习通过强制题型辨别…`、`自我解释需连接已有知识…`、
+`安排单次复习的正确流程顺序：…`、`对比提取练习与重新阅读：…`。
+
+**租约死了的时候读数从哪来**：`readGenerationProgressV2` 里那段 `JOIN … lease_expires_at > now()`
+让实时读数自动退场，`authored` 于是取自候选表计数（6）。界面上的「已写出 N」因此不会停在半路。
+
+**变异检查**（证明断言不是装饰）：换一个 0 候选的真批次（`d375f218`，cancelled）→ 恰好
+「不在 authoring」与「一张 landed 都没有」两条红，HTTP / 合同 / 漏题三条仍绿；再换一个不存在
+的 run → 四条全红。
+
+**我自己搞反的一处，记下来**：`projectCardGenerationCandidatesV1` 是**服务端**在 `routes.ts:211`
+调的，HTTP 返回已经是投影后的 V1（顶层与每张候选都带 `version`）。我把这份输出当输入喂回那支
+投影函数，strict 合同回「多认了一个 version 键」，我当场把它记成"桌面端投影接不住服务端的返回"。
+发现方式是 grep 调用点——**一句红要先确认它是被测行为的红，还是探针自己的红**，这已经是第二次了。
+
+**一条环境事实**：宿主 `apps/api/node_modules/@ailearn/shared` 是 09-21 08:01 的**旧快照目录**
+（不是符号链接），里面没有 `cardGenerationPracticeQuotaV1Schema`，所以任何在宿主上用 tsx 直接
+import 共享合同的探针都会以「does not provide an export named」结束。这类探针要在 api 容器里跑
+（那里 `packages/shared` 是挂载的最新源码）。探针放在 `apps/api/src/probes/`：新建文件不触发
+tsx watch，不会为了一次探针把共享的 api 进程重启给别人添堵。
