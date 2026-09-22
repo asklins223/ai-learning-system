@@ -1972,3 +1972,53 @@ worker 侧传 `candidate.objective.practiceItem` 的 `options.length`，api 侧
 验证：worker 747/747、worker typecheck 只剩别人那一条 `companion-dialogue.ts`；
 我两份集测 11/11（live-progress 与 bounded-repair 都在确定性路径上，能证"没改变行为"这一半）。
 **没证的那一半**（脚本 provider 真能被用起来、以及 #38 要的等式断言）就是 #37 本身。
+
+## 58. #37 与 #38 同时收口：脚本 provider 把"留 / 修 / 丢"三条结局各走了一遍，等式断言踩得住
+
+`workers/ai-worker/src/integration-tests/card-generation-v2-pedagogy-stage-postgres.integration.ts`。
+零 AI 调用、真 Postgres。这是 §40 B 组欠下来的那一半。
+
+**怎么把三种裁决各来一次**：批次仍是真跑出来的（确定性管道落 plan + 7 张候选 + 事件水位），
+然后只把 `critiqueAndFinalizeCandidates`（新导出，运行时行为一个字没改）再送进评审尾段一遍，
+喂三个脚本 provider：grounding 交完整逐项报告（每项 entailed/supported + 真证据 ID）、
+pedagogy 按"留 5 / 修 2 / 丢 1"裁决、author 只改题面。断言的是这段代码的承诺，不是"函数跑过了"：
+
+- 修好的新 revision 落库为 `authored`、题面真的变了（哈希变了不算证据，身份字段本身在闭包里）、
+  **不在**本批 `review_ready` 名单里、并且真的各入队了一条 `card_generation_recheck_candidate`
+  指向那条新 revision；两张 rewrite 恰好叫作者两次（有界）。
+- 被 pedagogy 丢掉的那张回写成 `dropped` + 一条 `card_candidate.dropped`(relation=pedagogy_drop)。
+- 等式（#38）：**审核页头部的配额 == 管道落的 `practice_quota_short`**，
+  **头部判「可保留」的张数 == 本批 `card_candidate.review_ready` 事件数**。
+  两边都从服务端读，界面不再自己数。
+
+**三条变异检查，每条都真的会红**（这是这批断言唯一的"不是空测试"凭证）：
+1. `dropped` 回写改成 `passed` → 用例 2 红（`'passed' !== 'dropped'`），
+   用例 3 红在**恰好那一句**：`头部算出的兑现张数与管道结算不一致（丢掉的卡又被算进去了） 2 !== 1`。
+   这就是 §50/§53 那对 `{3,3}` vs `{3,1}`，现在它是一条会红的断言而不是一次复盘。
+2. 去掉 recheck 入队 → 用例 2 红（`recheck job 入队了 0 条，应为 2`），用例 3 不受影响（正确：它测的不是这件事）。
+3. 去掉"修复后的 revision 不进牌堆名单"那道过滤 → 用例 2 红（修好的混进 review_ready），
+   用例 3 红（`界面判可保留 4 张，这一批的 review_ready 事件是 6 条`）。
+
+**为了"配额能被兑现"必须先种东西，这不是偷懒是事实**：确定性作者只交 `kind:"text"` 的答案，
+`derivePracticeItemFromCanonicalAnswer` 对它返回 undefined，于是确定性批次的配额恒 `met=0`——
+等式两边同是 0，测不出任何事；而它留空的 `evidenceRefIds` 又会让 `no_evidence_reference`
+在进评审之前就把整批判死（R30 那句"确定性模式无 passed 候选"）。所以种三步，
+每步都照真作者（真跑 4938cf7f）的形状写、并重算 revision 哈希：证据引用、题面（确定性题面
+逐字含答案，会被 `front_leaks_answer` hard 杀死）、两张被点名候选的练习件。
+
+**踩到并修掉的两个环境坑**：
+- 断言里的 `claimed.length === 1`（"容器抢走了 job，重跑即可"）不是偶发：`createGenerationRunV2`
+  提交与我的认领 UPDATE 之间有几毫秒窗口，dev 容器的 poller 真的会拿走（拿走后它自己的 LLM 跑
+  会把这批变成别人的数据）。现在**退回 pending 与认领写在同一个事务里**——未提交前那行对别的
+  poller 不可见，窗口为 0；若对手已经把它跑完，测试宁可红也不换断言对象。改完连跑 10 次全绿（另加与 bounded-repair 同批 6/6）。
+- `postgres.js` 的 `${JSON.stringify(x)}::jsonb` 会把字符串**再序列化一次**，列里留下的是 JSON
+  标量不是对象（drizzle 那条路径才是 `::jsonb` 的写法）。写回后加了一句 `jsonb_typeof` 断言兜住。
+
+**顺带确认的并发边界**：三份集测一起跑时，live-progress 里的 `claimV2OutboxJobs(20)` 会把别的
+文件刚入队的 job 一并领走（它按全局领，不按 run 领），于出现连环红；分开跑 6/6 绿。这不是本轮
+改出来的，但值得记一笔：**用全局认领写测试的文件，不能和会入队 job 的测试文件同批跑**。
+
+验证：新集测 3/3（连跑 10 次）、与 bounded-repair 同批 6/6、live-progress 单独 8/8、
+worker 套件 758/758、worker `tsc --noEmit` 全绿（含我这份新测试文件）。
+剩下的仍是 #26/#36（A1 逐候选落盘）——那条至今在本树里查不到实现，`scripts/check-a1-landed.sh`
+的判据一条都没亮。
