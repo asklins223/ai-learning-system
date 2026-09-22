@@ -109,6 +109,19 @@ apps/desktop-client/src/renderer/public/sherpa/
 # 伴星语音识别模型本体与 tokenizer（大文件，本地保留）
 model.int8.onnx
 tokens.txt
+# —— 2026-09-22：临时探针脚本与过程图一律不入库 ——
+# 各处的 tmp-* 探针（CDP 量界面、一次性验证、造数据）是**本地工具**，不是产品代码。
+# 它们会被下一次 `git add -A` 顺手带进来，所以按名字挡住；要长期保留的探针请改名并
+# 在下面的反选里显式放行（`scripts/companion-*` 那几份就是这么做的）。
+**/tmp-*.mjs
+**/tmp-*.mts
+**/tmp-*.ts
+**/tmp-*.py
+# 客观题流程的本地截图/状态目录
+apps/desktop-client/.objflow-caps/
+# 过程截图（Snipaste 等）不进仓库；设计参考图请放 docs/design/（整目录已忽略）
+**/Snipaste_*.png
+
 # 界面验证证据截图与交互原型（本地保留）
 apps/desktop-client/outputs/
 apps/desktop-client/prototypes/
