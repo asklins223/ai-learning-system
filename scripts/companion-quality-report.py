@@ -104,6 +104,14 @@ VETO_GATE_MIN_SAMPLE = 100
 # 全库第一条 playback 行 09:26 UTC）。早于这一行的段不可能有上报，不能算静音。
 PLAYBACK_REPORTING_SINCE = "2026-09-21 06:10:00+00"
 
+# 「把话头递回去」不一定带问号。2026-09-22 分类"未推进"样本时抓到的一类：
+# 用户说「等一下，先别念了」，她答「嗯，停在这儿了。你说。」——这是邀请，
+# 但上面那串问句标记一个都不命中，于是被计成"没推进"。
+# 只收**邀请形状**的说法；"我接着说/我说完了"是她在继续或收尾，不算递话头。
+ADVANCE_INVITATION_TEST = re.compile(
+    r"你说[。吧呀呢！]|你先说|想说什么|想说点什么|说点(什么|啥)|聊点(什么|啥)|尽管问|随时(说|找我|来问)"
+)
+
 # 开发库里的"真人账号"。这条是**开发栈的约定**而不是产品规则：这套 dev 栈上只有
 # 一个人在用，其余账号都是集成测试现造的（`test-*` / `t-*` / `agent-*`，每个都自带
 # 一个没签 AI 同意书的工作区，用来断言 fail-closed）。
@@ -251,7 +259,8 @@ def collect(since: str | None) -> dict:
         if not body:
             continue
         seen += 1
-        asked = any(mark in body for mark in ("？", "?", "要不要", "想不想", "试试", "吗？", "呢？"))
+        asked = (any(mark in body for mark in ("？", "?", "要不要", "想不想", "试试", "吗？", "呢？"))
+                 or bool(ADVANCE_INVITATION_TEST.search(body)))
         if asked:
             advance += 1
         cls = row["used_tool"] if row["used_tool"] in by_class else "none"
@@ -818,7 +827,10 @@ def render(metrics: dict) -> None:
         print(f"  （形态指标已剔除评测脚本轮 {shape['scripted_runs_excluded']} 条登记 id，"
               f"理由见脚本头部注释：脚本输入固定、开场白高度雷同，混进来会造出假的重复率）")
     print(f"  推进率 闲聊轮 = {shape['advance_chat_rate']:.1%} (n={shape['advance_chat_n']})"
-          f"   ← 目标 >60% 只对这一档")
+          f"   ← 只当形态读数：>60% 那条目标 2026-09-22 作废，理由见下一行")
+    print("    （逐条看过「没推进」的闲聊样本：「嘿嘿嘿」→「嗯，我在。」、「你在哪？」→「我一直在这儿呀。」、"
+          "「今天天气你知道吗」→「我这边看不到天气」——这些**不该被推高**；"
+          "把这条当 KPI 就是逼她在用户让她停下的时候追加一句反问，与 §9.12 作废「零工具率」同一条理由。）")
     print(f"  推进率 工具轮 = {shape['advance_tool_rate']:.1%} (n={shape['advance_tool_n']})"
           f"   合起来 = {shape['advance_rate']:.1%}"
           + (f"   （另有 {shape['advance_no_run_n']} 条不属于任何回合的答句，两边都不计）"
