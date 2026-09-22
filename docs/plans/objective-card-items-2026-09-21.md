@@ -1914,3 +1914,40 @@ worker 侧传 `candidate.objective.practiceItem` 的 `options.length`，api 侧
 验证：0255 测试 6/6（含读者守卫）、api scoped 37/37、shared 343/343、桌面 21/21。
 `apps/desktop-client` 的 typecheck 现有 4 条报错全在 `App.tsx`（`HOME_V2_ENABLED` / `ActionRail`
 未定义），那是并发会话在途的首页 v2 开关，不是这条链的，我没动。
+
+## 56. 牌堆归属现在说得真话了：pedagogy 丢弃的卡回写 `dropped`，读路径只数牌堆
+
+**写入侧**（`handler:2286` 之后）：牌堆定论后，把 `readyCandidates` 里既不在最终牌堆、
+也不在 `rewriteSet` 的那些回写 `quality_state='dropped'`，并补发
+`card_candidate.dropped`（`relation: "pedagogy_drop"`）。两个细节都是必须的：
+
+- **排除 rewrite 的原 revision**：它不是被丢弃，是新 revision 在等复核；标成 dropped
+  等于让审核页对一个还在进行的流程下结论。
+- **事件在过滤之前的集合上算**：今天的行为恰恰相反（pedagogy 事件只发给过滤后的），
+  所以被丢掉的卡既没状态也没事件 —— 事后完全查不到"这张去哪了"。
+- 去重丢弃的那批**早就**在 `handler:2116` 被标 `failed` 了，这次不动它们；
+  补的是 pedagogy 这一路。
+- 不需要迁移：`card_generation_events_v2` 上**没有** `event_type` CHECK（我试插一行
+  `card_candidate.dropped` 成功后回滚验证过）—— 别的会话提到过"事件白名单"，本库实测不存在。
+
+**读路径**（`summarizePlanPracticeQuotaV2`）：只数 `qualityState === 'passed'` 的那些。
+这才是 §50/§53 那个 `{3,3}` vs `{3,1}` 的正解：管道内结算用的是最终牌堆，
+读侧此前用的是"所有最新 revision"，两边不是同一个集合。现在两边同源。
+
+**历史批次不会被改写**（也不该改）：`4938cf7f` 那道 4 选项选择题的行仍写着 `passed`，
+所以头部对**那一批**依旧读成 `{3,3}` 而事件是 `{3,1}`。这是数据的时间差，不是bug没修完；
+新批次起两边一致。要把这条变成可判定的，就是下一步的等式断言（在新批次上跑）。
+
+**顺手修掉两处我自己的错**：
+1. `item.options?.length ?? item.pairs?.length` 打在 discriminated union 上，TS 拒绝
+   —— 类型窄化没做（这错是 §47 那次埋的，之前没被扫到是因为我只跑了 api 的 scoped tsc）；
+2. api 侧新参数一度复制了一份四值联合类型 —— 改回 `string` 比较字面量，避免又一份会漂移的副本。
+
+**归因**：`card-generation-v2-postgres.integration.ts` 那条 e2e 红是**已知的容器抢 job**
+（`pollV2Outbox` 拿到 0，dev 容器 worker 先认领），不是这条改动 —— 同一个
+`critiqueAndFinalizeCandidates` 在 live-progress 8/8 与 bounded-repair 3/3 里都跑过。
+我自己的 e2e 用例里那句"dev 容器的 worker 抢走了这条 job（重跑即可）"就是为这种时刻写的。
+
+验证：shared 343/343、桌面 21/21、api scoped 48/48 与 0255 6/6、worker 套件 745/745、
+我这两份集测 3/3；api/worker typecheck 里我的文件 0 报错（剩余各 1–2 条在
+`companion-dialogue.ts` / `daily-summary-routes.ts`，是并发会话在途的）。

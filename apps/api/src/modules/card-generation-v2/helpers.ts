@@ -342,14 +342,20 @@ export function summarizePlanPracticeQuotaV2(
   planResult: unknown,
   candidates: readonly {
     planObjectiveLocalId: string;
+    // 序列化自 text 列，类型上是 string；这里只比较字面量，不复制一份联合类型
+    // （复制的那份会和合同漂移，正是 §55 刚清掉的那种副本）。
+    qualityState: string;
     practiceItem: { kind: PracticeItemFormV2; optionCount?: number } | null;
   }[],
 ): { requiredCount: number; metCount: number } {
   const parsed = cardPlanResultV2Schema.safeParse(planResult ?? null);
   if (!parsed.success) return { requiredCount: 0, metCount: 0 };
+  // 只数进了牌堆的那些：`dropped`/`failed` 的练习件不是这批要交付的东西，
+  // 算进去就会与管道内结算（对最终牌堆算）给出两个答案（§50/§53）。
+  const inDeck = candidates.filter((candidate) => candidate.qualityState === "passed");
   const { requiredCount, metCount } = summarizePracticeQuotaV2(
     budgetedPlanObjectives({ result: parsed.data }),
-    new Map(candidates.map((candidate) => [
+    new Map(inDeck.map((candidate) => [
       candidate.planObjectiveLocalId,
       {
         form: candidate.practiceItem?.kind ?? null,

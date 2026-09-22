@@ -566,6 +566,7 @@ export async function getGenerationRunCandidatesV2(ctx: RunContext, runId: strin
         planRows[0]?.result,
         candidates.map((candidate) => ({
           planObjectiveLocalId: candidate.planObjectiveLocalId,
+          qualityState: candidate.qualityState,
           practiceItem: candidate.practiceItem,
         })),
       ),

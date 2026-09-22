@@ -2283,6 +2283,41 @@ async function critiqueAndFinalizeCandidates(
         }
       }
       afterRepair = afterRepair.filter((c) => keepSet.has(c.candidateId) || rewriteSet.has(c.candidateId));
+
+      /**
+       * §52：牌堆定论之后，把"过了各自门禁但没进这一批"的候选回写成 `dropped`。
+       *
+       * 不这么做，这些行会永远停在 `passed`（`quality_state` 只在 grounding 那一次
+       * 批量 UPDATE 里被写过），而审核页判"可保留/可激活"看的正是 `passed` ——
+       * 真跑 4938cf7f 实测：牌堆 2 张、界面给出 4 张，练习件配额也读出与结算事件
+       * 不同的数。去重丢弃的那些在 2116 已被标 `failed`，这里只补 pedagogy 这一路。
+       *
+       * 两个排除项是必须的：
+       * - `rewriteSet` 里的原 revision 不是"被丢弃"，它的新 revision 正在等复核，
+       *   标成 dropped 会让审核页对一个还在进行的流程下结论；
+       * - 事件在**过滤之前**的 `readyCandidates` 上算，否则被丢掉的那张既没状态
+       *   也没事件（这正是今天它的行为）。
+       */
+      const inDeckIds = new Set(afterRepair.map((c) => c.candidateId));
+      const droppedByPedagogy = readyCandidates.filter((c) =>
+        !inDeckIds.has(c.candidateId) && !rewriteSet.has(c.candidateId));
+      if (droppedByPedagogy.length > 0) {
+        await tx.execute(sql`
+          UPDATE public.card_generation_candidates_v2
+          SET quality_state = 'dropped', updated_at = now()
+          WHERE workspace_id = ${workspaceId}
+            AND candidate_revision_id IN (${sql.join(
+              droppedByPedagogy.map((c) => sql`${c.candidateRevisionId}::uuid`), sql`, `)})
+        `);
+        await insertEventsBatched(tx, workspaceId, runId, droppedByPedagogy.map((c) => ({
+          eventType: "card_candidate.dropped",
+          payload: {
+            candidateId: c.candidateId,
+            candidateRevisionId: c.candidateRevisionId,
+            relation: "pedagogy_drop",
+          },
+        })));
+      }
     }
 
     // 14. deck gate（含 binding plan hashes）
@@ -2389,8 +2424,9 @@ async function critiqueAndFinalizeCandidates(
           return [candidate.planObjectiveLocalId, {
             form: item?.kind ?? null,
             // 宽度按形状取：选择题数选项、配对题数配对（判断题/排序题没有下限）。
-            optionCount: item
-              ? item.options?.length ?? item.pairs?.length ?? 0
+            optionCount: !item ? 0
+              : item.kind === "single_choice" ? item.options.length
+              : item.kind === "matching" ? item.pairs.length
               : 0,
           }];
         })),
