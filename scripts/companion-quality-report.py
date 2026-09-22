@@ -812,8 +812,8 @@ def render(metrics: dict) -> None:
               f" / 等到超时 {playback['deadline']} / 取段失败 {playback['synth_failed']}"
               f"   播出率 = {playback['played_ratio']}")
         if playback.get("dropped"):
-            print(f"  ⚠ 另有 {playback['dropped']} 段字节到手却没播（dropped）——"
-                  f"不计进上面的播出率，但它们就是那条"给了音频没响"的证据。")
+            print(f"  ⚠ 另有 {playback['dropped']} 段字节到手却没播（dropped）："
+                  "不计进上面的播出率，但它们就是「给了音频没响」的那类证据。")
         for r in playback["by_reason"]:
             print(f"    {r['reason']:<14} n={r['n']:<4} p50={r['p50_ms']}ms p90={r['p90_ms']}ms")
     print(f"  音频已交付却零上报 = {playback['bytes_delivered_but_silent']} 段"
