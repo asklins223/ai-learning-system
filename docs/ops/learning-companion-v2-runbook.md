@@ -21,7 +21,7 @@
   ```bash
   # run/outbox/候选状态
   DATABASE_URL_WORKER="postgres://ailearn_worker:ailearn_dev@localhost:5432/ailearn" \
-    node --import workers/ai-worker/node_modules/tsx/dist/loader.mjs --test --test-concurrency=1 \
+    node --import ./workers/ai-worker/node_modules/tsx/dist/loader.mjs --test --test-concurrency=1 \
     workers/ai-worker/src/integration-tests/card-generation-v2-e2e-subset.integration.ts
   ```
 

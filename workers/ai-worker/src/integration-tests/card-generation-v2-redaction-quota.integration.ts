@@ -18,7 +18,7 @@
  * 运行（从仓库根，**必须单文件执行**——worker outbox claim 全局）：
  *   DATABASE_URL_WORKER="postgres://ailearn_worker:ailearn_dev@localhost:5432/ailearn" \
  *   DATABASE_URL_API="postgres://ailearn:ailearn_dev@localhost:5432/ailearn" \
- *   node --import workers/ai-worker/node_modules/tsx/dist/loader.mjs --test --test-concurrency=1 \
+ *   node --import ./workers/ai-worker/node_modules/tsx/dist/loader.mjs --test --test-concurrency=1 \
  *     workers/ai-worker/src/integration-tests/card-generation-v2-redaction-quota.integration.ts
  */
 

@@ -14,7 +14,7 @@
  *
  * 运行（仓库根）：
  *   DATABASE_URL_API=postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn \
- *   node --import workers/ai-worker/node_modules/tsx/dist/loader.mjs \
+ *   node --import ./workers/ai-worker/node_modules/tsx/dist/loader.mjs \
  *     workers/ai-worker/src/integration-tests/v2-llm-bench.ts
  *
  * 环境变量：

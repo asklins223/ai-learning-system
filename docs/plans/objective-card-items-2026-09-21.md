@@ -2375,3 +2375,45 @@ tsx watch，不会为了一次探针把共享的 api 进程重启给别人添堵
 **会复发**：谁再在 `apps/api` 跑一次安装，pnpm 会把目录快照装回来。一条判据：
 `ls -ld apps/api/node_modules/@ailearn/shared` —— 开头是 `l` 才对，是 `d` 就是复发了。
 要根治得动依赖声明（workspace 协议或安装后步骤），那是全局决定，不在这条链里替别人做。
+
+## 69. 这条链交付过的东西在现在的 HEAD 上重测一遍；顺带发现 worker 也有同一份过期快照
+
+**先说重测（全部本机跑，数字直接来自那几次运行）**
+
+| 范围 | 结果 |
+|---|---|
+| 桌面端全量 | `159 files / 1330 tests` **全绿**，exit 0 |
+| 我这条链的四份桌面文件 | `48/48`（35 + 状态函数那 13） |
+| worker 单测全量 | `764 tests / 764 pass / 0 fail` |
+| worker A1 三份集测（plan-commit / per-candidate-commit / pedagogy-stage） | `10/10` |
+| api 单测全量（宿主，§68 换软链之后） | `1449 tests / 1448 pass / 0 fail / 1 skipped` |
+| api `tsc --noEmit` | 0 个错 |
+
+**上一轮我报的"桌面全量 13 个红文件 / 59 条红用例"已经不在了**：那是并行会话未提交的 note-collab
+改动，他们这一轮提交了。这条更正要留在这里，否则下一个人会拿它当我的欠账。
+
+**§68 那类问题在 worker 那边也有一份，而且此刻正在咬人**
+
+跑 `card-generation-v2-c-cases` 时三条用例里的一条报：
+`ERR_MODULE_NOT_FOUND: … @ailearn/shared/src/tts-voice-catalog.ts imported from … @ailearn/shared/src/index.ts`。
+查下来：`workers/ai-worker/node_modules/.pnpm/@ailearn+shared@file+…/node_modules/@ailearn/shared`
+是一份 **09-21 18:37 的真目录拷贝**（`src` 里 100 个文件，源码 107），它的 `index.ts` 已经引用
+`tts-voice-catalog`，而那个文件不在拷贝里。也就是说：**import 共享 barrel 的 worker 进程当场起不来**，
+而只深导入子路径的（我那些集测与 764 条单测）完全没事——所以它藏得住。
+这不是 §68 造成的（那份拷贝早于我改 api），但**是同一件事的第二处**。
+
+改法与 §68 一样：旧拷贝移到 `/tmp/ailearn-shared-worker-snapshot-20260921`（没删），
+补一条指向 `packages/shared` 的软链（这一层深 7 级，第一次写 5 级没解析到，`ls` 当场拒绝）。
+
+**换完之后的变实**：`ERR_MODULE_NOT_FOUND` 消失，同一个文件剩下三条红，原因就是我上一轮报过、
+并且这次因为变量被单独换掉而能确认是环境的那两条——
+`worker must process outbox jobs (got 0)`（dev 容器抢走轮询型用例的 job）与
+`这篇笔记已经有一批学习卡在生成或等待审核`（别人留在库里的 4 个 `review_ready` 批次）。
+同时复测 worker 单测 `764/764`、A1 三份集测 `10/10`，都没有因为换链接而变。
+
+**顺带修掉一处"照着跑就跑不通"的启动命令**：五处文档/注释里写的是
+`node --import workers/ai-worker/node_modules/tsx/dist/loader.mjs`。`--import` 的参数按**包名**解析，
+不带 `./` 会直接 `Cannot find package 'workers'`——我这一轮就先挂了 10 分钟在这上面（而且最初的
+挂住是没给 `DATABASE_URL_*`，那是另一条已知的坑）。五处统一改成 `--import ./workers/…`：
+runbook 一处、`v2-perf-measure` / `v2-llm-bench` 各一处、`c-cases` 与 `redaction-quota` 头注释各一处。
+判据：`grep -rn -- "--import workers/ai-worker" .` 现在为 0。

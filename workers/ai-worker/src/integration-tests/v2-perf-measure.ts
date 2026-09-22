@@ -16,7 +16,7 @@
  * 运行（从仓库根；需要 worker 可跑确定性管道）：
  *   DATABASE_URL_WORKER="postgres://ailearn_worker:ailearn_dev@localhost:5432/ailearn" \
  *   DATABASE_URL_API="postgres://ailearn:ailearn_dev@localhost:5432/ailearn" \
- *   node --import workers/ai-worker/node_modules/tsx/dist/loader.mjs \
+ *   node --import ./workers/ai-worker/node_modules/tsx/dist/loader.mjs \
  *     workers/ai-worker/src/integration-tests/v2-perf-measure.mjs
  *   （可选）ROUNDS=10 控制轮数；LLM_SAMPLE=1 追加一次真实 LLM 全旅程采样。
  */
