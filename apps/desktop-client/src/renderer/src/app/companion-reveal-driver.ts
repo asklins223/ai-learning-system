@@ -39,6 +39,13 @@ export const COMPANION_REVEAL_LEAD_CHARS = 6;
  */
 export const COMPANION_REVEAL_FIRST_AUDIO_SILENCE_MS = 2_000;
 export const COMPANION_REVEAL_GAP_SILENCE_MS = 800;
+/**
+ * 阅读钟最多领先音频多少字（见 `tick` 里那段注释）。
+ *
+ * 10 字 ≈ 2 秒朗读：够垫住一次卡顿（气泡不冻），又短到"音频一回来就对上"。
+ * 它是**上限**不是速率——钟仍然按 `COMPANION_READ_MS_PER_CHAR` 走，只是走不远。
+ */
+export const COMPANION_REVEAL_MAX_DRIFT_CHARS = 10;
 
 /** 阅读钟的心跳间隔。60ms ≈ 16 字/秒，与 `estimateCompanionReadDurationMs` 同一条节奏。 */
 export const COMPANION_REVEAL_TICK_MS = COMPANION_READ_MS_PER_CHAR;
@@ -53,6 +60,8 @@ export interface CompanionRevealDriverOptions {
   readonly firstAudioSilenceMs?: number;
   /** 出声之后判定"卡住"的间隔；缺省 `COMPANION_REVEAL_GAP_SILENCE_MS`。 */
   readonly gapSilenceMs?: number;
+  /** 还有音频时阅读钟最多领先多少字；缺省 `COMPANION_REVEAL_MAX_DRIFT_CHARS`。 */
+  readonly maxDriftChars?: number;
   readonly onReveal?: (revealed: number) => void;
 }
 
@@ -94,6 +103,7 @@ export function createCompanionRevealDriver(
     Math.floor(options.firstAudioSilenceMs ?? COMPANION_REVEAL_FIRST_AUDIO_SILENCE_MS),
   );
   const gapSilenceMs = Math.max(0, Math.floor(options.gapSilenceMs ?? COMPANION_REVEAL_GAP_SILENCE_MS));
+  const maxDriftChars = Math.max(0, Math.floor(options.maxDriftChars ?? COMPANION_REVEAL_MAX_DRIFT_CHARS));
   const listeners = new Set<() => void>();
 
   let arrived = 0;
@@ -146,7 +156,27 @@ export function createCompanionRevealDriver(
         clockStartedAt = at;
         clockBase = revealed;
       }
-      commit(Math.max(revealed, clockBase + Math.floor((at - clockStartedAt) / msPerChar)));
+      const clockTarget = clockBase + Math.floor((at - clockStartedAt) / msPerChar);
+      /**
+       * **阅读钟不许把文字甩开音频太远**（2026-09-22 用户报"文字太快、气泡对不上"）。
+       *
+       * 阅读钟是 60ms/字（≈16.7 字/秒），而 TTS 实际约 4.6 字/秒——**快 2.6 倍**。
+       * 而 `revealed` 只增不减，所以只要钟接管过一次，文字就永久停在音频前面：
+       * 音频要花好几秒才追到那个位置，这期间气泡里的字和正在念的那句根本对不上。
+       * 我 09-22 把"段间卡住"的判定从 2000ms 收到 800ms 之后，这件事从偶发变成了常态。
+       *
+       * 所以给钟加一条**只在本轮真的还有音频时**生效的上限：最多领先音频
+       * `leadChars + MAX_DRIFT` 个字。它仍然能在段间静音时继续走一点（不冻住气泡），
+       * 但走不远——音频一回来就重新对齐。音频彻底没了（stopped/finished/静音模式）
+       * 时这条上限取消，钟照旧按阅读节奏把全文走完。
+       */
+      // "音频还在路上"：出过声（audioAt 有值）就一直算它在；一次都没出过声时，
+      // 等满两倍第一段看门狗就认为"这一轮不会出声了"，上限取消——否则一段永远
+      // 不来的音频会把文字永久钉在 lead+drift 上，气泡再也收不了尾。
+      const audioPending = sessionMode === "voice" && !audioGaveUp
+        && (audioAt !== null || (arrivedAt !== null && at - arrivedAt < firstAudioSilenceMs * 2));
+      const cap = audioPending ? audioCeiling + leadChars + maxDriftChars : arrived;
+      commit(Math.min(Math.max(revealed, clockTarget), cap));
     }
     completeIfDone();
   };

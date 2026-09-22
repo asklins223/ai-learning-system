@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   COMPANION_REVEAL_FIRST_AUDIO_SILENCE_MS,
   COMPANION_REVEAL_GAP_SILENCE_MS,
+  COMPANION_REVEAL_MAX_DRIFT_CHARS,
   COMPANION_REVEAL_LEAD_CHARS,
   createCompanionRevealDriver,
   type CompanionRevealDriver,
@@ -127,6 +128,59 @@ describe("companion-reveal-driver", () => {
     expect(driver.revealed).toBe(5 + COMPANION_REVEAL_LEAD_CHARS + 10);
   });
 
+  // 2026-09-22 用户报"文字太快、气泡里的展示对不上"：阅读钟 60ms/字 ≈ 16.7 字/秒，
+  // 而 TTS 只有约 4.6 字/秒——快 2.6 倍，而 revealed 只增不减，所以钟接管一次就永久
+  // 领先。下面三条把"领先有上限"钉住。
+  it("段间静音时文字最多领先音频 lead+drift 个字，不跟着阅读钟跑掉", () => {
+    const { driver, advance } = harness();
+    driver.noteSession("voice");
+    driver.noteArrived(400);
+    driver.noteAudioProgress(100);
+    // 静音远超 GAP 判定：钟接管，但只许走到 ceiling + lead + drift 就停住。
+    advance(COMPANION_REVEAL_GAP_SILENCE_MS + 5_000);
+    driver.tick();
+    advance(5_000);
+    driver.tick();
+    expect(driver.revealed).toBe(100 + COMPANION_REVEAL_LEAD_CHARS + COMPANION_REVEAL_MAX_DRIFT_CHARS);
+    // 音频回来：立刻重新对齐到音频位置 + 提前量（不倒退、也不再继续跑）。
+    driver.noteAudioProgress(104);
+    expect(driver.revealed).toBe(100 + COMPANION_REVEAL_LEAD_CHARS + COMPANION_REVEAL_MAX_DRIFT_CHARS);
+    driver.noteAudioProgress(140);
+    expect(driver.revealed).toBe(140 + COMPANION_REVEAL_LEAD_CHARS);
+  });
+
+  it("第一段音频迟迟不来：文字先被钉在 lead+drift，等满两倍看门狗才放行", () => {
+    const { driver, advance } = harness();
+    driver.noteSession("voice");
+    driver.noteArrived(400);
+    driver.tick();
+    expect(driver.revealed).toBe(COMPANION_REVEAL_LEAD_CHARS);   // 看门狗没到：只放行提前量
+    advance(COMPANION_REVEAL_FIRST_AUDIO_SILENCE_MS);
+    driver.tick();                                                // 看门狗到点，钟起算
+    advance(1_500);                                               // 还在"等音频"窗口内
+    driver.tick();
+    // 钟想走 25 个字，但一次都没出过声（ceiling=0）→ 最多 lead + drift。
+    expect(driver.revealed).toBe(COMPANION_REVEAL_LEAD_CHARS + COMPANION_REVEAL_MAX_DRIFT_CHARS);
+    // 等满两倍看门狗：认定这一轮不会出声，放行给阅读钟——否则一段永远不来的音频
+    // 会把文字永久钉在这里，气泡再也收不了尾。
+    advance(COMPANION_REVEAL_FIRST_AUDIO_SILENCE_MS);
+    driver.tick();
+    expect(driver.revealed).toBeGreaterThan(COMPANION_REVEAL_LEAD_CHARS + COMPANION_REVEAL_MAX_DRIFT_CHARS);
+  });
+
+  it("音频真的没了（被停/念完）时上限取消：文字仍按阅读钟走完", () => {
+    const { driver, advance } = harness();
+    driver.noteSession("voice");
+    driver.noteArrived(400);
+    driver.noteAudioProgress(100);
+    driver.noteAudioStopped();
+    advance(600);
+    driver.tick();
+    expect(driver.revealed).toBe(100 + COMPANION_REVEAL_LEAD_CHARS + 10);   // 钟从停的那一刻起算，按 60ms/字
+    driver.finish();
+    expect(driver.revealed).toBe(400);        // 用户点开全文：立刻到底
+  });
+
   it("音频失败/被停：立刻交回阅读钟", () => {
     const { driver, advance } = harness();
     driver.noteSession("voice");
@@ -157,9 +211,11 @@ describe("companion-reveal-driver", () => {
     driver.noteSession("voice");
     driver.noteArrived(20);
     // 还没 final：钟走完也不收尾（否则会在生成中途把气泡收掉）。
+    // 2026-09-22 起，"一次都没出过声"要等满两倍第一段看门狗才认为这一轮不出声了
+    // （在那之前阅读钟被钉在 lead+drift，免得文字跑到声音前面），所以这里要走过那一段。
     advance(2_000);
     driver.tick();
-    advance(1_250);
+    advance(4_500);
     driver.tick();
     expect(driver.revealed).toBe(20);
     expect(completions).toBe(0);
