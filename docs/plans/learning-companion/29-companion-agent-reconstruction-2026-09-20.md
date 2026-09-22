@@ -4176,3 +4176,31 @@ superseded 12，全都没有 error_code），剩下 3 条才是真·无码。三
 是按字符放行的，不额外加时间。写在这里是为了下次有人看见 13.5s 时不再去"优化"它。
 （顺带核对：报表里 `抽取 job = {running: 2}` 是几分钟前的状态，现在 `status='running'`
 的 job 是 0 条，不是卡住的租约。）
+
+### 12.13 抽取器是最后一个"产 JSON 却没关思考"的伴星调用点；失败行原来不带引擎（同日 13:50）
+
+回答"还有什么问题"时量出来的两条，都是能查的数而不是印象：
+
+**① 记忆抽取器每天在把 job 跑死。** `jobs` 里 `type='companion_memory_extract'` 的
+dead 行最近三条是今天的（03:59、04:14、04:15），原因分别是
+`MEMORY_EXTRACT_OUTPUT_INVALID` ×2 与 `provider_http_400`。根因与 §9.71 摘要器
+"建表以来 0 行"是**同一根**：这是一次 `responseFormat:"json_object"` + `maxTokens:800`
+的整段取回，而 provider config 没走 `withThinkingDisabled`——思考 token 也算在 800 里，
+吃满之后 `content` 为空，JSON 解析失败，重试跑满就 dead。摘要器/日记/念头三处
+09-21 都修了，抽取器漏了整整一天。
+
+修法除了补那一行，还加了一条**自动兜底**（`companion-memory-extractor.test.ts` 末尾）：
+扫 `handlers/companion-*.ts`，凡是写了 `responseFormat: "json_object"` 却没出现
+`withThinkingDisabled(` 的文件一律判红。扫描式而不是行为式，是因为这条的正确断言
+（"下一个新增的取回调用别再漏"）没有行为可测。变异检查：把那一行换回原样 →
+红在 `这些 handler 产 JSON 却没关思考：companion-memory-extractor.ts`。
+审出来的另外两处**故意没动**：`companion-dialogue.ts` 的 thinkingProvider
+（退化修复梯，本来就要开思考）与 vision 调用（实测能出正确转写）。
+
+**② `companion_tts_outcomes.engine` 只在成功时写**，于是报表里
+`edge n=13 ok=13 failed=0` 与全库真存在的 3 条 `EdgeTtsError` **同时成立**——
+按引擎分档那一行结构上看不见失败，而它正是"该不该换引擎/换音色"的判据。
+失败没有返回值，所以引擎信息挂在异常上带回去（`CompanionTtsFailure.ttsEngine`），
+路由侧用现成的信号判定：qwen 失败必先到 `onQwenFallback`，回调响过就说明最后
+试的是 edge。实库集测补一条断言：failed 行的 engine 必须是 `edge`；
+把服务侧那一笔去掉，断言红在 `expected: 'edge'`。
