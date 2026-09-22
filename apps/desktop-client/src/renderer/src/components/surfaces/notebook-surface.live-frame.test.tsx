@@ -66,6 +66,8 @@ function stub() {
   listeners = [];
   let call = 0;
   const seed = seedUpdate(SEED_TITLE, [STALE]);
+  const syncUpdate = vi.fn(async (_input: { noteId: string; update: string }) => ({ ok: true as const, workspaceEpoch: 1, data: { via: "stream", revision: null, savedAt: new Date().toISOString() } }));
+  const state = vi.fn(async () => noteDocResult({ update: seed }));
   window.ailearn = {
     contract: { enabledRoutes: ["note.detail"] },
     auth: { getState: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { status: "authenticated", workspace: { workspaceId: "w-1" } } })) },
@@ -88,8 +90,8 @@ function stub() {
         return notePayload(STALE, STALE);
       }),
       doc: {
-        state: vi.fn(async () => noteDocResult({ update: seed })),
-        syncUpdate: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { via: "stream", revision: null, savedAt: new Date().toISOString() } })),
+        state,
+        syncUpdate,
         presence: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { shared: true } })),
       },
     },
@@ -113,7 +115,7 @@ function stub() {
       },
     },
   } as unknown as typeof window.ailearn;
-  return { seed, reads: () => call };
+  return { seed, reads: () => call, syncUpdate, state };
 }
 
 /** 让挂起的一串 Promise（含自动保存的 debounce）都跑掉。 */
@@ -226,5 +228,45 @@ describe("编辑态：标题跟着别人那份走，我改的那一段不被顶�
     // 与"已经把这份覆盖掉了"在屏上长得一样，而前者要是让界面读成干净，改名就丢了。
     expect(saveTag()).toBe("草稿");
     expect(document.body.textContent).not.toContain(RENAMED);
+  });
+
+  it("对端的帧一直接着来，本机那一次自动保存也不能被一直往后推", async () => {
+    // 这一段量的是三件已经各自钉住的事：① 帧与回读来回搅动时那一次提交真的发生了；
+    // ② 交出去的是**我这一份文档**的增量（里面能读到我刚写的标题）；③ 起点只取一次，
+    // 也就是这份文档不会在搅动里被重建。②背后那个缺陷是"投影吃到旧值"——
+    // `setLocalTitle` 与 `flush` 在同一次保存里把 `dirty` 真真假假翻两轮，React 批量后
+    // 不产生渲染，memo 交出改写之前的标题；把本地改动也推进投影的版本号就治了它
+    // （摘掉那一行这条用例就红，实测过）。
+    // 如实记一句：自动保存的定时器**换成不含身份的依赖**这一件事，本用例并没有量到——
+    // 拿旧依赖跑它照样是绿的，也就是说"帧把提交一直往后推"这个猜测在 jsdom 里
+    // 没被复现。真实窗口里那句"永远停在草稿"到底是谁造成的，仍以量测为准。
+    const stubbed = stub();
+    ownerRoom();
+    await open("edit");
+    const title = document.getElementById("notebook-surface-title") as HTMLInputElement;
+    fireEvent.input(title, { target: { value: MINE } });
+
+    // 20 轮 × 100ms：整段都比分母（1.2s 的 debounce）密，"帧 → 回读 → 一个新的 `data`"
+    // 这一串就一直在重挂定时器。只在 churn **当中**读数（不给它一段安静窗口），
+    // 否则旧写法也会在被测窗口之后自己补上那一次提交，那条变异就不红了。
+    for (let round = 0; round < 20; round += 1) {
+      deliverFrame(stubbed, { text: `${FRESH}${round}` });
+      await settle(1);
+    }
+    await settle(3);
+
+    expect(stubbed.syncUpdate).toHaveBeenCalledTimes(1);
+    // 交出去的必须是**我改的那一次**：一条 yjs 增量里能读到我刚写的标题，说明它是从
+    // 这一份文档里出来的，不是别的东西。（渲染层没有 Buffer，这里同一条 btoa 反着走。）
+    const sent = stubbed.syncUpdate.mock.calls[0]![0] as { noteId: string; update: string };
+    expect(sent.noteId).toBe(NOTE_ID);
+    const decoded = new TextDecoder("utf-8", { fatal: false })
+      .decode(Uint8Array.from(atob(sent.update), (character) => character.charCodeAt(0)));
+    expect(decoded).toContain(MINE);
+    // 这一条钉的是投影不能吃到旧值：`setLocalTitle` 与 `flush` 在同一次保存里把 `dirty`
+    // 真真假假翻两轮，React 批量之后不产生渲染，memo 就会交出改写之前的标题——症状是
+    // "我那一次改名交出去了，屏幕却又回到别人那一份"。
+    expect(titleValue()).toBe(MINE);
+    expect(stubbed.state).toHaveBeenCalledTimes(1);
   });
 });

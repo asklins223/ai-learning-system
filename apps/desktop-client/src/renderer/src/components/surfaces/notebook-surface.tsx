@@ -428,6 +428,7 @@ export function NotebookSurface() {
   // Every block type — including images, which the editor writes as one
   // markdown line — has a text form now, so editability is a pure permission.
   const editable = Boolean(note?.permissions.canEdit);
+  const canSave = Boolean(note?.permissions.canSave);
   // 第一篇笔记刚读回来的那一帧还没有模式、回执这些"跟着这一篇重置"的状态，
   // 编辑页要等它过完再挂（早挂一帧就是白挂一份马上被换掉的编辑器）。
   const draftSeeded = Boolean(note && syncedNoteRef.current === note.noteId);
@@ -568,7 +569,10 @@ export function NotebookSurface() {
       // 交出去的就是这一份了：本机的标题覆盖值到此作废，之后屏幕上的标题又跟着文档走
       // （别人改名会上屏）。没交出去（`unchanged`/失败）时留着，否则那一次改名就凭空没了。
       if (written.via !== "unchanged") applyDraft({ ...draftRef.current, title: null });
-      await reload();
+      // 必须是要 silent 的那次回读：非 silent 会把这一屏换成「正在读取真实笔记」，
+      // 编辑器整个卸掉——自动保存每按几下就来一次，那等于每次保存都把选区、滚动位置和
+      // 还没交出去的字一起带走。版本号、权限那半边照样刷新。
+      await reload({ silent: true });
     } catch (error) {
       setSaveState("error");
       setSaveFailure(gatewayErrorMessage(error));
@@ -587,13 +591,17 @@ export function NotebookSurface() {
   // would flip the save-line between "正在提交…" and the failure notice — the
   // flicker. Recovery paths: the "重试保存" button, or a new keystroke (the
   // effect below clears the error so the debounce restarts naturally).
+  // Debounced autosave. 依赖里**不能有 `save` 或 `note` 对象**：这一屏每几秒就有一次
+  // 静默回读带来一个新的 `data`，`save` 因此换身份，定时器被"清理—重挂"反复归零——
+  // 实窗量到的正是这个：文档明明脏着（标签「草稿」），自动保存却永远不触发，
+  // 本机那几句话从来没有交出去过。走 `saveRef`（每个渲染都刷新）就不需要那些身份。
   useEffect(() => {
-    if (mode !== "edit" || !note?.permissions.canSave || !dirty || saving || saveState === "error") {
+    if (mode !== "edit" || !canSave || !dirty || saving || saveState === "error") {
       return undefined;
     }
-    const timer = window.setTimeout(() => { void save("auto"); }, AUTOSAVE_DELAY_MS);
+    const timer = window.setTimeout(() => { saveRef.current(); }, AUTOSAVE_DELAY_MS);
     return () => window.clearTimeout(timer);
-  }, [draft, mode, note, save, saving, dirty, saveState]);
+  }, [canSave, dirty, mode, saveState, saving]);
 
   // Editing again after a failed save clears the sticky error so autosave can
   // resume. Keyed on the draft object, which only changes on real input — the

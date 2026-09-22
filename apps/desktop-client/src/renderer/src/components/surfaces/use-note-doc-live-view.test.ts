@@ -150,6 +150,35 @@ describe("渲染进程那份文档", () => {
     expect(result.current.dirty).toBe(false);
   });
 
+  it("noteId 短暂为空（保存后那次回读就会这样）不许把没交出去的字一起清掉", async () => {
+    installApi();
+    const { result, rerender } = renderHook(({ noteId }: { noteId: string | null }) =>
+      useNoteDocLiveView(noteId, true, () => undefined), {
+      initialProps: { noteId: NOTE_ID as string | null },
+    });
+    await settle();
+    act(() => {
+      const fragment = result.current.fragment!;
+      ((fragment.get(0) as Y.XmlElement).get(0) as Y.XmlText).insert(3, "刚敲还没交出去的字");
+    });
+    expect(result.current.dirty).toBe(true);
+
+    rerender({ noteId: null });
+    await settle();
+    // 这一屏只是在重新读取，不是换了一篇：字和"还没交出去"这两件事都得活着。
+    // 少这一条的症状是实窗量到的"刚写的几句在自动保存之后凭空没了"。
+    expect(result.current.dirty).toBe(true);
+    expect(result.current.blocks[0]?.content).toContain("刚敲还没交出去的字");
+
+    rerender({ noteId: NOTE_ID });
+    await settle();
+    expect(result.current.blocks[0]?.content).toContain("刚敲还没交出去的字");
+    // 回来之后还要交得出去：`pendingRef` 被清过的话这里 flush 出的是 null。
+    let via: string | null = null;
+    await act(async () => { via = await result.current.flush(); });
+    expect(via).toBe("stream");
+  });
+
   it("订阅回执比连接早时，名字照旧广播得出去；在场人数只认这一排", async () => {
     const { result } = renderHook(() => useNoteDocLiveView(NOTE_ID, true, () => undefined, null));
     await settle();

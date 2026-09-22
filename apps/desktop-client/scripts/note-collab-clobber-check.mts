@@ -28,7 +28,12 @@ async function session(email: string, password: string) {
     const body = await fetch(`${API}/v2/notes/2b6c1f01-8659-415f-bcc0-08ee38046cd5`, { headers: { authorization: `Bearer ${token}` } }).then((r) => r.json()).catch(() => null);
     return body?.currentVersion?.blocks?.[0]?.content ?? null;
   };
-  return { token, read };
+  /** 整版块列表：并发那一段要数块数（旧形状量到的正是"3 块并发改两处收成 4 块"）。 */
+  const readAll = async () => {
+    const body = await fetch(`${API}/v2/notes/2b6c1f01-8659-415f-bcc0-08ee38046cd5`, { headers: { authorization: `Bearer ${token}` } }).then((r) => r.json()).catch(() => null);
+    return body?.currentVersion?.blocks ?? null;
+  };
+  return { token, read, readAll };
 }
 
 async function window(port: number, email: string, password: string) {
@@ -58,10 +63,20 @@ async function window(port: number, email: string, password: string) {
   await page.waitForTimeout(2200);
   await page.evaluate((hint) => [...document.querySelectorAll("button,a,li")].find((n) => (n.textContent || "").includes(hint))?.click(), NOTE_HINT);
   await page.waitForTimeout(4000);
-  // 点「编辑这篇笔记」与 `.ProseMirror` 挂上之间是异步的（React + Milkdown 建实例）。
-  // 原来这一句在点完立刻 `Boolean(querySelector(...))`，于是**编辑器其实开好了**也报
-  // false——一条会说谎的看门狗比没有更糟（后面所有读数都会被当成"没进编辑态"而作废）。
-  // 现在改成点一次、等它出现、再读。
+  // 列表那一行的点击在实机上有几种落点（「打开笔记：…」那条入口、「继续写」那张卡）。
+  // 一条会说谎的看门狗比没有更糟：这里挨个补点一次，最后仍没编辑器就把那一屏原样打出来，
+  // 让"这一腿没量到"看得见，而不是被读成"产品没同步"。
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await page.evaluate(() => {
+      if (document.querySelector(".ProseMirror")) return;
+      const entry = [...document.querySelectorAll("button,a,li")].find((n) => {
+        const text = (n.textContent || "").trim();
+        return text.startsWith("打开笔记：") || text.startsWith("继续写");
+      });
+      entry?.click();
+    });
+    await page.waitForTimeout(3500);
+  }
   await page.evaluate(() => {
     if (!document.querySelector(".ProseMirror")) {
       [...document.querySelectorAll("button")].find((n) => (n.textContent || "").includes("编辑这篇笔记"))?.click();
@@ -69,6 +84,10 @@ async function window(port: number, email: string, password: string) {
   });
   await page.waitForSelector(".ProseMirror", { timeout: 12_000 }).catch(() => {});
   const editState = await page.evaluate(() => Boolean(document.querySelector(".ProseMirror")));
+  if (!editState) {
+    const screen = await page.evaluate(() => (document.body?.innerText ?? "").slice(0, 240));
+    console.log(`  窗口 ${port} 没进编辑态，那一屏是：${screen.replace(/\n/g, " / ")}`);
+  }
   await page.waitForTimeout(2500);
   const type = (text) => page.evaluate((mark) => {
     const editor = document.querySelector(".ProseMirror");
@@ -120,4 +139,21 @@ const afterB = await owner.read();
 console.log(`B 又写了 ${MARK_B} → 服务端:`, afterB);
 console.log(">>> A 那段还在不在服务端:", afterB?.includes(MARK_A) ? "还在（没覆盖）" : "不见了（旧页把新内容盖掉了）");
 console.log(">>> B 那段:", afterB?.includes(MARK_B) ? "在" : "不在");
+
+/**
+ * 这一批真正要量的那件事：**同一个光标位置，两边各插一句，两句都得在，块数不能涨。**
+ * 旧形状（`Y.Array<Y.Map{content: Y.Text}>` + 界面持一份字符串拷贝）做不到——批次 A 的对照
+ * 用例量到"3 块并发改两处收成 4 块"；绑上 `y-prosemirror` 之后两边写的都是同一个 `YXmlText`，
+ * 合并给的是同一块里的两处插入。判据读服务端那一份投影，不读任何一屏。
+ */
+const SIM_A = `同段并发A${stamp}`;
+const SIM_B = `同段并发B${stamp}`;
+const blocksBefore = await owner.readAll();
+await Promise.all([a.type(SIM_A), b.type(SIM_B)]);
+await wait(9000);
+const afterSim = await owner.readAll();
+const first = afterSim?.[0]?.content ?? "";
+console.log(`同一光标位置两边各插一句 → 块数 ${(blocksBefore?.length ?? 0)}→${afterSim?.length ?? 0}`);
+console.log(">>> 两句都在第一段里:", first.includes(SIM_A) && first.includes(SIM_B), "| 第一段:", first.slice(0, 120));
+console.log(">>> 有没有多出一块:", (afterSim?.length ?? 0) > (blocksBefore?.length ?? 0) ? "多出来了（两份拷贝在并发插入）" : "没有");
 process.exit(0);

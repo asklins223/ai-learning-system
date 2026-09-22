@@ -110,16 +110,22 @@ export function useNoteDocLiveView(
   changeRef.current = onRemoteChange;
 
   const targetRef = useRef<string | null>(noteId);
-  if (targetRef.current !== noteId) {
-    // 先丢再建：反过来的话这一次渲染里"新的那一篇"仍然读到上一篇的正文，那一屏
-    // 会把上一篇印在下一篇上（这条被用例抓到过一次，症状就是换篇后块数不减）。
-    docRef.current?.destroy();
-    docRef.current = null;
-    pendingRef.current = [];
+  if (noteId !== null && targetRef.current !== noteId) {
+    // 只有"真的换了一篇"才丢掉这份文档。`noteId` 短暂为空是这一屏在重新读取
+    // （保存之后那次回读就会这样），不是换篇——跟着一起清会把**本机还没交出去的字**
+    // 也清掉，症状是刚敲的几句在每次自动保存之后凭空没了（实窗量到过一次）。
+    const switching = targetRef.current !== null;
     targetRef.current = noteId;
-    setDirty(false);
-    setSeeded(false);
-    setStream({ peers: [], authorizedScope: null, failure: null });
+    if (switching) {
+      // 先丢再建：反过来的话这一次渲染里"新的那一篇"仍然读到上一篇的正文，那一屏
+      // 会把上一篇印在下一篇上（这条被用例抓到过一次，症状就是换篇后块数不减）。
+      docRef.current?.destroy();
+      docRef.current = null;
+      pendingRef.current = [];
+      setDirty(false);
+      setSeeded(false);
+      setStream({ peers: [], authorizedScope: null, failure: null });
+    }
   }
 
   const doc = docRef.current ?? (() => {
@@ -140,6 +146,11 @@ export function useNoteDocLiveView(
       // "打开一篇没动过"的笔记一进门就显示未提交，并白上一次送。
       if (update.length === 0) return;
       pendingRef.current.push(b64(update));
+      // 本地改动也要推进那份投影的"版本号"：只靠 `setDirty(true)` 会漏——一次保存里
+      // `setLocalTitle` 刚把它置真，`flush` 立刻又置假，React 批量之后状态值没变，
+      // 一次渲染都不发生，投影 memo 于是交出**改写之前**的旧标题（实测量到的正是
+      // "标题交出去了，屏幕却又回到别人那一份"）。
+      setRevision((value) => value + 1);
       setDirty(true);
     };
     doc.on("update", record);

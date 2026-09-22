@@ -47,6 +47,10 @@ export function peerUpdate(
 ): string {
   const doc = new Y.Doc();
   Y.applyUpdate(doc, unb64(seed));
+  // 只交"起点之后多出来的那一段"：`encodeStateAsUpdate(doc)` 会把起点自己的操作也重放
+  // 一遍，那些操作带着对端的时钟，标题这种 LWW 字段会凭空气赢过一次本机改名——夹具就会
+  // 替产品撒一种假的"被别人覆盖了"。真客户端上行的一直是差集，这里按同一条来。
+  const since = Y.encodeStateVector(doc);
   doc.transact(() => {
     if (changes.text !== undefined) {
       const paragraph = doc.getXmlFragment(FRAGMENT_KEY).get(changes.paragraphIndex ?? 0) as Y.XmlElement;
@@ -60,7 +64,7 @@ export function peerUpdate(
     // 标题是 `meta` 里的一份 LWW 文本，不碰正文。
     if (changes.title !== undefined) doc.getMap("meta").set("title", changes.title);
   });
-  const update = b64(Y.encodeStateAsUpdate(doc));
+  const update = b64(Y.encodeStateAsUpdate(doc, since));
   doc.destroy();
   return update;
 }
