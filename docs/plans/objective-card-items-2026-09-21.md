@@ -2344,3 +2344,34 @@ npx tsx /app/src/probes/tmp-b4-http-probe.mts`）。零模型调用。
 import 共享合同的探针都会以「does not provide an export named」结束。这类探针要在 api 容器里跑
 （那里 `packages/shared` 是挂载的最新源码）。探针放在 `apps/api/src/probes/`：新建文件不触发
 tsx watch，不会为了一次探针把共享的 api 进程重启给别人添堵。
+
+## 68. 顺手修掉一条会咬所有人的环境事实：宿主 `apps/api` 的运行时一直在 import 09-21 的共享包快照
+
+上一轮那条"宿主 import 共享合同会报 does not provide an export named"不是运气差，是一处系统性
+错位，这一轮把它修了。
+
+**实测出来的形状**
+
+| 位置 | 是什么 | 后果 |
+|---|---|---|
+| `apps/desktop-client/node_modules/@ailearn/shared` | 符号链接 → `packages/shared` | 活的 |
+| `workers/ai-worker/node_modules/@ailearn/shared` | 符号链接 → `.pnpm/…` | 活的 |
+| `apps/api/node_modules/@ailearn/shared` | **真目录，09-21 08:01 的快照**（98 个文件，源码 107） | 运行时 import 到旧共享包 |
+| 容器里 `/app/node_modules/@ailearn/shared` | 软链 → `/app/packages/shared` | 活的（所以容器里从来不出这个问题） |
+
+**为什么一直没被察觉**：`apps/api/tsconfig.json` 的 `paths` 早在 2026-09-15 就为了躲 pnpm 的
+`file:` 安装期快照而改成指实时源码——**但它只管类型，不管运行时**。而 api 的 `test` 脚本是
+`node --import tsx --test …`，走 Node ESM 解析。于是 `tsc` 永远对、宿主测试永远在用旧共享包，
+两边给出的"这个导出存在吗"可以相反。
+
+**改法**：`mv` 快照到 `/tmp/ailearn-shared-snapshot-20260921`（没删，今天还捞得回来），
+`ln -s ../../../../packages/shared` 补上，与桌面端同一深度。
+
+**改完复测（都是宿主）**：探针 `npx tsx apps/api/src/probes/tmp-b4-http-probe.mts` 从
+「没有这个导出」变成跑通并打印 6 个概念名；api 全量单测 `1449 tests / 1448 pass / 0 fail /
+1 skipped`；`tsc --noEmit` 0 个错（上一次跑还有 1 个在 `tts-engine.test.ts`，是并行会话的在飞改动，
+这一轮自己没了）。
+
+**会复发**：谁再在 `apps/api` 跑一次安装，pnpm 会把目录快照装回来。一条判据：
+`ls -ld apps/api/node_modules/@ailearn/shared` —— 开头是 `l` 才对，是 `d` 就是复发了。
+要根治得动依赖声明（workspace 协议或安装后步骤），那是全局决定，不在这条链里替别人做。
