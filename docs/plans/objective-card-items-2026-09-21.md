@@ -1821,3 +1821,38 @@ worker 侧传 `candidate.objective.practiceItem` 的 `options.length`，api 侧
    第二条今天跑一次就会红（4 vs 2），它正是这次要钉的东西。
 
 §50 里那句"读路径只数 passed"作废，以本节为准。
+
+## 52. #38 的根因：`quality_state` 只有 grounding 写过一次，后面两道门禁从来不回写
+
+读到写状态的那一处（`handler:2060-2092`）就清楚了：
+
+- `candidateStatusUpdates` 里那条 `newQualityState`，来源是 **grounding** 的结果
+  （过 → `passed`，不过 → `failed`），一次性批量 UPDATE；
+- **pedagogy 与 deck gate 的结论从不回写这张行**：谁进了最终牌堆只存在于内存变量
+  `afterRepair` 里（keep/drop 的过滤、去重的 `selectDistinctCandidatesV2`）；
+- 更糟的一层：per-candidate 的 pedagogy 事件（`handler:2357` 那段）是在
+  **过滤之后**的集合上生成的 —— 所以被 pedagogy 判 drop 的那几张连
+  `pedagogy_failed` 事件都没有。`4938cf7f` 里"4 张 grounding_passed、只有 2 条
+  pedagogy 事件、但表里 4 行都是 passed"三件事同时成立，就是这个缺口的直接后果。
+
+于是"这张卡到底在不在牌堆里"今天**没有任何地方能读到**：行上是 `passed`，
+事件缺席，内存变量随事务结束消失。审核页拿 `passed ∧ undecided ∧ unpublished` 判可审核，
+就把牌堆外的卡一并给了出去。
+
+**修的形状（#38 按这个做，别再往下猜）**：
+1. 新增一个终态 `dropped`（`cg_v2_cand_quality_chk` 的 CHECK 要加值 → 一条新迁移，
+   接在 `0254` 之后，进 `meta/_journal.json`）。语义是"过了它自己那两道检查，
+   但没进这一批的牌堆"——不能复用 `failed`：那会把"质量不合格"和"和别的卡重复"
+   混成一件，而用户对这两件事的动作完全不同（重生成 vs 无需动作）。
+2. 在牌堆定论之后，把没入选的候选一次性回写成 `dropped`，并补一条
+   `card_candidate.dropped`（payload 带 `relation`: `pedagogy_drop` / `duplicate` / `mergeable`）
+   —— 顺序很关键：事件要在过滤**之前**的集合上算，否则又会出现"被丢了却什么都没留下"。
+3. 读路径不用再加判断：`isCandidateReviewReadyV2` 已经要求 `passed`，第 2 步一落，
+   审核列表与头部 `practiceQuota` 自动只看见牌堆里的卡（§51 想要的"同一个来源"就成立了）。
+4. 两条会红的断言：同一批次"事件结算的 `{required,met}`" == "头部读到的"；
+   `isReviewReady` 的张数 == `card_candidate.review_ready` 事件张数。今天跑第一条 3≠1、
+   第二条 4≠2，两条都会红 —— 它们红了才算修好。
+
+顺带一条同源要求：新加状态要同时过一遍**所有按 `qualityState` 分支的读点**
+（api 导出、审核列表计数、worker 2963 那句 `WHERE latest.quality_state='passed'`），
+不能只加枚举不查读者。
