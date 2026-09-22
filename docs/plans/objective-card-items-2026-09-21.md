@@ -2417,3 +2417,16 @@ tsx watch，不会为了一次探针把共享的 api 进程重启给别人添堵
 挂住是没给 `DATABASE_URL_*`，那是另一条已知的坑）。五处统一改成 `--import ./workers/…`：
 runbook 一处、`v2-perf-measure` / `v2-llm-bench` 各一处、`c-cases` 与 `redaction-quota` 头注释各一处。
 判据：`grep -rn -- "--import workers/ai-worker" .` 现在为 0。
+
+## 70. 「这条链交过的东西还在不在」变成一条命令
+
+HEAD 在这一天里被好几个会话往前推了十几个提交，而这一树的失效形状之一就是"我改了"≠"它在历史里"。
+所以把 `scripts/check-a1-landed.sh` 从原来那 5 条（只核 ON CONFLICT 与 arbiter）扩出第 ⑥ 段：
+**逐个签名对 `HEAD` 核，不对工作树核**，16 项覆盖 A1 的写路径、B4 的界面块、等式断言、
+迁移 0253 的文件与登记，以及这一串量测工具本身。
+
+`bash scripts/check-a1-landed.sh` 在 `d40d05cc` 上的结果：**16/16 全在，exit 0**。
+牙齿也是量过的：`CHECK_A1_EXTRA="…::commitAuthoredCandidatesBatchedV2_GONE"` 塞一个 HEAD 里
+不存在的签名进去，那一项立刻 `**不在**`、整体 `exit 1`。
+
+以后任何人问"A1 到底落地了没有"，跑这一条就有答案，不需要谁转述。
