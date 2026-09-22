@@ -58,12 +58,17 @@ async function window(port: number, email: string, password: string) {
   await page.waitForTimeout(2200);
   await page.evaluate((hint) => [...document.querySelectorAll("button,a,li")].find((n) => (n.textContent || "").includes(hint))?.click(), NOTE_HINT);
   await page.waitForTimeout(4000);
-  const editState = await page.evaluate(() => {
+  // 点「编辑这篇笔记」与 `.ProseMirror` 挂上之间是异步的（React + Milkdown 建实例）。
+  // 原来这一句在点完立刻 `Boolean(querySelector(...))`，于是**编辑器其实开好了**也报
+  // false——一条会说谎的看门狗比没有更糟（后面所有读数都会被当成"没进编辑态"而作废）。
+  // 现在改成点一次、等它出现、再读。
+  await page.evaluate(() => {
     if (!document.querySelector(".ProseMirror")) {
       [...document.querySelectorAll("button")].find((n) => (n.textContent || "").includes("编辑这篇笔记"))?.click();
     }
-    return Boolean(document.querySelector(".ProseMirror"));
   });
+  await page.waitForSelector(".ProseMirror", { timeout: 12_000 }).catch(() => {});
+  const editState = await page.evaluate(() => Boolean(document.querySelector(".ProseMirror")));
   await page.waitForTimeout(2500);
   const type = (text) => page.evaluate((mark) => {
     const editor = document.querySelector(".ProseMirror");
