@@ -132,6 +132,23 @@ export function actionSteerBudget(input: { userAskedForAction: boolean }): numbe
 }
 
 /**
+ * 笔记检索词的切分（纯函数，方案 29 §12.3）。
+ *
+ * 空白分词 + 去掉 LIKE 的通配符（`%`/`_` 留在词里等于让模型自己拼通配查询）。
+ * 上限 6 个词：再多就是模型在把整段话塞进检索词，AND 的命中率会掉到 0，
+ * 而"搜不到"在她嘴里是一句结论，不是"我搜得太多"。
+ */
+export const NOTE_SEARCH_MAX_TERMS = 6;
+
+export function noteSearchTerms(query: string): string[] {
+  return query
+    .split(/\s+/)
+    .map((term) => term.replace(/[%_]/g, "").trim())
+    .filter((term) => term.length > 0)
+    .slice(0, NOTE_SEARCH_MAX_TERMS);
+}
+
+/**
  * 这一步要不要补、补的时候花掉哪条额度（纯函数，方案 29 §9.28 双额度的账目）。
  *
  * 单独立出来是因为那条"独立的"额度在实现里并不独立：原来只要触发一次 steer
@@ -847,9 +864,22 @@ async function executeReadTool(
     case "companion_search_notes": {
       const query = String(args.query).trim().slice(0, 120);
       const limit = typeof args.limit === "number" ? Math.min(10, Math.max(1, args.limit)) : 5;
-      // `%关键词%` 而不是 `关键词`：ILIKE 不带百分号是全等比较，一条都匹配不上
-      // （记忆检索的 keyword 降级路径踩过同一个坑，见 companion-memory-vector.ts）。
-      const pattern = `%${query.replace(/[%_]/g, "")}%`;
+      const terms = noteSearchTerms(query);
+      if (terms.length === 0) {
+        // 检索词被剥成空（模型只给了空格或纯标点）时**不能**放一个 `%%` 进去——
+        // 那会命中库里所有笔记，然后被她当成"这些都相关"念出来。
+        return { value: { notes: [] }, safeSummary: "检索词是空的，我需要先知道要搜什么" };
+      }
+      // 每个词都得命中（标题或正文），不是整串子串相等。实机 2026-09-22 真人轮：
+      // 她按摘要里的名字搜《欧姆定律生成验收》，用的检索词是"欧姆定律 生成验收"
+      // （中间一个空格），整串 `%…%` 在这篇笔记的标题里匹配不上 → 工具回"没有找到"，
+      // 而这篇笔记在库里、没删。假阴性的代价不是"少一条结果"，是她据此说"库里没这篇"。
+      const termConditions = terms.map((term) => sql`
+        (n.title ILIKE ${`%${term}%`} OR EXISTS (
+          SELECT 1 FROM note_blocks nb
+          WHERE nb.version_id = n.current_version_id
+            AND nb.content ILIKE ${`%${term}%`}
+        ))`);
       const rows = await withWorkerWorkspaceTransaction(
         { workspaceId: event.ctx.workspaceId, userId: event.read.userId },
         async (tx) => tx.execute<NoteSearchRow>(sql`
@@ -862,11 +892,11 @@ async function executeReadTool(
             SELECT string_agg(nb.content, ' ') AS snippet
             FROM note_blocks nb
             WHERE nb.version_id = n.current_version_id
-              AND nb.content ILIKE ${pattern}
+              AND nb.content ILIKE ${`%${terms[0]}%`}
           ) b ON true
           WHERE n.workspace_id = ${event.ctx.workspaceId}
             AND n.deleted_at IS NULL
-            AND (n.title ILIKE ${pattern} OR coalesce(b.snippet, '') <> '')
+            AND ${sql.join(termConditions, sql` AND `)}
           ORDER BY n.updated_at DESC
           LIMIT ${limit}
         `),

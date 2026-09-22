@@ -19,6 +19,8 @@ import {
   boundedToolCallIdentity,
   actionSteerBudget,
   joinVisibleSegmentsDeduped,
+  NOTE_SEARCH_MAX_TERMS,
+  noteSearchTerms,
   partitionPersonaPatch,
   planStepSteer,
   stepHoldChars,
@@ -602,4 +604,27 @@ test("planStepSteer：额度用尽后不再重复补同一条", () => {
   assert.equal(planStepSteer({
     ...steerInput, hasUnverifiedClaims: false, lookupClaim: true, lookupClaimSteered: true,
   }).steer, false);
+});
+
+// ─── §12.3 笔记检索：逐词命中，不是整串子串 ──────────────────────────────
+test("noteSearchTerms：实机那句检索词切成两个词", () => {
+  // 她按摘要里的名字去搜《欧姆定律生成验收》，用的词是"欧姆定律 生成验收"——
+  // 整串 `%…%` 在这篇笔记的标题里匹配不上，工具回了"没有找到"。
+  assert.deepEqual(noteSearchTerms("欧姆定律 生成验收"), ["欧姆定律", "生成验收"]);
+  assert.deepEqual(noteSearchTerms("  多个   空格\t也算一个  "), ["多个", "空格", "也算一个"]);
+});
+
+test("noteSearchTerms：剥掉 LIKE 的通配符，别让模型自己拼通配查询", () => {
+  assert.deepEqual(noteSearchTerms("100% 复习_巩固"), ["100", "复习巩固"]);
+});
+
+test("noteSearchTerms：词数封顶", () => {
+  const many = noteSearchTerms(Array.from({ length: 12 }, (_, i) => `词${i}`).join(" "));
+  assert.equal(many.length, NOTE_SEARCH_MAX_TERMS);
+  assert.equal(many[0], "词0");
+});
+
+test("noteSearchTerms：空检索词返回空数组（调用方据此短路，不许放 %% 进 SQL）", () => {
+  assert.deepEqual(noteSearchTerms("   "), []);
+  assert.deepEqual(noteSearchTerms("%%% ___"), []);
 });
