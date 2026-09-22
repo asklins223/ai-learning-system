@@ -4306,3 +4306,33 @@ playback：played 75 / deadline 2（等待时长 3002ms）/ dropped 7
 报表那一行（`播放上报 = … / 等到超时 N` + by_reason 的 p50）就是前后对比用的。
 测试侧没有写死 3000——两条截止测试引用的都是导出的常量，所以阈值一改它们自动跟着走
 （26/26 绿）。
+
+#### D3 结果（同日 14:55）：两条目标用例修好了，但量出一个**更大的东西**（新开 D6）
+
+`companion-conversation` 那两条红，按 §13 的做法落地后：
+
+- **测试 4（active run 规则）**：前置的那条 active run 改成**直插**（`seedActiveRun`，
+  不经 service，因此**不入队 job**）。原来它靠 service 建，而 worker 是被
+  `pg_notify` 叫醒的（不是 500ms 轮询），实测在 service 提交后几毫秒内就把 job 认领走，
+  run 从此不再停在 accepted。事后补救两条都试过的并且都不成立：把 `scheduled_at`
+  推到 10 分钟后（与认领互相死锁 40P01）、事后抢锁占住（抢不过通知，稳定报"被抢先"）。
+  种子要把 `next_generation` 一起推到 2，否则 service 下一次分配出的 generation 还是 1，
+  插 run 时撞 `(conversation_id, generation)` 唯一约束——这条是我自己踩出来的。
+- **测试 6（SSE replay）**：`chunks.length === 1` 改成"第一帧必须是 turn.accepted 且
+  id 对得上"。"总共只有一帧"断言的不是被测语义，而是"这一刻没有别人往这条会话里写"，
+  在共享开发库上永远不可能稳定。
+
+**但这条套件仍然不是"随便什么时候跑都绿"**：连跑四次，每次红 1–2 条，**红在哪条会变**，
+错固定是 `40P01 deadlock detected`（出现在幂等、active run、messages 历史、SSE 各次不同的
+用例里），另有一次 `duplicate key ... companion_stream_events_pkey`。这两条都不是测试
+写错的样子：
+
+1. **死锁**：`createCompanionTurn` 的事务（messages → conversations 计数 → runs → events → jobs）
+   与 `ailearn_claim_jobs`（跨工作区按优先级排候选行再 UPDATE）在并发下互相拿锁。
+   生产含义是**用户发一轮可能直接 500**，不是"测试环境问题"。
+2. **事件 seq 撞号**：两个写者能拿到同一个 `(conversation_id, seq)`。所有已知分配点都是
+   `UPDATE ... RETURNING` 原子取的，所以还有一条没找到的路径在**手算 seq**。
+
+这两条都不属于 D3 的范围，单独立成 **D6**（下一批的第一位），先量再修：
+死锁要抓 `pg_stat`/日志里的两条语句对；撞号要先把所有写 `companion_stream_events` 的
+入口列出来，逐个看它是"取号"还是"算号"。

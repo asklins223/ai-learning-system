@@ -31,6 +31,45 @@ import { transcribeCompanionDialogueAudio } from "../modules/learning-sessions/c
 import { execFileSync } from "node:child_process";
 import { closeDatabase } from "../db/client.ts";
 
+/**
+ * 直接种一条 **active run**，不经 service —— 因为它**不会入队 job**。
+ *
+ * 为什么需要：这几条用例的前提是"这一轮还没有人跑过"。而 `ailearn_claim_jobs` 的
+ * 条件是 `status='pending' AND scheduled_at <= now()`，开发栈上那个活着的 worker
+ * 是**被 pg_notify 叫醒的**（不是 500ms 轮询），实测在 service 提交后的几毫秒内就把
+ * job 认领走了——于是 run 不再是 accepted、事件流里多出 worker 写的一串帧，
+ * "active run 规则"与"SSE replay 只有一帧"这两条在开发机上必红、只在没有 worker 的
+ * CI 里绿。试过两种事后补救：把 scheduled_at 推到 10 分钟后（与认领互相死锁 40P01）、
+ * 事后抢锁占住（抢不过通知，稳定报"被抢先"）。**能确定的只有别让 job 存在**：
+ * 前置条件用直插的 run，用例本身要断言的那次 create 仍然走 service。
+ */
+async function seedActiveRun(args: {
+  workspaceId: string; userId: string; conversationId: string;
+}): Promise<{ runId: string; generation: number }> {
+  const runId = randomUUID();
+  const messageId = randomUUID();
+  await sql.begin(async (tx) => {
+    await tx`SELECT set_config('app.workspace_id', ${args.workspaceId}, true)`;
+    await tx`SELECT set_config('app.user_id', ${args.userId}, true)`;
+    await tx`INSERT INTO companion_messages
+               (id, conversation_id, workspace_id, user_id, role, seq, kind, blocks, content_sha256)
+             VALUES (${messageId}, ${args.conversationId}, ${args.workspaceId}, ${args.userId},
+                     'user', 1, 'text', ${tx.json([{ type: "text", text: "前置的一轮" }])},
+                     ${"0".repeat(64)})`;
+    await tx`INSERT INTO companion_turn_runs
+               (id, conversation_id, workspace_id, user_id, user_message_id, generation, status,
+                idempotency_key_hash, request_body_hash)
+             VALUES (${runId}, ${args.conversationId}, ${args.workspaceId}, ${args.userId},
+                     ${messageId}, 1, 'accepted', ${"a".repeat(64)}, ${"b".repeat(64)})`;
+    // 计数器要一起走：`next_generation` 停在 1 的话，service 下一次分配出来的
+    // generation 还是 1，插 run 时撞 (conversation_id, generation) 唯一约束。
+    await tx`UPDATE companion_conversations
+             SET next_message_seq = 2, next_event_seq = 1, next_generation = 2
+             WHERE id = ${args.conversationId}`;
+  });
+  return { runId, generation: 1 };
+}
+
 async function collectCompanionExport(args: { workspaceId: string; userId: string }) {
   const ndjson: string[] = [];
   const result = await exportCompanionDataStream(args, (line) => {
@@ -198,11 +237,10 @@ test("P2 幂等：同 clientMessageId 同 body（不同 key）返回同一 run",
 test("P2 active run 规则：无 supersedesGeneration → 409；正确 supersede → 新 run + 旧 run superseded + cancelled event", async () => {
   const { workspaceId, userId, conversationId, cleanup } = await seedConversation();
   try {
-    const first = await createCompanionTurn({
-      workspaceId, userId, conversationId, idempotencyKey: randomUUID(),
-      body: turnBody(randomUUID()),
-    });
-    const firstGen = (first.body as { generation: number }).generation;
+    // 前置的 active run 直插（见 seedActiveRun）：走 service 就会被开发栈上的 worker
+    // 认领走，那两条断言在开发机上永远不可能成立。
+    const seeded = await seedActiveRun({ workspaceId, userId, conversationId });
+    const firstGen = seeded.generation;
 
     // 无 supersedesGeneration → RUN_ALREADY_ACTIVE
     await assert.rejects(
@@ -229,13 +267,13 @@ test("P2 active run 规则：无 supersedesGeneration → 409；正确 supersede
       body: { ...turnBody(randomUUID()), supersedesGeneration: firstGen },
     });
     assert.equal(second.statusCode, 202);
-    const secondGen = (second.body as { generation: number }).generation;
+const secondGen = (second.body as { generation: number }).generation;
     assert.equal(secondGen, 2);
 
     const rows = await sql.begin(async (tx) => {
       await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
       await tx`SELECT set_config('app.user_id', ${userId}, true)`;
-      const oldRun = await tx`SELECT status FROM companion_turn_runs WHERE id = ${(first.body as { runId: string }).runId}`;
+      const oldRun = await tx`SELECT status FROM companion_turn_runs WHERE id = ${seeded.runId}`;
       const cancelled = await tx`SELECT type FROM companion_stream_events WHERE conversation_id = ${conversationId} AND type = 'turn.cancelled'`;
       const activeRuns = await tx`SELECT count(*)::int AS n FROM companion_turn_runs WHERE conversation_id = ${conversationId} AND status IN ('accepted','running','cancel_requested')`;
       return { oldRun, cancelled, activeRuns };
@@ -294,6 +332,7 @@ test("P2 SSE：replay turn.accepted + after 推进 + INVALID_CURSOR/CURSOR_EXPIR
     });
     const acceptedSeq = (created.body as { eventCursor: number }).eventCursor;
 
+
     const chunks: string[] = [];
     const abortRef: { fn: (() => void) | null } = { fn: null };
     let closed = false;
@@ -309,7 +348,11 @@ test("P2 SSE：replay turn.accepted + after 推进 + INVALID_CURSOR/CURSOR_EXPIR
     assert.equal(result.statusCode, 200);
     if ("stream" in result) {
       result.stream.start();
-      assert.equal(chunks.length, 1, "replay 应含 turn.accepted");
+      // 只断言**第一帧**，不断言"总共只有一帧"：这一轮是 service 真入队的，开发栈上
+      // 那个 worker 随时可能跑完它并往同一条会话里追加帧——那是环境，不是被测行为。
+      // replay 的语义（游标之前的事件必须从头给到、且顺序正确）由"第一帧是 turn.accepted
+      // 且 id 对得上"承担，多出来的帧不改变这条结论。
+      assert.ok(chunks.length >= 1, "replay 至少要有 turn.accepted");
       assert.ok(chunks[0].includes(`id: ${conversationId}:${acceptedSeq}`));
       assert.ok(chunks[0].includes("event: companion"));
       assert.ok(chunks[0].includes("turn.accepted"));
