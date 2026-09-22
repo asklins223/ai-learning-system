@@ -1785,3 +1785,39 @@ worker 侧传 `candidate.objective.practiceItem` 的 `options.length`，api 侧
 1. 读路径只数 `qualityState === 'passed'` 的最新 revision —— 一处过滤，改完这条头部与卡面上"随卡练习是什么"才自洽（卡面本来就写着那张没过）。
 2. 读 `critiqueAndFinalizeCandidates` 里结算相对于 deck gate / 去重的位置，确认 `metCount` 应该以哪个集合为准；**两者必须引用同一个集合**，否则这个数永远有两个答案（这正是我这一整晚在反对的那类错，这次是我自己造的）。
 3. 定完之后把这条批次的两个数再各读一次，要求逐字段相等；把这个等式写成一条测试（事件与读路径同源）。
+
+## 51. §50 的修法我差点改错：`passed` 不等于"进了牌堆"，而审核页正在多发卡
+
+把 `4938cf7f` 这批改的事件按 `event_seq` 全读了一遍，事实链是这样：
+
+```
+5 authored
+4 grounding_passed / 1 grounding_failed(front_leaks_answer)   ← 只有那张是 failed
+2 pedagogy_passed
+2 card_candidate.review_ready
+1 practice_quota_short {required:3, met:1}
+```
+
+而候选表里的 `quality_state` 是 **4 passed + 1 failed**。
+
+**我原来准备改的读路径"只数 passed"是错的**：那 2 张被 pedagogy 丢掉、根本没进牌堆的卡，
+行上写的仍然是 `passed`。所以按 `passed` 过滤，头部依旧报 `{3,3}`，与事件的 `{3,1}` 还是两个答案。
+真跑把这一步拦下来了 —— 这就是"先证明有人读它的产出，再改写入侧"的反面教材：
+我先想改的是过滤器，而真正的语义缺口在上游。
+
+**而且这不只是配额的问题（更要紧的一条）**：审核页可审核的判据是
+`isCandidateReviewReadyV2 = qualityState='passed' ∧ undecided ∧ unpublished`，
+于是那 2 张 pedagogy 已经丢弃、只有 2 张真进了牌堆的批次，会在审核页给出
+**4 张"可保留 / 可激活"的卡**。用户保留第 3 张时会发生什么，我还没验——
+但"能点"与"在牌堆里"是两件事，这一点已经确定。
+
+**所以正确的修法顺序**（改完 §50 那条一起生效）：
+1. **牌堆归属必须是一个能被读到的状态**，不能只活在 `afterRepair` 这个内存变量里：
+   pedagogy 丢弃的那几张要把行上的状态推进到一个明确的终值（或落一条
+   `card_candidate.dropped`），让"能不能审核"有唯一来源。
+2. 读路径（头部 `practiceQuota` 与审核列表）改读那个来源，**不在界面侧再判一次**。
+3. 加一条断言：同一批次里"事件结算的 `{required,met}`"与"头部读到的 `{required,met}`"必须
+   逐字段相等；再一条：`isReviewReady` 的张数 == `card_candidate.review_ready` 事件张数。
+   第二条今天跑一次就会红（4 vs 2），它正是这次要钉的东西。
+
+§50 里那句"读路径只数 passed"作废，以本节为准。
