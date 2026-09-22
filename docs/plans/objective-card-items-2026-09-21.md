@@ -1951,3 +1951,24 @@ worker 侧传 `candidate.objective.practiceItem` 的 `options.length`，api 侧
 验证：shared 343/343、桌面 21/21、api scoped 48/48 与 0255 6/6、worker 套件 745/745、
 我这两份集测 3/3；api/worker typecheck 里我的文件 0 报错（剩余各 1–2 条在
 `companion-dialogue.ts` / `daily-summary-routes.ts`，是并发会话在途的）。
+
+## 57. `useLLM` 当能力判断的那 7 处全部摘掉——确定性路径不因此改变，但测试进得来了
+
+§40 说"门里那个 `useLLM` 是 `providers` 的代理"，这一步把它彻底拿掉：
+`handler` 里 7 处 `useLLM && providers` 改成 `providers`，并把因此变成死字段的
+`useLLM: boolean` 入参（1 处类型 + 5 处传参 + 1 处解构）一并删掉——留着就是
+"为兼容保留的死字段"，这仓库不许。
+
+**为什么生产行为不变（不是我推断，是读赋值处读出来的）**：四条 stage 入口都是
+`const providers = useLLM ? await buildProvidersForRun(...) : null`（`handler:1353/2678/2751/2962`），
+所以 `providers` 非空 当且仅当 `useLLM` 为真。用 `providers` 判，与用 `useLLM` 判，
+在生产里是同一个真值表；区别只有一句：**测试现在可以从外面走进来了**
+（#37 要的脚本 pedagogy 传进去就真会被用，不必再伪造一个环境变量）。
+
+**顺带这条也纠正 §40 的一处措辞**：我当时以为只需要动 `handler:2238` 那道门，
+实际 7 处里还包括 planner 抽取、author、grounding 契约三处同样把"是否付费"当"是否有能力"。
+一处一处改，比留一个 `useLLM` 到处当代理干净。
+
+验证：worker 747/747、worker typecheck 只剩别人那一条 `companion-dialogue.ts`；
+我两份集测 11/11（live-progress 与 bounded-repair 都在确定性路径上，能证"没改变行为"这一半）。
+**没证的那一半**（脚本 provider 真能被用起来、以及 #38 要的等式断言）就是 #37 本身。

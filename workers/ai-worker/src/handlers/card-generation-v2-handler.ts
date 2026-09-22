@@ -1366,7 +1366,7 @@ const existingObjRows = (await tx.execute(sql`
       unsupportedSourceBlocks,
       existingObjectives,
       clientHardMaxCards: inputSnapshot?.rawRequest?.quantity?.hardMaxCards,
-      extractionProvider: useLLM && providers ? providers.plannerExtraction : undefined,
+      extractionProvider: providers ? providers.plannerExtraction : undefined,
       // M3：把 sealed 证据清单与取消信号交给 planner（prompt 中"从可用证据 ID
       // 列表选择 evidenceRefIds"此前无从满足，existingObjectives 也恒为空）。
       evidenceList: sealed.evidenceManifest.evidence.map((e) => ({
@@ -1439,7 +1439,7 @@ const existingObjRows = (await tx.execute(sql`
     // 注意：本阶段**只做 provider 调用与纯计算，不碰 tx**——所有落库、事件、
     // 顺序判定仍由下面的串行收尾阶段按计划顺序完成（事务内语句顺序与改造前一致）。
     throwIfPipelineAborted(signal);
-    const authoringProvider: AuthoringProvider = useLLM && providers
+    const authoringProvider: AuthoringProvider = providers
       ? providers.author
       : new DeterministicAuthoringProvider();
     const authorInput = {
@@ -1510,7 +1510,7 @@ const existingObjRows = (await tx.execute(sql`
           generationRequest: semanticSpec.semanticRequest,
           signal: pipelineSignal,
         },
-        useLLM && providers ? providers.pedagogy : new DeterministicPedagogyProvider(),
+        providers ? providers.pedagogy : new DeterministicPedagogyProvider(),
       ).then(
         (report) => ({ report, judgedCandidateIds: judged.map((c) => c.candidateId) }),
         (error) => {
@@ -1565,7 +1565,6 @@ const existingObjRows = (await tx.execute(sql`
           sealed,
           existingObjectives,
           providers,
-          useLLM,
           stageSignal: pipelineSignal,
           // 可重试错误：abort 其余在途链（不再为注定回滚的 job 付费），
           // 错误本身按候选顺序在收尾阶段抛出（语义与串行版本一致）。
@@ -1618,7 +1617,6 @@ const existingObjRows = (await tx.execute(sql`
       sourceContent,
       existingObjectives,
       providers,
-      useLLM,
       signal,
       // 按候选流水线预计算的 grounding 结果：跳过本函数内部的 provider 波，
       // 直接进入串行收尾（写入顺序/事件/判定完全不变）。
@@ -1789,12 +1787,11 @@ export async function callGroundingCritic(args: {
   sealed: Awaited<ReturnType<typeof loadSealedEvidence>>;
   existingObjectives: ExistingObjectiveRef[];
   providers: Awaited<ReturnType<typeof buildProvidersForRun>> | null;
-  useLLM: boolean;
   stageSignal: AbortSignal;
   onRetryableError: (error: unknown) => void;
   signal?: AbortSignal;
 }): Promise<CandidateGroundingOutcome> {
-  const { precheck, sealed, existingObjectives, providers, useLLM, stageSignal } = args;
+  const { precheck, sealed, existingObjectives, providers, stageSignal } = args;
   const { candidate, fatalPre, softPre } = precheck;
   // H5/M1：每个候选（= 一组新的 grounding/critic 付费调用）开始前的取消检查。
   throwIfPipelineAborted(args.signal);
@@ -1803,7 +1800,7 @@ export async function callGroundingCritic(args: {
     return { candidate, fatalPre, softPre, contract: null, error: null };
   }
   try {
-    const contract = useLLM && providers
+    const contract = providers
       ? await runGroundingCritic(
           { candidate, evidenceManifest: sealed.evidenceManifest as never, existingObjectives, signal: stageSignal },
           providers.grounding,
@@ -1836,7 +1833,6 @@ async function critiqueAndFinalizeCandidates(
     sourceContent: string;
     existingObjectives: ExistingObjectiveRef[];
     providers: Awaited<ReturnType<typeof buildProvidersForRun>> | null;
-    useLLM: boolean;
     /** Recheck must never create an unbounded chain of authored revisions. */
     allowBoundedRepair?: boolean;
     /** H5/M1：job 级取消信号（租约丢失 / 墙钟预算耗尽）。 */
@@ -1869,7 +1865,6 @@ async function critiqueAndFinalizeCandidates(
     sourceContent,
     existingObjectives,
     providers,
-    useLLM,
     allowBoundedRepair = true,
     signal,
     generationRequest,
@@ -1936,7 +1931,6 @@ async function critiqueAndFinalizeCandidates(
             sealed,
             existingObjectives,
             providers,
-            useLLM,
             stageSignal,
             onRetryableError: (error) => stageAbort.abort(error),
             signal,
@@ -2184,7 +2178,7 @@ async function critiqueAndFinalizeCandidates(
               generationRequest,
               signal,
             },
-            useLLM && providers ? providers.pedagogy : new DeterministicPedagogyProvider(),
+            providers ? providers.pedagogy : new DeterministicPedagogyProvider(),
           );
     if (speculative) {
       logger.info(
@@ -2235,7 +2229,7 @@ async function critiqueAndFinalizeCandidates(
       const keepSet = new Set(pc.filter((p) => p.verdict === "keep").map((p) => p.candidateId));
       const rewriteSet = new Set(pc.filter((p) => p.verdict === "rewrite").map((p) => p.candidateId));
       // bounded repair：每个失败候选最多 repair 一次
-      if (allowBoundedRepair && useLLM && providers && rewriteSet.size > 0 && !repaired) {
+      if (allowBoundedRepair && providers && rewriteSet.size > 0 && !repaired) {
         const repairedRevisions: LearningCardCandidateRevisionV2[] = [];
         for (const c of afterRepair) {
           if (rewriteSet.has(c.candidateId)) {
@@ -2701,7 +2695,6 @@ async function processRegenerateCandidateJob(job: PendingOutboxJob, signal?: Abo
       sourceContent: ctx.sourceContent,
       existingObjectives: ctx.existingObjectives,
       providers,
-      useLLM,
       allowBoundedRepair: false,
       signal,
       generationRequest: ctx.semanticSpec.semanticRequest,
@@ -2763,7 +2756,7 @@ async function processReplanSetJob(job: PendingOutboxJob, signal?: AbortSignal):
       unsupportedSourceBlocks: ctx.unsupportedSourceBlocks,
       existingObjectives: ctx.existingObjectives,
       clientHardMaxCards: ctx.inputSnapshot?.rawRequest?.quantity?.hardMaxCards,
-      extractionProvider: useLLM && providers ? providers.plannerExtraction : undefined,
+      extractionProvider: providers ? providers.plannerExtraction : undefined,
       evidenceList: ctx.sealed.evidenceManifest.evidence.map((e) => ({
         evidenceSnapshotId: e.evidenceSnapshotId,
         quoteHash: e.quoteHash ?? null,
@@ -2872,7 +2865,6 @@ async function processReplanSetJob(job: PendingOutboxJob, signal?: AbortSignal):
       sourceContent: ctx.sourceContent,
       existingObjectives: ctx.existingObjectives,
       providers,
-      useLLM,
       signal,
       generationRequest: ctx.semanticSpec.semanticRequest,
     });
@@ -2974,7 +2966,6 @@ async function processRecheckCandidateJob(job: PendingOutboxJob, signal?: AbortS
       sourceContent: ctx.sourceContent,
       existingObjectives: ctx.existingObjectives,
       providers,
-      useLLM,
       // The initial generation already consumed the single bounded repair
       // budget. A recheck must only rerun the gates for this immutable
       // authored revision; allowing another repair here creates an unbounded
