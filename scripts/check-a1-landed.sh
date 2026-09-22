@@ -4,7 +4,7 @@
 set -u
 H=workers/ai-worker/src/handlers/card-generation-v2-handler.ts
 echo "① HEAD      : $(git log -1 --format='%h %s' 2>/dev/null)"
-echo "② 按目标的冲突目标（应为 3 处；0 处=A1 不在这棵树）:"
+echo "② 按目标的冲突目标（≥1 处；逐张写与批量写共用一支 helper 时就是 1 处。0 处=A1 不在这棵树）:"
 grep -c "ON CONFLICT (workspace_id, run_id" "$H" 2>/dev/null | sed 's/^/     /'
 echo "③ 入口守卫（A1 之后不应再有『非 planning 就 return』）:"
 grep -c 'if (run.status !== "planning")' "$H" 2>/dev/null | sed 's/^/     /'
