@@ -60,8 +60,8 @@ async function seedNote(title: string, content: string): Promise<{ versionId: st
     await tx`INSERT INTO users (id, email, password_hash)
       VALUES (${USER_ID}, ${`v2-ccases-${USER_ID}@example.invalid`}, 'unused')
       ON CONFLICT (id) DO NOTHING`;
-    await tx`INSERT INTO workspaces (id, owner_id, name, ai_consent_version, ai_consent_at, ai_consent_by)
-      VALUES (${WORKSPACE_ID}, ${USER_ID}, 'V2 C-cases', 'v1', now(), ${USER_ID})
+    await tx`INSERT INTO workspaces (id, owner_id, name)
+      VALUES (${WORKSPACE_ID}, ${USER_ID}, 'V2 C-cases')
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role)
       VALUES (${WORKSPACE_ID}, ${USER_ID}, 'owner') ON CONFLICT DO NOTHING`;
@@ -325,8 +325,8 @@ before(async () => {
     await tx`INSERT INTO users (id, email, password_hash)
       VALUES (${USER_ID}, ${`v2-ccases-${USER_ID}@example.invalid`}, 'unused')
       ON CONFLICT (id) DO NOTHING`;
-    await tx`INSERT INTO workspaces (id, owner_id, name, ai_consent_version, ai_consent_at, ai_consent_by)
-      VALUES (${WORKSPACE_ID}, ${USER_ID}, 'V2 C-cases', 'v1', now(), ${USER_ID})
+    await tx`INSERT INTO workspaces (id, owner_id, name)
+      VALUES (${WORKSPACE_ID}, ${USER_ID}, 'V2 C-cases')
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role)
       VALUES (${WORKSPACE_ID}, ${USER_ID}, 'owner') ON CONFLICT DO NOTHING`;

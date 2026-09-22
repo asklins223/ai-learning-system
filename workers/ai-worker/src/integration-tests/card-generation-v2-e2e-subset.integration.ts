@@ -84,8 +84,8 @@ async function seedNote(
     await tx`INSERT INTO users (id, email, password_hash)
       VALUES (${USER_ID}, ${`v2-e2e-${USER_ID}@example.invalid`}, 'unused')
       ON CONFLICT (id) DO NOTHING`;
-    await tx`INSERT INTO workspaces (id, owner_id, name, ai_consent_version, ai_consent_at, ai_consent_by)
-      VALUES (${WORKSPACE_ID}, ${USER_ID}, 'V2 E2E', 'v1', now(), ${USER_ID})
+    await tx`INSERT INTO workspaces (id, owner_id, name)
+      VALUES (${WORKSPACE_ID}, ${USER_ID}, 'V2 E2E')
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role)
       VALUES (${WORKSPACE_ID}, ${USER_ID}, 'owner') ON CONFLICT DO NOTHING`;
@@ -134,8 +134,8 @@ before(async () => {
     await tx`INSERT INTO users (id, email, password_hash)
       VALUES (${USER_ID}, ${`v2-e2e-${USER_ID}@example.invalid`}, 'unused')
       ON CONFLICT (id) DO NOTHING`;
-    await tx`INSERT INTO workspaces (id, owner_id, name, ai_consent_version, ai_consent_at, ai_consent_by)
-      VALUES (${WORKSPACE_ID}, ${USER_ID}, 'V2 E2E', 'v1', now(), ${USER_ID})
+    await tx`INSERT INTO workspaces (id, owner_id, name)
+      VALUES (${WORKSPACE_ID}, ${USER_ID}, 'V2 E2E')
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role)
       VALUES (${WORKSPACE_ID}, ${USER_ID}, 'owner') ON CONFLICT DO NOTHING`;
@@ -388,7 +388,7 @@ test("C32：跨 workspace 伪造 runId → 0 事件，内容零泄漏", async ()
   const intruderWorkspaceId = randomUUID();
   await admin.begin(async (tx) => {
     await tx`INSERT INTO users (id, email, password_hash) VALUES (${intruderUserId}, ${`intruder-${intruderUserId}@x.invalid`}, 'u') ON CONFLICT (id) DO NOTHING`;
-    await tx`INSERT INTO workspaces (id, owner_id, name, ai_consent_version, ai_consent_at, ai_consent_by) VALUES (${intruderWorkspaceId}, ${intruderUserId}, 'intruder', 'v1', now(), ${intruderUserId}) ON CONFLICT (id) DO NOTHING`;
+    await tx`INSERT INTO workspaces (id, owner_id, name) VALUES (${intruderWorkspaceId}, ${intruderUserId}, 'intruder') ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES (${intruderWorkspaceId}, ${intruderUserId}, 'owner') ON CONFLICT DO NOTHING`;
   });
 

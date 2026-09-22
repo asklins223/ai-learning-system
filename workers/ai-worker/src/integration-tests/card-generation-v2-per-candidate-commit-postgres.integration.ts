@@ -123,14 +123,15 @@ after(async () => {
 });
 
 /** 认领（必要时先退回 pending）本 run 的 plan job——两步必须在同一个事务里。 */
-async function claimPlanJob(options: { replay?: boolean } = {}): Promise<PlanJob> {
+async function claimPlanJob(options: { replay?: boolean; jobType?: string; optional?: boolean } = {}): Promise<PlanJob | null> {
+  const jobType = options.jobType ?? "card_generation_plan";
   for (let attempt = 0; attempt < 40; attempt += 1) {
     const leaseToken = randomUUID();
     const outcome = await admin.begin(async (tx) => {
       const states = await tx`
         SELECT status, (lease_token IS NOT NULL AND lease_expires_at > now()) AS live_lease
         FROM card_generation_run_outbox_v2
-        WHERE run_id = ${runId} AND job_type = 'card_generation_plan' FOR UPDATE
+        WHERE run_id = ${runId} AND job_type = ${jobType} FOR UPDATE
       ` as unknown as Array<{ status: string; live_lease: boolean }>;
       const status = states[0]?.status;
       if (status === "completed" && !options.replay) return { blocked: true as const };
@@ -139,7 +140,7 @@ async function claimPlanJob(options: { replay?: boolean } = {}): Promise<PlanJob
         UPDATE card_generation_run_outbox_v2
         SET status = 'pending', lease_token = NULL, lease_expires_at = NULL,
             started_at = NULL, processed_at = NULL, next_attempt_at = NULL
-        WHERE run_id = ${runId} AND job_type = 'card_generation_plan'
+        WHERE run_id = ${runId} AND job_type = ${jobType}
       `;
       const claimed = await tx`
         UPDATE card_generation_run_outbox_v2
@@ -163,13 +164,44 @@ async function claimPlanJob(options: { replay?: boolean } = {}): Promise<PlanJob
     }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  assert.fail("40 次尝试内没能认领到本 run 的 plan job");
+  if (options.optional) return null;
+  assert.fail(`40 次尝试内没能认领到本 run 的 ${options.jobType ?? "card_generation_plan"} job`);
 }
 
 async function runPlanJob(options: { replay?: boolean } = {}): Promise<void> {
   const job = await claimPlanJob(options);
+  assert.ok(job, "认领不该返回空");
   const { processV2OutboxJob } = await import("../handlers/card-generation-v2-handler.ts");
   await processV2OutboxJob(job);
+}
+
+/**
+ * 造一条**已经被本进程认领**的 replan job（一条 INSERT，不经过 pending 状态）。
+ *
+ * 为什么不叫 api 的 `retryGenerationRunV2` 再认领：它插的是 pending 行，而 dev 容器的
+ * poller 每秒扫一次这条表——实测就是被它抢先领走并用真 LLM 跑掉的（成本记在这次测试头上
+ * 不合理，也不该由测试来决定何时花钱）。入口守卫（必须 needs_attention +
+ * quality_gate_failed、双击 409）是 api 侧的事，已由
+ * `apps/api/src/__tests__/card-generation-v2-run-service.test.ts` 覆盖；
+ * 本用例要验的是 worker 那条**批量写候选**的路径还活着。
+ */
+async function insertClaimedReplanJob(): Promise<PlanJob> {
+  const leaseToken = randomUUID();
+  const rows: Array<{ id: string }> = await admin`
+    INSERT INTO card_generation_run_outbox_v2
+      (workspace_id, run_id, job_type, payload, status, started_at, lease_token, lease_expires_at)
+    VALUES (
+      ${WORKSPACE_ID}, ${runId}, 'card_generation_replan_set',
+      ${admin.json({ runId, workspaceId: WORKSPACE_ID })},
+      'processing', now(), ${leaseToken}, now() + interval '30 minutes'
+    )
+    RETURNING id
+  `;
+  return {
+    id: rows[0].id, workspaceId: WORKSPACE_ID, runId,
+    jobType: "card_generation_replan_set",
+    payload: { runId, workspaceId: WORKSPACE_ID }, leaseToken,
+  };
 }
 
 /** authored 事件出自哪些事务（事件行只追加不改，所以 xmin 就是"谁写下的它"）。 */
@@ -198,6 +230,13 @@ async function reusedCandidateIds(): Promise<string[]> {
       AND event_type = 'card_candidate.authored_reused'
   `;
   return rows.map((r) => r.candidate_id);
+}
+
+async function runStatus(): Promise<string> {
+  const rows: Array<{ status: string }> = await admin`
+    SELECT status FROM card_generation_runs_v2 WHERE id = ${runId} AND workspace_id = ${WORKSPACE_ID}
+  `;
+  return rows[0]?.status ?? "";
 }
 
 async function candidateRows(): Promise<Array<{ candidate_revision_id: string; quality_state: string; revision: number }>> {
@@ -261,4 +300,50 @@ test("重放不再调作者：行数与身份一字不动，跳过这件事留�
   // 复用不等于空转：评审段照样得把每张的状态从 authored 往前推。
   assert.ok(rowsAfter.some((r) => r.quality_state !== "authored"),
     "重放复用之后评审段一步没走（quality_state 还停在 authored）");
+});
+
+/**
+ * replan 走的是**另一条**候选写入路径（`insertAuthoredCandidatesBatched` 的批量形态，
+ * 不带 skipExisting）。A1·B2 改了那支 helper 的签名与列清单来源，所以这条路径必须由
+ * 自己的用例覆盖——否则"逐张提交没弄坏批量提交"这句话只是推断。
+ *
+ * 入口守卫（必须 needs_attention + quality_gate_failed、双击 409）是 api 侧的事，已由
+ * `apps/api/src/__tests__/card-generation-v2-run-service.test.ts` 覆盖；这里要让 worker
+ * 拿到一条**自己持有的租约**的 job，否则 dev 容器的 poller 会先领走并用真 LLM 跑一遍
+ * （实测发生过，成本不该由测试来决定）。确定性批次正好落在 needs_attention 上——
+ * 作者不写证据引用 → 全体 grounding 失败 → 牌堆空 → 需要处理。
+ */
+test("replan 那条批量写路径照样能写：新计划版本有候选、旧版本被 supersede 但行还在", async () => {
+  const status = await runStatus();
+  assert.equal(status, "needs_attention",
+    `这一批不在「需要处理」上（${status}），replan 的状态门闩会拒绝，用例前提不成立`);
+
+  const job = await insertClaimedReplanJob();
+  const { processV2OutboxJob } = await import("../handlers/card-generation-v2-handler.ts");
+  await processV2OutboxJob(job);
+
+  const plans: Array<{ plan_version: number }> = await admin`
+    SELECT plan_version FROM card_generation_plans_v2
+    WHERE workspace_id = ${WORKSPACE_ID} AND run_id = ${runId} ORDER BY plan_version
+  `;
+  assert.ok(plans.some((plan) => plan.plan_version === 2),
+    `replan 之后只有计划版本 ${plans.map((plan) => plan.plan_version).join(",")}`);
+
+  const byVersion: Array<{ plan_version: number; n: number }> = await admin`
+    SELECT plan_version, count(*)::int AS n FROM card_generation_candidates_v2
+    WHERE workspace_id = ${WORKSPACE_ID} AND run_id = ${runId} AND revision = 1
+    GROUP BY 1 ORDER BY 1
+  `;
+  const v2 = byVersion.find((row) => row.plan_version === 2);
+  assert.ok(v2 && v2.n > 0,
+    "replan 没有写出新版本的候选：A1·B2 改过的批量写入路径（不带 skipExisting）被弄坏了");
+  assert.ok((byVersion.find((row) => row.plan_version === 1)?.n ?? 0) > 0,
+    "旧版本的候选行不见了：replan 应该 supersede 而不是删除（revision 不可变）");
+
+  const superseded: Array<{ n: number }> = await admin`
+    SELECT count(*)::int AS n FROM card_generation_candidates_v2
+    WHERE workspace_id = ${WORKSPACE_ID} AND run_id = ${runId}
+      AND plan_version = 1 AND publish_state = 'superseded'
+  `;
+  assert.ok(superseded[0].n > 0, "旧版本候选没有被标 superseded，审核页会同时看到两批");
 });
