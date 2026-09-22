@@ -1793,6 +1793,90 @@
       "tag": "0256_companion_candidate_memory_cooling_off",
       "breakpoints": true,
       "when": 1789800000010
+    },
+    {
+      "idx": 256,
+      "version": "7",
+      "when": 1789800000011,
+      "tag": "0257_sec01_rls_reopen_core_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 257,
+      "version": "7",
+      "when": 1789800000012,
+      "tag": "0258_rls_force_and_tts_outcomes_fk",
+      "breakpoints": true
+    },
+    {
+      "idx": 258,
+      "version": "7",
+      "when": 1789800000013,
+      "tag": "0259_workspace_audit_schema_gaps",
+      "breakpoints": true
+    },
+    {
+      "idx": 259,
+      "version": "7",
+      "when": 1789800000014,
+      "tag": "0260_companion_turn_runs_message_fk_nullable",
+      "breakpoints": true
+    },
+    {
+      "idx": 260,
+      "version": "7",
+      "when": 1789800000016,
+      "tag": "0261_workspace_epoch",
+      "breakpoints": true
+    },
+    {
+      "idx": 261,
+      "version": "7",
+      "when": 1789800000017,
+      "tag": "0262_fix_workspace_epoch_trigger",
+      "breakpoints": true
+    },
+    {
+      "idx": 262,
+      "version": "7",
+      "when": 1789800000018,
+      "tag": "0263_workspace_audit_log",
+      "breakpoints": true
+    },
+    {
+      "idx": 263,
+      "version": "7",
+      "when": 1789800000019,
+      "tag": "0264_workspace_orphans_and_transfer",
+      "breakpoints": true
+    },
+    {
+      "idx": 264,
+      "version": "7",
+      "when": 1789800000020,
+      "tag": "0265_orphan_purge_respects_immutability",
+      "breakpoints": true
+    },
+    {
+      "idx": 265,
+      "version": "7",
+      "when": 1789800000021,
+      "tag": "0266_space_level_proactive_mute",
+      "breakpoints": true
+    },
+    {
+      "idx": 266,
+      "version": "7",
+      "when": 1789800000022,
+      "tag": "0267_cross_space_global_memories",
+      "breakpoints": true
+    },
+    {
+      "idx": 267,
+      "version": "7",
+      "when": 1789800000023,
+      "tag": "0268_sync_global_memory_mutations",
+      "breakpoints": true
     }
   ]
 }
