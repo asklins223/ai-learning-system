@@ -1,6 +1,12 @@
+import { randomUUID } from "node:crypto";
 import { and, eq, isNull, or, gte, desc, sql, inArray } from "drizzle-orm";
 import { DomainError } from "@ailearn/shared";
-import { db, withWorkspaceTransaction, type ApiTransaction } from "../../db/client.ts";
+import {
+  withWorkspaceTransaction,
+  withActorTransaction,
+  adoptWorkspaceContext,
+  type ApiTransaction,
+} from "../../db/client.ts";
 import {
   inviteCodes,
   workspaceMembers,
@@ -299,9 +305,16 @@ export async function consumeInvite(
   // 避免持有连接池连接的同时在主线程 hash（~50-150ms）。不换库（依赖约束）。
   const passwordHash = await hashPassword(password);
 
-  let result: { userId: string; workspaceId: string } | null;
+  // 新账号的 id 在插入前取定：actor 上下文必须在事务开始时确定，而这条路要写
+  // `users` / `workspaces` / `workspace_members` / `onboarding_states` / `invite_codes`
+  // ——其中几张表的策略按 `app.user_id` 判。让数据库 gen_random_uuid() 再回头设
+  // actor 会撞上嵌套校验（同一条请求里两个身份），所以显式生成一次。
+  const newUserId = randomUUID();
+  let result: { userId: string; workspaceId: string; tx: ApiTransaction } | null;
   try {
-    result = await db.transaction(async (tx) => {
+    // 边界事务：进来时只知道"手里这串邀请码"，空间 id 要读出来才知道。
+    // `app.session_token` 放令牌哈希，让邀请码那一行的 actor 读策略能命中。
+    result = await withActorTransaction({ userId: newUserId, sessionToken: tokenHash }, async (tx) => {
       const now = new Date();
 
       // Lock the invite row by token_hash
@@ -350,6 +363,7 @@ export async function consumeInvite(
       const [user] = await tx
         .insert(users)
         .values({
+          id: newUserId,
           email: normalizedEmail,
           passwordHash,
           displayName: defaultDisplayName(options?.displayName, normalizedEmail),
@@ -374,12 +388,19 @@ export async function consumeInvite(
         .set({ personalWorkspaceId: personalWs.id })
         .where(eq(users.id, user.id));
 
+      // 新空间的 id 到这里才知道，而成员行与引导行都要过租户守卫。
+      await adoptWorkspaceContext(tx, personalWs.id);
+
       // 个人工作区 membership（owner）
       await tx.insert(workspaceMembers).values({
         workspaceId: personalWs.id,
         userId: user.id,
         role: "owner",
       });
+
+      // 协作工作区的三处写入（成员行 / 引导行 / 邀请码消费）换到邀请码那个空间的
+      // 租户上下文里做——它们都不是个人空间的子行。
+      await adoptWorkspaceContext(tx, invite.workspaceId);
 
       // 协作工作区 membership with invite role
       await tx.insert(workspaceMembers).values({
@@ -398,6 +419,7 @@ export async function consumeInvite(
       });
 
       // Create onboarding state (个人工作区)
+      await adoptWorkspaceContext(tx, personalWs.id);
       await tx.insert(onboardingStates).values({
         workspaceId: personalWs.id,
         userId: user.id,
@@ -406,7 +428,8 @@ export async function consumeInvite(
         status: "pending",
       });
 
-      // Mark invite consumed
+      // Mark invite consumed（回到邀请码那个空间）
+      await adoptWorkspaceContext(tx, invite.workspaceId);
       await tx
         .update(inviteCodes)
         .set({ consumedBy: user.id, consumedAt: now, consumeContext: "registration" })
@@ -418,7 +441,7 @@ export async function consumeInvite(
         );
 
       // ADR-0009: 默认进入个人工作区
-      return { userId: user.id, workspaceId: personalWs.id };
+      return { userId: user.id, workspaceId: personalWs.id, tx };
     });
   } catch (error) {
     if (error instanceof ConsumeInviteError) return error;
@@ -433,7 +456,11 @@ export async function consumeInvite(
   // OPS-01: Funnel 指标 — 邀请码被消费（新用户注册成功）
   recordFunnelEvent("invite_consumed");
 
-  return issueSession(result.userId, result.workspaceId);
+  // `issueSession` 的会话写入必须落在那条 actor 事务里（`app.user_id` 就是新用户，
+  // 而 `sessions` 的写策略按它判）。把事务交出去，别让它自己再开一条——
+  // 那条新事务里 actor 已经换人了，旧写法在真实库上能过（策略只认 user_id），
+  // 但在这里会先撞上"嵌套上下文换人"的校验。
+  return issueSession(result.userId, result.workspaceId, result.tx);
 }
 
 // ─── Member management ──────────────────────────────────────────────

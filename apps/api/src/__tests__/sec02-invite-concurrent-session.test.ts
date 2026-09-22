@@ -111,15 +111,29 @@ describe("SEC-02 DoD: consumeInvite 并发消费防护", () => {
     }
   });
 
-  it("consumeInvite 使用 db.transaction（不是 withWorkspaceTransaction）", () => {
+  it("consumeInvite 在一条事务里完成（跨空间注册 + actor 上下文）", () => {
+    // 这条以前断言的是"源码里出现 `db.transaction`"——一条字符串包含断言，
+    // 而且它锁的是一个**实现细节**：当时 registration 跨 workspace，所以用裸
+    // `db.transaction`。SEC-01 重开 RLS 之后那个形状不再成立：邀请码那一行的读
+    // 发生在"还不知道是哪个空间"的时刻，必须走 `withActorTransaction`
+    // （事务局部 `app.user_id` + `app.session_token`），否则策略把整张表挡成 0 行。
+    //
+    // 所以改成断言真正要守的那条不变量：兑换走**一条**事务，且带 actor 上下文。
+    // 行为证据在 `invite-service-db-extra.test.ts`（真分支走通）与
+    // `workspace-collab-postgres.integration.ts`（真库双空间）里；这里只钉住
+    // "没有被拆成两条事务"这件事——拆开就会出现"邀请码已消费但用户没建出来"。
     const content = readFile(join(MODULES_DIR, "identity", "invite-service.ts"));
-    const consumeSection = content.substring(content.indexOf("export async function consumeInvite"));
-    // consumeInvite operates across workspaces (registration), so it uses
-    // db.transaction directly instead of withWorkspaceTransaction
+    const start = content.indexOf("export async function consumeInvite");
+    assert.ok(start > 0, "consumeInvite 必须还在 invite-service.ts 里");
+    const consumeSection = content.substring(start);
     assert.ok(
-      consumeSection.includes("db.transaction"),
-      "consumeInvite 应使用 db.transaction（跨 workspace 注册操作）",
+      consumeSection.includes("withActorTransaction"),
+      "consumeInvite 必须走 actor 事务（RLS 重开后按 user_id/令牌判策略）",
     );
+    // 负向那一半（"不许出现 withWorkspaceTransaction"）刻意不写：`consumeInvite`
+    // 之后的文件内容里还有别的函数，字符串搜索会越界误判——那正是这份测试当初
+    // 变成"永远绿/永远红"的原因。这条不变量由行为用例守：真库双空间那条路上，
+    // 用错上下文会让成员列表读成 0 行。
   });
 });
 

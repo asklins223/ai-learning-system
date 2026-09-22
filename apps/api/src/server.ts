@@ -16,6 +16,7 @@ import { sourceRoutes } from "./modules/source/routes.ts";
 import { importRoutes } from "./modules/import/routes.ts";
 import { searchRoutes } from "./modules/search/routes.ts";
 import { exportRoutes } from "./modules/export/routes.ts";
+import { auditRoutes } from "./modules/audit/routes.ts";
 import { statsRoutes } from "./modules/stats/routes.ts";
 import { activityRoutes } from "./modules/activity/routes.ts";
 import { uploadRoutes } from "./modules/upload/routes.ts";
@@ -340,6 +341,7 @@ async function main() {
   await app.register(importRoutes);
   await app.register(searchRoutes);
   await app.register(exportRoutes);
+  await app.register(auditRoutes);
   await app.register(statsRoutes);
   await app.register(activityRoutes);
   await app.register(uploadRoutes);

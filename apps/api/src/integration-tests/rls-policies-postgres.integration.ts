@@ -241,17 +241,61 @@ test("installs fail-closed SEC-01 policies without making this an HTTP or M1 gat
       FROM pg_catalog.pg_policies
       WHERE schemaname = 'public'
         AND tablename = ANY(${migrator.array([...POLICY_TABLES])})
-        AND policyname LIKE 'sec01\_v1\_%'
+        -- 0257 起 invite_codes 的租户守卫是 sec02 那一条（sec01 与 sec02 原本各装
+        -- 一条逐字相同的 RESTRICTIVE 守卫，两条都要求"当前空间"，兑换邀请码因此
+        -- 永远读不到行）。查询要把两代命名都收进来，下面的断言才看得到真实目录。
+        AND (policyname LIKE 'sec01\_v1\_%' OR policyname LIKE 'sec02\_v1\_%')
       ORDER BY tablename, policyname
     `;
 
+    // 0257 起多了三条 **actor 读策略**，它们服务"空间建立之前"的三条边界路：
+    //   - `sec01_v1_workspace_members_actor_read`（登录 / 空间列表按 user_id 读成员行）
+    //   - `sec01_v1_workspaces_actor_read`（同一时刻读空间名，含别人拥有的协作空间）
+    //   - `sec01_v1_invite_codes_actor_read`（兑换邀请码时按令牌哈希读那一行）
+    // 它们不服务"按 workspace_id 隔离"的读写，所以不在上面三组清单里，单独加 3。
+    const ACTOR_READ_POLICIES = [
+      "sec01_v1_workspace_members_actor_read",
+      "sec01_v1_workspaces_actor_read",
+      "sec01_v1_invite_codes_actor_read",
+    ] as const;
+    // 0257 同时**删掉了** `invite_codes` 上那条重复的 sec01 租户守卫：这张表原本
+    // 有两条逐字相同的 RESTRICTIVE `workspace_id = app.workspace_id`（sec01 与 sec02
+    // 各一条），RESTRICTIVE 之间是 AND，两条都要求"当前空间"，于是兑换邀请码
+    // （发生在"还不知道是哪个空间"时）永远读不到那一行——实测 404。删掉重复的
+    // sec01 那条、把 sec02 改成"给了空间才按空间收"之后，这张表只剩 2 条 sec01 策略。
+    const TABLES_WITHOUT_SEC01_TENANT_GUARD = new Set(["invite_codes"]);
     const expectedPolicyCount = WORKSPACE_POLICY_TABLES.length * 2
       + USER_PRIVATE_POLICY_TABLES.length * 3
       + AI_ARTIFACT_POLICIES.size
       + AI_AUDIT_POLICIES.size
-      + JOB_POLICIES.size;
-    assert.equal(policies.length, expectedPolicyCount);
-    assert.ok(policies.every((policy) => policy.policy_name.startsWith("sec01_v1_")));
+      + JOB_POLICIES.size
+      + ACTOR_READ_POLICIES.length
+      - TABLES_WITHOUT_SEC01_TENANT_GUARD.size;
+    assert.equal(
+      policies.filter((policy) => policy.policy_name.startsWith("sec01_v1_")).length,
+      expectedPolicyCount,
+    );
+    assert.ok(policies.every((policy) => (
+      policy.policy_name.startsWith("sec01_v1_") || policy.policy_name.startsWith("sec02_v1_")
+    )));
+    for (const actorPolicy of ACTOR_READ_POLICIES) {
+      const found = policies.find((policy) => policy.policy_name === actorPolicy);
+      assert.ok(found, `missing actor read policy ${actorPolicy}`);
+      assert.equal(found.permissive, "PERMISSIVE");
+      assert.equal(found.command, "SELECT");
+    }
+    for (const tableName of TABLES_WITHOUT_SEC01_TENANT_GUARD) {
+      // 要拦的是"sec01 那条重复守卫又回来了"，而不是"这张表没有守卫"——
+      // 它的守卫是 sec02 那一条（上面刚按名字取过）。
+      const stillThere = policies.some((policy) => (
+        policy.table_name === tableName && policy.policy_name === `sec01_v1_${tableName}_tenant_guard`
+      ));
+      assert.equal(
+        stillThere,
+        false,
+        `${tableName} 上不该再有 sec01 租户守卫：它与 sec02 那条逐字重复，且会让兑换路径读不到行`,
+      );
+    }
 
     const findPolicy = (tableName: string, policyName: string) => {
       const policy = policies.find((candidate) => (
@@ -280,11 +324,26 @@ test("installs fail-closed SEC-01 policies without making this an HTTP or M1 gat
     }
 
     for (const tableName of WORKSPACE_POLICY_TABLES) {
-      const tenantGuard = findPolicy(tableName, `sec01_v1_${tableName}_tenant_guard`);
+      // `invite_codes` 的租户守卫在 0257 里改成了 **sec02** 那一条（sec01 与 sec02
+      // 原本各装一条逐字相同的 RESTRICTIVE 守卫，两条都要求"当前空间"，导致兑换
+      // 邀请码读不到行）。所以它按 sec02 的名字找，其余表仍按 sec01。
+      const tenantGuardName = TABLES_WITHOUT_SEC01_TENANT_GUARD.has(tableName)
+        ? `sec02_v1_${tableName}_tenant_guard`
+        : `sec01_v1_${tableName}_tenant_guard`;
+      const tenantGuard = findPolicy(tableName, tenantGuardName);
       assert.equal(tenantGuard.permissive, "RESTRICTIVE");
       assert.equal(tenantGuard.command, "ALL");
       assert.match(tenantGuard.using_expression ?? "", /app\.workspace_id/);
       assert.match(tenantGuard.check_expression ?? "", /app\.workspace_id/);
+      // 那张表的守卫必须是"给了空间才按空间收"的形状：它服务的三条边界路
+      // （登录 / 空间列表 / 兑换邀请码）都发生在当前空间还不存在的时刻。
+      if (TABLES_WITHOUT_SEC01_TENANT_GUARD.has(tableName)) {
+        assert.match(
+          tenantGuard.using_expression ?? "",
+          /IS NULL/,
+          `${tableName} 的租户守卫必须让开"还没有当前空间"的边界事务`,
+        );
+      }
 
       const runtimeAccess = findPolicy(tableName, `sec01_v1_${tableName}_runtime_access`);
       assert.equal(runtimeAccess.permissive, "PERMISSIVE");

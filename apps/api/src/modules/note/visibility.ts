@@ -3,6 +3,19 @@ import { notes, noteVersions } from "@ailearn/shared/db-schema/note";
 // 目标那一层的判据要经卡才能回到笔记（见 `visibleObjectivesCondition` 的说明），
 // 所以这一句确实需要知道 `learning_cards_v2` 存在。仍然只有这一个文件说这句话。
 import { learningCardsV2 } from "@ailearn/shared/db-schema/card-generation-v2";
+// 判据文本的唯一来源。API 与 Worker 两个包共用同一段 SQL——伴星读正文那条路
+// 在 worker 里，此前它按 workspace 直接查 notes，把同空间别人的私有笔记一起读了
+// 出来（`companion_read_note` / here-and-now 快照）。
+import {
+  isNoteVisibleToViewer as isNoteVisibleToViewerShared,
+  noteVisibleSqlText as noteVisibleSqlTextShared,
+  NOTE_SHARE_SCOPES,
+  isNoteShareScope,
+  type NoteShareScope,
+} from "@ailearn/shared/note-visibility";
+
+export { NOTE_SHARE_SCOPES, isNoteShareScope };
+export type { NoteShareScope };
 
 /**
  * 笔记归属的唯一判据（批次 4.5）。
@@ -19,14 +32,10 @@ import { learningCardsV2 } from "@ailearn/shared/db-schema/card-generation-v2";
  * 判据散开写就会出现"列表挡住了、搜索没挡"那一类分裂——这正是审查里反复出现的那件事。
  * 所以：drizzle 读点用 `visibleNotesCondition`，手写 SQL 用 `noteVisibleSqlText`，
  * 已经握在手里的那一行用 `isNoteVisibleToViewer`。三个入口，一个规则。
+ *
+ * 三个入口的**文本**现在都来自 `@ailearn/shared/note-visibility`：worker 侧
+ * （伴星工具）也读同一份，跨包不会漂移。
  */
-
-export const NOTE_SHARE_SCOPES = ["private", "shared"] as const;
-export type NoteShareScope = (typeof NOTE_SHARE_SCOPES)[number];
-
-export function isNoteShareScope(value: unknown): value is NoteShareScope {
-  return value === "private" || value === "shared";
-}
 
 /** 判据那一句话。改动它等于改动全仓库的笔记可见性，所以只写一次。 */
 export function visibleNotesCondition(userId: string): SQL {
@@ -38,23 +47,18 @@ export function isNoteVisibleToViewer(
   row: { shareScope: string; createdBy: string },
   userId: string,
 ): boolean {
-  return row.shareScope === "shared" || row.createdBy === userId;
+  return isNoteVisibleToViewerShared(row, userId);
 }
 
 /**
- * 同一句话的手写 SQL 版本。
- *
- * `viewerExpr` 是一个 SQL **表达式**而不是绑定参数：伴星那张图里它是 `m.user_id`
- * （记忆行自带主人），搜索那条路里它是 `v.viewer`（`CROSS JOIN (SELECT $1::uuid AS viewer)`
- * 带进来的那一列）。之所以不接占位符字符串：调用方拼的是参数化模板，占位符序号只有
- * 那里知道，而这一段话必须一字不差地复用。
+ * 同一句话的手写 SQL 版本（转发到 shared 的唯一实现）。
  *
  * 与上面 drizzle 那条是同一规则的两种写法，这是本仓少有的重复。**故意留一份测试**
  * 去执行它们并比对结果集（`note-share-scope-postgres.integration.ts`），而不是比字符串——
  * 字符串相等证明不了两条路在同一份数据上给同样的答案。
  */
 export function noteVisibleSqlText(alias: string, viewerExpr: string): string {
-  return `(${alias}.share_scope = 'shared' OR ${alias}.created_by = ${viewerExpr})`;
+  return noteVisibleSqlTextShared(alias, viewerExpr);
 }
 
 /**

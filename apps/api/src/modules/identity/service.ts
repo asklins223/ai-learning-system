@@ -1,8 +1,16 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { DomainError } from "@ailearn/shared";
 import bcrypt from "bcryptjs";
 import { and, eq, isNull, lt, or, gte, inArray, desc, count, sql, ne } from "drizzle-orm";
-import { db, withWorkspaceTransaction } from "../../db/client.ts";
+import {
+  db,
+  withWorkspaceTransaction,
+  withActorTransaction,
+  adoptWorkspaceContext,
+  assumeActor,
+  SYSTEM_USER_ID,
+  type ApiTransaction,
+} from "../../db/client.ts";
 import {
   users,
   workspaceMembers,
@@ -19,6 +27,7 @@ import {
 } from "./invitation-token.ts";
 import { resolveSystemProviderForCapability } from "@ailearn/shared/task-router";
 import { deleteObject } from "../../lib/object-storage.ts";
+import { recordWorkspaceAudit } from "../audit/service.ts";
 import { logger } from "../../lib/logger.ts";
 
 /**
@@ -109,15 +118,49 @@ export interface SessionContext {
    * 判成只读。把 owner_id 放进 session 上下文，判据才有唯一的落点。
    */
   workspaceOwnerId?: string | null;
+  /**
+   * 当前空间的服务端边界令牌（`workspaces.workspace_epoch`，迁移 0261）。
+   *
+   * 审查 1.3 说服务端"无 workspaceEpoch 概念（只有硬编码 1）→ 无法做某空间全端
+   * 强制下线"。这一列把那个数字变成真的事实源：成员变动 / AI 同意或外发政策改变 /
+   * 空间改名时 +1（触发器），会话每次解码时读回当前值。客户端拿旧值请求会被
+   * 主进程的 `assertEpoch` 判 `stale_workspace`，重读会话后才继续。
+   */
+  workspaceEpoch: number;
 }
 
-export async function issueSession(userId: string, workspaceId: string): Promise<{ token: string; ctx: SessionContext }> {
+/**
+ * 签发一个会话行。
+ *
+ * `executor` 是**可选的**：调用方若已经在 actor 事务里（登录、切空间、注册），
+ * 传进来就能复用同一事务——`sessions` 的写策略要求 `user_id = app.user_id`，
+ * 没有 actor 上下文的裸 `db` 写会被 RLS 挡掉（静默 0 行，不是报错）。
+ */
+export async function issueSession(
+  userId: string,
+  workspaceId: string,
+  executor?: ApiTransaction,
+): Promise<{ token: string; ctx: SessionContext }> {
   const token = generateToken();
   const now = new Date();
   const expiresAt = new Date(now.getTime() + SESSION_TTL_MS);
+  const values = { token: hashToken(token), userId, workspaceId, createdAt: now, expiresAt };
   // R-011: 存储 token 的哈希值，而非明文
-  await db.insert(sessions).values({ token: hashToken(token), userId, workspaceId, createdAt: now, expiresAt });
-  return { token, ctx: { userId, workspaceId } };
+  if (executor) {
+    await executor.insert(sessions).values(values);
+  } else {
+    await withActorTransaction({ userId, workspaceId, sessionToken: hashToken(token) }, (tx) =>
+      tx.insert(sessions).values(values),
+    );
+  }
+  // 边界令牌必须**当场**读出来：签发的这一刻就是客户端认识的第一个值，
+  // 写死 1 会让"服务端抬过 epoch 的空间"在下次请求时立刻被判过期。
+  const [workspace] = await (executor ?? db)
+    .select({ workspaceEpoch: workspaces.workspaceEpoch })
+    .from(workspaces)
+    .where(eq(workspaces.id, workspaceId))
+    .limit(1);
+  return { token, ctx: { userId, workspaceId, workspaceEpoch: workspace?.workspaceEpoch ?? 1 } };
 }
 
 export interface WorkspaceInfo {
@@ -145,52 +188,58 @@ export async function loginWithPassword(
     return null;
   }
   if (!(await verifyPassword(password, user.passwordHash))) return null;
-  // ADR-0009: 查询所有活跃工作区（left_at IS NULL），排除已退出的
-  const memberships = await db.query.workspaceMembers.findMany({
-    where: and(
-      eq(workspaceMembers.userId, user.id),
-      isNull(workspaceMembers.leftAt),
-    ),
-  });
-  if (memberships.length === 0) return null;
+  // 空间建立之前的 actor 事务：这条路的**第一件事**就是把"这个人属于哪些空间"
+  // 读出来，而 RLS 的租户守卫要的正是"当前空间"。所以用 actor 上下文
+  // （`app.user_id`）而不是 workspace 上下文——`workspace_members` /
+  // `workspaces` 上的 actor 读策略就是为这一条路装的（迁移 0257）。
+  return withActorTransaction({ userId: user.id }, async (tx) => {
+    // ADR-0009: 查询所有活跃工作区（left_at IS NULL），排除已退出的
+    const memberships = await tx.query.workspaceMembers.findMany({
+      where: and(
+        eq(workspaceMembers.userId, user.id),
+        isNull(workspaceMembers.leftAt),
+      ),
+    });
+    if (memberships.length === 0) return null;
 
-  // 获取所有工作区名称
-  const workspaceIds = memberships.map((m) => m.workspaceId);
-  const workspaceRows = await db.query.workspaces.findMany({
-    where: inArray(workspaces.id, workspaceIds),
-  });
+    // 获取所有工作区名称
+    const workspaceIds = memberships.map((m) => m.workspaceId);
+    const workspaceRows = await tx.query.workspaces.findMany({
+      where: inArray(workspaces.id, workspaceIds),
+    });
   // PERF: 一次性建 Map，避免 memberships.map 内逐条 find() 的 O(m*n)。
-  const workspaceById = new Map(workspaceRows.map((w) => [w.id, w]));
-  const workspacesList: WorkspaceInfo[] = memberships.map((m) => {
-    const ws = workspaceById.get(m.workspaceId);
-    // `workspaceType` 是空间自身的属性，不是"谁在看"的函数。此前它由
-    // ownerId === 查看者派生，于是任何人的个人空间被别人加入后都会自称
-    // collaborative，而真正的协作空间反而没有创建入口。
-    const workspaceType = ws?.workspaceType ?? "personal";
-    // ADR-0009 §3.6: 个人归属仍按 ownerId 判定（而非 personalWorkspaceId），
-    // 但只有这一行本身是 personal 类型时才算"我的个人空间"。
-    const isPersonal = workspaceType === "personal" && ws?.ownerId === user.id;
-    return {
-      workspaceId: m.workspaceId,
-      workspaceName: ws?.name ?? "未命名工作区",
-      role: m.role,
-      workspaceType,
-      isPersonal,
-      leftAt: m.leftAt,
-    };
-  });
+    const workspaceById = new Map(workspaceRows.map((w) => [w.id, w]));
+    const workspacesList: WorkspaceInfo[] = memberships.map((m) => {
+      const ws = workspaceById.get(m.workspaceId);
+      // `workspaceType` 是空间自身的属性，不是"谁在看"的函数。此前它由
+      // ownerId === 查看者派生，于是任何人的个人空间被别人加入后都会自称
+      // collaborative，而真正的协作空间反而没有创建入口。
+      const workspaceType = ws?.workspaceType ?? "personal";
+      // ADR-0009 §3.6: 个人归属仍按 ownerId 判定（而非 personalWorkspaceId），
+      // 但只有这一行本身是 personal 类型时才算"我的个人空间"。
+      const isPersonal = workspaceType === "personal" && ws?.ownerId === user.id;
+      return {
+        workspaceId: m.workspaceId,
+        workspaceName: ws?.name ?? "未命名工作区",
+        role: m.role,
+        workspaceType,
+        isPersonal,
+        leftAt: m.leftAt,
+      };
+    });
 
-  // BUG-67 修复：验证 personalWorkspaceId 是否仍在活跃成员列表中。
-  // 如果用户被移出或主动退出了个人工作区（leftAt 非空），
-  // personalWorkspaceId 仍指向已退出的工作区，签发的 session 将无效。
-  // 改为优先从活跃成员列表中查找 personalWorkspaceId，找不到则回退到第一个。
-  const activeWorkspaceIds = new Set(memberships.map((m) => m.workspaceId));
-  const defaultWorkspaceId =
-    (user.personalWorkspaceId && activeWorkspaceIds.has(user.personalWorkspaceId))
-      ? user.personalWorkspaceId
-      : memberships[0].workspaceId;
-  const session = await issueSession(user.id, defaultWorkspaceId);
-  return { ...session, workspaces: workspacesList };
+    // BUG-67 修复：验证 personalWorkspaceId 是否仍在活跃成员列表中。
+    // 如果用户被移出或主动退出了个人工作区（leftAt 非空），
+    // personalWorkspaceId 仍指向已退出的工作区，签发的 session 将无效。
+    // 改为优先从活跃成员列表中查找 personalWorkspaceId，找不到则回退到第一个。
+    const activeWorkspaceIds = new Set(memberships.map((m) => m.workspaceId));
+    const defaultWorkspaceId =
+      (user.personalWorkspaceId && activeWorkspaceIds.has(user.personalWorkspaceId))
+        ? user.personalWorkspaceId
+        : memberships[0].workspaceId;
+    const session = await issueSession(user.id, defaultWorkspaceId, tx);
+    return { ...session, workspaces: workspacesList };
+  });
 }
 
 const MAX_WORKSPACE_NAME_LENGTH = 50;
@@ -223,15 +272,22 @@ export async function registerWithoutInvite(
   // 不换库（依赖约束），保留纯 JS bcryptjs；未来可迁移 native bcrypt/worker。
   // 副作用：重复注册（已在期用户）路径会多做一次哈希，但该路径罕见且开销可忽略。
   const passwordHash = await hashPassword(password);
-  let result: { userId: string; workspaceId: string } | null;
+  // 新账号的 id 在插入前就取定：`withActorTransaction` 的 actor 必须在事务开始时
+  // 确定，而注册这条路要写 `users` / `workspaces` / `workspace_members` /
+  // `onboarding_states` / `sessions` 五张表——其中四张的策略按 `app.user_id` 判。
+  // 让数据库自己 gen_random_uuid() 再回头设 actor，就会在嵌套校验上撞车
+  // （同一条请求里两个身份），所以这里显式生成一次，只生成这一个值。
+  const newUserId = randomUUID();
+  let result: { session: { token: string; ctx: SessionContext } } | null;
   try {
-    result = await db.transaction(async (tx) => {
+    result = await withActorTransaction({ userId: newUserId }, async (tx) => {
       const existing = await tx.query.users.findFirst({ where: eq(users.email, normalizedEmail) });
       if (existing) return null;
 
       const [user] = await tx
         .insert(users)
         .values({
+          id: newUserId,
           email: normalizedEmail,
           passwordHash,
           displayName: generateDefaultDisplayName(options?.displayName, normalizedEmail),
@@ -248,6 +304,11 @@ export async function registerWithoutInvite(
           workspaceType: "personal",
         })
         .returning({ id: workspaces.id });
+
+      // 注册是"边界事务"：新空间的 id 到这里才知道，而随后的成员行与引导行
+      // 都要过租户守卫。actor 已经是新用户（见上面 newUserId 的说明），这里
+      // 只需补上 `app.workspace_id`。
+      await adoptWorkspaceContext(tx, personalWs.id);
 
       await tx
         .update(users)
@@ -268,7 +329,7 @@ export async function registerWithoutInvite(
         status: "pending",
       });
 
-      return { userId: user.id, workspaceId: personalWs.id };
+      return { userId: user.id, workspaceId: personalWs.id, session: await issueSession(user.id, personalWs.id, tx) };
     });
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "23505") {
@@ -277,73 +338,94 @@ export async function registerWithoutInvite(
     throw error;
   }
   if (!result) return null;
-  return issueSession(result.userId, result.workspaceId);
+  return result.session;
 }
 
+/**
+ * 把凭据解成一个会话上下文。挂在 18 处 preHandler 上，是全站最热的一条查询。
+ *
+ * ─── 为什么从"一条 JOIN"改成"两段"（SEC-01 重开 RLS）───
+ * 旧写法是一条 `sessions LEFT JOIN workspace_members LEFT JOIN workspaces`。
+ * RLS 重开之后它不再成立：`workspace_members` 与 `workspaces` 的策略都要
+ * `app.workspace_id`，而**这个值正是要从这一行读出来的**——用未知量做谓词是循环。
+ *
+ * 所以按"已知量"分两段，并且都在同一个 actor 事务里：
+ *   1. 用令牌哈希读 `sessions`（策略 `sec01_v1_sessions_actor_read` 认
+ *      `token = app.session_token`），拿到 user_id / workspace_id；
+ *   2. 用这两个值查 `workspace_members` 与 `workspaces`——它们是**同一行里的
+ *      事实**，不是调用方传进来的参数，所以按它们取行不会放宽隔离。
+ *
+ * 代价是每个已认证请求多一次往返（两次都是主键/唯一索引命中）。换来的是一条
+ * 真正的边界：任何"按 token 查会话"的语句都只能拿到自己手里那一个令牌的行。
+ */
 export async function decodeToken(token: string): Promise<SessionContext | null> {
   // R-011: 查询时使用 token 哈希
-  // 2026-08-11（性能专项）：合并 JOIN——sessions 查询 + workspaceMembers
-  // 活跃校验原为 2 次串行 DB 往返（挂在 18 处 preHandler）。LEFT JOIN 条件
-  // 含 isNull(left_at)，join 不上即为非活跃成员，单条查询完成两语义。
-  // token 为 PRIMARY KEY（sessions 表），走索引。
   const tokenHash = hashToken(token);
-  const row = await db
-    .select({
-      userId: sessions.userId,
-      workspaceId: sessions.workspaceId,
-      createdAt: sessions.createdAt,
-      expiresAt: sessions.expiresAt,
-      // join 命中与否的判据：workspaceMembers 行存在时 leftAt 有值（活跃=null）。
-      memberLeftAt: workspaceMembers.leftAt,
-      // 顺带取成员角色（/auth/me 复用，避免重复查询）
-      membershipRole: workspaceMembers.role,
-      // 空间归属人：isWorkspaceOwner 的 OR 判据需要它。sessions→workspaces 是多对一，
-      // 不会放大行数。
-      workspaceOwnerId: workspaces.ownerId,
-    })
-    .from(sessions)
-    .leftJoin(
-      workspaceMembers,
-      and(
-        eq(workspaceMembers.workspaceId, sessions.workspaceId),
-        eq(workspaceMembers.userId, sessions.userId),
+
+  return withActorTransaction({ userId: SYSTEM_USER_ID, sessionToken: tokenHash }, async (tx) => {
+    const session = await tx.query.sessions.findFirst({
+      where: eq(sessions.token, tokenHash),
+      columns: { userId: true, workspaceId: true, createdAt: true, expiresAt: true },
+    });
+    if (!session) return null;
+    if (session.expiresAt < new Date()) {
+      // Remove expired credentials on first use as well as during the periodic
+      // cleanup job. This bounds the lifetime of a stolen, already-expired token.
+      await tx.delete(sessions).where(eq(sessions.token, tokenHash));
+      return null;
+    }
+
+    // 第二段：会话行自带的两个 id 是这里的已知量。`withActorTransaction` 的
+    // 嵌套校验只认同一个 actor，所以 actor 在这里从 SYSTEM_USER_ID 换成
+    // 令牌真正的主人——用一次显式的 `set_config`，语义是"这条事务从现在起
+    // 代表这个已认证用户"。
+    await assumeActor(tx, session.userId, session.workspaceId);
+
+    const membership = await tx.query.workspaceMembers.findFirst({
+      where: and(
+        eq(workspaceMembers.workspaceId, session.workspaceId),
+        eq(workspaceMembers.userId, session.userId),
       ),
-    )
-    .leftJoin(workspaces, eq(workspaces.id, sessions.workspaceId))
-    .where(eq(sessions.token, tokenHash))
-    .limit(1);
-  const session = row[0];
-  if (!session) return null;
-  if (session.expiresAt < new Date()) {
-    // Remove expired credentials on first use as well as during the periodic
-    // cleanup job. This bounds the lifetime of a stolen, already-expired token.
-    await db.delete(sessions).where(eq(sessions.token, tokenHash));
-    return null;
-  }
-  // ADR-0009: LEFT JOIN 未命中（无 membership 行）或 left_at 非空（已退出）——
-  // 用户被移出/退出后立即吊销 session。判据用 membershipRole（NOT NULL）区分
-  // "join 未命中"与"活跃成员（left_at IS NULL）"——两者 memberLeftAt 都是 NULL。
-  if (session.membershipRole === null || session.memberLeftAt !== null) {
-    await db.delete(sessions).where(eq(sessions.token, tokenHash));
-    return null;
-  }
-  // 滑动续期：桌面端把凭据存在本机，只要用户还在用就一直有效，直到绝对上限。
-  // 低频写入由 nextSessionExpiry 的阈值保证（见常量注释）。
-  const renewed = nextSessionExpiry({ createdAt: session.createdAt, expiresAt: session.expiresAt, now: new Date() });
-  if (renewed) {
-    await db.update(sessions).set({ expiresAt: renewed }).where(eq(sessions.token, tokenHash));
-  }
-  return {
-    userId: session.userId,
-    workspaceId: session.workspaceId,
-    membershipRole: session.membershipRole ?? null,
-    workspaceOwnerId: session.workspaceOwnerId ?? null,
-  };
+      columns: { leftAt: true, role: true },
+    });
+    // ADR-0009: 无 membership 行或 left_at 非空（已退出）——用户被移出/退出后
+    // 立即吊销 session。旧写法用 `membershipRole !== null` 区分"join 未命中"与
+    // "活跃成员（left_at 为 NULL）"；现在 membership 行本身在手上，判据更直白。
+    if (!membership || membership.leftAt !== null) {
+      await tx.delete(sessions).where(eq(sessions.token, tokenHash));
+      return null;
+    }
+
+    // 空间归属人（isWorkspaceOwner 的 OR 判据需要它）与边界令牌（0261）。
+    const workspace = await tx.query.workspaces.findFirst({
+      where: eq(workspaces.id, session.workspaceId),
+      columns: { ownerId: true, workspaceEpoch: true },
+    });
+
+    // 滑动续期：桌面端把凭据存在本机，只要用户还在用就一直有效，直到绝对上限。
+    // 低频写入由 nextSessionExpiry 的阈值保证（见常量注释）。
+    const renewed = nextSessionExpiry({ createdAt: session.createdAt, expiresAt: session.expiresAt, now: new Date() });
+    if (renewed) {
+      await tx.update(sessions).set({ expiresAt: renewed }).where(eq(sessions.token, tokenHash));
+    }
+    return {
+      userId: session.userId,
+      workspaceId: session.workspaceId,
+      membershipRole: membership.role ?? null,
+      workspaceOwnerId: workspace?.ownerId ?? null,
+      // 空间行读不到时退回 1（而不是 0）：契约是 positiveInt，0 会让整个会话
+      // 在客户端解析失败。读不到只可能是空间刚被删，那种情况下一次请求就会被拒。
+      workspaceEpoch: workspace?.workspaceEpoch ?? 1,
+    };
+  });
 }
 
 /** Revoke a session by its raw bearer/cookie token. */
 export async function revokeSession(token: string): Promise<void> {
-  await db.delete(sessions).where(eq(sessions.token, hashToken(token)));
+  const tokenHash = hashToken(token);
+  await withActorTransaction({ userId: SYSTEM_USER_ID, sessionToken: tokenHash }, (tx) =>
+    tx.delete(sessions).where(eq(sessions.token, tokenHash)),
+  );
 }
 
 /**
@@ -357,7 +439,10 @@ export async function resetRecoveredUserPassword(
   password: string,
 ): Promise<boolean> {
   const passwordHash = await hashPassword(password);
-  return db.transaction(async (tx) => {
+  // 恢复账号的密码重置：操作者是空间 owner，被改的是另一个人的账号，所以
+  // actor 用**目标账号**（会话删除要按它的 user_id 过策略），租户用当前空间
+  // （成员行与空间守卫都要它）。
+  return withActorTransaction({ userId, workspaceId }, async (tx) => {
     const membership = await tx.query.workspaceMembers.findFirst({
       where: and(
         eq(workspaceMembers.workspaceId, workspaceId),
@@ -390,24 +475,29 @@ export async function cleanupExpiredSessions(): Promise<number> {
   if (sessionCleanupRunning) return 0;
   sessionCleanupRunning = true;
   try {
-    let total = 0;
-    for (;;) {
-      // 分批删除：先取一批过期 token（LIMIT 有界），再按 id 删除，
-      // 避免单条无界 DELETE 在过期积压大时形成长事务。每批独立事务（隐式）。
-      const expired = await db
-        .select({ token: sessions.token })
-        .from(sessions)
-        .where(lt(sessions.expiresAt, new Date()))
-        .limit(SESSION_CLEANUP_BATCH);
-      if (expired.length === 0) break;
-      const ids = expired.map((r) => r.token);
-      // 按实际删除行计数（returning 中的 token 唯一；若个别 id 因并发已被删，
-      // returning 的 len 才反映真实删除数）。
-      const deleted = await db.delete(sessions).where(inArray(sessions.token, ids)).returning({ token: sessions.token });
-      total += deleted.length;
-      if (expired.length < SESSION_CLEANUP_BATCH) break;
-    }
-    return total;
+    // 系统级的会话维护：没有"某一个令牌"要处理，所以 actor 用 nil UUID 且
+    // sessionToken 留空——`sec01_v1_sessions_actor_*` 的空令牌分支就是为这条
+    // 每小时的清理路留的（只按 expires_at 扫，不认人）。
+    return await withActorTransaction({ userId: SYSTEM_USER_ID }, async (tx) => {
+      let total = 0;
+      for (;;) {
+        // 分批删除：先取一批过期 token（LIMIT 有界），再按 id 删除，
+        // 避免单条无界 DELETE 在过期积压大时形成长事务。
+        const expired = await tx
+          .select({ token: sessions.token })
+          .from(sessions)
+          .where(lt(sessions.expiresAt, new Date()))
+          .limit(SESSION_CLEANUP_BATCH);
+        if (expired.length === 0) break;
+        const ids = expired.map((r) => r.token);
+        // 按实际删除行计数（returning 中的 token 唯一；若个别 id 因并发已被删，
+        // returning 的 len 才反映真实删除数）。
+        const deleted = await tx.delete(sessions).where(inArray(sessions.token, ids)).returning({ token: sessions.token });
+        total += deleted.length;
+        if (expired.length < SESSION_CLEANUP_BATCH) break;
+      }
+      return total;
+    });
   } finally {
     sessionCleanupRunning = false;
   }
@@ -422,31 +512,32 @@ export async function switchWorkspace(
   workspaceId: string,
   previousToken: string | null,
 ): Promise<{ token: string; ctx: SessionContext } | null> {
-  const membership = await db.query.workspaceMembers.findFirst({
-    where: and(
-      eq(workspaceMembers.workspaceId, workspaceId),
-      eq(workspaceMembers.userId, userId),
-      isNull(workspaceMembers.leftAt),
-    ),
-  });
-  if (!membership) return null;
-  // 2026-08-11（安全修复）：同一事务内"撤销旧 token + 签发新 token"——
-  // 此前 routes 先签发后撤销，revoke 失败时被窃取的旧 token 继续有效。
-  return db.transaction(async (tx) => {
+  // 目标空间在这条路的入口就是已知量（请求体带 workspaceId），所以直接进
+  // workspace 事务：成员行要过租户守卫，会话行的撤销与签发要过 actor 策略。
+  return withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
+    const membership = await tx.query.workspaceMembers.findFirst({
+      where: and(
+        eq(workspaceMembers.workspaceId, workspaceId),
+        eq(workspaceMembers.userId, userId),
+        isNull(workspaceMembers.leftAt),
+      ),
+    });
+    if (!membership) return null;
+    // 2026-08-11（安全修复）：同一事务内"撤销旧 token + 签发新 token"——
+    // 此前 routes 先签发后撤销，revoke 失败时被窃取的旧 token 继续有效。
     if (previousToken) {
       await tx.delete(sessions).where(eq(sessions.token, hashToken(previousToken)));
     }
-    const now = new Date();
-    const token = generateToken();
-    const ctx: SessionContext = { userId, workspaceId, membershipRole: membership.role ?? null };
-    await tx.insert(sessions).values({
-      token: hashToken(token),
-      userId,
-      workspaceId,
-      createdAt: now,
-      expiresAt: new Date(now.getTime() + SESSION_TTL_MS),
-    });
-    return { token, ctx };
+    const session = await issueSession(userId, workspaceId, tx);
+    return {
+      token: session.token,
+      ctx: {
+        userId,
+        workspaceId,
+        membershipRole: membership.role ?? null,
+        workspaceEpoch: session.ctx.workspaceEpoch,
+      },
+    };
   });
 }
 
@@ -475,7 +566,9 @@ export async function createCollaborativeWorkspace(
     return { ok: false, error: "invalid_name" };
   }
 
-  return db.transaction(async (tx) => {
+  // 边界事务：进来的第一件事是按 user_id 查自己已有的协作空间（那时还没有当前
+  // 空间），建出新的之后才把租户切过去——所以 actor 上下文，不是 workspace 上下文。
+  return withActorTransaction({ userId }, async (tx) => {
     // 与 joinWorkspaceByInviteToken 同一把 users 行锁：两个并发请求不能各自越过配额。
     const userRows = await tx
       .select({ id: users.id })
@@ -504,6 +597,9 @@ export async function createCollaborativeWorkspace(
       .values({ ownerId: userId, name: trimmed, workspaceType: "collaborative" })
       .returning({ id: workspaces.id, name: workspaces.name });
 
+    // 新空间的成员行与引导行都要过租户守卫，而它的 id 到这一步才知道。
+    await adoptWorkspaceContext(tx, created.id);
+
     await tx.insert(workspaceMembers).values({
       workspaceId: created.id,
       userId,
@@ -525,34 +621,37 @@ export async function createCollaborativeWorkspace(
  * ADR-0009: 列出用户可访问的所有活跃工作区（含个人工作区和协作工作区）。
  */
 export async function listUserWorkspaces(userId: string): Promise<WorkspaceInfo[]> {
-  const memberships = await db.query.workspaceMembers.findMany({
-    where: and(
-      eq(workspaceMembers.userId, userId),
-      isNull(workspaceMembers.leftAt),
-    ),
-  });
-  if (memberships.length === 0) return [];
+  // 与登录同一条理由：这条路要读的正是"我属于哪些空间"，而当前空间还没定。
+  return withActorTransaction({ userId }, async (tx) => {
+    const memberships = await tx.query.workspaceMembers.findMany({
+      where: and(
+        eq(workspaceMembers.userId, userId),
+        isNull(workspaceMembers.leftAt),
+      ),
+    });
+    if (memberships.length === 0) return [];
 
-  const workspaceIds = memberships.map((m) => m.workspaceId);
-  const workspaceRows = await db.query.workspaces.findMany({
-    where: inArray(workspaces.id, workspaceIds),
-  });
+    const workspaceIds = memberships.map((m) => m.workspaceId);
+    const workspaceRows = await tx.query.workspaces.findMany({
+      where: inArray(workspaces.id, workspaceIds),
+    });
 
-  // PERF: 一次性建 Map 替代逐条 find() 的 O(m*n)。
-  const workspaceById = new Map(workspaceRows.map((w) => [w.id, w]));
-  return memberships.map((m) => {
-    const ws = workspaceById.get(m.workspaceId);
-    // 见 listUserWorkspaces 同名注释：类型属于空间，不属于查看者。
-    const workspaceType = ws?.workspaceType ?? "personal";
-    const isPersonal = workspaceType === "personal" && ws?.ownerId === userId;
-    return {
-      workspaceId: m.workspaceId,
-      workspaceName: ws?.name ?? "未命名工作区",
-      role: m.role,
-      workspaceType,
-      isPersonal,
-      leftAt: m.leftAt,
-    };
+    // PERF: 一次性建 Map 替代逐条 find() 的 O(m*n)。
+    const workspaceById = new Map(workspaceRows.map((w) => [w.id, w]));
+    return memberships.map((m) => {
+      const ws = workspaceById.get(m.workspaceId);
+      // 见 listUserWorkspaces 同名注释：类型属于空间，不属于查看者。
+      const workspaceType = ws?.workspaceType ?? "personal";
+      const isPersonal = workspaceType === "personal" && ws?.ownerId === userId;
+      return {
+        workspaceId: m.workspaceId,
+        workspaceName: ws?.name ?? "未命名工作区",
+        role: m.role,
+        workspaceType,
+        isPersonal,
+        leftAt: m.leftAt,
+      };
+    });
   });
 }
 
@@ -592,99 +691,108 @@ export async function joinWorkspaceByInviteToken(
 
   let result: { workspaceId: string; workspaceName: string; role: string } | null;
   try {
-    result = await db.transaction(async (tx) => {
-      const now = new Date();
+    // 边界事务：进来时只知道"手里这串邀请码"，空间 id 要读出来才知道。
+    // actor 是加入者本人；令牌哈希进 `app.session_token`，让邀请码那一行的
+    // actor 读策略能命中（策略见迁移 0257）。
+    result = await withActorTransaction(
+      { userId, sessionToken: tokenHash },
+      async (tx) => {
+        const now = new Date();
 
-      // Serialize all join operations for the same user so two different
-      // invitation tokens cannot both pass the three-workspace limit.
-      const userRows = await tx
-        .select()
-        .from(users)
-        .where(eq(users.id, userId))
-        .for("update");
-      const userRow = userRows[0];
-      if (!userRow) return null;
+        // Serialize all join operations for the same user so two different
+        // invitation tokens cannot both pass the three-workspace limit.
+        const userRows = await tx
+          .select()
+          .from(users)
+          .where(eq(users.id, userId))
+          .for("update");
+        const userRow = userRows[0];
+        if (!userRow) return null;
 
-      const inviteRows = await tx
-        .select()
-        .from(inviteCodes)
-        .where(
-          and(
-            eq(inviteCodes.tokenHash, tokenHash),
-            isNull(inviteCodes.consumedBy),
-            isNull(inviteCodes.revokedAt),
-            or(isNull(inviteCodes.expiresAt), gte(inviteCodes.expiresAt, now)),
-          ),
-        )
-        .for("update");
-
-      const invite = inviteRows[0];
-      if (!invite) {
-        // 检查是否存在但已失效
-        const existing = await tx
-          .select({
-            consumedBy: inviteCodes.consumedBy,
-            revokedAt: inviteCodes.revokedAt,
-            expiresAt: inviteCodes.expiresAt,
-          })
+        const inviteRows = await tx
+          .select()
           .from(inviteCodes)
-          .where(eq(inviteCodes.tokenHash, tokenHash))
-          .limit(1);
-        if (existing.length === 0) return null;
-        const row = existing[0];
-        if (row.revokedAt) throw new JoinWorkspaceError("revoked");
-        if (row.consumedBy) throw new JoinWorkspaceError("already_consumed");
-        if (row.expiresAt && row.expiresAt < now) throw new JoinWorkspaceError("expired");
-        return null;
-      }
+          .where(
+            and(
+              eq(inviteCodes.tokenHash, tokenHash),
+              isNull(inviteCodes.consumedBy),
+              isNull(inviteCodes.revokedAt),
+              or(isNull(inviteCodes.expiresAt), gte(inviteCodes.expiresAt, now)),
+            ),
+          )
+          .for("update");
 
-      // 检查目标 workspace 是否存在
-      const ws = await tx.query.workspaces.findFirst({
-        where: eq(workspaces.id, invite.workspaceId),
-      });
-      if (!ws) return null;
-      // ADR-0009: 允许邀请人加入个人工作区——对邀请者而言始终是「个人工作区」，
-      // 对被邀请者而言则显示为「协作工作区」（基于 isPersonal 用户视角判断）。
+        const invite = inviteRows[0];
+        if (!invite) {
+          // 检查是否存在但已失效
+          const existing = await tx
+            .select({
+              consumedBy: inviteCodes.consumedBy,
+              revokedAt: inviteCodes.revokedAt,
+              expiresAt: inviteCodes.expiresAt,
+            })
+            .from(inviteCodes)
+            .where(eq(inviteCodes.tokenHash, tokenHash))
+            .limit(1);
+          if (existing.length === 0) return null;
+          const row = existing[0];
+          if (row.revokedAt) throw new JoinWorkspaceError("revoked");
+          if (row.consumedBy) throw new JoinWorkspaceError("already_consumed");
+          if (row.expiresAt && row.expiresAt < now) throw new JoinWorkspaceError("expired");
+          return null;
+        }
 
-      // 检查是否已是活跃成员
-      const existingMembership = await tx.query.workspaceMembers.findFirst({
-        where: and(
-          eq(workspaceMembers.workspaceId, invite.workspaceId),
-          eq(workspaceMembers.userId, userId),
-          isNull(workspaceMembers.leftAt),
-        ),
-      });
-      if (existingMembership) {
-        throw new JoinWorkspaceError("already_member");
-      }
+        // 检查目标 workspace 是否存在
+        const ws = await tx.query.workspaces.findFirst({
+          where: eq(workspaces.id, invite.workspaceId),
+        });
+        if (!ws) return null;
 
-      // ADR-0009 defines a collaborative membership from the current user's
-      // perspective: active workspaces owned by somebody else. Excluding only
-      // personalWorkspaceId would incorrectly count other user-owned spaces.
-      const activeCollabMemberships = await tx
-        .select({ workspaceId: workspaceMembers.workspaceId })
-        .from(workspaceMembers)
-        .innerJoin(workspaces, eq(workspaces.id, workspaceMembers.workspaceId))
-        .where(
-          and(
+        // 空间 id 到这里才知道，随后的成员行 / 引导行 / 邀请码消费都要过租户守卫。
+        await adoptWorkspaceContext(tx, invite.workspaceId);
+
+        // ADR-0009: 允许邀请人加入个人工作区——对邀请者而言始终是「个人工作区」，
+        // 对被邀请者而言则显示为「协作工作区」（基于 isPersonal 用户视角判断）。
+
+        // 检查是否已是活跃成员
+        const existingMembership = await tx.query.workspaceMembers.findFirst({
+          where: and(
+            eq(workspaceMembers.workspaceId, invite.workspaceId),
             eq(workspaceMembers.userId, userId),
             isNull(workspaceMembers.leftAt),
-            ne(workspaces.ownerId, userId),
           ),
-        );
-      if (activeCollabMemberships.length >= MAX_COLLABORATIVE_WORKSPACES) {
-        throw new JoinWorkspaceError("workspace_limit_reached");
-      }
+        });
+        if (existingMembership) {
+          throw new JoinWorkspaceError("already_member");
+        }
 
-      // 检查是否有已退出的历史记录（可以重新加入）
-      const leftMembership = await tx.query.workspaceMembers.findFirst({
-        where: and(
-          eq(workspaceMembers.workspaceId, invite.workspaceId),
-          eq(workspaceMembers.userId, userId),
-          // left_at IS NOT NULL — 已退出的记录
-          sql`${workspaceMembers.leftAt} IS NOT NULL`,
-        ),
-      });
+        // ADR-0009 defines a collaborative membership from the current user's
+        // perspective: active workspaces owned by somebody else. Excluding only
+        // personalWorkspaceId would incorrectly count other user-owned spaces.
+        const activeCollabMemberships = await tx
+          .select({ workspaceId: workspaceMembers.workspaceId })
+          .from(workspaceMembers)
+          .innerJoin(workspaces, eq(workspaces.id, workspaceMembers.workspaceId))
+          .where(
+            and(
+              eq(workspaceMembers.userId, userId),
+              isNull(workspaceMembers.leftAt),
+              ne(workspaces.ownerId, userId),
+            ),
+          );
+        if (activeCollabMemberships.length >= MAX_COLLABORATIVE_WORKSPACES) {
+          throw new JoinWorkspaceError("workspace_limit_reached");
+        }
+
+        // 检查是否有已退出的历史记录（可以重新加入）
+        const leftMembership = await tx.query.workspaceMembers.findFirst({
+          where: and(
+            eq(workspaceMembers.workspaceId, invite.workspaceId),
+            eq(workspaceMembers.userId, userId),
+            // left_at IS NOT NULL — 已退出的记录
+            sql`${workspaceMembers.leftAt} IS NOT NULL`,
+          ),
+        });
 
       if (leftMembership) {
         // 重新加入：清除 left_at，使用邀请码指定的角色
@@ -729,7 +837,8 @@ export async function joinWorkspaceByInviteToken(
         );
 
       return { workspaceId: invite.workspaceId, workspaceName: ws.name, role: invite.role ?? "member" };
-    });
+      },
+    );
   } catch (error) {
     if (error instanceof JoinWorkspaceError) return error;
     if (error && typeof error === "object" && "code" in error && error.code === "23505") {
@@ -740,6 +849,110 @@ export async function joinWorkspaceByInviteToken(
 
   if (!result) return new JoinWorkspaceError("not_found");
   return result;
+}
+
+export type TransferOwnershipError =
+  | "not_found"
+  | "not_owner"
+  | "target_not_member"
+  | "target_is_owner"
+  | "personal_workspace_not_transferable";
+
+/**
+ * 把协作空间的所有权交给另一个**活跃成员**（审查附录 C 的"没有出口"）。
+ *
+ * 为什么必须有这条路：`leaveWorkspace` 对 owner 直接拒（`owner_cannot_leave`）——
+ * 那道拦截是对的（否则空间变无主，`requireOwner` 的 OR 语义会让所有 member 同时
+ * "非 owner"，整个空间锁死），但它把 owner 也关死了：既不能退，也不能交。
+ * 有了转让，退出这条路才重新打开（先交、再退）。
+ *
+ * 三条不变量：
+ *   - 只有**当前** owner 能发起（`isWorkspaceOwner`，与其余判据同源）；
+ *   - 目标必须是这个空间的活跃成员（数据库触发器也拦一次，见迁移 0264）；
+ *   - 个人空间不能转让（个人空间的所有权就是"这是我"这件事，ADR-0009）。
+ *
+ * 转让写审计（`workspace.ownership_transferred`）：这是"谁能拿走全空间数据"的变更，
+ * 比一次导出更该留痕。
+ */
+export async function transferWorkspaceOwnership(
+  actorUserId: string,
+  workspaceId: string,
+  targetUserId: string,
+): Promise<
+  | { ok: true; workspaceId: string; newOwnerUserId: string }
+  | { ok: false; error: TransferOwnershipError }
+> {
+  return withActorTransaction({ userId: actorUserId }, async (tx) => {
+    const workspace = await tx.query.workspaces.findFirst({
+      where: eq(workspaces.id, workspaceId),
+      columns: { id: true, ownerId: true, workspaceType: true },
+    });
+    if (!workspace) return { ok: false, error: "not_found" } as const;
+    if (workspace.workspaceType === "personal") {
+      return { ok: false, error: "personal_workspace_not_transferable" } as const;
+    }
+
+    // 当前 owner 判定要**同时**认 membership.role 与 workspaces.owner_id
+    // （`isWorkspaceOwner` 的 OR 语义），否则 co-owner 会被自己建的判据挡在门外。
+    const actorMembership = await tx.query.workspaceMembers.findFirst({
+      where: and(
+        eq(workspaceMembers.workspaceId, workspaceId),
+        eq(workspaceMembers.userId, actorUserId),
+        isNull(workspaceMembers.leftAt),
+      ),
+      columns: { role: true },
+    });
+    const actorIsOwner = workspace.ownerId === actorUserId || actorMembership?.role === "owner";
+    if (!actorIsOwner) return { ok: false, error: "not_owner" } as const;
+    if (workspace.ownerId === targetUserId) {
+      return { ok: false, error: "target_is_owner" } as const;
+    }
+
+    const targetMembership = await tx.query.workspaceMembers.findFirst({
+      where: and(
+        eq(workspaceMembers.workspaceId, workspaceId),
+        eq(workspaceMembers.userId, targetUserId),
+        isNull(workspaceMembers.leftAt),
+      ),
+      columns: { role: true },
+    });
+    if (!targetMembership) return { ok: false, error: "target_not_member" } as const;
+
+    await adoptWorkspaceContext(tx, workspaceId);
+
+    // 先写 owner_id（触发器要求新 owner 已是活跃成员，这里已核实）。
+    await tx
+      .update(workspaces)
+      .set({ ownerId: targetUserId })
+      .where(eq(workspaces.id, workspaceId));
+    // 成员角色跟着走：两个 co-owner 并列会让 `isWorkspaceOwner` 的 OR 语义出现
+    // 两个人都能"全权"的状态，而"谁是 owner"必须只有一个答案。
+    await tx
+      .update(workspaceMembers)
+      .set({ role: "member" })
+      .where(and(
+        eq(workspaceMembers.workspaceId, workspaceId),
+        eq(workspaceMembers.userId, actorUserId),
+      ));
+    await tx
+      .update(workspaceMembers)
+      .set({ role: "owner" })
+      .where(and(
+        eq(workspaceMembers.workspaceId, workspaceId),
+        eq(workspaceMembers.userId, targetUserId),
+      ));
+
+    await recordWorkspaceAudit(tx, {
+      workspaceId,
+      actorUserId,
+      action: "workspace.ownership_transferred",
+      targetKind: "user",
+      targetId: targetUserId,
+      detail: { previousOwnerUserId: actorUserId },
+    });
+
+    return { ok: true, workspaceId, newOwnerUserId: targetUserId } as const;
+  });
 }
 
 export type LeaveWorkspaceError =
@@ -760,7 +973,7 @@ export async function leaveWorkspace(
   userId: string,
   workspaceId: string,
 ): Promise<{ ok: true; personalWorkspaceId: string } | { ok: false; error: LeaveWorkspaceError }> {
-  const result = await db.transaction(async (tx) => {
+  const result = await withActorTransaction({ userId }, async (tx) => {
     const userRows = await tx
       .select()
       .from(users)
@@ -774,6 +987,11 @@ export async function leaveWorkspace(
     if (userRow.personalWorkspaceId === workspaceId) {
       return { ok: false as const, error: "personal_workspace_cannot_leave" as LeaveWorkspaceError };
     }
+    // 这一步要在"要退出的那个空间"的租户上下文里读不到：`workspaces` 的
+    // actor 读策略认 `id = app.workspace_id`。所以先把上下文摆到**个人空间**上
+    // （它的 id 就是 userRow.personalWorkspaceId），确认它还在、还是这个人的，
+    // 再把上下文切到要退出的空间做后面三张表的写入。
+    await adoptWorkspaceContext(tx, userRow.personalWorkspaceId);
     const personalRows = await tx
       .select({ id: workspaces.id })
       .from(workspaces)
@@ -787,6 +1005,10 @@ export async function leaveWorkspace(
     if (!personalRows[0]) {
       return { ok: false as const, error: "personal_workspace_missing" as LeaveWorkspaceError };
     }
+
+    // 退出动作全部发生在"要退出的那个空间"里：成员行、该空间内的会话、
+    // 该空间里被这个用户消费掉的邀请码——三张表的租户守卫都要它。
+    await adoptWorkspaceContext(tx, workspaceId);
 
     const membership = await tx
       .select()
@@ -935,11 +1157,15 @@ export async function renameWorkspace(
     return { ok: false, error: "not_personal_workspace" };
   }
 
-  const ws = await db.query.workspaces.findFirst({ where: eq(workspaces.id, workspaceId) });
-  if (!ws) return { ok: false, error: "not_found" };
+  // 读写都在同一个 workspace 事务里：`workspaces` 的租户守卫按
+  // `id = app.workspace_id` 判，裸 db 查询在 RLS 下会读到 0 行。
+  return withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
+    const ws = await tx.query.workspaces.findFirst({ where: eq(workspaces.id, workspaceId) });
+    if (!ws) return { ok: false, error: "not_found" };
 
-  await db.update(workspaces).set({ name: trimmedName }).where(eq(workspaces.id, workspaceId));
-  return { ok: true, workspaceId, name: trimmedName };
+    await tx.update(workspaces).set({ name: trimmedName }).where(eq(workspaces.id, workspaceId));
+    return { ok: true, workspaceId, name: trimmedName };
+  });
 }
 
 // ─── N-011: AI 隐私治理 ────────────────────────────────────────────
@@ -1133,20 +1359,23 @@ export async function logAICall(params: LogAICallParams): Promise<void> {
   if (!actorUserId) {
     throw new Error("AI audit log requires actorUserId (the initiating user UUID)");
   }
-  await db.insert(aiAuditLog).values({
-    workspaceId: params.workspaceId,
-    userId: actorUserId,
-    jobId: params.jobId ?? null,
-    provider: params.provider,
-    modelId: params.modelId,
-    operation: params.operation,
-    dataCategories: params.dataCategories ?? [],
-    dataSizeBytes: params.dataSizeBytes ?? null,
-    costTokens: params.costTokens ?? null,
-    durationMs: params.durationMs ?? null,
-    status: params.status ?? "success",
-    errorMessage: params.errorMessage ?? null,
-  });
+  // `ai_audit_log` 有租户守卫 + 插入 actor 守卫，两者都要上下文。
+  await withActorTransaction({ userId: actorUserId, workspaceId: params.workspaceId }, (tx) =>
+    tx.insert(aiAuditLog).values({
+      workspaceId: params.workspaceId,
+      userId: actorUserId,
+      jobId: params.jobId ?? null,
+      provider: params.provider,
+      modelId: params.modelId,
+      operation: params.operation,
+      dataCategories: params.dataCategories ?? [],
+      dataSizeBytes: params.dataSizeBytes ?? null,
+      costTokens: params.costTokens ?? null,
+      durationMs: params.durationMs ?? null,
+      status: params.status ?? "success",
+      errorMessage: params.errorMessage ?? null,
+    }),
+  );
 }
 
 /**
@@ -1162,7 +1391,9 @@ export async function changePassword(
   const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
   if (!user || !(await verifyPassword(currentPassword, user.passwordHash))) return false;
   const newHash = await hashPassword(newPassword);
-  await db.transaction(async (tx) => {
+  // 撤销"这个人的全部会话"是改密的语义本身，所以 actor 就是这个人，
+  // 不带 sessionToken——`sec01_v1_sessions_actor_*` 的空令牌分支允许按 user_id 批量删。
+  await withActorTransaction({ userId }, async (tx) => {
     await tx.update(users).set({ passwordHash: newHash, updatedAt: new Date() }).where(eq(users.id, userId));
     await tx.delete(sessions).where(eq(sessions.userId, userId));
   });
@@ -1173,5 +1404,7 @@ export async function changePassword(
  * 2026-08-11（安全加固）：撤销用户全部会话（"退出所有设备"）。
  */
 export async function revokeAllSessionsForUser(userId: string): Promise<void> {
-  await db.delete(sessions).where(eq(sessions.userId, userId));
+  await withActorTransaction({ userId }, (tx) =>
+    tx.delete(sessions).where(eq(sessions.userId, userId)),
+  );
 }

@@ -345,6 +345,9 @@ const SESSION_ONLY_ROUTES: ReadonlyArray<{
 }> = [
   { method: "GET", url: "/reviews/v2/queue" },
   { method: "GET", url: "/stats/overview" },
+  // 跨空间总览读的是"我属于哪些空间"（成员自己的成员关系），不是空间数据，
+  // 所以成员也必须能读——否则被空间切开的个人进度对成员永远不可见。
+  { method: "GET", url: "/stats/overview/all" },
   // 版本历史属于「读工作区数据」，成员可读；恢复到旧版本才是 owner-only（见上）。
   { method: "GET", url: `/notes/${PLACEHOLDER_UUID}/versions` },
   // 任务状态是本人学习动作的派生，成员当然能查自己的。

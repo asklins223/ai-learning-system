@@ -17,6 +17,7 @@ import {
 } from "./service.ts";
 import { requireSession, requireOwner, isWorkspaceOwner } from "../identity/middleware.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
+import { recordWorkspaceAudit } from "../audit/service.ts";
 import { parseBody } from "../../lib/validate.ts";
 import { parseQuery, paginationQuerySchema, uuidParamSchema } from "../../lib/pagination.ts";
 import { deleteObject } from "../../lib/object-storage.ts";
@@ -249,9 +250,26 @@ export async function noteRoutes(app: FastifyInstance) {
     if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
     const result = await withWorkspaceTransaction(
       { workspaceId: req.session.workspaceId, userId: req.session.userId },
-      (transaction) => physicalDeleteNote(transaction, req.params.id, req.session.workspaceId, {
-        userId: req.session.userId,
-      }),
+      async (transaction) => {
+        const deleted = await physicalDeleteNote(transaction, req.params.id, req.session.workspaceId, {
+          userId: req.session.userId,
+        });
+        // 审查附录 C：物理删除此前没有任何留痕。行没了就再也查不到"谁删的"，
+        // 所以审计与删除**同事务**写——删除回滚了不该留下记录，删除成功也不该丢记录。
+        if (deleted) {
+          await recordWorkspaceAudit(transaction, {
+            workspaceId: req.session.workspaceId,
+            actorUserId: req.session.userId,
+            action: "note.permanent_delete",
+            targetKind: "note",
+            targetId: req.params.id,
+            detail: {
+              imageObjects: deleted.imageObjectKeys?.length ?? 0,
+            },
+          });
+        }
+        return deleted;
+      },
     );
     if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
 

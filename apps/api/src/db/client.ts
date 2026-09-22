@@ -104,7 +104,25 @@ const apiScope = new WorkspaceTransactionScope<string, ApiTransaction>({
   createError: (message) => new WorkspaceTransactionContextError(message),
 });
 
-type ActiveApiWorkspaceTransaction = ActiveWorkspaceTransaction<string, ApiTransaction>;
+type ActiveApiWorkspaceTransaction = ActiveWorkspaceTransaction<string, ApiTransaction> & {
+  /**
+   * 当前请求的令牌哈希（`sessions.token`）。只有 actor 事务会写它；
+   * `withWorkspaceTransaction` 开的业务事务没有这一项——业务请求已经过了
+   * `decodeToken`，不再需要按令牌读会话行。
+   */
+  sessionToken?: string | null;
+  /**
+   * `app.workspace_id` 是否真的设过。
+   *
+   * `WorkspaceScopeContext<string>` 要求 workspaceId 非空，所以"还没有当前空间"
+   * 只能用 nil UUID 占位——但占位值与真实值必须能分辨，否则 `assumeActor`
+   * （"令牌读到主人了，从现在起代表他"）会分不清"当前 actor 是占位符"还是
+   * "当前 actor 是另一个人"。实测：`decodeToken` 的 actor 是 SYSTEM_USER_ID，
+   * 读回会话行里的真实 user_id 后要换 actor，被嵌套校验判成"一条请求里两个身份"
+   * 而拒绝——那会让**每一个**已认证请求 401。
+   */
+  workspaceBound?: boolean;
+};
 
 /** Pure validation used by both the runtime helper and unit tests. */
 export function normalizeWorkspaceTransactionContext(
@@ -211,6 +229,189 @@ export async function withWorkspaceTransaction<T>(
       }
     }
   });
+}
+
+/**
+ * 工作区**建立之前**的 actor 事务（SEC-01 重开 RLS 的第二条上下文）。
+ *
+ * 为什么需要它：`sessions` / `workspace_members` / `workspaces` 三张表上挂的是
+ * RESTRICTIVE 的租户守卫（`workspace_id = app.workspace_id`）。登录、令牌解析、
+ * 空间列表这三条路都发生在"还不知道当前空间"的时刻——它们要做的第一件事**就是**
+ * 把"这个人属于哪些空间"读出来。没有第二条上下文，这三条路在 RLS 下全是 0 行：
+ * 实测把 `workspace_members` 一开，`POST /auth/login` 立刻 401。
+ *
+ * 因此 actor 事务设置三个事务局部变量：
+ *   - `app.user_id`      —— 策略里"这一行是不是我自己的"；
+ *   - `app.workspace_id` —— 会话行自带的空间（`decodeToken` 要连 `workspaces`）；
+ *   - `app.session_token`—— 令牌哈希（`sessions` 的键就是它，见 db-schema/session.ts）。
+ *
+ * 与 `withWorkspaceTransaction` 的分工：那条路服务"已经在某个空间里"的业务请求，
+ * 必须同时有 workspace 与 actor；这条只服务边界动作。两者共用同一份 `set_config`
+ * 与回读校验，不各写一套。
+ */
+export type ActorTransactionContext = {
+  userId: string;
+  workspaceId?: string | null;
+  sessionToken?: string | null;
+};
+
+/** `sessions.token` 存的是 sha256 十六进制；格式错了说明调用方拼错了字段。 */
+const SESSION_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
+
+export async function withActorTransaction<T>(
+  context: ActorTransactionContext,
+  operation: (transaction: ApiTransaction) => Promise<T>,
+): Promise<T> {
+  // actor 上下文**允许没有空间**：`app.workspace_id` 留空是"还没选空间"这个
+  // 状态本身，也是 `workspace_members` / `workspaces` 的租户守卫让开的那个分支
+  // （迁移 0257）。这里绝不能拿 nil UUID 顶替——那是一个"存在的空间"，
+  // 守卫会照着它去比，实测结果是登录读到 0 条成员行。
+  const userId = apiScope.normalize({
+    workspaceId: context.workspaceId ?? SYSTEM_USER_ID,
+    userId: context.userId,
+  }).userId;
+  const sessionToken = context.sessionToken ?? null;
+  if (sessionToken !== null && !SESSION_TOKEN_PATTERN.test(sessionToken)) {
+    throw new WorkspaceTransactionContextError("sessionToken must be a sha256 hex digest");
+  }
+
+  // 嵌套：已经在同一个 actor 的上下文里就不另开事务。换人或换令牌是调用错误——
+  // 那意味着同一条请求里有两个身份，宁可当场报错也不要静默用错的那个。
+  const active: ActiveApiWorkspaceTransaction | undefined = apiScope.current();
+  if (active?.open) {
+    // SYSTEM_USER_ID 是"还没有身份"的占位（`decodeToken` 在读到会话行之前就是它），
+    // 不是一个人。嵌套进占位上下文时允许把 actor 定成真人——否则"先按令牌读会话行、
+    // 再按行里的 user_id 继续"这条唯一的路会被自己的校验判死。
+    const activeIsPlaceholder = active.context.userId === SYSTEM_USER_ID;
+    if (!activeIsPlaceholder && active.context.userId !== userId) {
+      throw new WorkspaceTransactionContextError(
+        "nested actor transaction cannot change the acting user",
+      );
+    }
+    if (sessionToken !== null && active.sessionToken !== sessionToken) {
+      throw new WorkspaceTransactionContextError(
+        "nested actor transaction cannot change the session token",
+      );
+    }
+    return operation(active.transaction);
+  }
+
+  return db.transaction(async (transaction) => {
+    const applied = await applyActorConfig(transaction, {
+      userId,
+      workspaceId: context.workspaceId ?? null,
+      sessionToken,
+    });
+
+    const scoped: ActiveApiWorkspaceTransaction = {
+      context: {
+        userId: applied.userId,
+        // 内存里的 workspaceId 仍要满足 `WorkspaceScopeContext<string>`（非空），
+        // 所以空值时用 nil UUID 占位——它只用于嵌套兼容性比较，不写进数据库。
+        workspaceId: applied.workspaceId ?? SYSTEM_USER_ID,
+      },
+      transaction,
+      open: true,
+      sessionToken: applied.sessionToken,
+      workspaceBound: applied.workspaceId !== null,
+    };
+    try {
+      return await apiScope.run(scoped, () => operation(transaction));
+    } finally {
+      scoped.open = false;
+    }
+  });
+}
+
+/**
+ * 把事务的 actor 从"还不知道是谁"换成"令牌真正的主人"。
+ *
+ * 唯一调用点是 `decodeToken`：它必须先按令牌哈希读到会话行，才知道 user_id 与
+ * workspace_id，而这两张表（`workspace_members` / `workspaces`）的策略要的正是
+ * 它们。这是"从已认证凭据里读出来的事实"，不是调用方传进来的参数——所以这里
+ * 允许换 actor，而 `withActorTransaction` 的嵌套校验不允许。
+ *
+ * 顺序不能反：先把新的 user_id 写进配置，再更新内存里的 context——否则两次
+ * `set_config` 之间若抛错，内存说 A、数据库说 B。
+ */
+export async function assumeActor(
+  transaction: ApiTransaction,
+  userId: string,
+  workspaceId: string,
+): Promise<void> {
+  const active: ActiveApiWorkspaceTransaction | undefined = apiScope.current();
+  if (!active?.open || active.transaction !== transaction) {
+    throw new WorkspaceTransactionContextError("assumeActor requires the active actor transaction");
+  }
+  const applied = await applyActorConfig(transaction, {
+    userId,
+    workspaceId,
+    sessionToken: active.sessionToken ?? null,
+  });
+  active.context.userId = applied.userId;
+  // assumeActor 的 workspaceId 参数是非空的，所以这里一定拿得到值。
+  active.context.workspaceId = applied.workspaceId ?? SYSTEM_USER_ID;
+}
+
+/** `app.*` 三个事务局部变量的唯一写入点，带回读校验。 */
+async function applyActorConfig(
+  transaction: ApiTransaction,
+  input: { userId: string; workspaceId: string | null; sessionToken: string | null },
+): Promise<{ userId: string; workspaceId: string | null; sessionToken: string | null }> {
+  const userId = apiScope.normalize({ userId: input.userId, workspaceId: SYSTEM_USER_ID }).userId;
+  const workspaceId = input.workspaceId === null
+    ? null
+    : apiScope.normalize({ userId: input.userId, workspaceId: input.workspaceId }).workspaceId;
+  const rows = await transaction.execute(sql`
+    SELECT
+      pg_catalog.set_config('app.workspace_id', ${workspaceId ?? ""}, true) AS workspace_id,
+      pg_catalog.set_config('app.user_id', ${userId}, true) AS user_id,
+      pg_catalog.set_config('app.session_token', ${input.sessionToken ?? ""}, true) AS session_token
+  `);
+  const applied = rows[0] as
+    | { workspace_id?: string | null; user_id?: string | null; session_token?: string | null }
+    | undefined;
+  if (
+    (applied?.workspace_id ?? "") !== (workspaceId ?? "")
+    || (applied?.user_id ?? "").toLowerCase() !== userId
+    || (applied?.session_token ?? "") !== (input.sessionToken ?? "")
+  ) {
+    throw new WorkspaceTransactionContextError("database rejected actor transaction context");
+  }
+  return { userId, workspaceId, sessionToken: input.sessionToken };
+}
+
+/**
+ * 在**同一条事务里**把租户切到刚建出来的空间。
+ *
+ * 建空间的路径（注册、`POST /workspaces`、接受邀请）天生是两段：先插入
+ * `workspaces` 行才知道新空间的 id，然后才能写它的成员行与引导行。而
+ * `withWorkspaceTransaction` 要求进入事务时就知道 workspace——它拒绝中途换租户
+ * （`assertCompatible`），这是对的：业务事务不该换空间。
+ *
+ * 所以这条 helper 只服务"边界事务"：调用方已经用 `withActorTransaction` 定好了
+ * actor，这里补上 `app.workspace_id`，让随后对 `workspace_members` /
+ * `onboarding_states` / `jobs` 的写入能过租户守卫。它不改变 actor，也不允许
+ * 在业务事务里调用（那种情况应当直接用 `withWorkspaceTransaction`）。
+ */
+export async function adoptWorkspaceContext(
+  transaction: ApiTransaction,
+  workspaceId: string,
+): Promise<void> {
+  const active: ActiveApiWorkspaceTransaction | undefined = apiScope.current();
+  if (!active?.open || active.transaction !== transaction) {
+    throw new WorkspaceTransactionContextError(
+      "adoptWorkspaceContext requires the active actor transaction",
+    );
+  }
+  const applied = await applyActorConfig(transaction, {
+    userId: active.context.userId,
+    workspaceId,
+    sessionToken: active.sessionToken ?? null,
+  });
+  // adoptWorkspaceContext 的 workspaceId 参数是非空的，所以这里一定拿得到值。
+  active.context.workspaceId = applied.workspaceId ?? SYSTEM_USER_ID;
+  active.workspaceBound = applied.workspaceId !== null;
 }
 
 export function closeDatabase(): Promise<void> {

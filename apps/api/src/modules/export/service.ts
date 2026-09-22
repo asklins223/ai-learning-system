@@ -252,15 +252,25 @@ async function checkExportSize(tx: ApiTransaction, workspaceId: string): Promise
  * 用户的一些行为不涵盖在里面」）。个人空间里导出者就是唯一成员，因此这条过滤
  * 对最常见的场景没有任何可见变化。
  */
-export async function exportWorkspace(workspaceId: string, userId: string) {
+export async function exportWorkspace(
+  workspaceId: string,
+  userId: string,
+  /**
+   * 可选：调用方已经开着的事务。
+   *
+   * 为什么要它：导出是审查点名的高危动作，审计行必须与这次导出**同事务**写入
+   * （见 `modules/audit/service.ts` 的三条约束）。路由层因此先开事务，把 tx 传进来，
+   * 再在同一个事务里写审计——导出成功而审计丢失、或反过来，都不该发生。
+   * 不传时行为不变（自己开事务），定时任务与测试仍走原路。
+   */
+  executor?: ApiTransaction,
+) {
   // BUG-75 修复：使用 withWorkspaceTransaction 替代 db.transaction
   // PERF-15/43 修复：在导出前执行预计数检查，对大型工作区记录警告或拒绝导出。
   // 对于极端大型工作区（单表超过 10 万行），抛出错误建议使用增量导出。
   // 对于大型工作区（总计超过 5 万行），记录警告日志但不阻止导出。
   // 各表查询已添加 limit 安全保护，防止单次查询返回过多数据。
-  return withWorkspaceTransaction(
-    { workspaceId, userId },
-    async (tx) => {
+  const run = async (tx: ApiTransaction) => {
     // PERF-15/43 修复：Phase 0 — 预计数检查
     await checkExportSize(tx, workspaceId);
 
@@ -667,8 +677,9 @@ export async function exportWorkspace(workspaceId: string, userId: string) {
       },
       exportedAt: new Date().toISOString(),
     };
-    },
-  );
+  };
+  if (executor) return run(executor);
+  return withWorkspaceTransaction({ workspaceId, userId }, run);
 }
 
 /**

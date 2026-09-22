@@ -9,6 +9,8 @@ declare module "fastify" {
       workspaceId: string;
       membershipRole?: string | null;
       workspaceOwnerId?: string | null;
+      /** 空间边界令牌（0261）：由 decodeToken 读回 `workspaces.workspace_epoch`。 */
+      workspaceEpoch: number;
     };
   }
 }

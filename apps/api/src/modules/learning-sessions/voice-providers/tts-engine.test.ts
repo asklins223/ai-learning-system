@@ -175,7 +175,7 @@ test("selection 说 edge：config 是 qwen 也不碰 qwen，不做'先试千问�
         qwenCalls += 1;
         return { stream: streamOf("qwen"), contentType: "audio/mpeg" };
       },
-      edgeSynthesize: async () => ({ audio: bytes("edge"), contentType: "audio/mpeg" }),
+      edgeSynthesize: async (_text, voice) => ({ audio: bytes("edge"), voice, contentType: "audio/mpeg" }),
     }),
   });
   assert.equal(result.engine, "edge");

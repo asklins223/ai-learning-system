@@ -204,10 +204,13 @@ test("hashPassword 相同密码产生不同哈希（盐随机）", async () => {
 
 // ─── 类型完整性验证 ──────────────────────────────────────────────────────
 
-test("SessionContext 包含 userId 和 workspaceId", () => {
-  const ctx: SessionContext = { userId: "u1", workspaceId: "w1" };
+test("SessionContext 包含 userId、workspaceId 与服务端边界令牌", () => {
+  // workspaceEpoch 是 0261 起必填的：它是"某空间全端强制下线"的令牌，写死或漏传
+  // 都会让客户端与服务端的边界判断分叉。
+  const ctx: SessionContext = { userId: "u1", workspaceId: "w1", workspaceEpoch: 1 };
   assert.ok("userId" in ctx);
   assert.ok("workspaceId" in ctx);
+  assert.ok("workspaceEpoch" in ctx);
 });
 
 test("WorkspaceInfo 包含 ADR-0009 必需字段", () => {

@@ -6,7 +6,7 @@
  * (journeyId, domainEventId) 幂等）。全部在 withWorkspaceTransaction 内。
  */
 
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
 import { DomainError } from "@ailearn/shared";
 import {
@@ -97,24 +97,6 @@ function journeyToContract(row: typeof companionJourneys.$inferSelect): Companio
   };
 }
 
-/**
- * 账号级恢复旅程读取必须跨 workspace，但普通 API 事务受 FORCE RLS 限制。
- * 通过数据库里的 SECURITY DEFINER 函数读取一个已暂停旅程；函数仍校验
- * app.user_id 与参数一致，只返回当前账号自己的最小契约，不暴露其他账号数据。
- */
-async function loadResumableJourney(
-  tx: ApiTransaction,
-  scope: JourneyScope,
-): Promise<CompanionJourneyV2 | null> {
-  const rows = await tx.execute<{ journey: CompanionJourneyV2 | null }>(sql`
-    SELECT public.ailearn_find_resumable_companion_journey(
-      ${scope.userId}::uuid,
-      ${scope.workspaceId}::uuid
-    ) AS journey
-  `);
-  return rows[0]?.journey ?? null;
-}
-
 function stateFromContract(journey: CompanionJourneyV2): JourneyReducerState {
   return {
     status: journey.status,
@@ -187,15 +169,17 @@ export async function bootstrapJourney(
     .orderBy(companionJourneys.updatedAt)
     .limit(5);
   const current = journeyRows.find((row) => !TERMINAL.includes(row.status)) ?? null;
-  // resumable：账号在其他 workspace 的可恢复旅程（跨 workspace 摘要）。
-  // 普通 companionJourneys 查询会被 FORCE RLS 隐藏，必须走受控函数。
-  const resumableJourney = current === null
-    ? await loadResumableJourney(tx, scope)
-    : null;
+  // 旅程是**空间级**的（2026-09-22 Owner 裁决）：一段旅程只属于它开始的那个空间。
+  //
+  // 这里原先还有一条"账号级可恢复旅程"的读取（0186 的
+  // `ailearn_find_resumable_companion_journey`，SECURITY DEFINER 绕过 RLS 找
+  // 其他 workspace 里 paused 的那一段）。它和空间级语义直接冲突，而且步骤引用的是
+  // **空间内的对象**（笔记、目标、卡片）——把一个空间的引用带进另一个空间，那些对象
+  // 在那里并不存在。所以整条链一起删掉：分支、受控函数、契约字段、界面那句
+  // "发现可恢复的旅程"。
   return {
     invitation: invitationToContract(invitation),
     journey: current ? journeyToContract(current) : null,
-    resumableJourney,
   };
 }
 

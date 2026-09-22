@@ -31,6 +31,14 @@ export type CapabilityProjectionInput = {
   readonly role: CapabilityRole;
   /** 缺失时按 fail-closed 处理：视作需要同意且未签署、不允许外发。 */
   readonly ai: WorkspaceAiConsentFacts | null;
+  /**
+   * 当前空间的边界令牌（`workspaces.workspace_epoch`，迁移 0261）。
+   *
+   * 以前这里写死 `workspaceEpoch: 1`，注释还说"桌面主进程拥有这个 epoch"——
+   * 那是把"服务端没有这个概念"当成了设计。审查 1.3 指出后果：改 AI 外发政策、
+   * 改空间名、撤销设备都无法即时生效。现在它是从空间行读回来的真值。
+   */
+  readonly workspaceEpoch: number;
 };
 
 const unavailableFeature = { state: "disabled" as const, reason: "error.feature_disabled" as const };
@@ -101,10 +109,9 @@ export function buildDesktopCapabilityProjection(input: CapabilityProjectionInpu
   return capabilityProjectionSchema.parse({
     version: 1,
     revision: `desktop-capability-v1:${role}:run-${learningRunEnabled ? "on" : "off"}:card-${cardGenerationEnabled ? "on" : "off"}:ai-${outboundAllowed ? "out" : "hold"}:dialogue-${dialogueEnabled ? "on" : "off"}:voice-${voiceDialogueEnabled ? "on" : "off"}`,
-    // The desktop main process owns the workspace epoch. The server value is
-    // a positive placeholder and is replaced after the trusted response is
-    // received at the desktop boundary.
-    workspaceEpoch: 1,
+    // 服务端自己的边界令牌：成员变动 / AI 同意或外发政策改变 / 空间改名时
+    // 由触发器 +1（0261），这里如实回传。客户端拿旧值请求会被判 stale_workspace。
+    workspaceEpoch: input.workspaceEpoch,
     actionCapabilities,
     featureAvailability,
     // 服务端不可能知道桌面壳的本机能力（剪贴板 / 通知 / 自动更新 / Live2D /

@@ -3,7 +3,7 @@ import { z } from "zod";
 import { eq } from "drizzle-orm";
 import { db } from "../../db/client.ts";
 import { users, workspaces } from "@ailearn/shared/db-schema/identity";
-import { loginWithPassword, registerWithoutInvite, switchWorkspace, createCollaborativeWorkspace, listUserWorkspaces, joinWorkspaceByInviteToken, leaveWorkspace, JoinWorkspaceError, getAIPrivacySettings, updateAIConsent, updateAIDataPolicy, listAIAuditLog, revokeSession, resetRecoveredUserPassword, SESSION_TTL_MS, updateUserProfile, renameWorkspace, changePassword, revokeAllSessionsForUser } from "./service.ts";
+import { loginWithPassword, registerWithoutInvite, switchWorkspace, createCollaborativeWorkspace, listUserWorkspaces, joinWorkspaceByInviteToken, leaveWorkspace, JoinWorkspaceError, getAIPrivacySettings, updateAIConsent, updateAIDataPolicy, listAIAuditLog, revokeSession, resetRecoveredUserPassword, SESSION_TTL_MS, updateUserProfile, renameWorkspace, changePassword, revokeAllSessionsForUser, transferWorkspaceOwnership } from "./service.ts";
 import { parseBody } from "../../lib/validate.ts";
 import { requireSession, requireOwner, isWorkspaceOwner, getRequestCredential } from "./middleware.ts";
 import { clampLimit, clampOffset, parseQuery } from "../../lib/pagination.ts";
@@ -213,7 +213,7 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
       response: {
         200: {
           type: "object",
-          required: ["userId", "workspaceId", "email", "role", "displayName", "avatarUrl", "workspaceName", "workspaceType", "isPersonal", "personalWorkspaceId"],
+          required: ["userId", "workspaceId", "email", "role", "displayName", "avatarUrl", "workspaceName", "workspaceType", "isPersonal", "personalWorkspaceId", "workspaceEpoch"],
           properties: {
             userId: { type: "string" },
             workspaceId: { type: "string" },
@@ -225,6 +225,10 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
             workspaceType: { type: "string" },
             isPersonal: { type: "boolean" },
             personalWorkspaceId: { type: ["string", "null"] },
+            // 0261：服务端边界令牌。**必须在响应 schema 里列出来**——Fastify 会按
+            // schema 裁剪响应体，漏了这一行就等于 handler 里加了字段但客户端永远
+            // 收不到（实测过：`/auth/me` 少了它，而 `/auth/capabilities/v1` 有）。
+            workspaceEpoch: { type: "integer", minimum: 1 },
           },
           additionalProperties: false,
         },
@@ -256,6 +260,10 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
       workspaceType,
       isPersonal,
       personalWorkspaceId: user.personalWorkspaceId,
+      // 服务端边界令牌（0261）。桌面网关把它当作本机 epoch 的**权威值**：
+      // 空间边界一变（成员/同意/改名），下一次读会话就会拿到更大的数，
+      // 在途请求随之被判 stale_workspace 并重读。
+      workspaceEpoch: req.session.workspaceEpoch,
     };
   });
 
@@ -273,6 +281,8 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
             sendToExternal: aiSettings.dataPolicy.sendToExternal,
           }
         : null,
+      // 边界令牌来自会话解码时读回的空间行（0261），不再写死 1。
+      workspaceEpoch: req.session.workspaceEpoch,
     });
   });
 
@@ -354,6 +364,33 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
           .send({ error: result.error });
       }
       return { workspaceId: result.workspaceId, workspaceName: result.workspaceName };
+    },
+  );
+
+  // 转让协作空间的所有权（审查附录 C：owner 此前既不能退也不能交）。
+  const transferOwnershipSchema = z.object({ toUserId: z.string().uuid() });
+  app.post<{ Params: { id: string } }>(
+    "/workspaces/:id/transfer-ownership",
+    { preHandler: [requireSession, requireOwner] },
+    async (req, reply) => {
+      const params = parseQuery(app, z.object({ id: z.string().uuid() }), req.params);
+      const body = parseBody(app, transferOwnershipSchema, req.body);
+      const result = await transferWorkspaceOwnership(
+        req.session.userId,
+        params.id,
+        body.toUserId,
+      );
+      if (!result.ok) {
+        const statusMap: Record<string, number> = {
+          not_found: 404,
+          not_owner: 403,
+          target_not_member: 409,
+          target_is_owner: 409,
+          personal_workspace_not_transferable: 409,
+        };
+        return reply.code(statusMap[result.error] ?? 400).send({ error: result.error });
+      }
+      return { ok: true, workspaceId: result.workspaceId, newOwnerUserId: result.newOwnerUserId };
     },
   );
 

@@ -17,6 +17,7 @@ const current: CompanionRoomProfileV1 = {
   equippedDecorBySlot: { desk: null, shelf: null, window: null, rest: null },
   unlockedEffectIds: ["effect.page-ribbon", "effect.ink-ripple"],
   equippedEffectId: null,
+  proactiveMuted: false,
   updatedAt: "2026-09-10T00:00:00.000Z",
 };
 
@@ -116,6 +117,8 @@ type FakeRoomProfileRow = {
   equippedDecorBySlot: CompanionRoomProfileV1["equippedDecorBySlot"];
   unlockedEffectIds: CompanionRoomProfileV1["unlockedEffectIds"];
   equippedEffectId: CompanionRoomProfileV1["equippedEffectId"];
+  /** 0266：空间级打扰开关。mock 行也要带它，否则 toRoomProfile 的 strictObject 解析失败。 */
+  proactiveMuted: boolean;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -192,6 +195,7 @@ function fakeExecutor(options: FakeExecutorOptions = {}) {
               equippedDecorBySlot: values.equippedDecorBySlot as FakeRoomProfileRow["equippedDecorBySlot"],
               unlockedEffectIds: values.unlockedEffectIds as FakeRoomProfileRow["unlockedEffectIds"],
               equippedEffectId: values.equippedEffectId as FakeRoomProfileRow["equippedEffectId"],
+              proactiveMuted: (values.proactiveMuted as boolean | undefined) ?? false,
               createdAt: values.createdAt as Date,
               updatedAt: values.updatedAt as Date,
             };
@@ -235,6 +239,7 @@ function profileRow(overrides: Partial<FakeRoomProfileRow> = {}): FakeRoomProfil
     equippedDecorBySlot: { desk: null, shelf: null, window: null, rest: null },
     unlockedEffectIds: ["effect.page-ribbon"],
     equippedEffectId: null,
+    proactiveMuted: false,
     createdAt: timestamp,
     updatedAt: timestamp,
     ...overrides,

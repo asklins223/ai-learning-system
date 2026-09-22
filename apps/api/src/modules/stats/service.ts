@@ -3,23 +3,12 @@ import { withWorkspaceTransaction } from "../../db/client.ts";
 import { learningCardsV2, learningObjectiveEvidenceBindingsV2, learningObjectiveRevisionsV2, learningObjectivesV2 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
 import { notes } from "@ailearn/shared/db-schema/note";
+import type { AllWorkspacesStatsOverviewV1, StatsOverviewV1, WorkspaceStatsOverviewRowV1 } from "@ailearn/shared";
 import { visibleCardsCondition, visibleNotesCondition, visibleObjectivesCondition } from "../note/visibility.ts";
 import { ReviewStatus } from "@ailearn/shared";
+import { listUserWorkspaces, MAX_COLLABORATIVE_WORKSPACES, type WorkspaceInfo } from "../identity/service.ts";
 
-export interface StatsOverview {
-  noteCount: number;
-  cardCount: number;
-  activeCardCount: number;
-  evidenceCount: number;
-  pendingReviewCount: number;
-  hardEvidenceCount: number;
-  /** R#6-5：降级标志——true 表示 activeCardCount 超过 STATS_ACTIVE_CARDS_MAX，
-   *  明细聚合按前 MAX 张活跃卡计算，计数与明细口径可能不一致。 */
-  capped: boolean;
-  /** Plan 23 CS-04：Objective 口径（与 /v2/learning-dashboard 对账；hidden alias=0）。 */
-  activeObjectiveCount: number;
-  objectiveReviewDueCount: number;
-}
+export type StatsOverview = StatsOverviewV1;
 
 /**
  * B1: 聚合统计 API — 一次性返回首页所需的全部统计数据，
@@ -193,4 +182,104 @@ export async function getStatsOverview(workspaceId: string, userId: string): Pro
   };
     },
   );
+}
+
+/**
+ * 跨空间总览的扇出上限。
+ *
+ * 产品把**协作空间**封在 `MAX_COLLABORATIVE_WORKSPACES`（=3）个，再加自己的
+ * 个人空间，正常账号最多 4 条活跃成员关系。这里按 3+1 设上限，理由有两条：
+ * 一是首页读取不应该按"历史遗留的成员行数"无限扇出（每条成员关系就是一次
+ * 独立的空间事务 + 6 条聚合查询）；二是这个数就是产品承诺的上界，超出的行只
+ * 可能来自脏数据或未来政策变化，那种情况下 `capped`/`skippedWorkspaceCount`
+ * 会如实说明"少算了几个"，而不是悄悄截断。
+ */
+export const STATS_OVERVIEW_WORKSPACE_MAX = MAX_COLLABORATIVE_WORKSPACES + 1;
+
+/** 可注入的依赖：让聚合逻辑不依赖真实 DB 就能测（见 __tests__/stats-overview-all.test.ts）。 */
+export interface AllWorkspacesStatsOverviewDeps {
+  readonly listWorkspaces?: (userId: string) => Promise<readonly WorkspaceInfo[]>;
+  readonly loadOverview?: (workspaceId: string, userId: string) => Promise<StatsOverview>;
+}
+
+/** 把每空间的数字加成合计。`capped` 是"任一空间降级"——合计里混进了降级口径。 */
+function sumStatsOverviews(rows: readonly StatsOverview[]): StatsOverview {
+  return rows.reduce<StatsOverview>(
+    (total, row) => ({
+      noteCount: total.noteCount + row.noteCount,
+      cardCount: total.cardCount + row.cardCount,
+      activeCardCount: total.activeCardCount + row.activeCardCount,
+      evidenceCount: total.evidenceCount + row.evidenceCount,
+      pendingReviewCount: total.pendingReviewCount + row.pendingReviewCount,
+      hardEvidenceCount: total.hardEvidenceCount + row.hardEvidenceCount,
+      capped: total.capped || row.capped,
+      activeObjectiveCount: total.activeObjectiveCount + row.activeObjectiveCount,
+      objectiveReviewDueCount: total.objectiveReviewDueCount + row.objectiveReviewDueCount,
+    }),
+    {
+      noteCount: 0,
+      cardCount: 0,
+      activeCardCount: 0,
+      evidenceCount: 0,
+      pendingReviewCount: 0,
+      hardEvidenceCount: 0,
+      capped: false,
+      activeObjectiveCount: 0,
+      objectiveReviewDueCount: 0,
+    },
+  );
+}
+
+/**
+ * 「全部空间」总览：当前账号在**每一个**活跃空间里的同一份统计 + 合计。
+ *
+ * 为什么不重写计数：`getStatsOverview` 是这些数字的唯一来源（可见性条件、
+ * objective 口径、到期归因到人都在里面）。这里只做两件事——找出"我属于哪些
+ * 空间"，以及把每空间的数字并排摆出来。任何在别处再算一遍的实现都会在下次
+ * 口径调整时和首页漂移。
+ *
+ * 边界：
+ * - `listUserWorkspaces` 自己开 actor 事务（`app.workspace_id` 还没有，RLS 的
+ *   租户守卫需要这条边界上下文），并且已经按 `left_at IS NULL` 过滤；这里只做
+ *   一次防御性复核，不重复实现过滤。
+ * - 每个空间的统计各自 `withWorkspaceTransaction`（由 `getStatsOverview` 内部
+ *   开），**串行**执行：并发会让首页一次读占住 4 条池连接（API 单池 25 条，
+ *   还要和后台 tick 共用），而串行最坏也只是 4 次往返。
+ * - `currentWorkspaceId` 只用于标记"哪一行是你正在看的空间"：渲染层没有
+ *   workspaceId，按名字猜会在同名空间上给出假答案。
+ */
+export async function getAllWorkspacesStatsOverview(
+  userId: string,
+  currentWorkspaceId: string,
+  deps: AllWorkspacesStatsOverviewDeps = {},
+): Promise<AllWorkspacesStatsOverviewV1> {
+  const listWorkspaces = deps.listWorkspaces ?? listUserWorkspaces;
+  const loadOverview = deps.loadOverview ?? getStatsOverview;
+
+  const memberships = await listWorkspaces(userId);
+  // listUserWorkspaces 已经挡掉 left_at 非空的行；这里再挡一次是防止将来换实现
+  // 时把"已退出的空间"算进合计（那是别人空间的数字，不是我的）。
+  const active = memberships.filter((membership) => membership.leftAt === null);
+  const selected = active.slice(0, STATS_OVERVIEW_WORKSPACE_MAX);
+  const skippedWorkspaceCount = active.length - selected.length;
+
+  const workspaces: WorkspaceStatsOverviewRowV1[] = [];
+  for (const membership of selected) {
+    workspaces.push({
+      workspaceId: membership.workspaceId,
+      workspaceName: membership.workspaceName,
+      role: membership.role,
+      isPersonal: membership.isPersonal,
+      isCurrent: membership.workspaceId === currentWorkspaceId,
+      overview: await loadOverview(membership.workspaceId, userId),
+    });
+  }
+
+  return {
+    version: 1,
+    workspaces,
+    total: sumStatsOverviews(workspaces.map((row) => row.overview)),
+    capped: skippedWorkspaceCount > 0,
+    skippedWorkspaceCount,
+  };
 }

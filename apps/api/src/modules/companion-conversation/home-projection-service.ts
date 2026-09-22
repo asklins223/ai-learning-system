@@ -151,6 +151,7 @@ function toRoomProfile(
     equippedDecorBySlot: row.equippedDecorBySlot,
     unlockedEffectIds: row.unlockedEffectIds,
     equippedEffectId: row.equippedEffectId,
+    proactiveMuted: row.proactiveMuted,
     updatedAt: row.updatedAt.toISOString(),
   });
 }
@@ -323,6 +324,9 @@ export async function patchCompanionRoomProfile(
     .set({
       equippedDecorBySlot: validated.equippedDecorBySlot,
       equippedEffectId: validated.equippedEffectId,
+      // 打扰开关与装饰共用同一把 revision 锁：两个窗口同时改时后写的那次会被
+      // `revision_conflict` 挡住，而不是把对方的设置悄悄覆盖掉。
+      ...(patch.proactiveMuted === undefined ? {} : { proactiveMuted: patch.proactiveMuted }),
       revision: current.revision + 1,
       updatedAt: now,
     })

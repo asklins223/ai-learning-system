@@ -23,7 +23,7 @@ import {
   ConsumeInviteError,
 } from "../modules/identity/invite-service.ts";
 import { db } from "../db/client.ts";
-import { generateInvitationToken } from "../modules/identity/invitation-token.ts";
+import { generateInvitationToken, hashInvitationToken } from "../modules/identity/invitation-token.ts";
 
 // ─── Mock helpers ───────────────────────────────────────────────────────
 
@@ -45,6 +45,12 @@ function chainable<T>(value: T): any {
 interface MockTxConfig {
   workspaceId: string;
   userId: string;
+  /**
+   * 该用例期望写进 `app.session_token` 的值（`withActorTransaction` 会回读校验）。
+   * consumeInvite 那条路把它设成邀请码的哈希，所以测试用 `hashInvitationToken(token)`
+   * 算出来交给 mock——比在 mock 里反解 drizzle 的 SQL 分片可靠。
+   */
+  sessionToken?: string;
   insertReturning?: any[][];
   selectResult?: any[][];
   inviteCodesFindFirst?: any;
@@ -74,9 +80,39 @@ function createMockTx(config: MockTxConfig): any {
     (config.onboardingStatesFindFirst !== undefined ? [config.onboardingStatesFindFirst] : [undefined]);
 
   return {
-    execute: async () => [
-      { workspace_id: config.workspaceId, user_id: config.userId },
-    ],
+    // `withActorTransaction` 会 set_config 三个事务局部变量并**回读校验**：写入成功
+    // 但读回对不上就等于上下文没生效（真库上这是"策略把整张表挡成 0 行"的前兆）。
+    //
+    // 所以这个 mock 必须**回显调用方实际写下去的值**，而不是回显夹具自己的
+    // `workspaceId`/`userId`：这条路（兑换邀请码）写的是 `app.workspace_id = ''`
+    // 加一个 SYSTEM_USER_ID 占位——那时还没有当前空间。照着夹具回显会让校验
+    // 看到"写空串、读回一个空间 id"，那是真库上不可能发生的组合。
+    // 分片顺序固定（见 client.ts 里那条 `SELECT set_config(...) AS workspace_id, ...`），
+    // 所以按下标取参数就是取到了各自的实参。
+    execute: async (...args: any[]) => {
+      const record = args[0] as { queryChunks?: unknown[] } | undefined;
+      const values: unknown[] = [];
+      const collect = (chunk: unknown): void => {
+        if (Array.isArray(chunk)) { chunk.forEach(collect); return; }
+        if (chunk && typeof chunk === "object" && "value" in (chunk as Record<string, unknown>)) {
+          const inner = (chunk as { value: unknown }).value;
+          if (typeof inner === "string") values.push(inner);
+          else if (Array.isArray(inner)) inner.forEach(collect);
+          return;
+        }
+        if (typeof chunk === "string") values.push(chunk);
+      };
+      collect(record?.queryChunks);
+      // 过滤掉 SQL 文本分片，只留绑定参数。
+      const params = values.filter((value) => typeof value === "string" && !value.includes("set_config"));
+      return [
+        {
+          workspace_id: params[0] ?? "",
+          user_id: params[1] ?? "",
+          session_token: params[2] ?? "",
+        },
+      ];
+    },
     insert: (_table: any) => ({
       values: (_data: any) => ({
         returning: () => chainable(insertReturning[insertIdx++] ?? []),
@@ -825,6 +861,7 @@ describe("invite-service consumeInvite (DB mock)", () => {
     setupDbMock({
       workspaceId: WS_ID,
       userId: USER_ID,
+      sessionToken: hashInvitationToken(validToken),
       selectResult: [
         [], // lock query returns empty
         [], // existence check returns empty
@@ -841,6 +878,7 @@ describe("invite-service consumeInvite (DB mock)", () => {
     setupDbMock({
       workspaceId: WS_ID,
       userId: USER_ID,
+      sessionToken: hashInvitationToken(validToken),
       selectResult: [
         [], // lock query returns empty (expired invites don't match)
         [{ consumedBy: null, revokedAt: null, expiresAt: past }], // existence check
@@ -857,6 +895,7 @@ describe("invite-service consumeInvite (DB mock)", () => {
     setupDbMock({
       workspaceId: WS_ID,
       userId: USER_ID,
+      sessionToken: hashInvitationToken(validToken),
       selectResult: [
         [], // lock query returns empty
         [{ consumedBy: null, revokedAt: now, expiresAt: null }], // existence check
@@ -872,6 +911,7 @@ describe("invite-service consumeInvite (DB mock)", () => {
     setupDbMock({
       workspaceId: WS_ID,
       userId: USER_ID,
+      sessionToken: hashInvitationToken(validToken),
       selectResult: [
         [], // lock query returns empty
         [{ consumedBy: "other-user", revokedAt: null, expiresAt: null }], // existence check
@@ -887,6 +927,7 @@ describe("invite-service consumeInvite (DB mock)", () => {
     setupDbMock({
       workspaceId: WS_ID,
       userId: USER_ID,
+      sessionToken: hashInvitationToken(validToken),
       selectResult: [
         [{  // lock query returns the invite
           id: "inv-1", workspaceId: WS_ID, role: "member",
@@ -908,6 +949,7 @@ describe("invite-service consumeInvite (DB mock)", () => {
     setupDbMock({
       workspaceId: WS_ID,
       userId: USER_ID,
+      sessionToken: hashInvitationToken(validToken),
       selectResult: [
         [{  // lock query returns the invite
           id: "inv-1", workspaceId: WS_ID, role: "member",
@@ -943,6 +985,7 @@ describe("invite-service consumeInvite (DB mock)", () => {
     setupDbMock({
       workspaceId: WS_ID,
       userId: USER_ID,
+      sessionToken: hashInvitationToken(validToken),
       selectResult: [
         [{  // lock query returns the invite
           id: "inv-2", workspaceId: WS_ID, role: "member",
@@ -970,6 +1013,7 @@ describe("invite-service consumeInvite (DB mock)", () => {
     setupDbMock({
       workspaceId: WS_ID,
       userId: USER_ID,
+      sessionToken: hashInvitationToken(validToken),
       selectResult: [
         [{  // lock query returns the invite with owner role
           id: "inv-owner", workspaceId: WS_ID, role: "owner",

@@ -60,14 +60,24 @@ const BASELINE_WITHOUT_FK = [
 
 /**
  * 有 workspace_id 列、但 RLS 未启用的表。
- * 批次 3 已重开 `review_schedules`（迁移 0241），它已从下面这份基线里删掉；
- * 谁再把它关回去，棘轮就会红。剩下的都是还没轮到 RLS 的表。
+ *
+ * **现在是空的，而且必须一直是空的**（迁移 0257 之后）。
+ *
+ * 这份基线曾经登记 13 张表（notes / note_versions / note_blocks / sources /
+ * source_segments / search_documents / ai_artifacts / ai_audit_log / jobs /
+ * sessions / invite_codes / workspace_members / onboarding_states）。它们都是
+ * `0027_sec01_rls_expansion_failsafe.sql` 关掉的，理由是"并非所有 workspace 归属
+ * 查询都跑在带 app.workspace_id 的事务里"。0257 把两条上下文补全之后重开了它们：
+ *   - `withWorkspaceTransaction`：已经在某个空间里的业务请求；
+ *   - `withActorTransaction`：登录 / 令牌解析 / 空间列表 / 兑换邀请码这些
+ *     "还不知道是哪个空间"的边界动作。
+ *
+ * 留成空数组而不是删掉这条检查，是因为它现在是一条**零容忍**的规则：
+ * 任何一张带 workspace_id 的新表忘了 ENABLE，或者谁再写一支批量 DISABLE，
+ * 这里立刻变红。`review_schedules`（0241）与 0257 那 14 张都从这里删掉过，
+ * 棘轮只减不增——现在减到底了。
  */
-const BASELINE_WITHOUT_RLS = [
-  "ai_artifacts", "ai_audit_log", "invite_codes", "jobs", "note_blocks", "note_versions",
-  "notes", "onboarding_states", "search_documents", "sessions",
-  "source_segments", "sources", "workspace_members",
-];
+const BASELINE_WITHOUT_RLS: string[] = [];
 
 after(async () => {
   await sql.end({ timeout: 5 }).catch(() => {});
