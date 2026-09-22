@@ -155,7 +155,7 @@ export const cardGenerationCandidatesV2 = pgTable(
     ),
     runIdx: index("cg_v2_cand_run_idx").on(t.workspaceId, t.runId, t.candidateId, t.revision),
     latestIdx: index("cg_v2_cand_latest_idx").on(t.workspaceId, t.runId, t.candidateId, sql`${t.revision} DESC`),
-    qualityCheck: check("cg_v2_cand_quality_chk", sql`${t.qualityState} IN ('authored','checking','passed','failed')`),
+    qualityCheck: check("cg_v2_cand_quality_chk", sql`${t.qualityState} IN ('authored','checking','passed','failed','dropped')`),
     reviewCheck: check("cg_v2_cand_review_chk", sql`${t.reviewDecision} IN ('undecided','keep','reject','merged')`),
     publishCheck: check("cg_v2_cand_publish_chk", sql`${t.publishState} IN ('unpublished','activating','activated','activation_failed','superseded','expired')`),
     revisionCheck: check("cg_v2_cand_revision_chk", sql`${t.revision} >= 1`),

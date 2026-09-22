@@ -1871,3 +1871,27 @@ worker 侧传 `candidate.objective.practiceItem` 的 `options.length`，api 侧
 
 结论：§52 那四步里没有一步可以省。**要修的是"行上的状态必须说真话"**，
 不是调整结算时机，也不是在读路径上再猜一次（那会变成第三个来源）。
+
+## 54. #38 第一步落地（只加状态，不写不读）+ 我弄坏过一次别人的登记并已修复
+
+**做完的**：候选新增 `dropped` 终态。`0255_candidate_quality_state_dropped.sql` 替换
+`cg_v2_cand_quality_chk` 那条 CHECK，值集合从 4 个变 5 个；drizzle schema 同步；
+`db:migrate` 报 `255 total, 1 to run` 并应用；库里约束定义已含 `'dropped'`。
+
+按 §52 的判断，这一步刻意**没有任何写入方与读取方**用到它 —— 给 CHECK 增加合法值
+不会打断任何读写，所以它能单独成为一次完整交付。下一步（牌堆定论后回写 + `card_candidate.dropped`
+事件 + 读点复核）才是让它生效的那一刀。
+
+验证：shared 343/343、api scoped 63/63、api 与 shared typecheck 各 0；写入能力在**回滚事务**里试过
+（`UPDATE … SET quality_state='dropped'` 成功，`ROLLBACK` 后残留 0 行）。
+
+**我这一步里犯过一个真错误，记录在此以免重演**：为了撤销我自己对
+`meta/_journal.json` 的一次整文件重写，我跑了 `git checkout -- <journal>`。而这个文件里
+**0254 那条是另一个会话尚未提交的编辑**——我把它一起 revert 掉了：文件还在磁盘上、
+登记没了，按"journal 是唯一迁移列表"的规则，那条迁移会永远不被应用。
+发现方式是紧接着的 `python` 断言（`entries[-1].tag` 不是预期的 0254），不是运气。
+已按其原 `idx/when` 语义补回（0254 → idx 253 / when …008，我这条 0255 → idx 254 / when …009），
+并连带把"每个 .sql 都必须登记"那条覆盖测试跑绿确认。
+
+教训写死在这里：**共享工作树里，`git checkout -- <别人也在改的文件>` 是破坏性操作**，
+和 `rm -rf` 同一档；要撤销自己的编辑就只能反向编辑那几行。
