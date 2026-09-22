@@ -1,7 +1,7 @@
 import { and, asc, desc, eq, inArray, isNull, isNotNull, or, sql } from "drizzle-orm";
 import { applyNoteDocUpdate, loadNoteDoc, persistNoteDoc } from "./document-state.ts";
 import { visibleNotesCondition, type NoteShareScope } from "./visibility.ts";
-import { deriveNoteTitle, projectFragmentBlocks, setNoteTitle, writeFragmentBlocks, type NoteDocBlock } from "./doc-fragment.ts";
+import { deriveNoteTitle, noteDocBlocksFromRows, projectFragmentBlocks, setNoteTitle, writeFragmentBlocks, type NoteDocBlock } from "./doc-fragment.ts";
 import { type ApiTransaction } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks, noteImageAssets } from "@ailearn/shared/db-schema/note";
 import { searchDocuments } from "@ailearn/shared/db-schema/search";
@@ -1134,14 +1134,9 @@ export async function restoreNoteVersion(
     // 批次 4.1：恢复本身只是把 `currentVersionId` 指回旧版本，但文档必须跟着走。
     // 否则快照仍是恢复前的正文，而接口已经报"这一版才是当前版"——之后有快照时
     // `loadNoteDoc` 不再从行补齐，读到的就是两套内容里的另一套。
-    // 用 drizzle 的行类型而不是 NoteBlock：后者没有 sourceRef / imageAssetId，
+    // 用 drizzle 的行类型而不是 NoteDocBlock：后者没有 sourceRef / imageAssetId，
     // 而这两个字段正是证据链要在恢复后继续活着的东西。
-    const restoredDocBlocks: NoteDocBlock[] = (blocks as Array<typeof noteBlocks.$inferSelect>).map((b) => ({
-      type: b.type,
-      content: b.content,
-      ...(b.sourceRef ? { sourceRef: b.sourceRef as NoteDocBlock["sourceRef"] } : {}),
-      ...(b.imageAssetId ? { imageAssetId: b.imageAssetId } : {}),
-    }));
+    const restoredDocBlocks = noteDocBlocksFromRows(blocks as Array<typeof noteBlocks.$inferSelect>);
     await applyNoteDocUpdate(
       tx,
       { workspaceId, noteId, userId },

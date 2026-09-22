@@ -22,7 +22,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import sensible from "@fastify/sensible";
 import { HocuspocusProvider } from "@hocuspocus/provider";
 import { closeDatabase, withWorkspaceTransaction } from "../db/client.ts";
-import { createNote } from "../modules/note/service.ts";
+import { checkpointNote, createNote } from "../modules/note/service.ts";
 import { documentNameForNote, closeNoteCollaboration, collaborationLoad } from "../modules/note/collaboration.ts";
 import { docFromSnapshot, editFragmentBlockText, projectFragmentBlocks } from "../modules/note/doc-fragment.ts";
 
@@ -539,6 +539,64 @@ test("编辑起点必须来自 doc-state：从行重建会复制块", async () =
     headers: { authorization: `Bearer ${strangerToken}` },
   });
   assert.equal(foreign.statusCode, 404, `实际 ${foreign.statusCode}`);
+});
+
+test("恢复历史版本：开着这一篇的人要跟着变，他之后敲的字不能把恢复顶回去", async () => {
+  /** 某个版本的 `note_blocks` 行。当前版本的行随文档移动，旧版本的行冻在建版那一刻。 */
+  const rowsOf = async (version: string): Promise<string[]> =>
+    (await sql`SELECT content FROM note_blocks WHERE version_id = ${version} ORDER BY ordinal`)
+      .map((row) => String(row.content));
+
+  // 这一条钉的是"服务端整篇替换正文，必须换在同一份内存文档上"。恢复原来在事务里直接写库，
+  // 绕开了 Hocuspocus 那份文档，于是有两件实测到的坏事：① 在线的人根本收不到恢复（下行只由
+  // 那份文档广播），要重开这一篇才看得见；② 更坏——他之后敲一个字，`onStoreDocument` 把
+  // **他那份还没恢复的内存文档**整个落盘，恢复被静默顶回去。不是看不见，是内容被换回去。
+  const { doc, provider, synced } = connect(ownerToken);
+  await synced;
+
+  const e1 = `${paraA}（停在 v1 的那一版）`;
+  editFragmentBlockText(doc, 1, e1);
+  await waitFor(() => provider.unsyncedChanges === 0, "第一次编辑被服务端确认");
+  await waitFor(async () => (await rowsOf(versionId)).includes(e1), "第一次编辑投影进 v1 的行");
+
+  // 「提交并确认」把此刻定成 v2：v1 的行从此停在 e1，不再跟着文档走。
+  const checkpointed = await withWorkspaceTransaction({ workspaceId: wsCollab, userId: userOwner }, (tx) =>
+    checkpointNote(tx, noteId, wsCollab, userOwner, { baseVersionId: versionId }));
+  const v2Id = checkpointed?.version.id ?? "";
+  assert.ok(v2Id && v2Id !== versionId, `确认应当产出另一个版本，实际 ${v2Id || "没有"}`);
+
+  const e2 = `${paraA}（v2 时期又改的）`;
+  editFragmentBlockText(doc, 1, e2);
+  await waitFor(() => provider.unsyncedChanges === 0, "第二次编辑被服务端确认");
+  await waitFor(async () => (await rowsOf(v2Id)).includes(e2), "第二次编辑投影进当前版本的行");
+  // 这一句是这次量测的前提：v1 的行要是也跟着动，"恢复 v1"就没有可恢复的东西了，
+  // 下面那两条断言会一起变成哑的。
+  assert.ok(!(await rowsOf(versionId)).includes(e2), "旧版本的行被当前版本的写入改动了");
+
+  const restored = await app.inject({
+    method: "POST",
+    url: `/notes/${noteId}/versions/${versionId}/restore`,
+    headers: { authorization: `Bearer ${ownerToken}` },
+    payload: {},
+  });
+  assert.equal(restored.statusCode, 200, `恢复必须成功，实际 ${restored.statusCode}: ${restored.body}`);
+
+  // ① 在线的那一屏跟着回去。
+  await waitFor(() => docContents(doc).includes(e1), "在线文档收到恢复后的正文");
+  assert.ok(!docContents(doc).includes(e2), "恢复之后在线文档里还留着 v2 那一次编辑");
+  assert.equal((await storedBlocks())[1], e1, "库里那份快照不是恢复后的正文");
+
+  // ② 他接着敲一个字：落盘的必须是"恢复后的那一份 + 这一字"。
+  const e3 = `${paraB}（恢复之后又写的）`;
+  editFragmentBlockText(doc, 2, e3);
+  await waitFor(() => provider.unsyncedChanges === 0, "恢复之后的编辑被服务端确认");
+  await waitFor(async () => (await storedBlocks()).includes(e3), "恢复之后的编辑落库");
+  const after = await storedBlocks();
+  assert.ok(after.includes(e1), `恢复被这一次落盘顶回去了：${JSON.stringify(after)}`);
+  assert.ok(!after.includes(e2), `这一次落盘把 v2 时期的编辑带了回来：${JSON.stringify(after)}`);
+
+  destroyProviders();
+  await waitFor(() => collaborationLoad().documents === 0, "文档卸载");
 });
 
 test("关停：debounce 窗口里的最后一次编辑必须落盘", async () => {

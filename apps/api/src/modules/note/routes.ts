@@ -22,7 +22,7 @@ import { parseQuery, paginationQuerySchema, uuidParamSchema } from "../../lib/pa
 import { deleteObject } from "../../lib/object-storage.ts";
 import { logger } from "../../lib/logger.ts";
 import { projectNoteDetailV1, projectNoteSaveReceiptV1 } from "./note-projection.ts";
-import { applyUploadedDocUpdate } from "./collaboration.ts";
+import { applyUploadedDocUpdate, publishRestoredNoteDoc } from "./collaboration.ts";
 import { readNoteDocState } from "./document-state.ts";
 import { noteSaveRequestV1Schema } from "@ailearn/shared/note-save-contracts";
 import { noteShareScopeRequestV1Schema } from "@ailearn/shared/note-share-contracts";
@@ -341,6 +341,22 @@ export async function noteRoutes(app: FastifyInstance) {
         );
 
         if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
+        // 恢复是在事务里直接写库的，Hocuspocus 那份内存文档还停在恢复前的正文。不补这一刀，
+        // 开着这一篇的人既收不到恢复，他之后敲一个字还会把恢复整个顶回去（落盘落的是那份旧文档）。
+        // 这一步失败不回滚已经提交的恢复，所以不能拿它报错骗用户"恢复没成功"；但它必须留痕，
+        // 否则症状又变回"没人知道文档和内存已经分叉"。
+        try {
+          await publishRestoredNoteDoc({
+            workspaceId: req.session.workspaceId,
+            userId: req.session.userId,
+            noteId: req.params.id,
+            versionId: req.params.versionId,
+            title: result.note.title,
+            titleSource: result.note.titleSource,
+          });
+        } catch (error) {
+          logger.error({ err: error, noteId: req.params.id }, "恢复已落库，但没能同步到在线文档");
+        }
         return result;
       } catch (err) {
         if (err instanceof RevisionConflictError) {

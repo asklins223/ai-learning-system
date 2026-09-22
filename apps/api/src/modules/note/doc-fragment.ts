@@ -200,6 +200,28 @@ export function editFragmentBlockText(doc: Y.Doc, ordinal: number, nextContent: 
 }
 
 /**
+ * `note_blocks` 的行 → 文档要的那份块。
+ *
+ * 两个证据链字段必须跟着走：恢复一次历史版本，第一个该活下来的就是"这一段来自来源的
+ * 哪一句"。行里没有才是真没有——`null` 与缺省在 `updateYFragment` 那边是同一个意思。
+ */
+export function noteDocBlocksFromRows(
+  rows: readonly {
+    type: string;
+    content: string;
+    sourceRef?: NoteDocBlock["sourceRef"];
+    imageAssetId?: string | null;
+  }[],
+): NoteDocBlock[] {
+  return rows.map((row) => ({
+    type: row.type,
+    content: row.content,
+    ...(row.sourceRef ? { sourceRef: row.sourceRef } : {}),
+    ...(row.imageAssetId ? { imageAssetId: row.imageAssetId } : {}),
+  }));
+}
+
+/**
  * 恢复历史版本 = 把快照里的块列表当成目标做一次 `writeFragmentBlocks`。
  *
  * 不是"删光再插"：那会在别人正在编辑时把他的内容整篇抹掉，而且没有版本可回退。

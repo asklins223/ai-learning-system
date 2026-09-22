@@ -4,7 +4,7 @@ import type { FastifyInstance } from "fastify";
 import websocket from "@fastify/websocket";
 import type { WebSocket as WsSocket, RawData } from "ws";
 import { and, eq } from "drizzle-orm";
-import { noteDocumentStates, notes } from "@ailearn/shared/db-schema/note";
+import { noteBlocks, noteDocumentStates, notes } from "@ailearn/shared/db-schema/note";
 import { logger } from "../../lib/logger.ts";
 import { db, withWorkspaceTransaction } from "../../db/client.ts";
 import { decodeToken } from "../identity/service.ts";
@@ -14,7 +14,12 @@ import {
   persistNoteDoc,
   resolveNoteDocFlushTarget,
 } from "./document-state.ts";
-import { snapshotOf } from "./doc-fragment.ts";
+import {
+  noteDocBlocksFromRows,
+  setNoteTitle,
+  snapshotOf,
+  writeFragmentBlocks,
+} from "./doc-fragment.ts";
 import { visibleNotesCondition } from "./visibility.ts";
 
 /**
@@ -302,6 +307,58 @@ export async function applyUploadedDocUpdate(input: {
     // 落盘口现在会刷新 `notes.updated_at`，所以这个时间是服务端给的，不是本机猜的。
     savedAt: (flushedNote?.updatedAt ?? new Date()).toISOString(),
   };
+}
+
+/**
+ * 服务端把一篇**已经存在的笔记**整篇换成另一份正文之后（现在只有「恢复历史版本」这一条路），
+ * 必须把 Hocuspocus 那份内存文档换成同一份。
+ *
+ * 少了这一步有两件实测到的坏事（集成用例钉着）：
+ *  - 开着这一篇的人收不到恢复。下行只由那份内存文档广播，而恢复是直接在事务里写库的，
+ *    他要重开这一篇才看得见；
+ *  - 更坏的一种：他之后敲一个字，`onStoreDocument` 把**他那份还没恢复的内存文档**整个落盘，
+ *    恢复被静默顶回去——不是"看不见"，是内容被换回去。
+ * 根是同一个：这条写正文的路绕开了那份内存文档，两个实例各写各的。所以以后再加"整篇替换
+ * 一篇已存在笔记的正文"的路，要么走 `applyUploadedDocUpdate` 那条增量通道，要么在这里补一次。
+ *
+ * 必须在**那个事务提交之后**调用：它自己按当前库读目标版本的行，回滚了不该留下痕迹。
+ * 没有人在开着这一篇时，`openDirectConnection` 从库里补的就是刚恢复的那份，
+ * 差分下来是个空操作，`onStoreDocument` 的"内容没变就一个字节都不写"会把它整条挡掉。
+ */
+export async function publishRestoredNoteDoc(input: {
+  workspaceId: string;
+  userId: string;
+  noteId: string;
+  versionId: string;
+  /** 恢复之后服务端认定的标题。文档的 `meta` 不跟着改，客户端的标题框就会停在旧版本那一个。 */
+  title: string;
+  titleSource: string;
+}): Promise<void> {
+  const rows = await withWorkspaceTransaction(
+    { workspaceId: input.workspaceId, userId: input.userId },
+    (tx) => tx.query.noteBlocks.findMany({
+      where: eq(noteBlocks.versionId, input.versionId),
+      orderBy: (b, { asc }) => [asc(b.ordinal)],
+    }),
+  );
+  const context: NoteDocContext = {
+    userId: input.userId,
+    workspaceId: input.workspaceId,
+    noteId: input.noteId,
+    versionId: input.versionId,
+    // 可写性由路由上的 `requireOwner` 判过（与 `onAuthenticate` 同一个谓词）；走到这里就是可写。
+    readOnly: false,
+  };
+  const connection = await noteCollaboration.openDirectConnection(documentNameForNote(input.noteId), context);
+  try {
+    await connection.transact((document) => {
+      const blocks = noteDocBlocksFromRows(rows);
+      writeFragmentBlocks(document, blocks);
+      setNoteTitle(document, input.title, input.titleSource);
+    });
+  } finally {
+    await connection.disconnect();
+  }
 }
 
 /**
