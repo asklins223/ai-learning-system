@@ -138,7 +138,8 @@ describe("笔记页上的在场名单", () => {
     });
     await open("read");
     expect(presence).toHaveBeenLastCalledWith(expect.objectContaining({
-      state: JSON.stringify({ name: "owner" }),
+      // 报名字与报块是同一条 awareness（本机替换整份）：光标还没进正文就是 null。
+      state: JSON.stringify({ name: "owner", block: null }),
     }));
     await deliverPresence([{ clientId: 7, state: { name: "小琳" } }]);
     const own = document.querySelectorAll(".notebook-presence__peer")[0];

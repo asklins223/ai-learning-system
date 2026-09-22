@@ -210,7 +210,52 @@ describe("渲染进程那份文档", () => {
     act(() => {
       emit(frame(NOTE_ID, { type: "presence", states: [{ clientId: 7, state: { name: "小林" } }, { clientId: 8, state: {} }] }));
     });
-    expect(result.current.presencePeers).toEqual([{ clientId: 7, name: "小林" }, { clientId: 8, name: null }]);
+    // 两枚都要有 `block` 这一格（对端没报就是 null）：断言整个对象而不是挑字段，
+    // 以后加一份没约定的东西进 awareness 就会在这里被看见。
+    expect(result.current.presencePeers).toEqual([
+      { clientId: 7, name: "小林", block: null },
+      { clientId: 8, name: null, block: null },
+    ]);
+  });
+
+  it("换块才报一次 awareness，同一块里的按键不重发", async () => {
+    installApi();
+    const { result } = renderHook(() => useNoteDocLiveView(NOTE_ID, true, () => undefined, "小琳"));
+    await settle();
+    // 起点那一次已经报过名字（块还没定，报的是 null）。
+    const reported = () => presence.mock.calls.map((call) => (call[0] as { state: string }).state);
+    expect(JSON.parse(reported().at(-1)!)).toEqual({ name: "小琳", block: null });
+
+    act(() => { result.current.setLocalBlock(2); });
+    expect(JSON.parse(reported().at(-1)!)).toEqual({ name: "小琳", block: 2 });
+
+    // 同一块里再来一次（一次按键会派发好几回事务）不该多发一条广播。
+    const before = presence.mock.calls.length;
+    act(() => { result.current.setLocalBlock(2); });
+    expect(presence.mock.calls.length).toBe(before);
+
+    act(() => { result.current.setLocalBlock(null); });
+    expect(JSON.parse(reported().at(-1)!)).toEqual({ name: "小琳", block: null });
+  });
+
+  it("对端报的块号读得出来，认不出的形状读成没有而不是丢掉那个人", async () => {
+    const { result } = renderHook(() => useNoteDocLiveView(NOTE_ID, true, () => undefined));
+    await settle();
+    act(() => {
+      emit(frame(NOTE_ID, {
+        type: "presence",
+        states: [
+          { clientId: 7, state: { name: "小林", block: 1 } },
+          { clientId: 8, state: { name: "老周", block: "第三段" } },
+        ],
+      }));
+    });
+    // 第二条那个块号是字符串（对端版本不同或被改坏），读成 null——但人还在名单上：
+    // 因为一格认不出来就把人抹掉，那一排头像会凭空少一位。
+    expect(result.current.presencePeers).toEqual([
+      { clientId: 7, name: "小林", block: 1 },
+      { clientId: 8, name: "老周", block: null },
+    ]);
   });
 
   it("personal 空间不订阅：那一格本来就没有长连接", async () => {

@@ -68,6 +68,7 @@ function stub() {
   const seed = seedUpdate(SEED_TITLE, [STALE]);
   const syncUpdate = vi.fn(async (_input: { noteId: string; update: string }) => ({ ok: true as const, workspaceEpoch: 1, data: { via: "stream", revision: null, savedAt: new Date().toISOString() } }));
   const state = vi.fn(async () => noteDocResult({ update: seed }));
+  const presence = vi.fn(async (_input: { noteId: string; state: string }) => ({ ok: true as const, workspaceEpoch: 1, data: { shared: true } }));
   window.ailearn = {
     contract: { enabledRoutes: ["note.detail"] },
     auth: { getState: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { status: "authenticated", workspace: { workspaceId: "w-1" } } })) },
@@ -92,7 +93,7 @@ function stub() {
       doc: {
         state,
         syncUpdate,
-        presence: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { shared: true } })),
+        presence,
       },
     },
     capabilities: {
@@ -115,7 +116,7 @@ function stub() {
       },
     },
   } as unknown as typeof window.ailearn;
-  return { seed, reads: () => call, syncUpdate, state };
+  return { seed, reads: () => call, syncUpdate, state, presence };
 }
 
 /** 让挂起的一串 Promise（含自动保存的 debounce）都跑掉。 */
@@ -268,6 +269,36 @@ describe("编辑态：标题跟着别人那份走，我改的那一段不被顶�
     // "我那一次改名交出去了，屏幕却又回到别人那一份"。
     expect(titleValue()).toBe(MINE);
     expect(stubbed.state).toHaveBeenCalledTimes(1);
+  });
+
+  it("别人报的块号与我此刻这一段对上时，屏上出现一句文字提示", async () => {
+    // 这一条量的是"配对"那一环：钩子认识块号（上面有用例）、编辑器真的会报块号（下面
+    // 那句断言就是它报的），而页面把两者一比对之后**必须说出一句话**——不能只靠颜色。
+    const stubbed = stub();
+    ownerRoom();
+    await open("edit");
+    const reported = () => JSON.parse(
+      String((stubbed.presence.mock.calls.at(-1)?.[0] as { state: string }).state),
+    ) as { name: string; block: number | null };
+    const mine = reported();
+    // 编辑器真报了一格（不是本机替它编的）；报的是 null 就说明这次挂载里没有选区，
+    // 那这条用例测不到东西，直接喊出来而不是悄悄放行。
+    expect(mine.block).not.toBeNull();
+
+    // 只认这一个类：保存那一行的回执也带 `role="status"`，用角色去取会读到它，
+    // 于是"提示收回去了"这条断言会绿在错的东西上。
+    const hint = () => document.querySelector(".notebook-cowriters")?.textContent?.trim() ?? null;
+    const deliver = (block: number | null) => act(() => {
+      for (const listener of listeners) {
+        listener({ data: { kind: "note_doc_event", noteId: NOTE_ID, event: { type: "presence", states: [{ clientId: 7, state: { name: "小琳", block } }] } } });
+      }
+    });
+
+    deliver(mine.block);
+    expect(hint()).toContain("小琳 也在写这一段");
+    // 错开一格就该收回去：常驻的是"这一段有没有人"，不是"这篇有没有人"。
+    deliver((mine.block as number) + 1);
+    expect(hint()).toBeNull();
   });
 
   it("我刚交出去的那个标题，不能在下一次重画时被读回旧的那一份", async () => {

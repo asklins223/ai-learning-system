@@ -64,8 +64,24 @@ export function projectBlocks(doc: Y.Doc): NoteBlockProjectionV1[] {
   }));
 }
 
-/** 一个远端协作者。名字来自对端自己广播的 awareness 状态，不是查名册查出来的。 */
-export type NoteDocPeer = { clientId: number; name: string | null };
+/**
+ * 一个远端协作者。名字与"他在改第几块"都来自对端自己广播的 awareness 状态，
+ * 不是查名册查出来的，也不是本机替他猜的。
+ */
+export type NoteDocPeer = { clientId: number; name: string | null; block: number | null };
+
+/**
+ * awareness 那一份状态只有一个形状：名字 + 当前光标所在的块（`null` = 不在任何块里）。
+ * 报块是为了"别人也在写这一段"这句话有出处——它必须是一句文字，不能只靠颜色，
+ * 也必须是**对端自己说的**，否则界面会在别人早就离开之后还挂着那个提示。
+ */
+const presenceState = (name: string | null, block: number | null): string =>
+  JSON.stringify({ name: (name ?? "").slice(0, 40), block });
+
+/** 对端的形状不归这里管：认不出的就当没有，而不是整帧丢掉（丢了会凭空少一个人）。 */
+function peerBlock(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+}
 
 export type NoteDocLiveView = {
   /** 谁还开着这一篇（不含自己）。人数就是这一排的长度，不再另存一个数——两个真相迟早对不上。 */
@@ -89,6 +105,8 @@ export type NoteDocLiveView = {
   setLocalTitle: (title: string, titleSource: "auto" | "manual") => void;
   /** 交出本机攒下的增量；没有可交的就返回 null，界面据此报"未改动"而不是"同步中"。 */
   flush: () => Promise<"stream" | "uploaded" | "queued" | "unchanged" | null>;
+  /** 本机光标进了哪一块（`null` = 离开正文）。换块才报一次，认不出的对端读成没有。 */
+  setLocalBlock: (block: number | null) => void;
 };
 
 export function useNoteDocLiveView(
@@ -109,6 +127,9 @@ export function useNoteDocLiveView(
   const [seeded, setSeeded] = useState(false);
   const [dirty, setDirty] = useState(false);
   const pendingRef = useRef<string[]>([]);
+  const blockRef = useRef<number | null>(null);
+  const presenceNameRef = useRef(presenceName);
+  presenceNameRef.current = presenceName;
   const changeRef = useRef(onRemoteChange);
   changeRef.current = onRemoteChange;
 
@@ -125,6 +146,7 @@ export function useNoteDocLiveView(
       docRef.current?.destroy();
       docRef.current = null;
       pendingRef.current = [];
+      blockRef.current = null;
       setDirty(false);
       setSeeded(false);
       setStream({ peers: [], authorizedScope: null, failure: null });
@@ -213,6 +235,7 @@ export function useNoteDocLiveView(
             // awareness 状态是对端自己写的，形状不归这里管：认不出的就无名，
             // 而不是整帧丢掉（丢掉会让头像凭空少一个人）。
             name: typeof peer.state.name === "string" && peer.state.name.trim() ? peer.state.name.trim() : null,
+            block: peerBlock(peer.state.block),
           })),
         }));
         return;
@@ -235,7 +258,7 @@ export function useNoteDocLiveView(
           handle(payload.event);
         });
         // 没有显示名也照样报名字为空：不报的话这一行的人数会比头像多出一个来历不明的位置。
-        void api.note.doc.presence({ meta: meta(), noteId, state: JSON.stringify({ name: (presenceName ?? "").slice(0, 40) }) }).catch(() => undefined);
+        void api.note.doc.presence({ meta: meta(), noteId, state: presenceState(presenceName, blockRef.current) }).catch(() => undefined);
       } catch {
         // 订阅不通只是看不到实时帧，正文本身仍由读路径保证。
       }
@@ -253,6 +276,18 @@ export function useNoteDocLiveView(
       }
     };
   }, [doc, enabled, noteId, presenceName]);
+
+  // 报块与报名字是同一条 awareness，换块就重发一次整份（不是加一个键）：awareness 的
+  // 本机上传统一是替换，两边各写半份迟早会拼出"有名没块"或"有块没名"。
+  const setLocalBlock = useCallback((block: number | null): void => {
+    if (blockRef.current === block) return;
+    blockRef.current = block;
+    const api = window.ailearn;
+    if (!api?.note?.doc?.presence || !noteId) return;
+    void api.note.doc
+      .presence({ meta: createRequestMeta(epochRef?.current ?? undefined), noteId, state: presenceState(presenceNameRef.current, block) })
+      .catch(() => undefined);
+  }, [noteId]);
 
   const flush = useCallback(async (): Promise<"stream" | "uploaded" | "queued" | "unchanged" | null> => {
     const api = window.ailearn;
@@ -273,6 +308,7 @@ export function useNoteDocLiveView(
     // queued 要留着这一批：没网时它们是"改完还没交出去"的全部内容，清了就是丢掉。
     if (via && via !== "queued") {
       pendingRef.current = [];
+      blockRef.current = null;
       setDirty(false);
     }
     return via;
@@ -304,6 +340,7 @@ export function useNoteDocLiveView(
     dirty,
     flush,
     setLocalTitle,
+    setLocalBlock,
     ...projection,
   };
 }

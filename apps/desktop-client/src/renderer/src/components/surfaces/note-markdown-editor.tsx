@@ -101,6 +101,11 @@ const withNoteDocAttrs = (schemaObject: { extendSchema: (handler: never) => unkn
 type Props = {
   /** 正文的共享文档片段。编辑器直接写它，不再持有一份文本拷贝。 */
   readonly fragment: Y.XmlFragment;
+  /**
+   * 光标进了哪一块（`null` = 离开正文）。交给 awareness，别人那一屏才说得出
+   * 「小琳 也在写这一段」——这句话的对端说的是他自己所在的位置，不是本机替他猜的。
+   */
+  readonly onCaretBlock?: (block: number | null) => void;
   readonly initialMarkdown: string;
   readonly onChange: (markdown: string) => void;
   readonly disabled?: boolean;
@@ -260,6 +265,37 @@ function imageNodeViewPlugin(
   }));
 }
 
+/**
+ * 光标所在块的监听。用插件的 `view.update`：它在**只变选区**时也跑，而
+ * `markdownUpdated` 那种内容回调只会漏掉"点了另一段、一个字没打"这一格——
+ * 那一格正是冲突提示最需要出现在的时候。
+ *
+ * 只在块号真的变了才回调：一次按键会派发多次事务，跟着每次重发 awareness 就是把
+ * 广播当心跳用。
+ */
+function caretBlockPlugin(onCaretBlock: React.RefObject<((block: number | null) => void) | undefined>) {
+  return $prose(() => new Plugin({
+    key: new PluginKey("NOTE_CARET_BLOCK"),
+    view: (view) => {
+      let last: number | null | undefined;
+      const read = (): void => {
+        const $from = view.state.selection.$from;
+        const block = $from.depth > 0 ? $from.index(0) : null;
+        if (block === last) return;
+        last = block;
+        onCaretBlock.current?.(block);
+      };
+      read();
+      return {
+        update: read,
+        // 编辑器关掉就把这一格报成"不在任何块里"：awareness 是本机上传统一替换，
+        // 不报的话别人那一屏会一直挂着「也在写这一段」，直到这台机器的连接断掉。
+        destroy: () => { onCaretBlock.current?.(null); },
+      };
+    },
+  }));
+}
+
 /** 代码块内的 Tab 是缩进，不是焦点跳走。 */
 function codeBlockTabPlugin() {
   return $prose(() => keymap({
@@ -295,13 +331,15 @@ function placeholderPlugin() {
   }));
 }
 
-function MilkdownBody({ fragment, initialMarkdown, onChange, disabled, onImagePaste }: Props) {
+function MilkdownBody({ fragment, initialMarkdown, onChange, disabled, onImagePaste, onCaretBlock }: Props) {
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
   const disabledRef = useRef(disabled);
   disabledRef.current = disabled;
   const onImagePasteRef = useRef(onImagePaste);
   onImagePasteRef.current = onImagePaste;
+  const onCaretBlockRef = useRef(onCaretBlock);
+  onCaretBlockRef.current = onCaretBlock;
   // 图片节点的点击放大：节点视图是命令式 DOM，经 ref 把点击交给 React 渲染灯箱。
   const onImageZoomRef = useRef<((src: string, alt: string) => void) | undefined>(undefined);
   onImageZoomRef.current = (src, alt) => setZoom({ src, alt });
@@ -349,6 +387,7 @@ function MilkdownBody({ fragment, initialMarkdown, onChange, disabled, onImagePa
     .use(clipboard)
     .use(imageUploadPlugin(onImagePasteRef))
     .use(imageNodeViewPlugin(onImageZoomRef))
+    .use(caretBlockPlugin(onCaretBlockRef))
     .use(codeBlockTabPlugin())
     .use(placeholderPlugin()));
 
@@ -457,6 +496,7 @@ export function NoteMarkdownEditor({
   onChange,
   disabled,
   onImagePaste,
+  onCaretBlock,
   ref,
 }: Props) {
   const handleRef = useRef<NoteMarkdownEditorHandle | null>(null);
@@ -469,6 +509,7 @@ export function NoteMarkdownEditor({
         onChange={onChange}
         disabled={disabled}
         onImagePaste={onImagePaste}
+        onCaretBlock={onCaretBlock}
       />
       <MilkdownControls handleRef={handleRef} externalRef={ref} />
     </MilkdownProvider>

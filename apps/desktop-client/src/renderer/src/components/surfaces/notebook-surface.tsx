@@ -315,6 +315,8 @@ export function NotebookSurface() {
   const [versionsLoading, setVersionsLoading] = useState(false);
   const [versionsFailure, setVersionsFailure] = useState<string | null>(null);
   const [restoringVersionId, setRestoringVersionId] = useState<string | null>(null);
+  /** 本机光标此刻在第几块。冲突提示读的就是这一格，所以它必须与报给对端的那一份同源。 */
+  const [caretBlock, setCaretBlock] = useState<number | null>(null);
   /**
    * 与 `draft` 同一份内容的 ref：图片上传回填要在渲染之外读到当前正文，
    * 卸载时那一次保存也要闭包到最新一份，而不能在渲染阶段读 ref。
@@ -466,6 +468,11 @@ export function NotebookSurface() {
   // 所以不必在"帧"和"回读"之间二选一（那两个来源并存正是上一次覆盖的根）。
   const readSourceBlocks = noteDocLive.blocks.length ? noteDocLive.blocks : (note?.currentVersion.blocks ?? []);
   const readTitle = titleValue;
+  // 谁在这同一块里：判据只有对端自己报的那一格，`caretBlock` 为空时不成立
+  // （光标还没进正文，说不出"这一段"是哪一段）。
+  const coWriters = caretBlock === null
+    ? []
+    : noteDocLive.presencePeers.filter((peer) => peer.block === caretBlock);
   const mark = useMemo(
     () => conceptMark(readSourceBlocks, objective?.content.conceptLabel),
     [readSourceBlocks, objective],
@@ -525,7 +532,14 @@ export function NotebookSurface() {
   // 这两个引用按 noteId / doc 建（`useCallback`），每个 noteId 内不变。把它们单独取出来
   // 再进 `save` 的依赖，是为了不让 `save` 每次渲染都换身份——那会把自动保存的 debounce
   // 一帧一帧地重置掉，永远等不到触发。
-  const { setLocalTitle, flush } = noteDocLive;
+  const { setLocalTitle, flush, setLocalBlock } = noteDocLive;
+
+  // 光标换块：本机改这一格，对端那一格交给 awareness（同一次调用里两份一起动，
+  // 否则"我看到的"与"别人看到的我"会分开）。
+  const onCaretBlock = useCallback((block: number | null) => {
+    setCaretBlock(block);
+    setLocalBlock(block);
+  }, [setLocalBlock]);
 
   const save = useCallback(async (reason: "auto" | "manual") => {
     const api = desktopApi();
@@ -1402,6 +1416,13 @@ export function NotebookSurface() {
       </h2>
       <label className="sr-only" htmlFor="notebook-surface-body">笔记正文</label>
       <div id="notebook-surface-body" data-surface-initial-focus={mode === "edit" ? "true" : undefined}>
+        {coWriters.length ? (
+          // 一句文字，不靠颜色：这一格说的是"别人和我在同一段里"，看不见颜色的人
+          // 与截图review都得能读出来。名字来自对端自己报的，一个也没本机代填。
+          <p className="small notebook-note notebook-cowriters" role="status">
+            {`${coWriters.map((peer) => peer.name ?? "另一个人").join("、")} 也在写这一段`}
+          </p>
+        ) : null}
         {noteDocLive.fragment ? <NoteMarkdownEditor
           key={note.noteId}
           ref={editorRef}
@@ -1410,6 +1431,7 @@ export function NotebookSurface() {
           onChange={applyContent}
           disabled={!editable}
           onImagePaste={imageUploads.queueFile}
+          onCaretBlock={onCaretBlock}
         /> : null}
       </div>
       <NoteImageUploads
