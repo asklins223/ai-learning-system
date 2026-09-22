@@ -682,6 +682,11 @@ test("looksLikeActionRequest：实机四条『她该动手』的请求全部命�
   // 名词侧也要认：她自己的设定项（活跃度/口头禅/称呼）出现在请求里就该动手，
   // 动词怎么说是说不完的。
   assert.equal(looksLikeActionRequest("你的活跃度现在是哪一档？换到最安静那档。"), true);
+  // 同一类"动词差一个字"（§12.5 的 AC 轮）：用户说的是「**念**一小段原文给我」，
+  // 判据里只有 `读(原文|一下|出来)`，于是要原文这一轮不被认成动作轮——
+  // 她零工具交出一段课本话，也没有攒住与 steer 挡着。
+  assert.equal(
+    looksLikeActionRequest("《欧姆定律 生成验收》这篇里到底写了什么？念一小段原文给我。"), true);
 });
 
 test("looksLikeActionRequest：普通聊天与提问不算（不为它们白烧一次调用）", () => {

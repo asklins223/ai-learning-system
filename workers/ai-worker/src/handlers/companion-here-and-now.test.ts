@@ -4,6 +4,7 @@ import {
   asksForBoundaryChange,
   asksForLearningStats,
   extractNoteTitleReference,
+  noteOpeningExcerpt,
   renderHereAndNow,
   summarizeLearningStats,
   weekdayLabel,
@@ -43,13 +44,13 @@ test("答应的提醒会出现在她知道的当下（不记得自己许过约�
 
 test("用户点名的笔记：找到就给 id，没找到也不给她「它不存在」这个结论", () => {
   const found = renderHereAndNow(snapshot({
-    noteReference: { title: "欧姆定律生成验收", found: true, noteId: "b4ab4749-d888-4b93-9019-e33b74679206", ageLabel: "4 天前", imageCount: 0 },
+    noteReference: { title: "欧姆定律生成验收", found: true, noteId: "b4ab4749-d888-4b93-9019-e33b74679206", ageLabel: "4 天前", imageCount: 0, opening: null },
   }));
   assert.ok(found?.includes("b4ab4749-d888-4b93-9019-e33b74679206"));
   assert.ok(found?.includes("companion_read_note"));
 
   const missing = renderHereAndNow(snapshot({
-    noteReference: { title: "欧姆定律生成验收", found: false, noteId: null, ageLabel: null, imageCount: 0 },
+    noteReference: { title: "欧姆定律生成验收", found: false, noteId: null, ageLabel: null, imageCount: 0, opening: null },
   }));
   assert.ok(missing?.includes("按标题没找到"));
   // 关键：这一行必须把她推向"再查一次/照实说"，而不是让她有依据地下假结论
@@ -67,7 +68,7 @@ test("用户点名的笔记：找到就给 id，没找到也不给她「它不�
 test("有图就先把图数交给她：看不了时禁止承诺，能看时指向 companion_read_image", () => {
   const denied = renderHereAndNow(snapshot({
     imagesReadable: false,
-    noteReference: { title: "IndexTTS 2.5", found: true, noteId: "a7aa823c-f2cf-4b3d-bda1-37a6eca14bce", ageLabel: "3 天前", imageCount: 6 },
+    noteReference: { title: "IndexTTS 2.5", found: true, noteId: "a7aa823c-f2cf-4b3d-bda1-37a6eca14bce", ageLabel: "3 天前", imageCount: 6, opening: null },
   }));
   assert.ok(denied?.includes("6 张图"));
   assert.ok(denied?.includes("图片外发没开启"));
@@ -77,14 +78,14 @@ test("有图就先把图数交给她：看不了时禁止承诺，能看时指�
 
   const readable = renderHereAndNow(snapshot({
     imagesReadable: true,
-    noteReference: { title: "IndexTTS 2.5", found: true, noteId: "a7aa823c-f2cf-4b3d-bda1-37a6eca14bce", ageLabel: "3 天前", imageCount: 2 },
+    noteReference: { title: "IndexTTS 2.5", found: true, noteId: "a7aa823c-f2cf-4b3d-bda1-37a6eca14bce", ageLabel: "3 天前", imageCount: 2, opening: null },
   }));
   assert.ok(readable?.includes("companion_read_image"));
   assert.ok(!readable?.includes("图片外发没开启"), "政策开着时不能告诉她看不了");
 
   // 没图时一个字都不提：多出来的那句"另有一张图"本身就是假事实。
   const none = renderHereAndNow(snapshot({
-    noteReference: { title: "欧姆定律", found: true, noteId: "b4ab4749-d888-4b93-9019-e33b74679206", ageLabel: "4 天前", imageCount: 0 },
+    noteReference: { title: "欧姆定律", found: true, noteId: "b4ab4749-d888-4b93-9019-e33b74679206", ageLabel: "4 天前", imageCount: 0, opening: null },
   }));
   assert.ok(!none?.includes("张图"));
 });
@@ -259,4 +260,28 @@ test("要改边界时，当前状态先摆出来；说「记住了」不等于�
   // 这一句是这次要买的后果：她以前把"应下来"当成"已经改好了"。
   assert.match(asked, /光答"记下了"什么都没变/);
   assert.doesNotMatch(renderHereAndNow(snapshot()) ?? "", /催复习=/);
+});
+
+// §12.5 ①：她把"原文"编成课本话，是因为手上只有一句"要看正文就调工具"，
+// 而没有任何一段真文本。注进首块开头之后，她不必补，也不该拿这段往下补。
+test("noteOpeningExcerpt：只取第一句、压换行、封顶 120 字", () => {
+  assert.equal(
+    noteOpeningExcerpt("欧姆定律说明，\n在电阻不变时，电流与电压成正比，公式为 I=U/R。\n例如电压增加一倍。"),
+    "欧姆定律说明， 在电阻不变时，电流与电压成正比，公式为 I=U/R。",
+  );
+  assert.equal(noteOpeningExcerpt("没有句号的整段".repeat(30))!.length, 121,
+    "超长要截断并留省略号");
+  assert.equal(noteOpeningExcerpt(null), null);
+  assert.equal(noteOpeningExcerpt("   \n  "), null);
+});
+
+test("点名的笔记找到时，快照里带出真开头并注明不许往下补", () => {
+  const block = renderHereAndNow(snapshot({
+    noteReference: {
+      title: "欧姆定律生成验收", found: true, noteId: "b4ab4749-d888-4b93-9019-e33b74679206",
+      ageLabel: "4 天前", imageCount: 0, opening: "欧姆定律说明，在电阻不变时，电流与电压成正比。",
+    },
+  }));
+  assert.ok(block?.includes("这篇的开头是：「欧姆定律说明，在电阻不变时，电流与电压成正比。」"));
+  assert.ok(block?.includes("不要照这段往下补"), "要同时点名边界：只有开头，更长的还得去读");
 });

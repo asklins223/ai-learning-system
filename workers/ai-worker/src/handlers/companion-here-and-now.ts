@@ -67,7 +67,10 @@ export interface HereAndNowSnapshot {
    * 实机 2026-09-21 她零工具就说"这篇正文读完了，里面没有截图"，而那篇挂着 6 张图——
    * 因为图不在 `note_blocks` 里，她照实读完正文仍会推出"没有图"这个假阴性。
    */
-  noteReference: { title: string; found: boolean; noteId: string | null; ageLabel: string | null; imageCount: number } | null;
+  noteReference: {
+    title: string; found: boolean; noteId: string | null; ageLabel: string | null;
+    imageCount: number; opening: string | null;
+  } | null;
   /** 图片外发政策是否开着（决定"有图但看不了"这句话怎么说）。 */
   imagesReadable: boolean;
   /**
@@ -385,9 +388,15 @@ export async function loadHereAndNow(
     ? sql`n.title = ${noteRefTitle ?? ""}`
     : sql`${sql.join(noteRefTerms.map((term) => sql`n.title ILIKE ${`%${term}%`}`), sql` AND `)}`;
   const noteRefRows = noteRefTitle
-    ? await tx.execute<{ id: string; title: string; age_minutes: string; image_count: string }>(sql`
+    ? await tx.execute<{ id: string; title: string; age_minutes: string; image_count: string; opening: string | null }>(sql`
         SELECT n.id, n.title,
                EXTRACT(EPOCH FROM (now() - n.updated_at)) / 60 age_minutes,
+               -- 首块的开头（按 ordinal，与 read_note 同一个顺序）：实机 2026-09-22 AC 轮，
+               -- 她零工具交出一段"看着像原文"的课本话——那不是编错的物理，是编的出处。
+               -- 真开头在这一行里，她就没有补的必要了（方案 29 §12.5 的 ①）。
+               (SELECT nb.content FROM note_blocks nb
+                 WHERE nb.version_id = n.current_version_id AND coalesce(nb.content, '') <> ''
+                 ORDER BY nb.ordinal LIMIT 1) AS opening,
                -- 图挂在另一张表里，不在 note_blocks——所以她"把正文读完了"仍然看不见它们。
                (SELECT count(*) FROM note_image_assets a
                  WHERE a.workspace_id = n.workspace_id
@@ -472,8 +481,9 @@ export async function loadHereAndNow(
           noteId: noteRefRows[0].id,
           ageLabel: ageLabel(Number(noteRefRows[0].age_minutes)),
           imageCount: Number(noteRefRows[0].image_count ?? 0),
+          opening: noteOpeningExcerpt(noteRefRows[0].opening),
         }
-        : { title: noteRefTitle, found: false, noteId: null, ageLabel: null, imageCount: 0 })
+        : { title: noteRefTitle, found: false, noteId: null, ageLabel: null, imageCount: 0, opening: null })
       : null,
     imagesReadable,
     learningStats,
@@ -486,6 +496,27 @@ export async function loadHereAndNow(
 }
 
 /** 页面类型的中文说法；`other`/`home` 不渲染（见 resolveCurrentPage）。 */
+/**
+ * 首块正文 → 注进环境快照的那一句"开头是…"。
+ *
+ * 只取到第一句、上限 120 字，并把换行压成空格：这一段的作用是**让她不必自己补原文**
+ * （实机 2026-09-22 AC 轮她零工具交出一段课本话当"原文"），不是替她读完全篇——
+ * 给得越多，越像可以照抄，而它不进历史、也不带块结构。
+ */
+export const NOTE_OPENING_MAX_CHARS = 120;
+
+export function noteOpeningExcerpt(content: unknown): string | null {
+  if (typeof content !== "string") return null;
+  const flat = content.replace(/\s+/g, " ").trim();
+  if (flat.length === 0) return null;
+  const stop = flat.search(/[。！？!?；;]/);
+  const firstSentence = stop >= 0 ? flat.slice(0, stop + 1) : flat;
+  const clipped = firstSentence.length > NOTE_OPENING_MAX_CHARS
+    ? `${firstSentence.slice(0, NOTE_OPENING_MAX_CHARS)}…`
+    : firstSentence;
+  return clipped.length > 0 ? clipped : null;
+}
+
 export const PAGE_KIND_LABELS: Record<string, string> = {
   note: "笔记",
   card: "学习卡",
@@ -625,6 +656,11 @@ export function renderHereAndNow(snapshot: HereAndNowSnapshot): string | null {
       ? `用户提到的《${truncate(ref.title, 24)}》在笔记库里，noteId=${ref.noteId}（${ref.ageLabel}写的）；要看正文就调用 companion_read_note 用这个 id。`
       // 没找到时**不把"它不存在"当结论交给她**——那正是实机里她零工具却脱口而出的假阴性。
       : `按标题没找到《${truncate(ref.title, 24)}》这篇笔记：标题可能记岔，或者它其实是一张卡片。先调用 companion_search_notes 换个关键词再查；查不到就照实说没查到，不要替笔记库下"没有这东西"的结论。`);
+    // 只给开头一段，并点名"更长的原文还是要去读"：给全篇等于让她抄一个可能已经
+    // 过期、也没进历史的版本，而那正是要修的东西。
+    if (ref.found && ref.opening) {
+      lines.push(`这篇的开头是：「${ref.opening}」（只到第一句为止；要更长的原文仍然要调用 companion_read_note 去读，不要照这段往下补。）`);
+    }
     // 图的事实在这里给，而不是等她去猜：图片不是 note_blocks 的一部分，她把正文
     // 读三遍也看不到图，于是"我读完了，里面没有截图"听起来像诚实的回答（实机
     // 2026-09-21 就是这么一句假阴性）。

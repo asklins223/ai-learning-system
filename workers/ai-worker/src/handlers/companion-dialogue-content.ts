@@ -449,7 +449,7 @@ export function looksLikeUnfulfilledActionNarration(text: string): boolean {
  * （实机 2026-09-22 说了"设成"，判据里只有"设为/改成/设置成"，于是她零工具直接回
  * "活跃度调到「活跃」了喵"），而名词是有限的一小撮，出现即可以判定"这轮必须动手"。
  */
-const ACTION_REQUEST_TEST = /(记住|记下|记一下|别记|忘掉|忘了|忘记|删掉|别记着|口头禅|口癖|活跃度|称呼|提醒我|提醒一下|以后.{0,8}(别|不要|不准)|别催|改成|改到|设为|设成|设置成|调成|调到|换到|帮我(查|搜|找|看看)|帮你(查|搜|找)|打开|读(原文|一下|出来)|排(个|一下)?复习)/;
+const ACTION_REQUEST_TEST = /(记住|记下|记一下|别记|忘掉|忘了|忘记|删掉|别记着|口头禅|口癖|活跃度|称呼|提醒我|提醒一下|以后.{0,8}(别|不要|不准)|别催|改成|改到|设为|设成|设置成|调成|调到|换到|帮我(查|搜|找|看看)|帮你(查|搜|找)|打开|读(原文|一下|出来)|念.{0,8}原文|排(个|一下)?复习)/;
 
 export function looksLikeActionRequest(text: string): boolean {
   return ACTION_REQUEST_TEST.test(text);
