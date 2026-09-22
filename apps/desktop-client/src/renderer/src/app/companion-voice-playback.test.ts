@@ -53,6 +53,16 @@ class FakeHost implements CompanionVoiceHost {
     return Promise.resolve(buffer(text));
   }
 
+  /**
+   * 音频时钟读数（方案 29 §14.11 修复 ⑤）。测试自己设"念到几成"；
+   * null = 没在播（宿主在段间/停止时就是这么答的）。
+   */
+  progressValue: number | null = null;
+
+  progress(): number | null {
+    return this.progressValue;
+  }
+
   /** 严格片段通道：测试里以 segmentId 为键，与 synthesize 共用失败表。 */
   synthesizeSegment(ref: CompanionVoiceSpeakSegmentRequestV2): Promise<AudioBuffer> {
     return this.synthesize(ref.segmentId);
@@ -652,6 +662,30 @@ describe("逐段播放结局上报", () => {
     );
     expect(host.reports.filter((report) => report.reason === "dropped").map((report) => report.ordinal))
       .toEqual([3]);
+  });
+
+  // §14.11 修复 ⑤：字幕的位置**从音频时钟现算**，不是拿 80ms 的采样值外推。
+  // 这条钉住"当前段的绝对字数 = 段区间 × 播放比例"，以及"没在播时答 null"。
+  it("位置读数：当前段区间 × 音频时钟比例；没在播时为 null", async () => {
+    const host = new FakeHost();
+    setCompanionVoiceHost(host);
+    const session = beginCompanionSpeechLine({ strictSegments: true });
+    session.feedSegment(refSegment(1, "第一句。"));
+
+    await waitUntil(() => host.played.length === 1);
+    expect(session.currentVisibleChars()).toBeNull();   // 宿主还没给位置
+    host.progressValue = 0.5;
+    expect(session.currentVisibleChars()).toBe(2);      // 0 + floor(0.5 × 4)
+    host.progressValue = 1;
+    expect(session.currentVisibleChars()).toBe(4);
+
+    // 播完这一段之后（还没轮到下一段）没有在播的音频 → null，显现层原地等。
+    host.progressValue = null;
+    host.finishSegment();
+    await flush();
+    await flush();
+    expect(session.currentVisibleChars()).toBeNull();
+    session.finish("");
   });
 
   it("本地文本路径（服务端没签段引用）不产生任何上报", async () => {

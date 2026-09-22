@@ -267,6 +267,7 @@ export function HomeV2AudioController() {
   const stopVoicePlayback = useCallback((immediate = true) => {
     const playback = voiceRef.current;
     voiceRef.current = null;
+    activePlaybackRef.current = null;
     window.cancelAnimationFrame(mouthReleaseFrameRef.current);
     if (!playback) {
       if (immediate) {
@@ -333,6 +334,7 @@ export function HomeV2AudioController() {
       source.connect(analyser).connect(graph.context.destination);
       const samples = new Float32Array(analyser.fftSize);
       const startedAt = graph.context.currentTime;
+      activePlaybackRef.current = { context: graph.context, startedAt, duration: buffer.duration };
       let previousMeterAt = performance.now();
       const playback: VoicePlayback = { source, analyser, samples, frame: 0, settle: () => resolve() };
       const meter = (at: number) => {
@@ -403,6 +405,14 @@ export function HomeV2AudioController() {
     windowVisible: windowState === "visible" && !document.hidden,
   });
   const userInitiatedAudibleRef = useRef(false);
+  /**
+   * 正在播的那一段的**音频时钟读数**（方案 29 §14.11 修复 ⑤）。
+   *
+   * 字幕要的是"现在念到哪了"，而这个问题的唯一正确答案在音频时钟里
+   * （`AudioContext.currentTime`）——不是 rAF 采样的最后值：窗口不可见/被遮挡时
+   * rAF 会被节流甚至停住，采样值冻住而声音照走，字幕立刻与声音脱开。
+   */
+  const activePlaybackRef = useRef<{ context: AudioContext; startedAt: number; duration: number } | null>(null);
   userInitiatedAudibleRef.current = userInitiatedAudible;
 
   const synthesizeVoice = useCallback(async (text: string): Promise<AudioBuffer> => {
@@ -440,6 +450,19 @@ export function HomeV2AudioController() {
     }).catch(() => undefined);
   }, []);
 
+  /**
+   * 此刻的播放位置 0..1；没有在播返回 null。
+   *
+   * 从音频时钟现算（不是缓存上一次 rAF 的值）：这是"字幕跟着声音走"的唯一可靠来源。
+   */
+  const voiceProgress = useCallback((): number | null => {
+    const active = activePlaybackRef.current;
+    if (!active || !(active.duration > 0)) return null;
+    const elapsed = active.context.currentTime - active.startedAt;
+    if (!Number.isFinite(elapsed)) return null;
+    return Math.min(1, Math.max(0, elapsed / active.duration));
+  }, []);
+
   // 把音频出口交给伴星台词播放服务：它只管排队与计时，解码、播放、振幅仍在这里，
   // 全应用因此只有一个 AudioContext 和一条嘴型通道。
   useEffect(() => {
@@ -448,11 +471,12 @@ export function HomeV2AudioController() {
       synthesize: synthesizeVoice,
       synthesizeSegment: synthesizeVoiceSegment,
       play: playVoiceBuffer,
+      progress: voiceProgress,
       stop: stopVoicePlayback,
       reportSegmentOutcome,
     });
     return () => setCompanionVoiceHost(null);
-  }, [playVoiceBuffer, stopVoicePlayback, synthesizeVoice, synthesizeVoiceSegment, reportSegmentOutcome]);
+  }, [playVoiceBuffer, stopVoicePlayback, synthesizeVoice, synthesizeVoiceSegment, reportSegmentOutcome, voiceProgress]);
 
   useEffect(() => {
     const graph = graphRef.current;

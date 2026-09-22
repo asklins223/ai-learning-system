@@ -36,6 +36,14 @@ export interface CompanionVoiceHost {
    * 被 stop() 打断时也 resolve——打断由 generation 判定，不靠异常。
    */
   readonly play: (buffer: AudioBuffer, onProgress: (fraction: number) => void) => Promise<void>;
+  /**
+   * 此刻的播放位置 0..1；没有在播返回 null（方案 29 §14.11 修复 ⑤）。
+   *
+   * 与 `play` 的进度回调是两件事：回调是**采样**（每 ~80ms 一次，窗口不可见时还会
+   * 被 rAF 节流拖住），这个是**现算**——字幕要的是"现在念到哪了"，只有一个时钟
+   * （音频时钟）能回答，采样加第二个时钟必然漂移。
+   */
+  readonly progress?: () => number | null;
   /** 立刻停掉当前播放。 */
   readonly stop: () => void;
   /**
@@ -291,6 +299,13 @@ export interface CompanionSpeechSession {
   /** 生成结束：把最后一段增量拼上、尾巴强制成段并收尾。 */
   finish(text?: string): void;
   stop(): void;
+  /**
+   * 此刻该露出到第几个字——**从音频时钟现算**，没有在播时返回 null。
+   *
+   * 显现层每个心跳问一次这个值，而不是拿进度回调的最后一次采样去外推：外推就是
+   * 第二个时钟，两个时钟的速率差会一路累积成"前面差一点、后面完全对不上"。
+   */
+  currentVisibleChars(): number | null;
 }
 
 export interface CompanionServerVoiceSegment {
@@ -315,6 +330,11 @@ interface CompanionSpeechQueue {
    * 挂上这个回调，段一到就开始合成，合成在上一段的播放时间里跑完。
    */
   onSegmentQueued: (() => void) | null;
+  /**
+   * "此刻念到第几个字"的读数（方案 29 §14.11 修复 ⑤）。由 `runQueuedSpeech` 装上：
+   * 它手里有当前段与它在正文里的绝对区间；没有在播时返回 null。
+   */
+  positionProvider: (() => number | null) | null;
 }
 
 interface CompanionQueuedSpeechSegment {
@@ -448,6 +468,21 @@ async function runQueuedSpeech(args: {
     prefetchUpcoming();
   };
   /**
+   * "现在念到第几个字"：当前段的绝对区间 + 音频时钟现算出来的比例（§14.11 ⑤）。
+   *
+   * 只认**正在播**的那一段：段间那一小段空档返回 null，让显现层原地等——字幕跟着
+   * 声音走，声音没有就不动。这里绝不用"上一段的最后位置 + 时间 × 语速"去外推，
+   * 那就是第二个时钟。
+   */
+  let playingSegment: CompanionQueuedSpeechSegment | null = null;
+  queue.positionProvider = () => {
+    const current = playingSegment;
+    if (!current) return null;
+    const fraction = args.host.progress?.() ?? null;
+    if (fraction === null) return null;
+    return visibleAt(current, fraction);
+  };
+  /**
    * 预取已经发起、却没轮到播的段：被打断或宿主卸载时给它们一个终态。
    *
    * 不报的话这些段在服务端只剩一条 `stage='synth'` 的成功行，于是"给了音频却没响"
@@ -518,6 +553,8 @@ async function runQueuedSpeech(args: {
       // 字节到手了：从这里开始，无论走哪条出口都必须有终态。
       inFlight = { segment, startedAtMs: pending.startedAtMs };
 
+      // 记下"正在播的是哪一段"：位置读数要用它把 0..1 映射回绝对字数。
+      playingSegment = segment;
       emit({
         planId: args.planId,
         phase: "speaking",
@@ -568,6 +605,7 @@ async function runQueuedSpeech(args: {
         }
         return;
       }
+      playingSegment = null;
       previousEnd = segment.endIndex;
       playedCount += 1;
       // 走到这里才算"播成了"：`play()` 被打断时同样 resolve，所以必须排在上面那道
@@ -618,8 +656,10 @@ async function runQueuedSpeech(args: {
       failure: gatewayErrorMessage(error),
     });
   } finally {
-    // 循环真的退出了（念完 / 被打断 / 异常）：此后新到的段不再预取。
+    // 循环真的退出了（念完 / 被打断 / 异常）：此后新到的段不再预取，也不再报位置。
     loopActive = false;
+    playingSegment = null;
+    queue.positionProvider = null;
   }
 }
 
@@ -629,7 +669,7 @@ export function beginCompanionSpeechLine(options: { readonly strictSegments?: bo
   const planId = `speech-${(sequence += 1)}`;
   const activeHost = host;
   const mode: "voice" | "silent" = activeHost && activeHost.audible() ? "voice" : "silent";
-  const queue: CompanionSpeechQueue = { segments: [], finished: false, wake: null, onSegmentQueued: null };
+  const queue: CompanionSpeechQueue = { segments: [], finished: false, wake: null, onSegmentQueued: null, positionProvider: null };
   let feedState: CompanionSpeechFeedState = COMPANION_SPEECH_FEED_INITIAL;
   /** 调用方喂进来的累积文本（feed/finish 收增量，这里拼成切段器要的全量）。 */
   let accumulated = "";
@@ -661,6 +701,7 @@ export function beginCompanionSpeechLine(options: { readonly strictSegments?: bo
   return {
     planId,
     mode,
+    currentVisibleChars: () => queue.positionProvider?.() ?? null,
     feed(text: string): void {
       if (options.strictSegments) return;
       if (text.length === 0) return;

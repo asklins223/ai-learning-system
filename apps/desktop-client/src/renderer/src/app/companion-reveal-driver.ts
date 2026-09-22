@@ -39,14 +39,6 @@ export const COMPANION_REVEAL_LEAD_CHARS = 6;
  */
 export const COMPANION_REVEAL_FIRST_AUDIO_SILENCE_MS = 2_000;
 export const COMPANION_REVEAL_GAP_SILENCE_MS = 800;
-/**
- * 阅读钟最多领先音频多少字（见 `tick` 里那段注释）。
- *
- * 10 字 ≈ 2 秒朗读：够垫住一次卡顿（气泡不冻），又短到"音频一回来就对上"。
- * 它是**上限**不是速率——钟仍然按 `COMPANION_READ_MS_PER_CHAR` 走，只是走不远。
- */
-export const COMPANION_REVEAL_MAX_DRIFT_CHARS = 10;
-
 /** 阅读钟的心跳间隔。60ms ≈ 16 字/秒，与 `estimateCompanionReadDurationMs` 同一条节奏。 */
 export const COMPANION_REVEAL_TICK_MS = COMPANION_READ_MS_PER_CHAR;
 
@@ -60,8 +52,6 @@ export interface CompanionRevealDriverOptions {
   readonly firstAudioSilenceMs?: number;
   /** 出声之后判定"卡住"的间隔；缺省 `COMPANION_REVEAL_GAP_SILENCE_MS`。 */
   readonly gapSilenceMs?: number;
-  /** 还有音频时阅读钟最多领先多少字；缺省 `COMPANION_REVEAL_MAX_DRIFT_CHARS`。 */
-  readonly maxDriftChars?: number;
   readonly onReveal?: (revealed: number) => void;
 }
 
@@ -76,8 +66,12 @@ export interface CompanionRevealDriver {
   noteArrived(chars: number): void;
   /** 本轮语音会话的模式；没有会话传 `unavailable`。 */
   noteSession(mode: CompanionRevealSessionMode): void;
-  /** 音频正在播（每 80ms 一次的真实播放进度）。 */
-  noteAudioProgress(visibleChars: number): void;
+  /**
+   * 此刻念到第几个字——**由音频时钟现算**，每个心跳喂一次（不是 80ms 的采样值）。
+   * 拿采样的最后值再按时间外推，就是给自己造了第二个时钟；两个速率不同的时钟
+   * 必然漂移，而字幕恰恰是"错一点、越错越多"最难看的地方。
+   */
+  noteAudioPosition(visibleChars: number): void;
   /** 音频播完：全文到手，可以收尾。 */
   noteAudioFinished(): void;
   /** 音频失败/被停：交回阅读钟。 */
@@ -103,7 +97,6 @@ export function createCompanionRevealDriver(
     Math.floor(options.firstAudioSilenceMs ?? COMPANION_REVEAL_FIRST_AUDIO_SILENCE_MS),
   );
   const gapSilenceMs = Math.max(0, Math.floor(options.gapSilenceMs ?? COMPANION_REVEAL_GAP_SILENCE_MS));
-  const maxDriftChars = Math.max(0, Math.floor(options.maxDriftChars ?? COMPANION_REVEAL_MAX_DRIFT_CHARS));
   const listeners = new Set<() => void>();
 
   let arrived = 0;
@@ -138,45 +131,44 @@ export function createCompanionRevealDriver(
     for (const listener of listeners) listener();
   };
 
+  /**
+   * 心跳（每 60ms 一拍）。**这里没有第二个时钟**——这是这一版最重要的一条。
+   *
+   * 显现只有两个合法来源：
+   *   1. **音频时钟现算的位置**（`noteAudioPosition`，每个心跳喂一次）——权威；
+   *   2. 本轮**真的没有音频**了（静音模式 / 被停 / 念完）时的阅读钟——兜底。
+   *
+   * 中间那种"音频还在路上、只是这一拍没读到位置"的状态（段间空档、刚起播还没喂到）
+   * 一律**原地等**。以前这里让阅读钟接管，而阅读钟是 60ms/字、TTS 只有约 130ms/字
+   * ——快 2.6 倍；两个速率不同的时钟叠在一起，差值会一路累积，用户看到的就是
+   * "前面差一点、后面完全对不上"（2026-09-22 用户原话）。
+   */
   const tick = (): void => {
     const at = now();
     if (audioLive(at)) {
-      // 音频在说话：它是唯一权威。钟挂起，等它停了再从头起算（不回退计数）。
+      // 位置刚更新过：音频是唯一权威。钟挂起，等它真停了再从头起算（不回退计数）。
       clockStartedAt = null;
       clockBase = revealed;
+      completeIfDone();
       return;
     }
     const waitingFirstAudio = sessionMode === "voice" && audioAt === null && !audioGaveUp;
     const waitedEnough = arrivedAt !== null && at - arrivedAt >= firstAudioSilenceMs;
+    // "音频还在路上"：出过声就一直算它在；一次都没出过声时，等满两倍第一段看门狗
+    // 就认为这一轮不会出声了——否则一段永远不来的音频会把文字永久钉住、气泡收不了尾。
+    const audioPending = sessionMode === "voice" && !audioGaveUp
+      && (audioAt !== null || (arrivedAt !== null && at - arrivedAt < firstAudioSilenceMs * 2));
     if (waitingFirstAudio && !waitedEnough) {
-      // 第一段音频还在路上：只放行提前量，剩下的等声音。
+      // 第一段音频还没到：先露一个头。这一小截会被音频位置追上，不是偏移累积。
       commit(Math.max(revealed, Math.min(arrived, leadChars)));
+    } else if (audioPending) {
+      // 原地等（见上面那段注释）。
     } else {
       if (clockStartedAt === null) {
         clockStartedAt = at;
         clockBase = revealed;
       }
-      const clockTarget = clockBase + Math.floor((at - clockStartedAt) / msPerChar);
-      /**
-       * **阅读钟不许把文字甩开音频太远**（2026-09-22 用户报"文字太快、气泡对不上"）。
-       *
-       * 阅读钟是 60ms/字（≈16.7 字/秒），而 TTS 实际约 4.6 字/秒——**快 2.6 倍**。
-       * 而 `revealed` 只增不减，所以只要钟接管过一次，文字就永久停在音频前面：
-       * 音频要花好几秒才追到那个位置，这期间气泡里的字和正在念的那句根本对不上。
-       * 我 09-22 把"段间卡住"的判定从 2000ms 收到 800ms 之后，这件事从偶发变成了常态。
-       *
-       * 所以给钟加一条**只在本轮真的还有音频时**生效的上限：最多领先音频
-       * `leadChars + MAX_DRIFT` 个字。它仍然能在段间静音时继续走一点（不冻住气泡），
-       * 但走不远——音频一回来就重新对齐。音频彻底没了（stopped/finished/静音模式）
-       * 时这条上限取消，钟照旧按阅读节奏把全文走完。
-       */
-      // "音频还在路上"：出过声（audioAt 有值）就一直算它在；一次都没出过声时，
-      // 等满两倍第一段看门狗就认为"这一轮不会出声了"，上限取消——否则一段永远
-      // 不来的音频会把文字永久钉在 lead+drift 上，气泡再也收不了尾。
-      const audioPending = sessionMode === "voice" && !audioGaveUp
-        && (audioAt !== null || (arrivedAt !== null && at - arrivedAt < firstAudioSilenceMs * 2));
-      const cap = audioPending ? audioCeiling + leadChars + maxDriftChars : arrived;
-      commit(Math.min(Math.max(revealed, clockTarget), cap));
+      commit(Math.max(revealed, clockBase + Math.floor((at - clockStartedAt) / msPerChar)));
     }
     completeIfDone();
   };
@@ -213,7 +205,7 @@ export function createCompanionRevealDriver(
     noteSession(mode: CompanionRevealSessionMode): void {
       sessionMode = mode;
     },
-    noteAudioProgress(visibleChars: number): void {
+    noteAudioPosition(visibleChars: number): void {
       audioAt = now();
       audioGaveUp = false;
       audioCeiling = Math.max(audioCeiling, Math.max(0, Math.floor(visibleChars)));

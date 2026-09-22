@@ -622,7 +622,10 @@ export function CompanionHud({
     speakingRef.current = progress.phase === "speaking" && progress.planId === activeSpeechPlanRef.current;
     const driver = revealDriverRef.current;
     if (!driver || progress.planId !== activeSpeechPlanRef.current) return;
-    if (progress.phase === "speaking") driver.noteAudioProgress(progress.visibleChars);
+    // `speaking` 的进度**不再**喂给驱动器：那是 80ms 一次的采样值，用它驱动字幕就是
+    // 让字幕跟着"上一次采样 + 时间外推"走（第二个时钟，必然漂移）。位置改由下面那个
+    // 心跳从音频时钟现算（§14.11 ⑤）。
+    if (progress.phase === "speaking") { /* 位置见 tick */ }
     else if (progress.phase === "finished" && progress.visibleChars > 0) driver.noteAudioFinished();
     else if (progress.phase === "finished") {
       // 整轮一个字都没念过（服务端语音关着 / 没有任何片段）：不能按"音频播完"
@@ -641,10 +644,15 @@ export function CompanionHud({
   const turnLive = Boolean(chat.draft || chat.liveReply || chat.interrupted);
   useEffect(() => {
     if (!turnLive) return;
-    const timer = window.setInterval(
-      () => revealDriverRef.current?.tick(),
-      COMPANION_REVEAL_TICK_MS,
-    );
+    const timer = window.setInterval(() => {
+      const driver = revealDriverRef.current;
+      if (!driver) return;
+      // 每一拍都从**音频时钟**现算一次位置（没有在播时为 null）。
+      // 这是"字幕跟着声音走"的唯一时间来源；驱动器自己不再外推。
+      const position = speechSessionRef.current?.currentVisibleChars() ?? null;
+      if (position !== null) driver.noteAudioPosition(position);
+      driver.tick();
+    }, COMPANION_REVEAL_TICK_MS);
     return () => window.clearInterval(timer);
   }, [turnLive]);
 
@@ -1543,7 +1551,7 @@ function CompanionQuickSettings({ settings }: { readonly settings: CompanionHudS
   const quiet = account?.quietHours ?? null;
   const permissionLevel = account?.agentSettings?.permissionLevel ?? "guided";
   const permissionDescription = permissionLevel === "read_only"
-    ? "只读取和查询，不执行任何改动。"
+    ? "只会读取和查询，不执行任何改动。"
     : permissionLevel === "guided"
       ? "每次产生改动前都会先向你确认。"
       : "跳转、设置与填充可自动执行；不可恢复的操作仍会确认。";
