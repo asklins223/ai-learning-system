@@ -1856,3 +1856,18 @@ worker 侧传 `candidate.objective.practiceItem` 的 `options.length`，api 侧
 顺带一条同源要求：新加状态要同时过一遍**所有按 `qualityState` 分支的读点**
 （api 导出、审核列表计数、worker 2963 那句 `WHERE latest.quality_state='passed'`），
 不能只加枚举不查读者。
+
+## 53. 试过的捷径不成立：结算没错，撒谎的是行上的状态
+
+本想找一条不动状态机的便宜修法（把结算挪到牌堆定论之后，让它和头部读同一个集合）。
+读完 `handler:2395-2470` 就否掉了：**结算用的 `survivors` 就是最终牌堆** ——
+`card_candidate.review_ready` 事件也是对同一批 `survivors` 发的。所以事件的
+`{required:3, met:1}` 与那 2 张 review_ready 是一致的，没有"时机过早"的问题。
+
+不一致的另一头才是真问题：obj-atom-2 那道 4 选项的选择题**没进最终牌堆**
+（没有它的 review_ready 事件），但它行上的 `quality_state` 仍写着 `passed`。
+于是读路径（头部 `practiceQuota`、审核列表的"可保留/可激活"）都把它当成还在批次里，
+数出 `{3,3}` 与 4 张可操作卡。
+
+结论：§52 那四步里没有一步可以省。**要修的是"行上的状态必须说真话"**，
+不是调整结算时机，也不是在读路径上再猜一次（那会变成第三个来源）。
