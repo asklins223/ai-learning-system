@@ -112,6 +112,19 @@ PLAYBACK_REPORTING_SINCE = "2026-09-21 06:10:00+00"
 # 切分点之前剩下的段是历史，不是现状；只报全时段会让一个修好的病天天显示成故障。
 AUDIO_SILENT_FIX_SINCE = "2026-09-22 04:40:00+00"
 
+# `companion_stream_events` 有 TTL（迁移 0217 的过期清扫），旧事件会被真的删掉。
+# 于是"按事件数出来的"指标在保留窗口之前会读成 0——那不是"没下发"，是**证据没了**。
+#
+# 地平线取**第一条 `voice.segment.ready` 事件**，不取全表最早事件：后者只说明"事件从那时
+# 起没被清完"，不说明"从那时的段都被记下来了"。实测（2026-09-22）：
+#   全表最早事件 09-20 01:45，但 09-20 那 158 轮的段事件是 0——它们要么被 TTL 清过、
+#   要么那时管线还没在发段，两种解释都推不出"这 158 轮漏了段"。
+#   第一条段事件在 09-21 09:26:35，从它起 n=80 轮、零段 = 0。
+# 旧注释写的"分界 09-19 11:00"是当时的读数，现在读不出来了（事件已过期）——别照着它推。
+VOICE_SEGMENT_HORIZON_SQL = (
+    "(SELECT min(created_at) FROM companion_stream_events WHERE type = 'voice.segment.ready')"
+)
+
 # 「把话头递回去」不一定带问号。2026-09-22 分类"未推进"样本时抓到的一类：
 # 用户说「等一下，先别念了」，她答「嗯，停在这儿了。你说。」——这是邀请，
 # 但上面那串问句标记一个都不命中，于是被计成"没推进"。
@@ -431,14 +444,13 @@ def collect(since: str | None) -> dict:
 
     # 语音：有正文却零段的 run
     #
-    # **必须带时间边界读这个数**（踩过）。实测分界是 **2026-09-19 11:00**：
-    #   02:00–10:00 共 106 轮，零段 = 106（100%）；11:00 起 108 轮，零段 = 0。
-    # 分段管线是那一刻才落的，所以全时段统计会得到「125/255 ≈ 49% 有正文零语音」，
-    # 看着像灾难性故障，其实是历史数据。
+    # **必须夹在"第一条段事件"之后读**（踩过两次）。全时段统计得到的是
+    # 「363/444 有正文零语音」，看着像灾难，其实那 363 里绝大多数是**事件被 TTL 清掉的
+    # 轮次**——seg=0 是证据没了，不是没下发。地平线之内（09-21 09:26 起）这个数是 **0**。
     #
     # 反过来这也**排除了一个错误假设**：用户抱怨「输出了但语音根本不读」不是服务端
-    # 没下发段——分界之后一段都没漏过。责任在客户端 deadline 降级与 edge-tts 上游
-    # 故障（方案 §3.5 / §4.9）。这里把分界固化下来，别让下一个人重新推一遍。
+    # 没下发段——有证据的窗口里一段都没漏过。责任在客户端 deadline 降级与 edge-tts
+    # 上游故障（方案 §3.5 / §4.9）。地平线的定义与实测数见文件上方常量注释。
     voice = rows(f"""
         WITH per_run AS (
           SELECT r.id, r.created_at,
@@ -452,7 +464,13 @@ def collect(since: str | None) -> dict:
                count(*) FILTER (WHERE segs = 0 AND chars > 0) zero_voice,
                min(created_at)::date zero_voice_from,
                max(created_at)::date zero_voice_to,
-               round(avg(segs)::numeric, 2) avg_segs
+               round(avg(segs)::numeric, 2) avg_segs,
+               -- 地平线之内：事件还在，seg=0 才是"真的没下发段"。
+               count(*) FILTER (WHERE created_at >= {VOICE_SEGMENT_HORIZON_SQL}) in_horizon,
+               count(*) FILTER (WHERE created_at >= {VOICE_SEGMENT_HORIZON_SQL} AND segs = 0 AND chars > 0)
+                 zero_voice_in_horizon,
+               round(avg(segs) FILTER (WHERE created_at >= {VOICE_SEGMENT_HORIZON_SQL})::numeric, 2)
+                 avg_segs_in_horizon
         FROM per_run;
     """)
 
@@ -625,7 +643,8 @@ def collect(since: str | None) -> dict:
 
     tts_requested = int(scalar(f"""
         SELECT count(*) FROM companion_stream_events e
-        WHERE e.type = 'voice.segment.ready' {since_clause(since, 'e.created_at')};
+        WHERE e.type = 'voice.segment.ready' {since_clause(since, 'e.created_at')}
+          AND e.created_at >= {VOICE_SEGMENT_HORIZON_SQL};
     """) or 0)
 
     # 首字延迟：run 开始 → 第一个 assistant.delta
@@ -879,7 +898,10 @@ def collect(since: str | None) -> dict:
             "succeeded_runs": int(num(voice[0]["n"])) if voice else 0,
             "runs_with_text_but_zero_segments": int(num(voice[0]["zero_voice"])) if voice else 0,
             "zero_voice_span": f"{voice[0].get('zero_voice_from') or '-'}~{voice[0].get('zero_voice_to') or '-'}" if voice else "-",
+            "zero_voice_in_horizon": int(num(voice[0]["zero_voice_in_horizon"])) if voice else 0,
+            "runs_in_horizon": int(num(voice[0]["in_horizon"])) if voice else 0,
             "avg_segments": num(voice[0]["avg_segs"]) if voice else 0,
+            "avg_segments_in_horizon": num(voice[0]["avg_segs_in_horizon"]) if voice else 0,
             # 逐段合成结果（0246）。requested 是"下发了几段"，attempts 是"客户端来取过几次"，
             # 两者的差就是**根本没来取**的段数——那是另一类没声音。
             "tts": {
@@ -1073,9 +1095,14 @@ def render(metrics: dict) -> None:
           f"  抽取 job = {mem['extract_jobs']}")
 
     print("\n【语音】方案 #4")
-    print(f"  成功轮 = {voice['succeeded_runs']}  有正文却零语音段 = {voice['runs_with_text_but_zero_segments']}"
-          f"（落在 {voice['zero_voice_span']}，管线 2026-09-19 才上线——**不要按全时段读这个数**）")
-    print(f"  平均段数 = {voice['avg_segments']}")
+    print(f"  成功轮 = {voice['succeeded_runs']}  有正文却零语音段 = "
+          f"{voice['zero_voice_in_horizon']}（段事件地平线内，n={voice['runs_in_horizon']}）"
+          f" / {voice['runs_with_text_but_zero_segments']}（全时段）")
+    # 全时段那个数**不是**"管线还没上线"，也不是"历史就是坏的"——是 `companion_stream_events`
+    # 的 TTL 把证据删了。真相是"历史读不出来"，所以现状只能读地平线内那一半。
+    print(f"    平均段数 = {voice['avg_segments_in_horizon']}（地平线内） / {voice['avg_segments']}（全时段）"
+          f"   ← 全时段那一半含 {voice['zero_voice_span']} 这些**段事件已被 TTL 清掉**的轮次，"
+          "它们的 seg=0 是证据没了，不是没下发")
     tts = voice["tts"]
     playback = tts["playback"]
     if tts["attempts"] == 0:
@@ -1164,7 +1191,17 @@ def compare(current: dict, baseline: dict) -> None:
         return out
 
     before, after = flat(baseline), flat(current)
-    interesting = [k for k in after if k in before and before[k] != after[k]]
+    # 这些键**跨时间不可比**，delta 表里一律不出现：
+    # `voice.runs_with_text_but_zero_segments` 数的是"段事件还在的轮次里 seg=0 有几条"，
+    # 而事件有 TTL——同一条历史在 09-20 读是 0、在 09-22 读是 363，涨的是"证据过期"，
+    # 不是"她哑了"。把它放进 delta 表，下一个人一定会把它读成回归。
+    # 同一个 TTL 也压着平均段数：分母里那些轮的段事件被清掉了，段数自然是 0。
+    incomparable = {
+        "voice.runs_with_text_but_zero_segments",
+        "voice.avg_segments",
+    }
+    interesting = [k for k in after
+                   if k in before and before[k] != after[k] and k not in incomparable]
     print(f"\n{'='*66}\n与基线对照（基线 since={baseline.get('since') or '全部'}）\n{'='*66}")
     width = max((len(k) for k in interesting), default=10)
     for key in sorted(interesting):
