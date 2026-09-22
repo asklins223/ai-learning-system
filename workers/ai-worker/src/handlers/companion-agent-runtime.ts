@@ -132,6 +132,51 @@ export function actionSteerBudget(input: { userAskedForAction: boolean }): numbe
 }
 
 /**
+ * 这一步要不要补、补的时候花掉哪条额度（纯函数，方案 29 §9.28 双额度的账目）。
+ *
+ * 单独立出来是因为那条"独立的"额度在实现里并不独立：原来只要触发一次 steer
+ * 就把 `lookupClaimSteered` 置真，于是第 1 步的形状问题会吃掉"说查过而没查"的额度，
+ * 第 2 步的假阴性就没闸可拦了（实机 2026-09-22 真人轮量到，见 §12 C1）。
+ */
+export function planStepSteer(input: {
+  stepCalls: number;
+  toolCallCount: number;
+  finalAnswerOnly: boolean;
+  withinBudget: boolean;
+  userAskedForAction: boolean;
+  hasUnverifiedClaims: boolean;
+  looksLikeUnfulfilledNarration: boolean;
+  lookupClaim: boolean;
+  actionSteerAttempts: number;
+  actionSteerBudget: number;
+  lookupClaimSteered: boolean;
+}): {
+  steer: boolean;
+  consumeAction: boolean;
+  consumeLookup: boolean;
+  swapToFallback: boolean;
+} {
+  const shapeSteer = input.actionSteerAttempts < input.actionSteerBudget
+    && (input.userAskedForAction
+      || input.hasUnverifiedClaims
+      || input.looksLikeUnfulfilledNarration);
+  const lookupSteer = !input.lookupClaimSteered && input.lookupClaim;
+  const steer = input.stepCalls === 0
+    && input.toolCallCount === 0
+    && !input.finalAnswerOnly
+    && input.withinBudget
+    && (shapeSteer || lookupSteer);
+  return {
+    steer,
+    consumeAction: steer && shapeSteer,
+    consumeLookup: steer && lookupSteer,
+    // 假阴性与"让她做事她没做"这两类，多说一遍同样的话在同档模型上换不来行动
+    // （实机各两次），补的那一步要换兜底模型；纯数字无出处那类不必换。
+    swapToFallback: steer && (lookupSteer || input.userAskedForAction),
+  };
+}
+
+/**
  * 把"与当前值完全相同"的项从补丁里剔掉。
  *
  * 为什么工具侧要做这件事：工具结果里那句"已把 X 设为 Y"是她措辞的唯一依据。
@@ -2891,21 +2936,27 @@ export async function runCompanionAgentLoop(args: {
     // 额度被第 1 步那句引言（"我换个词再搜一次"，命中 action-request）先花掉，
     // 第 2 步才讲出"两个词都搜过了，笔记库里没有这篇"——而这条才是真正不能交付的：
     // 承诺只是没做事，这句是把可证伪的**假阴性**当结论说出去（那篇笔记在库里，3 个正文块）。
-    const shapeSteer = actionSteerAttempts < actionSteerBudget({ userAskedForAction })
-      && (userAskedForAction
-        || unverifiedClaims.length > 0
-        || looksLikeUnfulfilledActionNarration(said));
-    const lookupSteer = !lookupClaimSteered && lookupClaim;
-    if (
-      calls.length === 0
-      && toolCallCount === 0
-      && !finalAnswerOnly
-      && stepCount < budget.maxSteps
-      && Date.now() < deadlineAt
-      && (shapeSteer || lookupSteer)
-    ) {
-      if (shapeSteer) actionSteerAttempts += 1;
-      lookupClaimSteered = true;
+    const steerPlan = planStepSteer({
+      stepCalls: calls.length,
+      toolCallCount,
+      finalAnswerOnly,
+      withinBudget: stepCount < budget.maxSteps && Date.now() < deadlineAt,
+      userAskedForAction,
+      hasUnverifiedClaims: unverifiedClaims.length > 0,
+      looksLikeUnfulfilledNarration: looksLikeUnfulfilledActionNarration(said),
+      lookupClaim,
+      actionSteerAttempts,
+      actionSteerBudget: actionSteerBudget({ userAskedForAction }),
+      lookupClaimSteered,
+    });
+    if (steerPlan.steer) {
+      if (steerPlan.consumeAction) actionSteerAttempts += 1;
+      // 只花**这一次真正为它补的那条额度**。此前这里无条件把 `lookupClaimSteered`
+      // 置真，于是第 1 步的形状问题会把"说查过而没查"那条独立额度一起吃掉——
+      // 实机 2026-09-22 真人轮量到：第 1 步因数字无出处被 steer，第 2 步她说出
+      // "搜索没搜到任何相关记忆"（零工具，而库里有 10 条含那句话的活记忆），
+      // 已经没额度了，那句假阴性就交付了。这一行的注释原本写的就是这个设计意图。
+      if (steerPlan.consumeLookup) lookupClaimSteered = true;
       // 「说查过而没查」和「让她做事却没做」这两类，补的那一步都换兜底模型：
       // 指名道姓要求她调用工具都换不来一次真实调用（实机 2026-09-21 两次），
       // 这是模型档的问题，多说一遍同样的话只会多烧一步。
@@ -2913,7 +2964,7 @@ export async function runCompanionAgentLoop(args: {
       // action-request 的 steer 都触发了，同档第二次仍然 tools=0，
       // 还回了一句"到期列表现在是空的"（库里 25 条 pending 到期）——
       // 不换模型时，这一步只是让她把同一个谎再说一遍。
-      steerSwapToFallback = lookupClaim || userAskedForAction;
+      steerSwapToFallback = steerPlan.swapToFallback;
       // 空的一步（provider 退化时会一个字都不给）不写进正文，也不回灌空的
       // assistant 消息——那会在拼接里留下一个孤立的空段。
       if (said.trim().length > 0) {

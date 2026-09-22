@@ -531,6 +531,18 @@ export async function runCompanionDialogue(
     petProfile: read.petProfile,
   });
 
+  // 量的是**要发出去的那份请求**，不是中间变量：`<conversation_summary>` 这条链
+  // 单元级早就绿了，缺的是"真回合里它到底进没进 system 消息"这一环的证据
+  // （方案 29 §12 C1）。INFO 级：dev 里读得到，一次回合一行。
+  logger.info(
+    {
+      runId: read.runId,
+      summaryInjected: String(messages[0]?.content ?? "").includes("<conversation_summary>"),
+      summaryChars: read.conversationSummary?.length ?? 0,
+    },
+    "companion turn context assembled",
+  );
+
   // ── 阶段 2a：fence claim + assistant.status（provider 调用前）─────────
   // 让客户端尽早进入 thinking；run 已被 cancel/supersede 时不调用 provider。
   const expiresAt = new Date(Date.now() + 24 * 3_600_000).toISOString();

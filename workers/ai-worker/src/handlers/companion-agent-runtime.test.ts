@@ -20,6 +20,7 @@ import {
   actionSteerBudget,
   joinVisibleSegmentsDeduped,
   partitionPersonaPatch,
+  planStepSteer,
   stepHoldChars,
   steerableToolNames,
   runStreamingAgentStep,
@@ -557,4 +558,48 @@ test("taskQueueToolResult：没有待办 / 拿不到 run 时不硬造 route", ()
     taskQueueToolResult([{ task_id: "t1", sequence: 1, status: "pending",
                            label: "x", run_phase: "active", run_id: null }]).route, undefined,
     "run_id 为空就不能拼出一个跳转");
+});
+
+// ─── §9.28 双额度的账目（方案 29 §12 C1 的实机回归）───────────────────────
+const steerInput = {
+  stepCalls: 0, toolCallCount: 0, finalAnswerOnly: false, withinBudget: true,
+  userAskedForAction: false, hasUnverifiedClaims: true,
+  looksLikeUnfulfilledNarration: false, lookupClaim: false,
+  actionSteerAttempts: 0, actionSteerBudget: 1, lookupClaimSteered: false,
+};
+
+test("planStepSteer：形状那一步不吃掉『说查过而没查』的额度", () => {
+  // 实机 2026-09-22 真人轮：第 1 步她报了个没有出处的数字（形状），第 2 步才说
+  // "搜索没搜到任何相关记忆"（假阴性）。旧实现里第 1 步那次 steer 顺手把第二条额度
+  // 置真，于是第 2 步那句直接交付——而库里那 10 条活记忆都还在。
+  const first = planStepSteer(steerInput);
+  assert.equal(first.steer, true);
+  assert.equal(first.consumeAction, true);
+  assert.equal(first.consumeLookup, false, "这次不是为假阴性补的，不许花那条额度");
+
+  const second = planStepSteer({
+    ...steerInput,
+    hasUnverifiedClaims: false,
+    lookupClaim: true,
+    actionSteerAttempts: first.consumeAction ? 1 : 0,
+    lookupClaimSteered: first.consumeLookup,
+  });
+  assert.equal(second.steer, true, "第 2 步的假阴性必须还有额度可拦");
+  assert.equal(second.consumeLookup, true);
+  assert.equal(second.swapToFallback, true, "假阴性那一步要换兜底模型：同档再说一遍还是会说不查");
+});
+
+test("planStepSteer：工具真跑过 / 已是强制收尾步 → 一律不补", () => {
+  assert.equal(planStepSteer({ ...steerInput, toolCallCount: 1 }).steer, false);
+  assert.equal(planStepSteer({ ...steerInput, finalAnswerOnly: true }).steer, false);
+  assert.equal(planStepSteer({ ...steerInput, withinBudget: false }).steer, false);
+  assert.equal(planStepSteer({ ...steerInput, hasUnverifiedClaims: false }).steer, false,
+    "没命中任何一类就不该白烧一步");
+});
+
+test("planStepSteer：额度用尽后不再重复补同一条", () => {
+  assert.equal(planStepSteer({ ...steerInput, actionSteerAttempts: 1, actionSteerBudget: 1 }).steer, false);
+  assert.equal(planStepSteer({
+    ...steerInput, hasUnverifiedClaims: false, lookupClaim: true, lookupClaimSteered: true,
+  }).steer, false);
 });
