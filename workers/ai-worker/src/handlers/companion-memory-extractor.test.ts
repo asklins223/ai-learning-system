@@ -117,7 +117,7 @@ test("prompt 必须把 JSON 形状与枚举写给模型（契约不能只在代�
 // 0256 那条迁移里的解禁规则跑在 plpgsql（SECURITY DEFINER，跨用户扫），
 // 判据的正主是这个文件的 isVolatileStatisticMemory。两处各写一份正则，
 // 早晚会漂——这条测试把两边按同一批样本对齐，漂了就红。
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 
 function migrationStatTests(): { window: RegExp; quantity: RegExp } {
   const url = new URL(
@@ -158,4 +158,20 @@ test("0256 的例外比抽取器更严，方向必须是这样", () => {
   const content = "本周的计划写在《背 3 条法律》里。";
   assert.equal(isVolatileStatisticMemory(content), false, "TS 遮掉名字后不该判成统计");
   assert.equal(window.test(content) && quantity.test(content), true, "SQL 侧应当更严");
+});
+
+// ─── 产 JSON 的伴星调用一律关思考（§9.71 那根因的自动兜底）────────────────────
+// 摘要器当年"建表以来 0 行"的三个根因里，最难自己浮出来的就是这个：思考 token 吃满
+// maxTokens 之后 content 为空，JSON 解析失败，job 一路重试到 dead。修了摘要器、
+// 日记、念头，抽取器漏了整整一天（实机 2026-09-22：dead 里 OUTPUT_INVALID 与
+// provider_http_400 各一条）。这条不测行为，测的是"下一个新增的取回调用别再漏"。
+test("每个用 json_object 取回的伴星 handler 都必须 withThinkingDisabled", () => {
+  const dir = new URL(".", import.meta.url);
+  const offenders = readdirSync(dir)
+    .filter((name) => name.startsWith("companion-") && name.endsWith(".ts") && !name.includes(".test."))
+    .filter((name) => {
+      const text = readFileSync(new URL(name, dir), "utf8");
+      return text.includes('responseFormat: "json_object"') && !text.includes("withThinkingDisabled(");
+    });
+  assert.deepEqual(offenders, [], `这些 handler 产 JSON 却没关思考：${offenders.join(", ")}`);
 });

@@ -13,7 +13,7 @@ import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { readJobPayloadString } from "@ailearn/shared";
 import { logger } from "../lib/logger.ts";
-import { createProvider } from "../lib/ai-provider.ts";
+import { createProvider, withThinkingDisabled } from "../lib/ai-provider.ts";
 import {
   AIConsentRequiredError,
   createGovernedProvider,
@@ -170,8 +170,13 @@ export async function runCompanionMemoryExtract(job: JobPayload): Promise<void> 
   const govCtx = await resolveAIGovernanceContext(job.workspaceId, userId);
   if (!govCtx.consentOk) throw new AIConsentRequiredError();
   const textRes = resolveProviderForTask(govCtx, "companion_agent");
+  // 思考必须关掉：这是一次 `responseFormat:"json_object"` + `maxTokens:800` 的整段取回，
+  // 思考 token 也算在 800 里——吃满之后 `content` 直接为空，JSON 解析失败，
+  // provider 内部重试 × job 重试跑满就把 job 判死（实机 2026-09-22：dead 里
+  // `MEMORY_EXTRACT_OUTPUT_INVALID` 与 `provider_http_400` 各占一条，
+  // 与 §9.71 摘要器"建表以来 0 行"是同一根因，当时只修了摘要器那一个调用点）。
   const provider = createGovernedProvider(
-    createProvider(textRes.providerName, textRes.providerConfig),
+    createProvider(textRes.providerName, withThinkingDisabled(textRes.providerConfig)),
     govCtx,
     job.workspaceId,
     // AI P0-8（2026-09-15 审计）：接上 ai_audit_log 的唯一写入口（此前零调用）。
