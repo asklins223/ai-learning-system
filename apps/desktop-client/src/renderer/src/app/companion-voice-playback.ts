@@ -93,7 +93,15 @@ const PROGRESS_INTERVAL_MS = 80;
  * 现在超时只跳过那一段（见 runQueuedSpeech），整轮一段都没播出来才降级。
  */
 export const COMPANION_SPEECH_FIRST_AUDIO_DEADLINE_MS = 4_000;
-export const COMPANION_SPEECH_GAP_DEADLINE_MS = 3_000;
+/**
+ * 段间截止 4s 的出处（2026-09-22 量，`stage='synth' outcome='ok'` 的 duration_ms）：
+ * qwen n=75 p50 829 / p90 2250 / **p95 3071** / max 5093，>3s 有 4 条、>4s 只剩 2 条；
+ * edge n=13 p50 2005 / max 2272（尾很紧，一条都没越过 3s）。
+ * 原来的 3000 正好压在 qwen 的 p95 上，实机因此真跳过了句子（`error_code='deadline'`
+ * 2 次，等待时长 3002ms——差 2 毫秒）。**跳过一句比晚 4 秒开口难得多**：文字早就在
+ * 屏幕上，语音只是渐进增强，而少掉的那半句用户会当成"她不读了"。
+ */
+export const COMPANION_SPEECH_GAP_DEADLINE_MS = 4_000;
 /** 合成失败后的重试间隔与次数（原来是**零退避**盲重试一次，且丢掉原始异常）。 */
 const SYNTH_RETRY_DELAY_MS = 250;
 const SYNTH_MAX_ATTEMPTS = 3;
