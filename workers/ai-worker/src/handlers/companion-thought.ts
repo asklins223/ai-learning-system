@@ -418,13 +418,25 @@ export interface RoutineCueTimingInput {
   readonly recentDeliveryStates: readonly string[];
   readonly interventionLevel: CompanionInterventionLevelV1;
   readonly msSinceLastRoutineCue: number | null;
+  /**
+   * **这个空间**是否被静音（`companion_room_profiles.proactive_muted`，0266）。
+   *
+   * 审查 4.4：主动触达按 (ws,user) 各自产生，而开关只有账号级——一个人在两个空间
+   * 就会同时收到两边的"她想跟你说话"，只能靠把整个伴星关掉来止血。
+   * 这一条排在最前面：它是用户对**这个房间**的显式决定，比账号级的时段与节奏更具体。
+   */
+  readonly spaceMuted: boolean;
 }
 
 export function evaluateRoutineCueTiming(input: RoutineCueTimingInput): {
   allow: boolean;
-  reason: "allowed" | "availability" | "quiet_hours" | "dismissal_feedback" | "cadence";
+  reason: "allowed" | "space_muted" | "availability" | "quiet_hours" | "dismissal_feedback" | "cadence";
   detail: Record<string, unknown>;
 } {
+  // 空间级静音排在最前：它是"别在这个房间说话"这一句最具体的指令。
+  if (input.spaceMuted) {
+    return { allow: false, reason: "space_muted", detail: {} };
+  }
   if (proactiveAvailabilityBlocked(input.availability)) {
     return { allow: false, reason: "availability", detail: { availability: input.availability } };
   }
@@ -678,6 +690,13 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
       WHERE user_id = ${userId} LIMIT 1
     `);
 
+    // 空间级打扰开关（0266）：账号级总开关之外，"这个房间要不要出声"。
+    // 缺行按不静音——房间档案没建过时不该默认闭嘴。
+    const roomProfileRows = await tx.execute<{ proactive_muted: boolean }>(sql`
+      SELECT proactive_muted FROM companion_room_profiles
+      WHERE workspace_id = ${job.workspaceId} AND user_id = ${userId} LIMIT 1
+    `);
+
     // 环境事实块与对话侧同源（同一份 SQL、同一个 RLS 事务）：她主动开口时知道的
     // 世界，必须和被动回答时知道的是同一个。
     const hereAndNow = await loadHereAndNow(tx, {
@@ -710,6 +729,8 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
     // "没设过"不等于"勿扰"，所以缺省按在线；但用户一旦显式设了勿扰/离线，
     // 这条链路必须听——以前它连这一列都没读。
     const availability: CompanionAvailabilityV1 = accountRows[0]?.presence?.presence ?? "online";
+    // 空间级静音（0266）。缺行按 false：房间档案还没建过时不该默认闭嘴。
+    const spaceMuted = roomProfileRows[0]?.proactive_muted === true;
 
     return {
       today,
@@ -736,15 +757,17 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
       quietHours,
       interventionLevel,
       availability,
+      spaceMuted,
       facts: renderHereAndNow(hereAndNow),
     } satisfies ThoughtMaterial & {
       quietHours: CompanionQuietHours | null;
       interventionLevel: CompanionInterventionLevelV1;
       availability: CompanionAvailabilityV1;
+      spaceMuted: boolean;
     };
   });
 
-  const { quietHours, interventionLevel, availability, ...thoughtMaterial } = material;
+  const { quietHours, interventionLevel, availability, spaceMuted, ...thoughtMaterial } = material;
 
   // 每一次调度都留一行结局。沉默本身是对的（"沉默默认"是设计），但**沉默且无日志**
   // 等于这个功能不存在——抱怨 #8 的排查过程里，这条管线跑完就是 "job ok"，
@@ -763,6 +786,7 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
     recentDeliveryStates: thoughtMaterial.recentDeliveryStates,
     interventionLevel,
     msSinceLastRoutineCue: thoughtMaterial.msSinceLastRoutineCue,
+    spaceMuted,
   });
   if (!timing.allow) {
     finish("silent", { reason: timing.reason, ...timing.detail });

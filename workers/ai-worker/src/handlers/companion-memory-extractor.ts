@@ -44,6 +44,82 @@ import type { JobPayload } from "./index.ts";
 const LIVE_ON_WRITE_KINDS = new Set<string>(["preference", "goal", "learning_context"]);
 
 /**
+ * 跨空间同步的判据（2026-09-22 Owner 裁决 + 当日收紧）。
+ *
+ * 裁决是"跟空间关联性不强的记忆需要带过去"，同时要求**收紧**——因为"关联性不强"
+ * 如果只按种类粗判，会把空间专属的东西带到别的空间去。
+ *
+ * ─── 拿真实数据定出来的两条 ───
+ * dev 库那批真种子记忆（45 条）里能看到很清楚的分界：
+ *
+ *   可携带：习惯在晚上九点之后写笔记 / 看新概念时更想先看反例 / 偏好短节奏学习
+ *   该留下：用户正在备考日语N3，考试时间为下个月 / 用户正在学习数据库索引优化 /
+ *           用户之前主要专注于 N3 相关工作，近期开始接触数据库索引优化
+ *
+ * 于是：
+ *   1. **只有 `preference` 可能跨空间**。`interaction_note` 实测记的多半是"用户
+ *      当前在做什么"（上面第三条就是它），那是空间内容，改回本地。另外三种本来
+ *      就绑定空间内的对象。
+ *   2. `preference` 里还要再分一次：关于**怎么学**的（时段、节奏、顺序、环境、
+ *      称呼）跟人走；提到**具体科目/考试/项目**的留在原空间——那些东西在另一个
+ *      空间里根本不存在。
+ *
+ * ─── 两道判据，任一判本地就本地 ───
+ *   - 模型给 `binding`（它在对话现场，能看见"这句话是在说这门课还是说我"）；
+ *   - 服务端确定性规则（见 `memoryLooksWorkspaceBound`），**可以否决模型**：
+ *     模型说 portable 但内容里有明确的"这个班/这门课/考试"，一律按本地。
+ *
+ * 缺省 fail-closed：模型没说、规则也没说 → 本地。宁可少带，不可错带。
+ */
+const CROSS_SPACE_KINDS = new Set<string>(["preference"]);
+
+/**
+ * 内容里出现"空间专属"信号的确定性判据。
+ *
+ * 两类：
+ *   - **明确的本地指代**：这个班 / 我们组 / 这门课 / 本学期的……
+ *   - **具体科目、考试、项目**：日语、物理、贝叶斯、N3、考试、期中、答辩……
+ *     （第二个列表只用于 `preference`，所以像"喜欢在安静时段学习"这种不带科目的
+ *     偏好不会被误判成本地。）
+ *
+ * 导出给测试用。改这个正则等于改"什么记忆会跨空间"，所以它有专门的用例。
+ */
+const LOCAL_REFERENCE_PATTERN =
+  /(这个|该|本|我们|咱们|此)(空间|房间|工作区|协作|班级|班|课|课程|小组|团队|项目|学期|门课)|(这|本)(学期|门课|门|节课|次考试)|(期中|期末|月考|模拟考|统考|答辩|deadline|截止日期)/;
+
+const SUBJECT_OR_EXAM_PATTERN =
+  /(日语|英语|数学|物理|化学|生物|语文|历史|地理|政治|编程|数据库|索引|算法|贝叶斯|统计|概率|线性代数|微积分|N[1-5]|雅思|托福|考研|高考|中考|四级|六级|考试|备考|证书|认证)/i;
+
+/** `preference` 的内容看起来是否绑定了这个空间。 */
+export function memoryLooksWorkspaceBound(content: string): boolean {
+  return LOCAL_REFERENCE_PATTERN.test(content) || SUBJECT_OR_EXAM_PATTERN.test(content);
+}
+
+/** 一条记忆该落在哪个 scope 上。导出给测试与调用方共用，避免第二套判据。 */
+export function memoryScopeForKind(
+  kind: string,
+  modelScope?: string,
+  binding?: string,
+  content?: string,
+): "global" | "workspace" | "task" {
+  if (CROSS_SPACE_KINDS.has(kind)) {
+    // 两道判据任一判本地就本地。规则那一道可以否决模型。
+    //
+    // 注意这里是 `!== "portable"` 而不是 `=== "local"`：缺省必须落在**本地**。
+    // 契约（schema）的默认值也是 local，但函数不能依赖调用方先过 schema——
+    // 直接调这个函数的地方（测试、以后的批量重算）同样要 fail-closed。
+    // 实测抓到过：写成 `=== "local"` 时 `binding` 为 undefined 会返回 global，
+    // 与契约的默认值方向相反，等于开了一个"漏传就跨空间"的口子。
+    if (binding !== "portable") return "workspace";
+    if (content !== undefined && memoryLooksWorkspaceBound(content)) return "workspace";
+    return "global";
+  }
+  // 非跨空间种类尊重模型给的 task（"只在这一轮有用"的细分），其余一律 workspace。
+  if (modelScope === "task") return "task";
+  return "workspace";
+}
+
+/**
  * "系统随时算得出来的那份统计"不是记忆（实机 2026-09-21）。
  *
  * 抽取器把"截至当前，用户本周累计学习时长为 23 分钟，拥有 10 张活跃卡片和 9 篇笔记"
@@ -76,6 +152,13 @@ const memoryExtractCandidateSchema = z.object({
    */
   confidence: z.number().min(0).max(1),
   scope: z.enum(["global", "workspace", "task"]).default("workspace"),
+  /**
+   * 这条记忆是"关于我怎么学"（portable）还是"关于我现在在弄什么"（local）。
+   *
+   * 缺省 **local**（fail-closed）：模型没说就按本地处理。宁可少带一条到别的空间，
+   * 也不要把"这个班的作业"带过去。服务端的确定性规则还能再否决一次 portable。
+   */
+  binding: z.enum(["portable", "local"]).default("local"),
   linkedEntityIds: z.array(z.string()).max(10).default([]),
 });
 
@@ -101,8 +184,15 @@ const EXTRACT_PROMPT = [
   // 契约必须写进 prompt：schema 单方面要求而模型不知道，等于必然失败。
   "只输出一个 JSON 对象，形状如下（不要输出 JSON 以外的任何文字、不要 markdown 代码块）：",
   '{"candidates":[{"kind":"goal|preference|learning_context|interaction_note|episodic",'
-  + '"content":"…","importance":0.0到1.0,"confidence":0.0到1.0,"scope":"workspace"}]}',
-  "kind 与 scope 都可以省略（会有默认值），但 kind 必须从上面五个枚举里选。",
+  + '"content":"…","importance":0.0到1.0,"confidence":0.0到1.0,"binding":"portable|local"}]}',
+  "kind 可以省略（会有默认值），但必须从上面五个枚举里选。",
+  // scope 不再由模型选（产品规则按 kind 定），但 binding 必须问它：只有它在对话现场，
+  // 能分辨"这句话是在说我这门课，还是在说我一贯怎么学"。
+  "不要输出 scope 字段——记忆的可见范围由系统决定。",
+  "每条给一个 binding，表示这条记忆是不是只在**当前这个学习空间**里成立：",
+  "  portable —— 关于用户**一贯怎么学、怎么相处**的：学习时段与节奏、理解顺序、环境偏好、称呼与沟通方式。换个空间照样成立。",
+  "  local —— 与**当前空间的内容**绑定的：正在学的科目或技术、要考的试与时间、这个班/这门课/这个项目的事、以及「用户最近在做什么」。",
+  "拿不准就填 local。宁可留在这个空间，也不要让它跑到别的空间去。",
   "confidence 表示你有多确信这是用户真实长期信息：0.7 以上才会被采纳。",
   "没有值得记的信息时输出 {\"candidates\":[]}。",
   "候选最多 3 条。",
@@ -357,6 +447,9 @@ export async function runCompanionMemoryExtract(job: JobPayload): Promise<void> 
     `);
     for (const [index, candidate] of candidates.entries()) {
       const sourceEventId = `memory-extract:${runId}:${index}`;
+      // scope 由种类 + 绑定判据决定，不采信模型给的 scope（见 memoryScopeForKind）。
+      // 两道判据任一判本地就本地，服务端规则可以否决模型的 portable。
+      const scope = memoryScopeForKind(candidate.kind, candidate.scope, candidate.binding, candidate.content);
       await tx.execute(sql`
         INSERT INTO assistant_memory_items
           (workspace_id, user_id, kind, content, source_event_id, user_stated, user_confirmed,
@@ -364,7 +457,7 @@ export async function runCompanionMemoryExtract(job: JobPayload): Promise<void> 
         VALUES
           (${job.workspaceId}, ${userId}, ${candidate.kind}, ${candidate.content}, ${sourceEventId},
            false, false, ${!LIVE_ON_WRITE_KINDS.has(candidate.kind)},
-           ${candidate.importance}, ${candidate.confidence}, ${candidate.scope},
+           ${candidate.importance}, ${candidate.confidence}, ${scope},
            'model_inferred', 'pending', now(), now())
         ON CONFLICT (workspace_id, user_id, kind, source_event_id)
           WHERE deleted_at IS NULL AND source_event_id IS NOT NULL
@@ -378,6 +471,26 @@ export async function runCompanionMemoryExtract(job: JobPayload): Promise<void> 
       `);
       const memoryId = memoryRows[0]?.id;
       if (memoryId) {
+        // 跨空间记忆：铺到该用户所有活跃空间（0267 的唯一实现）。
+        // 只对 global 调；函数自己也会再判一次 scope，双保险。
+        // 铺开失败不该让整轮记忆丢掉——它是"多带一份"的增强，不是主路径；
+        // 但也不能静默：日志里留一行，否则"另一个空间怎么不记得"会查无实据。
+        if (scope === "global") {
+          try {
+            const fanned = await tx.execute<{ inserted: number }>(sql`
+              SELECT public.ailearn_fanout_global_companion_memory(${memoryId}::uuid) AS inserted
+            `);
+            logger.info(
+              { memoryId, kind: candidate.kind, spaces: Number(fanned[0]?.inserted ?? 0) },
+              "cross-space memory fanned out",
+            );
+          } catch (error) {
+            logger.warn(
+              { memoryId, kind: candidate.kind, error: (error as Error).message },
+              "cross-space memory fanout failed; the memory stays in this space only",
+            );
+          }
+        }
         const dedupeKey = `memory-candidate:${sourceEventId}`;
         // §16.2：delivery 携带候选内容摘要（≤80 字），气泡确认卡可直接展示；
         // 摘要缺失时由前端展示通用文案。

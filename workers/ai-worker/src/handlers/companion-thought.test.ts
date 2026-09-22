@@ -263,8 +263,17 @@ test("时机判定：勿扰 → 静默时段 → 划走两次 → 间隔", () =>
     recentDeliveryStates: [],
     interventionLevel: "moderate",
     msSinceLastRoutineCue: null,
+    // 0266：这个房间没有被静音。空间级开关排在最前，所以它必须显式给值——
+    // 默认成 false 会把"忘了传"变成"可以打扰"，而那是错的方向。
+    spaceMuted: false,
   } as const;
   assert.equal(evaluateRoutineCueTiming(base).reason, "allowed");
+  // 空间级静音优先于其余三条：它是"别在这个房间说话"这句最具体的指令。
+  assert.equal(evaluateRoutineCueTiming({ ...base, spaceMuted: true }).reason, "space_muted");
+  assert.equal(evaluateRoutineCueTiming({
+    ...base, spaceMuted: true, availability: "dnd",
+    quietHours: { startLocal: "11:00", endLocal: "13:00", timezone: "UTC" },
+  }).reason, "space_muted");
   // 「勿扰」以前只有 api 那条链路认，念头管线连 presence 这列都没读——用户按了没用。
   assert.equal(evaluateRoutineCueTiming({ ...base, availability: "dnd" }).reason, "availability");
   assert.equal(evaluateRoutineCueTiming({ ...base, availability: "offline" }).reason, "availability");

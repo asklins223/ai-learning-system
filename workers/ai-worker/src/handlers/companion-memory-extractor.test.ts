@@ -4,6 +4,7 @@ import {
   buildExtractMessages,
   isVolatileStatisticMemory,
   memoryExtractOutputSchema,
+  memoryScopeForKind,
   parseMemoryExtractJson,
 } from "./companion-memory-extractor.ts";
 
@@ -174,4 +175,65 @@ test("每个用 json_object 取回的伴星 handler 都必须 withThinkingDisabl
       return text.includes('responseFormat: "json_object"') && !text.includes("withThinkingDisabled(");
     });
   assert.deepEqual(offenders, [], `这些 handler 产 JSON 却没关思考：${offenders.join(", ")}`);
+});
+
+// ─── 跨空间记忆的判据（2026-09-22 裁决 + 收紧）──────────────────────────
+// 这些断言直接对着 dev 库那批真种子记忆写：分界线是从数据里读出来的，不是猜的。
+
+test("跨空间判据：只有 preference 可能跨空间，其余留在原空间", () => {
+  // 正向：偏好——关于"怎么学、怎么相处"——跟人走。
+  assert.equal(memoryScopeForKind("preference", "workspace", "portable", "喜欢在安静时段学习"), "global");
+  assert.equal(memoryScopeForKind("preference", "workspace", "portable", "看新概念时更想先看反例，再看定义"), "global");
+  assert.equal(memoryScopeForKind("preference", "workspace", "portable", "习惯在晚上九点之后写笔记，白天只做采集"), "global");
+  assert.equal(memoryScopeForKind("preference", "workspace", "portable", "用户曾要求关闭桌宠的声音"), "global");
+  // 负向：这四类绑定空间内的东西。
+  assert.equal(memoryScopeForKind("interaction_note", "workspace", "portable", "被追问原因时会先举例"), "workspace");
+  assert.equal(memoryScopeForKind("goal", "workspace", "portable", "下个月要考日语N3"), "workspace");
+  assert.equal(memoryScopeForKind("learning_context", "workspace", "portable", "正在学习物理"), "workspace");
+  assert.equal(memoryScopeForKind("episodic", "workspace", "portable", "第一次独立完成三分钟微旅程验证"), "workspace");
+});
+
+test("跨空间判据：提到具体科目/考试的偏好留在原空间（这是收紧的那一半）", () => {
+  // 实测数据里这两条都是 preference，但一条跟人走、一条绑科目。
+  assert.equal(memoryScopeForKind("preference", "workspace", "portable", "偏好短节奏学习，每次约10分钟"), "global");
+  assert.equal(
+    memoryScopeForKind("preference", "workspace", "portable", "用户正在学习数据库索引优化，理解速度较快"),
+    "workspace",
+    "科目绑定的偏好跑到别的空间去了——那个空间里没有这门课",
+  );
+  assert.equal(
+    memoryScopeForKind("preference", "workspace", "portable", "用户之前主要专注于 N3 相关工作"),
+    "workspace",
+  );
+  // 明确的本地指代同样拦下。
+  assert.equal(memoryScopeForKind("preference", "workspace", "portable", "这个班的作业每周三交"), "workspace");
+  assert.equal(memoryScopeForKind("preference", "workspace", "portable", "这门课的期中考试在下周"), "workspace");
+});
+
+test("跨空间判据：服务端规则可以否决模型的 portable；模型说 local 一律 local", () => {
+  // 规则否决模型：模型在对话现场可能把"我在学贝叶斯"当成一贯偏好。
+  assert.equal(
+    memoryScopeForKind("preference", "workspace", "portable", "我正在学贝叶斯统计"),
+    "workspace",
+    "服务端规则必须能挡住模型误判的 portable",
+  );
+  // 模型说 local：即使规则看不出本地信号，也按本地。
+  assert.equal(
+    memoryScopeForKind("preference", "workspace", "local", "喜欢在安静时段学习"),
+    "workspace",
+    "模型明确说这条只在这个空间成立时，规则不该覆盖它",
+  );
+  // 缺省 fail-closed：没给 binding 就是 local。
+  assert.equal(
+    memoryScopeForKind("preference", "workspace", undefined, "喜欢在安静时段学习"),
+    "workspace",
+    "没给 binding 时应当按本地处理（宁可少带，不可错带）",
+  );
+});
+
+test("跨空间判据：非跨空间种类仍尊重模型给的 task 细分", () => {
+  assert.equal(memoryScopeForKind("episodic", "task", "local", "这一轮的事"), "task");
+  assert.equal(memoryScopeForKind("goal", "task", "local", "这一轮的目标"), "task");
+  // 跨空间种类不吃 task：偏好不是"这一轮"的东西。
+  assert.equal(memoryScopeForKind("preference", "task", "portable", "喜欢先看反例"), "global");
 });

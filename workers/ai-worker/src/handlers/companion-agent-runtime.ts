@@ -25,6 +25,7 @@ import {
   type ChatMessage,
 } from "@ailearn/shared";
 import { canonicalJsonV1, sha256Utf8V1 } from "@ailearn/shared/content-hash";
+import { noteVisibleSqlText } from "@ailearn/shared/note-visibility";
 import { buildAgentTurnMessages } from "../lib/providers/json-response.ts";
 import { createCompanionEnvelopeDecoder } from "./companion-dialogue-envelope.ts";
 import { CompanionStreamStoppedError } from "./companion-dialogue-stream.ts";
@@ -957,6 +958,10 @@ async function executeReadTool(
             WHERE n.id = ${noteId}::uuid
               AND n.workspace_id = ${event.ctx.workspaceId}
               AND n.deleted_at IS NULL
+              -- 归属边界与 HTTP 那一侧同一句话（@ailearn/shared/note-visibility）。
+              -- 缺这一句时，协作空间里成员甲的伴星能读出成员乙**私有笔记的正文**：
+              -- 空间隔离挡住了别的空间，挡不住同一个空间里的别人。
+              AND ${sql.raw(noteVisibleSqlText("n", `'${event.read.userId}'::uuid`))}
             GROUP BY n.id, n.title, n.updated_at
             LIMIT 1
           `);

@@ -18,6 +18,7 @@
  */
 
 import { sql } from "drizzle-orm";
+import { noteVisibleSqlText } from "@ailearn/shared/note-visibility";
 import type { WorkerTransaction } from "../db.ts";
 import { normalizeWorkspaceAIPolicy } from "../lib/governance.ts";
 import { noteSearchTerms, parsePageContext } from "./companion-dialogue-content.ts";
@@ -359,15 +360,21 @@ export async function loadHereAndNow(
       AND occurred_at >= date_trunc('day', now() AT TIME ZONE ${tzSubquery(scope.userId)}) AT TIME ZONE ${tzSubquery(scope.userId)}
   `);
 
+  // 三处笔记查询都带**归属边界**（@ailearn/shared/note-visibility，与 HTTP 侧同一
+  // 句话）。只按 workspace 数/取标题时，协作空间里她会在甲的对话里念出乙的私有笔记
+  // 标题，并把这些标题注进 prompt 外发模型——审查原文把它记成"中"，但它和
+  // `companion_read_note` 是同一类越界：空间隔离挡不住同空间的别人。
   const noteCountRows = await tx.execute<{ n: string }>(sql`
-    SELECT count(*) n FROM notes
-    WHERE workspace_id = ${scope.workspaceId} AND deleted_at IS NULL
+    SELECT count(*) n FROM notes n
+    WHERE n.workspace_id = ${scope.workspaceId} AND n.deleted_at IS NULL
+      AND ${sql.raw(noteVisibleSqlText("n", `'${scope.userId}'::uuid`))}
   `);
   const noteRows = await tx.execute<{ title: string; age_minutes: string }>(sql`
-    SELECT title, EXTRACT(EPOCH FROM (now() - updated_at)) / 60 age_minutes
-    FROM notes
-    WHERE workspace_id = ${scope.workspaceId} AND deleted_at IS NULL
-    ORDER BY updated_at DESC LIMIT 3
+    SELECT n.title, EXTRACT(EPOCH FROM (now() - n.updated_at)) / 60 age_minutes
+    FROM notes n
+    WHERE n.workspace_id = ${scope.workspaceId} AND n.deleted_at IS NULL
+      AND ${sql.raw(noteVisibleSqlText("n", `'${scope.userId}'::uuid`))}
+    ORDER BY n.updated_at DESC LIMIT 3
   `);
 
   const proposalRows = await tx.execute<{ n: string }>(sql`
@@ -405,6 +412,7 @@ export async function loadHereAndNow(
         FROM notes n
         WHERE n.workspace_id = ${scope.workspaceId} AND n.deleted_at IS NULL
           AND ${noteRefTitleMatch}
+          AND ${sql.raw(noteVisibleSqlText("n", `'${scope.userId}'::uuid`))}
         ORDER BY (n.title = ${noteRefTitle}) DESC, n.updated_at DESC
         LIMIT 1
       `)
