@@ -97,6 +97,13 @@ export const COMPANION_SPEECH_GAP_DEADLINE_MS = 3_000;
 /** 合成失败后的重试间隔与次数（原来是**零退避**盲重试一次，且丢掉原始异常）。 */
 const SYNTH_RETRY_DELAY_MS = 250;
 const SYNTH_MAX_ATTEMPTS = 3;
+/**
+ * 一段音频"播完"的额外容忍量：等待上限 = 这段音频自身的时长 + 这个数。
+ *
+ * 命中即按"没听见"处理（dropped）并放开整轮，见 runQueuedSpeech 里那条注释。
+ * 导出只为让测试跟着这个数走，不写死 5000。
+ */
+export const COMPANION_SPEECH_PLAY_STALL_MS = 5_000;
 
 function emit(progress: CompanionSpeechProgress): void {
   for (const listener of listeners) listener(progress);
@@ -147,6 +154,14 @@ interface SpeechRun {
   readonly host: CompanionVoiceHost;
   readonly segments: readonly CompanionSpeechSegment[];
   readonly totalChars: number;
+}
+
+/** 一条已发起、可能还没到手的预取（`delivered` 决定它能不能被记成 dropped）。 */
+interface PrefetchedSegment {
+  key: string;
+  startedAtMs: number;
+  delivered: boolean;
+  buffer: Promise<AudioBuffer>;
 }
 
 async function runSpeech(run: SpeechRun): Promise<void> {
@@ -324,7 +339,7 @@ async function runQueuedSpeech(args: {
    * 合成路上。深度 1 时段间仍会露出一个合成往返的空档（qwen/edge 都有网络
    * 往返），实测听感就是"句与句之间卡一下"；深度 2 让下一段几乎总是就绪。
    */
-  const prefetched: Array<{ key: string; buffer: Promise<AudioBuffer>; startedAtMs: number }> = [];
+  const prefetched: PrefetchedSegment[] = [];
   /**
    * 一段的结局要回到服务端才算得清"没声音"是谁的锅（0247）。
    * 只有带 ref 的段可报——本地文本路径没有 run/segment 身份，没有可归因的对象。
@@ -380,10 +395,18 @@ async function runQueuedSpeech(args: {
       // startedAtMs 记在**发起合成**的那一刻，不是取用的那一刻：预取的段在队列里
       // 等着的时候等待时间也在走，而那正是"首字等了多久"的真相。
       const startedAtMs = Date.now();
-      const promise = synthesizeWithRetry(upcoming);
+      const entry: PrefetchedSegment = {
+        key: upcoming.key, startedAtMs, delivered: false, buffer: null as unknown as Promise<AudioBuffer>,
+      };
+      entry.buffer = synthesizeWithRetry(upcoming).then((value) => {
+        // "字节到手"这件事只有这一处事实来源：dropped 的口径是"给了音频却没响"，
+        // 一条还在路上的合成不能算进去（那会替"没响"编出一条它没有的证据）。
+        entry.delivered = true;
+        return value;
+      });
       // 预取失败会在用到它的那一轮被 await 到；先挂个空 handler 免得变成未处理拒绝。
-      promise.catch(() => undefined);
-      prefetched.push({ key: upcoming.key, buffer: promise, startedAtMs });
+      entry.buffer.catch(() => undefined);
+      prefetched.push(entry);
     }
   };
   /**
@@ -396,6 +419,7 @@ async function runQueuedSpeech(args: {
   const reportAbandoned = (current?: { segment: CompanionQueuedSpeechSegment; startedAtMs: number }): void => {
     if (current) report(current.segment, "dropped", current.startedAtMs);
     for (const entry of prefetched) {
+      if (!entry.delivered) continue;
       const segment = queue.segments.find((item) => item.key === entry.key);
       if (segment) report(segment, "dropped", entry.startedAtMs);
     }
@@ -429,7 +453,12 @@ async function runQueuedSpeech(args: {
           hasStartedAudio ? COMPANION_SPEECH_GAP_DEADLINE_MS : COMPANION_SPEECH_FIRST_AUDIO_DEADLINE_MS,
         );
       } catch (error) {
-        if (args.runGeneration !== generation) return;
+        if (args.runGeneration !== generation) {
+          // 只报预取那几段：本段的字节没到手（这正是它进 catch 的原因），报 dropped
+          // 就是替"没响"编一条它没有的证据。
+          reportAbandoned();
+          return;
+        }
         // **一段出问题只丢那一段**（方案 29 §4.9）。旧行为是首段/段间截止一到就
         // `generation += 1` + `host.stop()`，把整轮音频连同后面已经合成好的段一起
         // 作废——而文字早已流完，用户只看到"她说话但没声音"，且当轮不可恢复。
@@ -456,23 +485,44 @@ async function runQueuedSpeech(args: {
       });
       hasStartedAudio = true;
       let lastProgressAt = 0;
-      await args.host.play(buffer, (fraction) => {
-        if (args.runGeneration !== generation) return;
-        const now = Date.now();
-        if (now - lastProgressAt < PROGRESS_INTERVAL_MS) return;
-        lastProgressAt = now;
-        emit({
-          planId: args.planId,
-          phase: "speaking",
-          segmentIndex: playedCount,
-          segmentCount: playedCount + 1 + queue.segments.length,
-          visibleChars: visibleAt(segment, fraction),
-        });
-      });
-      if (args.runGeneration !== generation) {
-        // play() 被 stop() 提前 resolve 时"到底听没听见"是不知道的，所以这里报 dropped
-        // 而不是 played：played 继续只由正常路径写，否则这条读数又开始替"没响"说话。
+      /**
+       * 播放这一等也必须封顶。`host.play()` 要等 AudioContext 真的走完，而实机
+       * 2026-09-22 03:59 出现过整条音频钟停住（14/15/16 三段的 `played` 挤在同一秒里
+       * 补吐出来），循环就此停在 `await` 上——那一轮之后再也没有 generation 检查，
+       * 预取到手的段一条结局都报不出（服务端留着三条 `synth ok`、playback 零行）。
+       * 上限按这段音频自己的时长给，再加固定余量，正常长句不会被误杀。
+       */
+      let stalled = false;
+      try {
+        await withDeadline(
+          args.host.play(buffer, (fraction) => {
+            if (args.runGeneration !== generation) return;
+            const now = Date.now();
+            if (now - lastProgressAt < PROGRESS_INTERVAL_MS) return;
+            lastProgressAt = now;
+            emit({
+              planId: args.planId,
+              phase: "speaking",
+              segmentIndex: playedCount,
+              segmentCount: playedCount + 1 + queue.segments.length,
+              visibleChars: visibleAt(segment, fraction),
+            });
+          }),
+          (Number.isFinite(buffer.duration) ? buffer.duration : 0) * 1_000
+            + COMPANION_SPEECH_PLAY_STALL_MS,
+        );
+      } catch {
+        stalled = true;
+      }
+      if (stalled || args.runGeneration !== generation) {
+        // play() 被 stop() 提前 resolve、或根本没走完时"到底听没听见"是不知道的，
+        // 所以这里报 dropped 而不是 played：played 继续只由正常路径写。
         reportAbandoned({ segment, startedAtMs: pending.startedAtMs });
+        if (stalled) {
+          // 卡住的那一轮要把界面和 `activePlanId` 一起放开，否则她永远"在说话"，
+          // 主动提示音会一直给这条不存在的朗读让路（见 isCompanionSpeechActive）。
+          stopCompanionSpeech();
+        }
         return;
       }
       previousEnd = segment.endIndex;
@@ -506,7 +556,10 @@ async function runQueuedSpeech(args: {
       visibleChars: previousEnd,
     });
   } catch (error) {
-    if (args.runGeneration !== generation) return;
+    if (args.runGeneration !== generation) {
+      reportAbandoned();
+      return;
+    }
     activePlanId = null;
     emit({
       planId: args.planId,

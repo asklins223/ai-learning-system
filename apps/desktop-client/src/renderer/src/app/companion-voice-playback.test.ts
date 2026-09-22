@@ -5,7 +5,10 @@ import type {
 } from "@ailearn/shared/companion-voice-contracts";
 import {
   COMPANION_SPEECH_FIRST_AUDIO_DEADLINE_MS,
+  COMPANION_SPEECH_GAP_DEADLINE_MS,
+  COMPANION_SPEECH_PLAY_STALL_MS,
   beginCompanionSpeechLine,
+  isCompanionSpeechActive,
   resetCompanionVoicePlayback,
   setCompanionVoiceHost,
   speakCompanionLine,
@@ -525,13 +528,15 @@ describe("逐段播放结局上报", () => {
       strictSessionWithRef(host, 2);
 
       await vi.advanceTimersByTimeAsync(COMPANION_SPEECH_FIRST_AUDIO_DEADLINE_MS + 50);
-      await vi.runAllTimersAsync();
 
       expect(host.reports).toHaveLength(1);
       expect(host.reports[0]).toMatchObject({ ordinal: 1, reason: "deadline" });
       // 超时是按段判定的，后面的段仍要能播完并各自上报。
+      // 这里**不能**用 `runAllTimersAsync()`：播放封顶那条计时器也在里面，跑光所有
+      // 计时器等于宣布"第 2 段的音频钟也停住了"，那条 dropped 会把断言搅浑。
+      await vi.advanceTimersByTimeAsync(10);
       host.finishSegment();
-      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(10);
       expect(host.reports[1]).toMatchObject({ ordinal: 2, reason: "played" });
     } finally {
       vi.useRealTimers();
@@ -574,6 +579,57 @@ describe("逐段播放结局上报", () => {
     // 第二条结局——这一段就是那条"没响"的证据。
     expect(dropped).toEqual([1, 2, 3]);
     expect(host.reports.filter((report) => report.reason === "played")).toEqual([]);
+  });
+
+  // 实机 2026-09-22 03:59：一整轮的音频钟停住过（14/15/16 三段的 `played` 在同一秒里
+  // 补吐出来），循环就停在 `await host.play()` 上——那一行之后再也没有 generation 检查，
+  // 于是那一轮预取到手的段带着服务端的 `synth ok` 行永远没有结局（报表里那 3 段
+  // "音频已交付却零上报"就是它）。播这一等必须封顶。
+  it("play() 永不返回（音频钟停住）时按 dropped 收口，并把整轮放开", async () => {
+    const host = new FakeHost();
+    setCompanionVoiceHost(host);
+    const events = collect();
+    strictSessionWithRef(host, 2);
+
+    await waitUntil(() => host.played.length === 1);
+    host.finishSegment();                      // 第 1 段正常播完 → played
+    await waitUntil(() => host.reports.length === 1);
+    expect(host.reports[0]).toMatchObject({ ordinal: 1, reason: "played" });
+
+    // 第 2 段：字节到手（FakeHost 的合成即时 resolve），但 play() 这一次不再返回。
+    await waitUntil(() => host.played.length === 2);
+    await waitUntil(
+      () => host.reports.some((report) => report.reason === "dropped"),
+      COMPANION_SPEECH_PLAY_STALL_MS + 3_000,
+    );
+
+    expect(host.reports.at(-1)).toMatchObject({ ordinal: 2, reason: "dropped" });
+    // 卡住的那一轮必须把 `activePlanId` 放开：否则她永远"在说话"，
+    // 主动提示音会一直给这条不存在的朗读让路（isCompanionSpeechActive 是那条让路的判据）。
+    expect(isCompanionSpeechActive()).toBe(false);
+    expect(events.some((event) => event.phase === "stopped")).toBe(true);
+  });
+
+  it("还在路上的预取不算 dropped：字节没到手的段不编造「给了音频没响」", async () => {
+    const host = new FakeHost();
+    // 第 2 段是"当前正在等"的那一条，第 4 段是**已发起却没到手**的预取；
+    // 只有第 3 段真的拿到了字节。断言的方向因此只能是"恰好一条"。
+    host.hangFor.add(segmentIdFor(2));
+    host.hangFor.add(segmentIdFor(4));
+    setCompanionVoiceHost(host);
+    strictSessionWithRef(host, 4);
+
+    await waitUntil(() => host.played.length === 1);
+    host.finishSegment();                      // 第 1 段播完 → 取第 2 段，卡在等字节
+    await waitUntil(() => host.reports.length === 1);
+    stopCompanionSpeech();                     // 用户在这时打断
+
+    await waitUntil(
+      () => host.reports.some((report) => report.reason === "dropped"),
+      COMPANION_SPEECH_GAP_DEADLINE_MS + 3_000,
+    );
+    expect(host.reports.filter((report) => report.reason === "dropped").map((report) => report.ordinal))
+      .toEqual([3]);
   });
 
   it("本地文本路径（服务端没签段引用）不产生任何上报", async () => {
