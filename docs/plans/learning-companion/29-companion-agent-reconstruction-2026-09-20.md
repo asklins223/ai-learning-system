@@ -4673,3 +4673,41 @@ SQL 文件与 journal 改动留在工作树里（都已在 dev 库生效）。
 renderer 工程 `tsc` 现在**零报错**。整包 `npm run typecheck` 还剩 **1 条**：
 `src/preload/index.ts(65,7) TS2741 缺 'stats'`——那个文件正在工作树里被另一条会话改着，
 按 D5 的边界不动它。
+
+### 14.10 顺手救活一条**正在死**的链路：笔记归属边界把 uuid 当成了 SQL 字面量
+
+清完历史后核 worker 健康度，撞见 `companion_thought` 每跑必死（09:11 那一分钟里 4 个 job
+跑满 3 次重试全部 dead）：
+
+```
+Failed query: SELECT count(*) n FROM notes n
+  WHERE n.workspace_id = $1 AND n.deleted_at IS NULL
+    AND (n.share_scope = 'shared' OR n.created_by = f6c4a80e-e668-4be7-a7b3-e8ad9311079a::uuid)
+cause: trailing junk after numeric literal at or near "4be7"
+```
+
+这是**另一条会话正在做的**"笔记归属边界"（`@ailearn/shared/note-visibility`，把 HTTP 侧的
+可见性判据搬给伴星——那是个真问题：不搬的话，协作空间里她能把别人的私有笔记标题注进
+prompt）。判据函数收的是 **SQL 表达式**（`m.user_id` / `v.viewer` 那种），而 worker 侧四个
+调用点传的是**值**：`` `${scope.userId}::uuid` ``。少一层引号，`::uuid` 就落在字符串里，
+Postgres 先报语法错、补上外层引号后改报 `invalid input syntax for type uuid: "…::uuid"`。
+
+四处（`companion-here-and-now.ts` ×3、`companion-agent-runtime.ts` ×1）改成与集成测试同一
+写法 `` `'${…}'::uuid` `` 之后：
+
+```
+companion_thought：dead 4 → 3（那 4 条里 1 条是 09-21 的旧账）
+重投 09:11 那条 job：status=succeeded attempts=0，日志 companion thought outcome outcome="silent"
+（silent 是节奏/静默时段的正当代码，不是失败）
+```
+
+**为什么这个修复没有单独提交**：它落在**别人正在改的两个文件**里（`companion-here-and-now.ts`
+与 `companion-agent-runtime.ts` 的工作树 diff 就是这个特性本身），而且这个特性依赖一个**还没
+进仓库**的新文件 `packages/shared/src/note-visibility.ts`（未跟踪）+ API 侧 `note/visibility.ts`
+的 19 行改动。只提交 worker 这两处，HEAD 会 import 一个不存在的模块。所以它跟着那条会话的
+批次一起落地；**dev 容器已经跑上修好的代码**（worker 源码是挂载进容器的，重启即生效），
+链路现在是活的。
+
+**顺带记一条环境事实**：macOS 宿主上的文件改动**不会**触发容器里 `tsx watch` 的热重载
+（inotify 事件不跨 Docker Desktop 的文件共享）。所以"改了代码但 job 还在报旧错"不是没改对，
+是进程没重载——`docker restart ailearn-dev-worker-1` 之后才看得到真结果。
