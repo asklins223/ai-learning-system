@@ -579,6 +579,12 @@
   padding: 7px 12px;
 }
 
+/* 与消息气泡同一拍退场（140ms，同一个 keyframes；轨道本来就靠 translateX(50%) 居中，
+   所以这套变换的横向位置跟它自己的一致）。 */
+.companion-hud__rail[data-leaving] {
+  animation: companion-hud-exit 140ms var(--ease-out) both;
+}
+
 .companion-hud__rail[data-turn="stopped"] {
   border-style: dashed;
   border-color: rgba(169, 156, 140, .7);

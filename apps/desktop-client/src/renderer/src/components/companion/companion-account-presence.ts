@@ -57,7 +57,7 @@ export function companionInterventionHint(level: CompanionInterventionLevel): st
  *   自动设置/自动填充类工具直接执行。
  */
 export const COMPANION_AGENT_PERMISSION_OPTIONS = [
-  ["read_only", "只读"],
+  ["read_only", "仅可读取"],
   ["guided", "分步确认"],
   ["full", "自动执行"],
 ] as const;

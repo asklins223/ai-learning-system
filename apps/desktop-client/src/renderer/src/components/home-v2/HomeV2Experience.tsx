@@ -634,12 +634,25 @@ function HomeV2Catalog({ open, notice, onNotice, onClose }: { readonly open: boo
     else window.dispatchEvent(new CustomEvent("ailearn:home-v2-sound", { detail: { kind: "magic" } }));
   };
 
+  /**
+   * 这个空间要不要让伴星主动开口（0266）。
+   *
+   * 审查 4.4：主动触达按 (ws,user) 各自产生，而开关只有账号级——一个人在两三个
+   * 空间里就会同时收到几份"她想跟你说话"，只能把整个伴星关掉来止血，而那会把
+   * "她记得我"一起关掉。这里给的是**按房间**的开关，与装饰共用同一把 revision 锁。
+   */
+  const toggleProactiveMuted = async () => {
+    if (!roomProfile || companionHome.profileSaving) return;
+    const result = await companionHome.patchRoomProfile({ proactiveMuted: !roomProfile.proactiveMuted });
+    if (!result.ok) onNotice(result.message);
+  };
+
   return (
     <dialog ref={dialogRef} className="home-v2-catalog" aria-labelledby="home-v2-catalog-title" onCancel={(event) => { event.preventDefault(); onClose(); }} onClose={() => { if (open) onClose(); }}>
       <header className="home-v2-catalog__header">
         <div>
           <h2 id="home-v2-catalog-title">魔法目录</h2>
-          <p>{home.snapshotAt ? "书房状态已同步" : "等待书房同步"}{home.degraded ? " · 部分信息待恢复" : ""}</p>
+          <p>{home.snapshotAt ? "学习空间状态已同步" : "等待学习空间同步"}{home.degraded ? " · 部分信息待恢复" : ""}</p>
         </div>
         <dl aria-label="真实学习概览">
           <div><dt>研究册</dt><dd>{home.noteCount ?? "—"}</dd></div>
@@ -691,6 +704,19 @@ function HomeV2Catalog({ open, notice, onNotice, onClose }: { readonly open: boo
                 {COMPANION_EFFECT_IDS.filter((effectId) => roomProfile.unlockedEffectIds.includes(effectId)).map((effectId) => (
                   <button key={effectId} type="button" aria-pressed={roomProfile.equippedEffectId === effectId} disabled={companionHome.profileSaving} onClick={() => { void toggleEffect(effectId); }}>{HOME_V2_EFFECT_COPY[effectId]}</button>
                 ))}
+              </div>
+            ) : null}
+            {roomProfile ? (
+              <div className="home-v2-collection__effects" role="group" aria-label="这个学习空间的打扰设置">
+                <span>这个空间</span>
+                <button
+                  type="button"
+                  aria-pressed={roomProfile.proactiveMuted}
+                  disabled={companionHome.profileSaving}
+                  onClick={() => { void toggleProactiveMuted(); }}
+                >
+                  {roomProfile.proactiveMuted ? "已静音：她不在这里开口" : "可以主动找我"}
+                </button>
               </div>
             ) : null}
           </div>

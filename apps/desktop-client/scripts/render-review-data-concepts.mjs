@@ -28,7 +28,7 @@ const electronApp = await electron.launch({
 })
 
 const sharedMarkup = `
-  <button class="return-control" type="button"><span aria-hidden="true">←</span><span>返回书房</span></button>
+  <button class="return-control" type="button"><span aria-hidden="true">←</span><span>返回学习空间</span></button>
   <header class="scene-heading">
     <time datetime="2026-08-25T18:30:00+08:00">8月25日周二</time>
     <h1>今日复习</h1>

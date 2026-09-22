@@ -37,6 +37,25 @@ const ENTRY_LIMIT = 48;
 const SINGLE_ENTRY_MAX_BYTES = 2_000_000;
 const FILE_MAX_BYTES = 12_000_000;
 
+/**
+ * 界面手里那一份**还没交给主进程**的草稿（刷新/崩溃不丢字）。
+ *
+ * 为什么另存一格而不是"反正 `docState` 里都有"：`docState` 是主进程那份影子文档的编码，
+ * 而界面到主进程之间的那一段（编辑器里刚敲、自动保存的 1.2 秒还没到）从来不在它里面——
+ * 渲染进程一刷新，那一段就没了。这一格装的就是那一段：一条合并过的 yjs 增量
+ * （不是整份正文，也不是每次按键一条），界面重挂载时并回自己的文档。
+ *
+ * 只有**增量**才装得下这件事：正文存成文本就要在恢复时覆盖，而覆盖会抹掉对端在这期间
+ * 写进来的字；增量是 CRDT 合并，对端写的部分一个字不动。
+ */
+export const noteDocDraftV1Schema = z.strictObject({
+  update: base64Schema,
+  /** 写这一份的时刻（本机钟）。只用于界面那句"什么时候的草稿"，不参与判据。 */
+  savedAt: z.string(),
+});
+
+export type NoteDocDraftV1 = z.infer<typeof noteDocDraftV1Schema>;
+
 export const noteDocCacheEntryV1Schema = z.strictObject({
   // 尺寸不在这里判（超长要的是"这一份不收"，不是抛错），但编码必须判：
   // 读回来的一份非法 base64 会让 `seed` 静默应用半条更新。
@@ -49,6 +68,13 @@ export const noteDocCacheEntryV1Schema = z.strictObject({
   /** 进程内的 epoch，只用于诊断"这份是上一次哪一轮留下的"，不参与判据。 */
   epochAtRest: z.number().int().min(0),
   updatedAt: z.string(),
+  /**
+   * 可选，而且**故意不进位格式版本**：`NOTE_DOC_CACHE_VERSION` 管的是既有字段换了
+   * 含义（那一类必须整份作废，见下面那段注释），这里只是多一格，老文件没有它也照样
+   * 解得出。反过来进位到 3 会把这台机器上攒着、还没交出去的离线编辑一起丢掉——为了
+   * 一个可选字段付这个代价没有道理。
+   */
+  draft: noteDocDraftV1Schema.optional(),
 });
 
 export type NoteDocCacheEntryV1 = z.infer<typeof noteDocCacheEntryV1Schema>;
@@ -89,6 +115,18 @@ export interface NoteDocCacheStore {
   get(key: NoteDocCacheKey): Promise<NoteDocCacheEntryV1 | null>;
   /** 返回 false = 这一份大到不该占本机缓存（不静默截断正文，直接不收）。 */
   set(key: NoteDocCacheKey, entry: NoteDocCacheEntryV1): Promise<boolean>;
+  getDraft(key: NoteDocCacheKey): Promise<NoteDocDraftV1 | null>;
+  /**
+   * 写草稿。返回 false = 没有可挂的那一条（本机还没有这一篇的文档）或这一份太大。
+   *
+   * **不凭空造条目**：草稿是"本机那一份文档里还没交出去的部分"，而那一份必须有一个
+   * 来自服务端的祖先（见 `desktop-gateway.ts` 的 `restoreNoteDocLocal`）。没有祖先的
+   * 一份草稿接回编辑器，就是拿一棵没有共同历史的文档树去改服务端那篇——一改就复制块。
+   */
+  setDraft(key: NoteDocCacheKey, draft: NoteDocDraftV1): Promise<boolean>;
+  /** 返回 true = 本来有、这次清掉了。**确认交出去之后**每一次都会调它，所以"本来就没有" */
+  /** 这条要能廉价地回答（落盘那一层据此跳过整份重写）。 */
+  clearDraft(key: NoteDocCacheKey): Promise<boolean>;
   clearNote(key: NoteDocCacheKey): Promise<void>;
   clearWorkspace(subjectId: string, workspaceId: string): Promise<void>;
   clearSubject(subjectId: string): Promise<void>;
@@ -123,13 +161,43 @@ export class MemoryNoteDocCacheStore implements NoteDocCacheStore {
     const bytes = JSON.stringify(parsed).length;
     if (bytes > SINGLE_ENTRY_MAX_BYTES) return false;
     const id = entryKey(key);
-    this.entries.set(id, { key, entry: parsed });
+    // 落盘本机文档那一次**不顺手抹掉草稿**：草稿是"界面还没交给主进程的那几个操作"，
+    // 与 `docState` 是两条时间线。打开一篇笔记时先读起点、再读草稿，两次 IPC 谁先到
+    // 不确定；这里若把草稿一起换掉，抢在前面到的那一次就把要恢复的东西删了。
+    // 清草稿只有一条路：`clearDraft`（确认交出去之后）。
+    const draft = this.entries.get(id)?.entry.draft;
+    const next = draft && parsed.draft === undefined ? { ...parsed, draft } : parsed;
+    this.entries.set(id, { key, entry: next });
     // 超出条数就先放下最旧的那一份：常用的那几篇才会不断被刷新 `updatedAt`。
     if (this.entries.size > ENTRY_LIMIT) {
       const oldest = [...this.entries.entries()].sort((a, b) =>
         a[1].entry.updatedAt.localeCompare(b[1].entry.updatedAt))[0];
       if (oldest && oldest[0] !== id) this.entries.delete(oldest[0]);
     }
+    return true;
+  }
+
+  async getDraft(key: NoteDocCacheKey): Promise<NoteDocDraftV1 | null> {
+    return this.entries.get(entryKey(key))?.entry.draft ?? null;
+  }
+
+  async setDraft(key: NoteDocCacheKey, draft: NoteDocDraftV1): Promise<boolean> {
+    const id = entryKey(key);
+    const existing = this.entries.get(id);
+    if (!existing) return false;
+    const parsed = noteDocDraftV1Schema.parse(draft);
+    const entry: NoteDocCacheEntryV1 = { ...existing.entry, draft: parsed, updatedAt: draft.savedAt };
+    if (JSON.stringify(entry).length > SINGLE_ENTRY_MAX_BYTES) return false;
+    this.entries.set(id, { key: existing.key, entry });
+    return true;
+  }
+
+  async clearDraft(key: NoteDocCacheKey): Promise<boolean> {
+    const id = entryKey(key);
+    const existing = this.entries.get(id);
+    if (!existing || existing.entry.draft === undefined) return false;
+    const { draft: _dropped, ...entry } = existing.entry;
+    this.entries.set(id, { key: existing.key, entry });
     return true;
   }
 
@@ -199,6 +267,26 @@ export class FileNoteDocCacheStore implements NoteDocCacheStore {
     const written = await this.memory.set(key, entry);
     if (written) await this.flush();
     return written;
+  }
+
+  async getDraft(key: NoteDocCacheKey): Promise<NoteDocDraftV1 | null> {
+    await this.ensureLoaded();
+    return this.memory.getDraft(key);
+  }
+
+  async setDraft(key: NoteDocCacheKey, draft: NoteDocDraftV1): Promise<boolean> {
+    await this.ensureLoaded();
+    const written = await this.memory.setDraft(key, draft);
+    if (written) await this.flush();
+    return written;
+  }
+
+  async clearDraft(key: NoteDocCacheKey): Promise<boolean> {
+    await this.ensureLoaded();
+    const cleared = await this.memory.clearDraft(key);
+    // 本来就没有的那一次不重写整份文件：确认提交之后每一次都会走到这里。
+    if (cleared) await this.flush();
+    return cleared;
   }
 
   async clearNote(key: NoteDocCacheKey): Promise<void> {

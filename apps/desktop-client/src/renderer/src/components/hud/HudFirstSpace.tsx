@@ -118,7 +118,7 @@ function HudFirstSpace({
   return (
     <section ref={dialogRef} className="first-space" role="dialog" aria-modal="true" aria-labelledby="first-space-title">
       <h1 id="first-space-title" ref={headingRef} tabIndex={-1}>先选一个学习空间</h1>
-      <p className="sub">这是首次进入书房的一次性设置；选择前不会读取任何空间数据。</p>
+      <p className="sub">这是首次进入学习空间的一次性设置；选择前不会读取任何空间数据。</p>
       {status ? <p className="sub first-space__notice" role="alert">{status}</p> : null}
       <div className="space-path">
         <section className="space-choice">

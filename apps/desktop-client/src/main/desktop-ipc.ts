@@ -86,6 +86,12 @@ import {
   noteDocStateResultV1Schema,
   noteDocWriteResultV1Schema,
   noteDocPresenceResultV1Schema,
+  noteDocDraftSaveResultV1Schema,
+  noteDocDraftGetResultV1Schema,
+  noteDocDraftClearResultV1Schema,
+  type NoteDocDraftSaveResultV1,
+  type NoteDocDraftGetResultV1,
+  type NoteDocDraftClearResultV1,
   type NoteDocWriteResultV1,
   renameWorkspaceResultV1Schema,
   createWorkspaceResultV1Schema,
@@ -116,6 +122,8 @@ import {
 import { objectiveListPageV3Schema, learningObjectiveSurfaceV3Schema } from "@ailearn/shared/learning-objective-surface-contracts";
 import { understandingTopologySnapshotV3Schema } from "@ailearn/shared/understanding-topology-v3-contracts";
 import { todayActivityV1Schema } from "@ailearn/shared/activity-surface-contracts";
+// 跨空间统计合同：输出校验器与网关共用同一份形状，渲染层不另抄一遍。
+import { allWorkspacesStatsOverviewSchema } from "@ailearn/shared/stats-overview-contracts";
 import {
   getLearningRunResultResponseV2Schema,
   learningRunTargetRevealV2Schema,
@@ -478,6 +486,8 @@ const activityGetTodayInputSchema = z.strictObject({
   from: isoTimestampSchema.optional(),
   to: isoTimestampSchema.optional(),
 });
+// 「全部空间」统计：无参数读数，唯一的输入就是请求元数据（含空间边界 epoch）。
+const statsGetOverviewAllInputSchema = z.strictObject(m1InputBase);
 const reviewDeferInputSchema = z.strictObject({ ...m1InputBase, request: reviewDeferRequestV2Schema });
 const sourceListInputSchema = z.strictObject({ ...m1InputBase, cursor: z.string().min(1).max(128).optional(), limit: z.number().int().min(1).max(100).optional(), status: z.string().min(1).max(32).optional() });
 const sourceCreateInputSchema = z.strictObject({ ...m1InputBase, request: desktopSourceCreateRequestSchema });
@@ -559,6 +569,20 @@ const noteDocPresenceInputSchema = z.strictObject({
   noteId: uuidSchema,
   // 空串 = 我离开了这篇。上限与主进程里的 awareness 检查同一个数。
   state: z.string().max(NOTE_DOC_PRESENCE_MAX_CHARS),
+});
+/**
+ * 本机草稿的三条（刷新/崩溃不丢字）。界面交的还是同一种东西——一条 yjs 增量——
+ * 只是这次不交给服务端，而是留在本机那份缓存里等界面回来取。
+ */
+const noteDocDraftSaveInputSchema = z.strictObject({
+  ...m1InputBase,
+  noteId: uuidSchema,
+  // 与 `syncUpdate` 同一个上限：同一条增量走两条路，两侧不能各说一套。
+  update: z.string().min(1).max(NOTE_DOC_UPDATE_MAX_CHARS),
+});
+const noteDocDraftNoteInputSchema = z.strictObject({
+  ...m1InputBase,
+  noteId: uuidSchema,
 });
 /** 一条笔记的活连接；`workspaceEpoch` 用来在切空间时识别"这条已经不作数"。 */
 type NoteDocStreamEntry = {
@@ -679,11 +703,6 @@ const answerModePatchInputSchema = z.strictObject({
 // 设置 → 语音与伴星：写偏好与试听都只收 engine + voice。
 // voice 的取值合法性由合同层的 superRefine 把关（引擎与音色必须成对），这里不重述清单。
 const voicePreferencePatchInputSchema = z.strictObject({
-  ...m1InputBase,
-  engine: ttsEngineV1Schema,
-  voice: z.string().min(1).max(120),
-});
-const voicePreviewInputSchema = z.strictObject({
   ...m1InputBase,
   engine: ttsEngineV1Schema,
   voice: z.string().min(1).max(120),
@@ -1734,7 +1753,17 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     trackedCardGenerationRunIds.clear();
     stopCompanionChatStreams();
     stopCompanionLifecycle();
-    if (activeSubjectId && activeWorkspaceId) await pendingReturnMarkerStore.clear(activeSubjectId, activeWorkspaceId);
+    if (activeSubjectId && activeWorkspaceId) {
+      await pendingReturnMarkerStore.clear(activeSubjectId, activeWorkspaceId);
+      // 审查附录 C：「磁盘侧（导出文件、图片缓存、资源目录）是否按空间分键？」
+      // 核实结果：主进程落盘的三份东西都按 `(subjectId, workspaceId, …)` 分键
+      // （`note-doc-cache-store` / `pending-return-marker-store`），导出文件由读者
+      // 自己在系统对话框里选路径（那是他的文件，不是本机缓存）。**但"分键"只解决
+      // 串读，不解决残留**：离开一个空间后正文还躺在盘上，下一次登录同一个账号
+      // 仍能按 uuid 读回来。所以切走时把这个空间的本机副本一起作废——与退出那条路
+      // 同一句话，只是触发时机不同。
+      await noteDocCache.clearWorkspace(activeSubjectId, activeWorkspaceId);
+    }
     const session = await gateway.switchWorkspace(input.workspaceId, input.meta.requestId);
     activeWorkspaceEpoch = session.workspaceEpoch;
     rememberSession(session);
@@ -1951,15 +1980,6 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     );
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionVoicePreferenceV1Schema);
 
-  // 试听的回执是 mp3 的 base64：正文与 companionVoiceSpeak 同一形状，复用那个 schema。
-  installHandler(DESKTOP_IPC_CHANNELS.companionVoicePreview, voicePreviewInputSchema, options, async (_event, _window, input) => {
-    requireM2Route(contract, "settings.section");
-    assertEpoch(input.meta, activeWorkspaceEpoch);
-    return gateway.previewCompanionVoice(
-      { engine: input.engine, voice: input.voice },
-      input.meta.requestId,
-    );
-  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionVoiceSpeakResultV1Schema);
 
   installHandler(DESKTOP_IPC_CHANNELS.roomGetProjection, runtimeInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "room.home");
@@ -2605,6 +2625,45 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     return { shared: true as const };
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, noteDocPresenceResultV1Schema);
 
+  /**
+   * 本机草稿（刷新/崩溃不丢字）。这三条**不碰 CRDT 流程**：不并文档、不上行、不改队列，
+   * 只是把界面手里还没交出来的那条增量写进/读回/清掉本机那份缓存。
+   *
+   * 键在这里拼，界面只报 noteId：草稿与正文同一条边界——`(subjectId, workspaceId, noteId)`。
+   * 少了 workspaceId，另一个空间里同名的 noteId 就能把这里的字复活过去（批次 1 立这条键
+   * 要防的正是跨空间正文缝合）；少了 subjectId，同一台机器上的另一个账号就能读到别人的
+   * 私有笔记草稿。身份不全时一律"不读也不写"，与 `noteDocCacheKey` 的既有口径一致。
+   */
+  installHandler(DESKTOP_IPC_CHANNELS.noteDocDraftSave, noteDocDraftSaveInputSchema, options, async (_event, _window, input): Promise<NoteDocDraftSaveResultV1> => {
+    requireM2Route(contract, "note.detail");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    const key = noteDocCacheKey(input.noteId);
+    if (!key) return { saved: false };
+    // 时间取主进程这一刻：它与界面同一个钟，但"这份是什么时候留下的"不该由界面自己报
+    // ——那等于让被存的一方定义自己的时间戳。
+    const saved = await noteDocCache.setDraft(key, { update: input.update, savedAt: new Date().toISOString() });
+    return { saved };
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, noteDocDraftSaveResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.noteDocDraftGet, noteDocDraftNoteInputSchema, options, async (_event, _window, input): Promise<NoteDocDraftGetResultV1> => {
+    requireM2Route(contract, "note.detail");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    const key = noteDocCacheKey(input.noteId);
+    // 身份不全 = 读不到，而不是"读到某个没归属的那一份"。
+    if (!key) return { draft: null };
+    return { draft: await noteDocCache.getDraft(key) };
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, noteDocDraftGetResultV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.noteDocDraftClear, noteDocDraftNoteInputSchema, options, async (_event, _window, input): Promise<NoteDocDraftClearResultV1> => {
+    requireM2Route(contract, "note.detail");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    const key = noteDocCacheKey(input.noteId);
+    if (!key) return { cleared: false };
+    // `cleared` 如实回答"本来有没有这一份"：确认提交之后每次都会走到这里，说成 true
+    // 就等于每次都宣称清掉了一份不存在的草稿。
+    return { cleared: await noteDocCache.clearDraft(key) };
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, noteDocDraftClearResultV1Schema);
+
   installHandler(DESKTOP_IPC_CHANNELS.noteCardGenerationStart, cardGenerationStartInputSchema, options,
     async (_event, _window, input) => {
     requireM2Route(contract, "note.detail");
@@ -2789,6 +2848,15 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     assertEpoch(input.meta, activeWorkspaceEpoch);
     return gateway.getTodayActivity(input.from, input.to, input.meta.requestId);
   }, undefined, todayActivityV1Schema);
+
+  // 「全部空间」统计与今日日志同页。它是**读**通道，所以走 assertEpoch（fail
+  // closed）：切空间后带着旧 epoch 回来的读数必须被拒，不能把上一个空间的合计
+  // 落到新空间的界面上。
+  installHandler(DESKTOP_IPC_CHANNELS.statsGetOverviewAll, statsGetOverviewAllInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.getAllWorkspacesStatsOverview(input.meta.requestId);
+  }, undefined, allWorkspacesStatsOverviewSchema);
 
   installHandler(DESKTOP_IPC_CHANNELS.learningRunGet, learningRunGetInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "learningRun.detail");

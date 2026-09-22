@@ -516,7 +516,7 @@ async function openNotebookFromToday(window) {
   if (await noteTicket.count()) {
     await noteTicket.click()
   } else {
-    await window.getByRole('navigation', { name: '书房目录' }).getByRole('button', { name: '笔记' }).click()
+    await window.getByRole('navigation', { name: '学习空间目录' }).getByRole('button', { name: '笔记' }).click()
     await window.locator('.note-open').first().waitFor({ state: 'visible', timeout: 15_000 })
     await window.locator('.note-open').first().click()
   }
@@ -1146,7 +1146,7 @@ async function runMemberJourney(window) {
   }
   memberJourney.result = true
 
-  const resultReturn = window.getByRole('button', { name: /回到复习队列|返回书房/ }).first()
+  const resultReturn = window.getByRole('button', { name: /回到复习队列|返回学习空间/ }).first()
   await resultReturn.waitFor({ state: 'visible', timeout: 15_000 })
   await resultReturn.click()
   await window.getByRole('heading', { name: '复习队列' }).waitFor({ timeout: 20_000 })
@@ -1162,7 +1162,7 @@ async function runMemberJourney(window) {
   await assertFormalGuardReleased('Packaged Member LearningRun')
   memberJourney.returned = true
 
-  await window.getByLabel('关闭任务面并返回房间').click()
+  await window.getByLabel('关闭任务面并返回学习空间').click()
   await activateHomeAction(window, 'primary')
   await waitForTodayRoute(window, 'Packaged Member Study')
   await openNotebookFromToday(window)
@@ -1182,7 +1182,7 @@ async function runMemberJourney(window) {
     throw new Error('Packaged Member Note still exposes the Owner-only Card Generation action')
   }
   memberJourney.note = true
-  await window.getByLabel('关闭任务面并返回房间').click()
+  await window.getByLabel('关闭任务面并返回学习空间').click()
 }
 
 try {

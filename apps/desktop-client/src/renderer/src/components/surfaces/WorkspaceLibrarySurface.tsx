@@ -10,11 +10,15 @@ import {
   CircleAlert,
   Clock3,
   FileText,
+  Flag,
   FolderOpen,
   History,
   Layers3,
+  Leaf,
   LoaderCircle,
+  Map as MapIcon,
   RefreshCw,
+  Route,
   Search,
   Target,
 } from "lucide-react";
@@ -63,6 +67,12 @@ import {
   type ObjectiveLibraryFilter,
 } from "./objective-library-view-state";
 import { useHudPage } from "../hud/use-hud-page";
+import {
+  objectiveQuestRegion,
+  orderObjectivesForQuest,
+  runModePresentation,
+  type ObjectiveQuestRegion,
+} from "./objective-quest-presentation";
 
 type SurfaceHeaderProps = {
   // 页面家族眉标：与 .impeccable/review/desktop-pages-v2/REVIEW.md 的家族列一致。
@@ -219,6 +229,17 @@ const FILTER_BUCKETS = [
   ...PERSONAL_BUCKETS,
 ] as const satisfies ReadonlyArray<{ key: ObjectiveLibraryFilter; label: string; hint: string }>;
 
+const QUEST_REGIONS = [
+  { key: "ready", label: "待挑战", detail: "需要验证、复习或修补", icon: Flag },
+  { key: "active", label: "远征中", detail: "正在作答或等待复习", icon: Route },
+  { key: "mastered", label: "已掌握", detail: "已有正式证据支撑", icon: Leaf },
+] as const satisfies ReadonlyArray<{
+  key: ObjectiveQuestRegion;
+  label: string;
+  detail: string;
+  icon: typeof Flag;
+}>;
+
 export function ObjectiveLibrarySurface() {
   const invoke = useRoomStore((state) => state.invoke);
   const setActiveObjectiveId = useRoomStore((state) => state.setActiveObjectiveId);
@@ -234,6 +255,8 @@ export function ObjectiveLibrarySurface() {
   const [failure, setFailure] = useState<string | null>(null);
   const [pageFailure, setPageFailure] = useState<string | null>(null);
   const [primaryFocusId, setPrimaryFocusId] = useState<string | null>(null);
+  const [queuePriorityIds, setQueuePriorityIds] = useState<string[]>([]);
+  const [compactRegion, setCompactRegion] = useState<ObjectiveQuestRegion>("ready");
   const [query, setQuery] = useState(() => readObjectiveLibraryView().query);
   const [filter, setFilter] = useState<ObjectiveLibraryFilter>(() => readObjectiveLibraryView().filter);
   useHudPage("goals");
@@ -263,8 +286,12 @@ export function ObjectiveLibrarySurface() {
       if (projectionResponse) {
         const projection = unwrapGatewayResult(projectionResponse);
         setPrimaryFocusId(projection.primaryFocus.state === "data" ? projection.primaryFocus.data.objective.objectiveId : null);
+        setQueuePriorityIds(projection.queueSummary?.state === "data"
+          ? projection.queueSummary.data.items.map((item) => item.objectiveId)
+          : []);
       } else {
         setPrimaryFocusId(null);
+        setQueuePriorityIds([]);
       }
     } catch (error) {
       setFailure(gatewayErrorMessage(error));
@@ -351,6 +378,16 @@ export function ObjectiveLibrarySurface() {
         .some((value) => value!.toLocaleLowerCase("zh-CN").includes(normalizedQuery));
     });
   }, [filter, page, query]);
+  const orderedVisibleGoals = useMemo(
+    () => orderObjectivesForQuest(visibleGoals, primaryFocusId, queuePriorityIds),
+    [primaryFocusId, queuePriorityIds, visibleGoals],
+  );
+  const questGroups = useMemo(() => {
+    const groups: Record<ObjectiveQuestRegion, ObjectiveListItemV3[]> = { ready: [], active: [], mastered: [] };
+    for (const item of orderedVisibleGoals) groups[objectiveQuestRegion(item.personalState.state)].push(item);
+    return groups;
+  }, [orderedVisibleGoals]);
+  const activeMode = activeGoal ? runModePresentation(activeGoal.primaryAction) : null;
 
   const openObjective = (objectiveId: string) => {
     setActiveObjectiveId(objectiveId);
@@ -389,120 +426,133 @@ export function ObjectiveLibrarySurface() {
   };
 
   return (
-    <ApprovedSurfaceFrame family="workshop" eyebrow="理解构建" headingId="objective-library-title" title="理解目标" detail="先看下一步，再浏览每一条可验证的理解">
+    <ApprovedSurfaceFrame family="workshop" eyebrow="理解远征" headingId="objective-library-title" title="理解地图" detail="沿着真实学习证据，一关一关走到真正掌握">
       {loading ? <SurfaceDataState kind="loading" message="正在读取理解目标" detail="状态和进度都来自服务器，不是本机推算的。" /> : null}
       {!loading && failure ? <SurfaceDataState kind="error" message="理解目标暂时不可用" detail={failure} onRetry={() => void load()} /> : null}
       {!loading && !failure && !activeGoal ? <SurfaceDataState kind="empty" message="还没有活跃目标" detail="从笔记生成或确认目标后，会在这里形成理解路线。" /> : null}
       {!loading && !failure && activeGoal ? (
-        <div className="v3-goal-workbench">
-          <section className="v3-goal-focus" aria-labelledby="goal-focus-title">
-            <ObjectiveProgressBand segment={progressSegmentForState(activeGoal.personalState.state)} />
-            <div className="v3-goal-focus__topline">
-              <span className={`v3-objective-state v3-objective-state--${objectiveStateTone(activeGoal.personalState.state)}`}><CircleDot size={12} aria-hidden="true" />{formatObjectiveState(activeGoal.personalState.state)}</span>
-              <span>{formatKnowledgeForm(activeGoal.knowledgeForm)}</span>
+        <div className="objective-expedition">
+          <section className="v3-goal-focus objective-expedition__focus" aria-labelledby="goal-focus-title">
+            <div className="objective-expedition__focus-flags" aria-label="本轮模式与状态">
+              <span className={`objective-mode-badge objective-mode-badge--${activeMode?.mode ?? "unavailable"}`}>
+                {activeMode?.label}
+              </span>
+              <span className={`v3-objective-state v3-objective-state--${objectiveStateTone(activeGoal.personalState.state)}`}>
+                <CircleDot size={12} aria-hidden="true" />{formatObjectiveState(activeGoal.personalState.state)}
+              </span>
             </div>
-            <div className="v3-goal-focus__copy">
-              <p>{serverFocus ? "今日主焦点" : "接下来可以继续"}</p>
+            <div className="objective-expedition__focus-copy">
+              <span className="objective-expedition__next"><Flag size={16} aria-hidden="true" />{serverFocus ? "下一关" : "推荐下一关"}</span>
               <h3 id="goal-focus-title">{activeGoal.conceptLabel ?? activeGoal.primaryNoteTitle ?? "未命名理解目标"}</h3>
               <blockquote>{activeGoal.publicSummary}</blockquote>
-              <button type="button" className="v3-goal-focus__action" disabled={startingFocus} onClick={() => void startFocus(activeGoal)}>
-                <span><small>{startingFocus ? "正在开始…" : "这一步真的开始作答"}</small>{primaryActionLabel(activeGoal.primaryAction)}</span>
+              <ObjectiveProgressBand segment={progressSegmentForState(activeGoal.personalState.state)} />
+              <p className="objective-expedition__mode-copy">{activeMode?.description}</p>
+            </div>
+            <div className="objective-expedition__focus-actions">
+              <button type="button" className="v3-goal-focus__action" disabled={startingFocus || !isActionable(activeGoal.primaryAction)} onClick={() => void startFocus(activeGoal)}>
+                <span><small>{startingFocus ? "正在准备路线…" : "从这里继续远征"}</small>{primaryActionLabel(activeGoal.primaryAction)}</span>
                 <ArrowRight size={19} aria-hidden="true" />
               </button>
-              {/* 为什么这一句要单独占一行：它比按钮上的动词长，塞进按钮的 kicker 里
-                  会把 320px 宽的按钮撑破（31 号文档 P8 量过这张卡的横向溢出）。 */}
               <p className="v3-goal-focus__hint">{primaryActionDescription(activeGoal.primaryAction)}</p>
               {focusFailure ? <p className="v3-goal-focus__error" role="alert">{focusFailure}</p> : null}
-              <button type="button" className="v3-goal-focus__detail" onClick={() => openObjective(activeGoal.objectiveId)}>
-                先看这条目标的详情
-              </button>
+              <button type="button" className="v3-goal-focus__detail" onClick={() => openObjective(activeGoal.objectiveId)}>先看挑战简报</button>
             </div>
-            <dl className="v3-goal-pulse" aria-label="目标状态概览">
-              {PERSONAL_BUCKETS.map((bucket) => (
-                <div key={bucket.key} title={bucket.hint}><dt>{bucket.label}</dt><dd>{counts[bucket.key]}</dd></div>
-              ))}
-            </dl>
-            {/* 这一行是 nowrap + ellipsis：720 宽实测 212 的内容装进 179 的盒，
-                标题尾部约四个字被裁掉。截断本身可以，但被裁的字要在界面上还能拿到。 */}
-            <p className="v3-goal-focus__source" title={activeGoal.primaryNoteTitle ?? "未关联主笔记"}><BookOpenText size={13} aria-hidden="true" />{activeGoal.primaryNoteTitle ?? "未关联主笔记"}</p>
+            <p className="v3-goal-focus__source" title={activeGoal.primaryNoteTitle ?? "未关联主笔记"}>
+              <BookOpenText size={14} aria-hidden="true" />{activeGoal.primaryNoteTitle ?? "未关联主笔记"}
+            </p>
           </section>
 
-          <section className="v3-goal-ledger" aria-labelledby="goal-ledger-title">
-            <header className="v3-goal-ledger__header">
-              <div>
-                <h3 id="goal-ledger-title">全部理解目标</h3>
-                {/* 「已载入 16 / 16」在全部读完时是一个误导的写法：那个斜杠让人以为
-                    外面还有一个更大的池子没读进来（31 号文档 P12 撤回后留下的这一条）。
-                    读完就说总数；确实还有下一页时才报"已载入 X / Y"。 */}
-                <p>{page?.nextCursor ? `已载入 ${page.items.length} / ${page.total ?? 0} 条` : `共 ${page?.total ?? 0} 条`}{page?.snapshotAt ? ` · 更新于 ${formatObjectiveDateTime(page.snapshotAt)}` : ""}</p>
-              </div>
+          <section className="objective-expedition__map" aria-labelledby="expedition-map-title">
+            <header className="objective-expedition__map-heading">
+              <div><MapIcon size={19} aria-hidden="true" /><h3 id="expedition-map-title">纸上远征图</h3></div>
+              <p>路线只表示系统推荐的学习顺序，不代表知识依赖。</p>
+            </header>
+            <div className="objective-expedition__tabs" role="tablist" aria-label="切换地图区域">
+              {QUEST_REGIONS.map((region) => (
+                <button key={region.key} type="button" role="tab" aria-selected={compactRegion === region.key} onClick={() => setCompactRegion(region.key)}>
+                  {region.label}<span>{questGroups[region.key].length}</span>
+                </button>
+              ))}
+            </div>
+            <div className="objective-expedition__route" data-compact-region={compactRegion}>
+              {QUEST_REGIONS.map((region) => {
+                const RegionIcon = region.icon;
+                const nodes = questGroups[region.key];
+                return (
+                  <section key={region.key} className="objective-quest-region" data-region={region.key} aria-labelledby={`quest-region-${region.key}`}>
+                    <header>
+                      <span className="objective-quest-region__icon"><RegionIcon size={17} aria-hidden="true" /></span>
+                      <span><strong id={`quest-region-${region.key}`}>{region.label}</strong><small>{region.detail} · {nodes.length} 个</small></span>
+                    </header>
+                    <ol>
+                      {nodes.slice(0, 4).map((item, index) => (
+                        <li key={item.objectiveId}>
+                          <button
+                            type="button"
+                            className="objective-quest-node"
+                            data-primary={item.objectiveId === activeGoal.objectiveId ? "true" : "false"}
+                            title={item.conceptLabel ?? item.primaryNoteTitle ?? "未命名理解目标"}
+                            onClick={() => openObjective(item.objectiveId)}
+                          >
+                            <span className="objective-quest-node__step" aria-hidden="true">{index + 1}</span>
+                            <span><strong>{item.conceptLabel ?? item.primaryNoteTitle ?? "未命名理解目标"}</strong><small>{formatObjectiveState(item.personalState.state)} · {formatKnowledgeForm(item.knowledgeForm)}</small></span>
+                            <ChevronRight size={15} aria-hidden="true" />
+                          </button>
+                        </li>
+                      ))}
+                      {!nodes.length ? <li className="objective-quest-region__empty">这片区域暂时没有目标</li> : null}
+                    </ol>
+                  </section>
+                );
+              })}
+            </div>
+          </section>
+
+          <details className="v3-goal-ledger objective-expedition__index">
+            <summary>
+              <span><Search size={16} aria-hidden="true" /><strong id="goal-ledger-title">打开远征册</strong></span>
+              <small>{page?.nextCursor ? `已载入 ${page.items.length} / ${page.total ?? 0} 条` : `共 ${page?.total ?? 0} 条`}</small>
+            </summary>
+            <div className="objective-expedition__index-body">
               <label className="v3-goal-search">
                 <Search size={14} aria-hidden="true" />
                 <span className="sr-only">搜索理解目标</span>
                 <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={page?.nextCursor ? "搜索已载入目标" : "搜索全部理解目标"} />
               </label>
-            </header>
-            <div className="v3-goal-filters" role="group" aria-label="筛选理解目标">
-              {FILTER_BUCKETS.map((bucket) => (
-                <button
-                  key={bucket.key}
-                  type="button"
-                  className={filter === bucket.key ? "is-active" : ""}
-                  aria-pressed={filter === bucket.key}
-                  title={bucket.hint}
-                  onClick={() => setFilter(bucket.key)}
-                >
-                  {bucket.label}<span>{bucket.key === "all" ? page?.items.length ?? 0 : counts[bucket.key]}</span>
-                </button>
-              ))}
-            </div>
-            <ul
-              ref={listRef}
-              className="v3-goal-list"
-              onScroll={(event) => { writeObjectiveLibraryView({ scrollTop: event.currentTarget.scrollTop }); }}
-            >
-              {visibleGoals.map((item) => (
-                <li key={item.objectiveId}>
-                  <button type="button" className="v3-goal-row" onClick={() => openObjective(item.objectiveId)}>
-                    <span className={`v3-goal-row__marker v3-goal-row__marker--${objectiveStateTone(item.personalState.state)}`} aria-hidden="true" />
-                    <span className="v3-goal-row__body">
-                      <span className="v3-goal-row__title">{item.conceptLabel ?? item.primaryNoteTitle ?? "未命名理解目标"}</span>
-                      <span className="v3-goal-row__summary">{item.publicSummary}</span>
-                      <span className="v3-objective-tags">
-                        <span
-                          className={`v3-objective-state v3-objective-state--${objectiveStateTone(item.personalState.state)}`}
-                          title={objectiveStateHint(item.personalState.state)}
-                        >
-                          <CircleDot size={12} aria-hidden="true" />{formatObjectiveState(item.personalState.state)}
-                        </span>
-                        {/* P10：知识形态与作答进展不再各占一个 chip 容器。16 行里出现过
-                            22 种 chip 文案、同一字号同一底色同一圆角，扫视时无法分组——
-                            而"边界/步骤/因果模型"是内容属性、"复习已到期 17 天"是时间属性、
-                            "还没正式答过"是进度属性，三类东西长得一模一样。
-                            现在只有**状态**保留 chip（它带色点，是唯一需要颜色分级的），
-                            其余降成一句用间隔号串起来的事实。 */}
-                        <span className="v3-goal-row__facts">
-                          {formatKnowledgeForm(item.knowledgeForm)}
-                          {objectiveProgressChips(item.progress).map((chip) => (
-                            <Fragment key={chip}>&nbsp;· {chip}</Fragment>
-                          ))}
-                        </span>
-                        <span className="v3-goal-row__meta">建于 {formatDate(item.createdAt)}</span>
-                      </span>
-                    </span>
-                    {/* 行按下去是进详情，不是开始作答——所以右边写它带你去哪，
-                        不重复服务端那个动词（同一个词在列表里指向两个地方，
-                        就是 31 号文档 P9 的病）。真正开始作答的入口只有焦点卡那颗。 */}
-                    <span className="v3-goal-row__next"><small>进入详情</small><ChevronRight size={16} aria-hidden="true" /></span>
+              <div className="v3-goal-filters" role="group" aria-label="筛选理解目标">
+                {FILTER_BUCKETS.map((bucket) => (
+                  <button key={bucket.key} type="button" className={filter === bucket.key ? "is-active" : ""} aria-pressed={filter === bucket.key} title={bucket.hint} onClick={() => setFilter(bucket.key)}>
+                    {bucket.label}<span>{bucket.key === "all" ? page?.items.length ?? 0 : counts[bucket.key]}</span>
                   </button>
-                </li>
-              ))}
-              {!visibleGoals.length ? <li className="v3-goal-list__empty" role="status"><Search size={19} aria-hidden="true" /><strong>已载入范围内没有匹配目标</strong><span>{page?.nextCursor ? "可以继续读取后面的目标，或更换条件。" : "换一个关键词或筛选条件。"}</span></li> : null}
-              {pageFailure ? <li className="v3-goal-list__paging" role="alert"><span>{pageFailure}</span>{page?.nextCursor ? <button type="button" onClick={() => void loadMore()}>重试读取</button> : null}</li> : null}
-              {page?.nextCursor && !pageFailure ? <li className="v3-goal-list__paging"><button type="button" disabled={loadingMore} onClick={() => void loadMore()}>{loadingMore ? "正在读取…" : `继续读取（还有 ${Math.max(0, page.total - page.items.length)} 条）`}</button></li> : null}
-              {!page?.nextCursor && page && page.items.length > 0 ? <li className="v3-goal-list__end" role="status">已读到全部目标</li> : null}
-            </ul>
-          </section>
+                ))}
+              </div>
+              <ul ref={listRef} className="v3-goal-list" onScroll={(event) => { writeObjectiveLibraryView({ scrollTop: event.currentTarget.scrollTop }); }}>
+                {visibleGoals.map((item) => (
+                  <li key={item.objectiveId}>
+                    <button type="button" className="v3-goal-row" onClick={() => openObjective(item.objectiveId)}>
+                      <span className={`v3-goal-row__marker v3-goal-row__marker--${objectiveStateTone(item.personalState.state)}`} aria-hidden="true" />
+                      <span className="v3-goal-row__body">
+                        <span className="v3-goal-row__title">{item.conceptLabel ?? item.primaryNoteTitle ?? "未命名理解目标"}</span>
+                        <span className="v3-goal-row__summary">{item.publicSummary}</span>
+                        <span className="v3-objective-tags">
+                          <span className={`v3-objective-state v3-objective-state--${objectiveStateTone(item.personalState.state)}`} title={objectiveStateHint(item.personalState.state)}>
+                            <CircleDot size={12} aria-hidden="true" />{formatObjectiveState(item.personalState.state)}
+                          </span>
+                          <span className="v3-goal-row__facts">{formatKnowledgeForm(item.knowledgeForm)}{objectiveProgressChips(item.progress).map((chip) => <Fragment key={chip}>&nbsp;· {chip}</Fragment>)}</span>
+                          <span className="v3-goal-row__meta">建于 {formatDate(item.createdAt)}</span>
+                        </span>
+                      </span>
+                      <span className="v3-goal-row__next"><small>进入详情</small><ChevronRight size={16} aria-hidden="true" /></span>
+                    </button>
+                  </li>
+                ))}
+                {!visibleGoals.length ? <li className="v3-goal-list__empty" role="status"><Search size={19} aria-hidden="true" /><strong>已载入范围内没有匹配目标</strong><span>{page?.nextCursor ? "可以继续读取后面的目标，或更换条件。" : "换一个关键词或筛选条件。"}</span></li> : null}
+                {pageFailure ? <li className="v3-goal-list__paging" role="alert"><span>{pageFailure}</span>{page?.nextCursor ? <button type="button" onClick={() => void loadMore()}>重试读取</button> : null}</li> : null}
+                {page?.nextCursor && !pageFailure ? <li className="v3-goal-list__paging"><button type="button" disabled={loadingMore} onClick={() => void loadMore()}>{loadingMore ? "正在读取…" : `继续读取（还有 ${Math.max(0, page.total - page.items.length)} 条）`}</button></li> : null}
+                {!page?.nextCursor && page && page.items.length > 0 ? <li className="v3-goal-list__end" role="status">已读到全部目标</li> : null}
+              </ul>
+            </div>
+          </details>
         </div>
       ) : null}
     </ApprovedSurfaceFrame>
@@ -570,126 +620,69 @@ export function ObjectiveDetailSurface() {
   const content = objective?.content;
   const detailState = objective?.personalState.state ?? null;
   const evidenceSnapshotCount = objective?.sources.origins.reduce((sum, origin) => sum + origin.evidenceSnapshotIds.length, 0) ?? 0;
+  const detailMode = objective ? runModePresentation(objective.primaryAction) : null;
   return (
-    <ApprovedSurfaceFrame family="workshop" eyebrow="理解构建" headingId="objective-detail-title" title="理解目标详情" detail="看清主张、当前理解状态、证据来路与下一步">
+    <ApprovedSurfaceFrame family="workshop" eyebrow="远征简报" headingId="objective-detail-title" title="挑战简报" detail="先看要证明什么，再决定现在是否出发">
       {!activeObjectiveId ? <SurfaceDataState kind="empty" message="还没有选择理解目标" detail="从理解目标库点击目标后，会直接进入完整详情。" /> : null}
       {activeObjectiveId && loading ? <SurfaceDataState kind="loading" message="正在读取目标详情" detail="这里只显示公开内容，不含答案和评分规则。" /> : null}
       {activeObjectiveId && !loading && failure ? <SurfaceDataState kind="error" message="目标详情暂时不可用" detail={failure} onRetry={() => void load()} /> : null}
       {activeObjectiveId && !loading && !failure && objective && content && detailState ? (
-        <div className="v3-objective-workspace">
-          <article className="v3-objective-sheet">
-            <div className="v3-objective-intro">
-              <ObjectiveProgressBand segment={progressSegmentForState(detailState ?? "")} />
-              <header className="v3-objective-sheet__header">
+        <div className="objective-brief">
+          <article className="v3-objective-sheet objective-brief__sheet">
+            <header className="objective-brief__hero">
+              <div className="objective-brief__flags">
+                <span className={`objective-mode-badge objective-mode-badge--${detailMode?.mode ?? "unavailable"}`}>{detailMode?.label}</span>
                 <span className={`v3-objective-state v3-objective-state--${objectiveStateTone(detailState)}`}><CircleDot size={12} aria-hidden="true" />{formatObjectiveState(detailState)}</span>
-                <span>更新于 {formatObjectiveDateTime(objective.updatedAt)}</span>
-              </header>
+              </div>
               <h3>{content.conceptLabel ?? "未命名理解目标"}</h3>
               <p className="v3-objective-summary">{content.publicSummary}</p>
-              <div className="v3-objective-tags" aria-label="目标属性">
-                <span>{formatKnowledgeForm(content.knowledgeForm)}</span>
-                <span>{formatFreshness(content.freshness)}</span>
-                <span>{formatLifecycle(content.lifecycle)}</span>
+              <div className="objective-brief__facts" aria-label="目标属性">
+                <span>{formatKnowledgeForm(content.knowledgeForm)}</span><span>{formatFreshness(content.freshness)}</span><span>{formatLifecycle(content.lifecycle)}</span>
               </div>
-            </div>
+            </header>
 
-            {/* P15：这块黄纸本身就是那颗按钮。此前标题的 <strong> 和右边那颗按钮印
-                的是同一个词（实机 sameWord=true），而按钮只有 77×28——427×78 的一整块
-                视觉重心里，唯一该被点的东西占 5% 的面积。现在按列表行那套语法：
-                纸块可点，右边只放箭头。名字只取动词，两句解释走 describedby，
-                否则读屏会念一整段纸。 */}
-            <button
-              type="button"
-              className="v3-next-action"
-              disabled={starting || !isActionable(objective.primaryAction)}
-              onClick={() => void startAction()}
-              aria-labelledby="objective-next-action-verb"
-              aria-describedby="objective-next-action-state objective-next-action-why"
-            >
-              <span className="v3-next-action__text">
-                <span className="v3-next-action__label">现在最值得做</span>
-                <strong id="objective-next-action-verb" className="v3-next-action__verb">
-                  {starting ? "正在准备" : primaryActionLabel(objective.primaryAction)}
-                </strong>
-                {/* 状态词先解释自己，再谈下一步：只留一个灰色按钮时，用户读到的是
-                    "产品坏了"，不是"我上次看了答案"（2026-09-20 实走复盘 #9）。 */}
-                <span id="objective-next-action-state" className="v3-next-action__why">{objectiveStateHint(detailState)}</span>
-                <span id="objective-next-action-why" className="v3-next-action__why">{primaryActionDescription(objective.primaryAction)}</span>
-              </span>
-              <span className="v3-next-action__go" aria-hidden="true">
-                {starting ? <LoaderCircle size={17} /> : objective.primaryAction.kind === "refresh" ? <RefreshCw size={17} /> : <ArrowRight size={17} />}
-              </span>
-            </button>
-            {actionFailure ? <p className="v3-action-error" role="alert"><AlertTriangle size={14} aria-hidden="true" />{actionFailure}</p> : null}
+            <section className="objective-brief__proof" aria-labelledby="objective-proof-title">
+              <div className="objective-brief__section-title"><Target size={17} aria-hidden="true" /><h4 id="objective-proof-title">这一关要证明什么</h4></div>
+              <p>不用背原文。请用自己的话说明这条主张，并给出能让它成立的解释、例子或边界。</p>
+              <div className={`objective-brief__mode objective-brief__mode--${detailMode?.mode ?? "unavailable"}`}>
+                <strong>{detailMode?.label}</strong><span>{detailMode?.description}</span>
+              </div>
+            </section>
 
-            <section className="v3-learning-ledger" aria-labelledby="learning-ledger-title">
-              <div className="v3-section-heading"><div><History size={15} aria-hidden="true" /><h4 id="learning-ledger-title">理解足迹</h4></div><span>{objective.personal.practiceTrailCount} 次练习</span></div>
+            <section className="v3-learning-ledger objective-brief__progress" aria-labelledby="learning-ledger-title">
+              <div className="v3-section-heading"><div><History size={16} aria-hidden="true" /><h4 id="learning-ledger-title">现在走到哪里</h4></div><span>{objective.personal.practiceTrailCount} 次练习</span></div>
+              <ObjectiveProgressBand segment={progressSegmentForState(detailState)} />
               <dl>
-                <div>
-                  <dt><CheckCircle2 size={14} aria-hidden="true" />首次验证</dt>
-                  <dd>{objective.personal.initialValidation ? ({ ready: "现在就能正式答", deferred: "要等一等", idle: "还没开始", completed: "已经答过了" } as const)[objective.personal.initialValidation.status] : "还没安排"}</dd>
-                  <small>{objective.personal.initialValidation?.status === "deferred" && objective.personal.initialValidation.qualificationNotBefore
-                    ? `${formatObjectiveDateTime(objective.personal.initialValidation.qualificationNotBefore)} 开放。这一题的参考答案你看过，马上答等于开卷，所以正式验证要等记忆回落之后再算数；等待期间可以随时练。`
-                    : objective.personal.initialValidation?.qualificationNotBefore
-                      ? `开放时间 ${formatObjectiveDateTime(objective.personal.initialValidation.qualificationNotBefore)}`
-                      : "没有其他等待条件"}</small>
-                </div>
-                <div>
-                  <dt><Clock3 size={14} aria-hidden="true" />学习旅程</dt>
-                  <dd>{objective.personal.activeRun ? formatRunPhase(objective.personal.activeRun.phase) : "没有进行中的旅程"}</dd>
-                  <small>{objective.personal.lastCanonicalAt ? `最近一次正式结果 ${formatObjectiveDateTime(objective.personal.lastCanonicalAt)}` : "还没有正式验证结果"}</small>
-                </div>
-                <div>
-                  <dt><CalendarClock size={14} aria-hidden="true" />复习安排</dt>
-                  <dd>{objective.personal.review ? (objective.personal.review.status === "due" ? "已经到期" : "已排入计划") : "尚未排期"}</dd>
-                  <small>{objective.personal.review ? `${formatObjectiveDateTime(objective.personal.review.dueAt)} · 第 ${objective.personal.review.generation} 轮` : "完成一次正式验证后会自动排期"}</small>
-                </div>
+                <div><dt><CheckCircle2 size={14} aria-hidden="true" />正式验证</dt><dd>{objective.personal.initialValidation ? ({ ready: "现在可以挑战", deferred: "等待开放", idle: "还没开始", completed: "已经答过" } as const)[objective.personal.initialValidation.status] : "还没安排"}</dd><small>{objective.personal.initialValidation?.qualificationNotBefore ? `${formatObjectiveDateTime(objective.personal.initialValidation.qualificationNotBefore)} 开放` : "没有其他等待条件"}</small></div>
+                <div><dt><Clock3 size={14} aria-hidden="true" />当前旅程</dt><dd>{objective.personal.activeRun ? formatRunPhase(objective.personal.activeRun.phase) : "没有进行中的旅程"}</dd><small>{objective.personal.lastCanonicalAt ? `最近正式结果 ${formatObjectiveDateTime(objective.personal.lastCanonicalAt)}` : "还没有正式结果"}</small></div>
+                <div><dt><CalendarClock size={14} aria-hidden="true" />复习安排</dt><dd>{objective.personal.review ? (objective.personal.review.status === "due" ? "已经到期" : "已排入计划") : "尚未排期"}</dd><small>{objective.personal.review ? `${formatObjectiveDateTime(objective.personal.review.dueAt)} · 第 ${objective.personal.review.generation} 轮` : "正式验证后自动安排"}</small></div>
               </dl>
             </section>
 
-            {/* 原来这里排着五个 8px 的 span：目标第 N 版 / 状态变更 N 次 / 学习卡第 N 版 /
-                发布第 N 版 / 创建于…。前四个是 revision 闭包与 lifecycle 的内部账本，
-                对「我会不会这道题」零帮助，摆在最底部像一张收据（31 号文档 P16）。
-                合同要求的是可追溯，不是把追溯字段铺在主版面上——只留创建时间。 */}
-            <footer className="v3-objective-revision">
-              <span>创建于 {formatObjectiveDateTime(objective.createdAt)}</span>
-            </footer>
-          </article>
+            <button type="button" className="v3-next-action objective-brief__action" disabled={starting || !isActionable(objective.primaryAction)} onClick={() => void startAction()} aria-labelledby="objective-next-action-verb" aria-describedby="objective-next-action-state objective-next-action-why">
+              <span className="v3-next-action__text">
+                <span className="v3-next-action__label">准备好就从这里出发</span>
+                <strong id="objective-next-action-verb" className="v3-next-action__verb">{starting ? "正在准备" : primaryActionLabel(objective.primaryAction)}</strong>
+                <span id="objective-next-action-state" className="v3-next-action__why">{objectiveStateHint(detailState)}</span>
+                <span id="objective-next-action-why" className="v3-next-action__why">{primaryActionDescription(objective.primaryAction)}</span>
+              </span>
+              <span className="v3-next-action__go" aria-hidden="true">{starting ? <LoaderCircle size={18} /> : objective.primaryAction.kind === "refresh" ? <RefreshCw size={18} /> : <ArrowRight size={18} />}</span>
+            </button>
+            {actionFailure ? <p className="v3-action-error" role="alert"><AlertTriangle size={14} aria-hidden="true" />{actionFailure}</p> : null}
 
-          <aside className="v3-lineage-ledger" aria-label="证据与出处">
-            <header>
-              <div><Layers3 size={16} aria-hidden="true" /><h3>证据清单</h3></div>
-              <span>{objective.sources.origins.length} 条来源 · {evidenceSnapshotCount} 条原文证据</span>
-            </header>
-            {objective.sources.primaryNote ? (
-              <button type="button" className="v3-primary-note" onClick={() => invoke("open-notebook")}>
-                <FileText size={17} aria-hidden="true" />
-                <span><small>主笔记</small><strong>{objective.sources.primaryNote.title}</strong></span>
-                <ChevronRight size={16} aria-hidden="true" />
-              </button>
-            ) : <div className="v3-primary-note v3-primary-note--missing"><AlertTriangle size={17} aria-hidden="true" /><span><small>主笔记</small><strong>尚未关联主笔记</strong></span></div>}
-            {objective.sources.missingOrigin ? <p className="v3-lineage-warning"><AlertTriangle size={14} aria-hidden="true" />部分来源还没对上，验证前建议先补齐。</p> : null}
-            <div className="v3-origin-list">
-              {objective.sources.origins.length ? objective.sources.origins.map((origin, index) => (
-                <article key={origin.originId} className="v3-origin-row">
-                  <span className="v3-origin-row__index">{String(index + 1).padStart(2, "0")}</span>
-                  <div>
-                    <div><strong>{formatOriginKind(origin.kind)}</strong><span>{formatSupportGrade(origin.supportGrade)}</span></div>
-                    {/* 「0 条原文证据」在这一栏里出现过三次：栏头总数、这一行、
-                        下一行的「没有留当时引用的原文」。同一件负面事实说三遍，
-                        就是 P17 那栏看起来很满其实很空的来源。总数留在栏头，这一行
-                        只在**真有**证据时报数。 */}
-                    <p>{formatOriginIntegrity(origin.integrity)}{origin.evidenceSnapshotIds.length ? ` · ${origin.evidenceSnapshotIds.length} 条原文证据` : ""}</p>
-                    <small>{origin.kind === "imported" ? `导入批次 ${origin.importBatchRef}` : origin.sourceSnapshotId ? "留了当时引用的原文" : "没有留当时引用的原文"}</small>
-                  </div>
-                </article>
-              )) : <div className="v3-origin-empty"><FolderOpen size={19} aria-hidden="true" /><strong>还没有可公开的出处</strong><span>这里不会用示例证据填充空白。</span></div>}
-            </div>
-            <footer className="v3-lineage-boundary">
-              <strong>这里会展示什么</strong>
-              <p>这里只讲来源关系和学习状态；标准答案、评分依据和你引用的原文段落，不会出现在这台设备上。</p>
-            </footer>
-          </aside>
+            <details className="v3-lineage-ledger objective-brief__dossier">
+              <summary><span><Layers3 size={16} aria-hidden="true" /><strong>资料卷宗</strong></span><small>{objective.sources.origins.length} 条来源 · {evidenceSnapshotCount} 条原文证据</small></summary>
+              <div className="objective-brief__dossier-body">
+                {objective.sources.primaryNote ? <button type="button" className="v3-primary-note" onClick={() => invoke("open-notebook")}><FileText size={17} aria-hidden="true" /><span><small>主笔记</small><strong>{objective.sources.primaryNote.title}</strong></span><ChevronRight size={16} aria-hidden="true" /></button> : <div className="v3-primary-note v3-primary-note--missing"><AlertTriangle size={17} aria-hidden="true" /><span><small>主笔记</small><strong>尚未关联主笔记</strong></span></div>}
+                {objective.sources.missingOrigin ? <p className="v3-lineage-warning"><AlertTriangle size={14} aria-hidden="true" />部分来源还没对上，验证前建议先补齐。</p> : null}
+                <div className="v3-origin-list">
+                  {objective.sources.origins.length ? objective.sources.origins.map((origin, index) => <article key={origin.originId} className="v3-origin-row"><span className="v3-origin-row__index">{String(index + 1).padStart(2, "0")}</span><div><div><strong>{formatOriginKind(origin.kind)}</strong><span>{formatSupportGrade(origin.supportGrade)}</span></div><p>{formatOriginIntegrity(origin.integrity)}{origin.evidenceSnapshotIds.length ? ` · ${origin.evidenceSnapshotIds.length} 条原文证据` : ""}</p><small>{origin.kind === "imported" ? `导入批次 ${origin.importBatchRef}` : origin.sourceSnapshotId ? "留了当时引用的原文" : "没有留当时引用的原文"}</small></div></article>) : <div className="v3-origin-empty"><FolderOpen size={19} aria-hidden="true" /><strong>还没有可公开的出处</strong><span>这里不会用示例证据填充空白。</span></div>}
+                </div>
+                <footer className="v3-lineage-boundary"><strong>公开边界</strong><p>这里只讲来源关系和学习状态；标准答案、评分依据和原文段落不会提前出现。</p></footer>
+              </div>
+            </details>
+            <footer className="v3-objective-revision"><span>创建于 {formatObjectiveDateTime(objective.createdAt)} · 更新于 {formatObjectiveDateTime(objective.updatedAt)}</span></footer>
+          </article>
         </div>
       ) : null}
     </ApprovedSurfaceFrame>

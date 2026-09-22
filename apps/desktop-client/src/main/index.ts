@@ -214,7 +214,11 @@ function rendererContentSecurityPolicy(): string {
     `script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'${devScriptSources}`,
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
-    "media-src 'self'",
+    // 设置里的音色试听放的是本渲染进程自己用 Blob 造出来的一段 mp3。blob: 不引入
+    // 任何外部地址，且这条策略的 img-src / connect-src / worker-src 本来就允许它；
+    // 只放开 media-src 是因为 <audio> 只认这一条（实测：不放开时 src 设上了但
+    // metadata 永远不加载，点了没声也没有报错）。
+    "media-src 'self' blob:",
     "font-src 'self' data:",
     `connect-src 'self' blob:${devConnectSources}`,
     "worker-src 'self' blob:",

@@ -60,6 +60,7 @@ const roomProfile = companionRoomProfileV1Schema.parse({
   },
   unlockedEffectIds: [],
   equippedEffectId: null,
+  proactiveMuted: false,
   updatedAt: "2026-08-23T00:00:00.000Z",
 });
 

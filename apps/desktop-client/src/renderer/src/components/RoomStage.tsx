@@ -111,7 +111,7 @@ export function RoomStage() {
   }, [activeHomeCompletion, consumeHomeCompletion, markHomeCompletionStarted, roomIsQuiet, scenePhase]);
 
   useEffect(() => {
-    if (error) setPhase("media-fallback", `${error}，已使用本地静态书房`);
+    if (error) setPhase("media-fallback", `${error}，已使用本地静态场景`);
     else if (manifest) setPhase("poster-ready");
   }, [error, manifest, setPhase]);
 

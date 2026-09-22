@@ -2,6 +2,7 @@ import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { learningDashboardV2Schema, type LearningDashboardV2 } from "@ailearn/shared";
+import { allWorkspacesStatsOverviewSchema, type AllWorkspacesStatsOverviewV1 } from "@ailearn/shared/stats-overview-contracts";
 import {
   DESKTOP_API_SERVICE_ID,
   DESKTOP_IPC_CHANNELS,
@@ -108,6 +109,7 @@ import {
   companionAccountGlobalOffEventV1Schema,
   companionAccountStateV1Schema,
   companionAnswerModePreferenceV1Schema,
+  companionVoicePreferenceV1Schema,
   companionOverviewSchema,
   onboardingTransitionResponseSchema,
   runtimeFenceResponseSchema,
@@ -119,6 +121,7 @@ import {
   type OnboardingTransitionResponse,
   type RuntimeFenceResponse,
 } from "@ailearn/shared/companion-shell-contracts";
+import { type TtsEngineV1 } from "@ailearn/shared/tts-voice-catalog";
 import {
   companionHomeProjectionV1Schema,
   companionRoomProfileV1Schema,
@@ -364,6 +367,10 @@ const rawAuthResponseSchema = z.strictObject({
     userId: z.string().uuid(),
     workspaceId: z.string().uuid(),
     membershipRole: z.string().nullable().optional(),
+    // The API includes the server-authoritative workspace boundary in every
+    // newly issued session. Session loading reads it again from /auth/me, but
+    // the strict login envelope must still accept the field.
+    workspaceEpoch: z.number().int().positive().optional(),
   }),
   // `login` / `register` 会带这一份名册，`switch-workspace` **不带**（它只回 token 与 ctx）。
   // 所以它是可选的：以前写成必填，切空间每次都 `unsupported_contract` —— 服务端已经切过去
@@ -396,6 +403,9 @@ const rawAuthMeSchema = z.strictObject({
   workspaceType: z.enum(["personal", "collaborative"]),
   isPersonal: z.boolean(),
   personalWorkspaceId: z.string().uuid().nullable(),
+  // 0261：服务端边界令牌。**必填**——它是本机 epoch 的权威值，缺了就该按契约不符
+  // 拒掉，而不是悄悄退回本地计数（那正是审查说的"数字只活在客户端"）。
+  workspaceEpoch: z.number().int().positive(),
 });
 
 const rawWorkspaceListSchema = z.strictObject({
@@ -1534,6 +1544,22 @@ export class DesktopGateway {
     if (to !== undefined && to !== "") query.set("to", to);
     const result = await this.request(`/activity/today?${query.toString()}`, { method: "GET" }, true, true, requestId);
     const parsed = todayActivityV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  /**
+   * 「全部空间」统计：当前账号在每个活跃空间里的同一份数字 + 合计。
+   *
+   * 与 `/stats/overview` 的关系：那条读的是**当前空间**（网关只持一个
+   * `this.token`，空间由令牌决定），所以界面上那些"我的"数字其实只是"这个
+   * 空间的"。这条按账号扇出，用来把被空间切开的个人进度并排摆出来。形状校验
+   * 在这里做，与邻居同一条：解析失败按 unsupported_contract 交给上层，不猜字段。
+   */
+  async getAllWorkspacesStatsOverview(requestId?: string): Promise<AllWorkspacesStatsOverviewV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request("/stats/overview/all", { method: "GET" }, true, true, requestId);
+    const parsed = allWorkspacesStatsOverviewSchema.safeParse(result.body);
     if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
     return parsed.data;
   }
@@ -3065,31 +3091,6 @@ export class DesktopGateway {
     return parsed.data;
   }
 
-  /**
-   * 试听一条音色：文本由服务端固定，这里只提交 engine + voice。
-   * 与 speakCompanionVoice 同一形状（raw audio/mpeg → base64 回渲染进程）。
-   */
-  async previewCompanionVoice(
-    input: { engine: TtsEngineV1; voice: string },
-    requestId?: string,
-  ): Promise<CompanionVoiceSpeakResultV1> {
-    await this.ensureConnected(requestId);
-    const result = await this.requestAudioBytes(
-      "/voice/tts/preview",
-      { method: "POST", body: JSON.stringify({ version: 1, ...input }) },
-      requestId,
-    );
-    const parsed = companionVoiceSpeakResultV1Schema.safeParse({
-      version: 1,
-      mimeType: "audio/mpeg",
-      audioBase64: Buffer.from(result.bytes).toString("base64"),
-      byteLength: result.bytes.byteLength,
-      voice: input.voice,
-    });
-    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
-    return parsed.data;
-  }
-
   async speakCompanionVoice(
     request: CompanionVoiceSpeakRequestV1,
     requestId?: string,
@@ -4381,6 +4382,12 @@ export class DesktopGateway {
     const parsed = rawAuthMeSchema.safeParse(result.body);
     if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
     const workspace = this.toWorkspaceContext(parsed.data);
+    // 服务端是本机 epoch 的权威来源：边界一变（成员 / AI 同意 / 改名）它就变大，
+    // 这里跟着走。本地切换时仍会 +1（切空间必须立刻让在途请求作废），但两者取
+    // 较大值——否则"服务端抬过、本地计数还小"会让刚拿到的新 epoch 被自己覆盖回去。
+    if (parsed.data.workspaceEpoch > this.workspaceEpoch) {
+      this.workspaceEpoch = parsed.data.workspaceEpoch;
+    }
     this.currentSession = sessionContextSchema.parse({
       version: 1,
       status: "authenticated",

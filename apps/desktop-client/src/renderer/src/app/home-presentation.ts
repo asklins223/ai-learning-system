@@ -79,13 +79,13 @@ export function homePresentation(projection: RoomProjectionV1 | null, loading: b
   let primaryIntent: RoomIntent | null;
   if (primaryLoading) {
     title = "正在整理今天的书桌…";
-    detail = "书房正在读取你的学习位置";
+    detail = "学习空间正在读取你的学习位置";
     primaryLabel = "正在准备";
     primaryIntent = null;
   } else if (primaryFailed) {
     title = "学习记录暂未送达";
     detail = failure || "主学习目标暂时无法读取";
-    primaryLabel = retry ? "重新读取" : "查看书房目录";
+    primaryLabel = retry ? "重新读取" : "查看学习空间目录";
     primaryIntent = null;
   } else if (focusTitle) {
     title = focusTitle;
@@ -94,8 +94,8 @@ export function homePresentation(projection: RoomProjectionV1 | null, loading: b
     primaryIntent = actionAvailable ? "continue" : "open-objective";
   } else {
     title = "从一份真正想弄懂的材料开始";
-    detail = "书房目录已经把学习路径和全部功能整理好了";
-    primaryLabel = "查看书房目录";
+    detail = "学习空间目录已经把学习路径和全部功能整理好了";
+    primaryLabel = "查看学习空间目录";
     primaryIntent = null;
   }
 

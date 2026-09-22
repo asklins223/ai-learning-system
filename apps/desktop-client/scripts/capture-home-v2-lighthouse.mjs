@@ -51,6 +51,9 @@ const fixtureAuthMe = {
   workspaceType: "personal",
   isPersonal: true,
   personalWorkspaceId: fixtureWorkspaceId,
+  // 0261：服务端边界令牌。网关的 rawAuthMeSchema 现在**必填**它——缺了这一行，
+  // 这个离线夹具会让 loadSession 判 unsupported_contract，整条截图链路断在登录后。
+  workspaceEpoch: 1,
 };
 const fixtureDashboard = {
   version: 2,

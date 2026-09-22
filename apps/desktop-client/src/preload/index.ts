@@ -133,6 +133,10 @@ const desktopApi: AILearnDesktopApiM2 = {
   activity: {
     getToday: (input) => invoke(DESKTOP_IPC_CHANNELS.activityGetToday, input)
   },
+  // 跨空间统计：唯一一条不随"当前空间"变化的读数（今日页的「全部空间」栏）。
+  stats: {
+    getOverviewAll: (input) => invoke(DESKTOP_IPC_CHANNELS.statsGetOverviewAll, input)
+  },
   source: {
     list: (input) => invoke(DESKTOP_IPC_CHANNELS.sourceList, input),
     create: (input) => invoke(DESKTOP_IPC_CHANNELS.sourceCreate, input),
@@ -250,9 +254,6 @@ const desktopApi: AILearnDesktopApiM2 = {
     voicePreference: {
       get: (input) => invoke(DESKTOP_IPC_CHANNELS.companionVoicePreferenceGet, input),
       patch: (input) => invoke(DESKTOP_IPC_CHANNELS.companionVoicePreferencePatch, input)
-    },
-    voicePreview: {
-      synthesize: (input) => invoke(DESKTOP_IPC_CHANNELS.companionVoicePreview, input)
     }
   },
   note: {
@@ -269,6 +270,10 @@ const desktopApi: AILearnDesktopApiM2 = {
       syncUpdate: (input) => invoke(DESKTOP_IPC_CHANNELS.noteDocSyncUpdate, input),
       syncTitle: (input) => invoke(DESKTOP_IPC_CHANNELS.noteDocSyncTitle, input),
       presence: (input) => invoke(DESKTOP_IPC_CHANNELS.noteDocPresence, input),
+      // 本机草稿：只碰本机那份缓存，不碰 CRDT 流程（键由主进程按身份拼）。
+      draftSave: (input) => invoke(DESKTOP_IPC_CHANNELS.noteDocDraftSave, input),
+      draftGet: (input) => invoke(DESKTOP_IPC_CHANNELS.noteDocDraftGet, input),
+      draftClear: (input) => invoke(DESKTOP_IPC_CHANNELS.noteDocDraftClear, input),
     },
     // 「共享给空间」/「取消共享」：归属是作者的一个动作，不是编辑权限的一部分。
     setShareScope: (input) => invoke(DESKTOP_IPC_CHANNELS.noteSetShare, input),

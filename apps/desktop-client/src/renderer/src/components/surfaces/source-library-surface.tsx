@@ -402,7 +402,7 @@ export function SourceLibrarySurface() {
             )) : null}
             {!loading && !failure && truncatedForTab ? (
               <p className="index-foot">
-                索引只读取了前 {pool.length} 份，共有 {status === "archived" ? data?.archivedTotal ?? 0 : total} 份；页签计数只统计已读取的部分。
+                索引只覆盖了前 {pool.length} 份，共有 {status === "archived" ? data?.archivedTotal ?? 0 : total} 份；页签计数只统计已读取的部分。
                 <button type="button" className="text-action" onClick={loadMore}>加载更多</button>
               </p>
             ) : null}

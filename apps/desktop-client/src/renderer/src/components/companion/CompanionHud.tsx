@@ -65,6 +65,7 @@ import type {
 } from "../../app/companion-agent-nodes";
 import {
   CompanionAgentRail,
+  companionAgentRailVisible,
   type CompanionAgentRailProgress,
   type CompanionAgentRailTurnState,
 } from "./companion-agent-rail";
@@ -1165,8 +1166,11 @@ export function CompanionHud({
    * 判据以前是"节点里有 skill，或摘要 mode=hybrid"。技能层删掉之后 hybrid 恒真，
    * 那个字段就不再表达任何事实了；工具节点是剩下的唯一确证，而且它比 mode 更硬：
    * 它说的是"这轮确实查/做了东西"，不是"系统打算允许她查"。
+   *
+   * 第二个条件（气泡在屏）是 2026-09-22 用户要的同步：轨道跟着消息气泡一起消失，
+   * 不再自己计时。判据只此一份，写在 `companionAgentRailVisible`。
    */
-  const railVisible = chat.nodes.some((node) => node.kind === "tool");
+  const railVisible = companionAgentRailVisible(chat.nodes, Boolean(outputText));
 
   /**
    * 工具节点的每一次状态迁移各通知角色层一次（`requested → executing` 算同一步的
@@ -1231,7 +1235,13 @@ export function CompanionHud({
   return (
     <div ref={hudRef} className="companion-hud" data-mode={chat.mode} data-motion={motionMode}>
       {railVisible ? (
-        <CompanionAgentRail nodes={chat.nodes} progress={railProgress} turnState={railTurnState} tight={railTight} />
+        <CompanionAgentRail
+          nodes={chat.nodes}
+          progress={railProgress}
+          turnState={railTurnState}
+          tight={railTight}
+          leaving={bubbleStage === "leaving"}
+        />
       ) : null}
 
       {outputText ? (

@@ -69,7 +69,7 @@ export class RenderErrorBoundary extends Component<
         <SurfaceDataState
           kind="error"
           message={`${this.props.label}没能打开`}
-          detail="这一页在渲染时出错了；书房的其他部分仍然可用。可以先重试，重试无效就重新载入应用。"
+          detail="这一页在渲染时出错了；学习空间的其他部分仍然可用。可以先重试，重试无效就重新载入应用。"
           action={(
             <>
               <p className="render-error-boundary__reason">{failure.message}</p>

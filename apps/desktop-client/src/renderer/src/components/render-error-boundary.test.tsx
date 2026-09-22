@@ -35,7 +35,7 @@ describe("a render crash becomes a readable page", () => {
 
     const paper = screen.getByRole("alert");
     expect(paper.textContent).toContain("伴星中心没能打开");
-    expect(paper.textContent).toContain("书房的其他部分仍然可用");
+    expect(paper.textContent).toContain("学习空间的其他部分仍然可用");
     // 原始信息原样呈现，用户能把它抄给开发者，不用去翻控制台。
     expect(paper.textContent).toContain("useCompanionChat must be used inside CompanionChatProvider");
     expect(screen.getByRole("button", { name: /重试/ })).toBeTruthy();

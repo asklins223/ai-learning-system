@@ -1,532 +1,658 @@
-/* 理解目标链路（列表 → 详情 → 作答 → 结算）的版式修正层。
- *
- * 单独成文件而不是写进 hud-surface.css，有两个原因：这条链路的规则散在
- * hud-surface.css 的 4668-5403 段里，和伴星中心、复习牌堆共用一个 6000+ 行的
- * 文件；而这里每一条都是对同文件更早处的一条覆盖，必须整体排在 hud 层之后才
- * 稳定取胜。加载顺序见 main.tsx。
- *
- * 每条规则都标了它修的是 31-objective-flow-ui-review 的哪一个问题（Pn）。 */
+/* Understanding expedition: objective map → challenge brief → focused answer → evidence result.
+ * The retired two-column workbench and invoice-like result skin are intentionally not retained. */
 
-/* P5：结算页的出口此前长在 .learning-run-result-report 这个 overflow:auto 的
- * 列里，内容一长就把按钮顶到折叠线以下（实测 actions 底边 789 vs 板底 755），
- * 用户要滚动内层列才够得着「返回书房」。出口移出滚动列，钉在板的底部一行。 */
-/* 只加行，不动列：列宽在 hud-surface.css 的 ≤760px 段里另有一档
- * （:5348），这里重写会把它盖掉。 */
-.hud-surface .learning-run-result-board { grid-template-rows: minmax(0, 1fr) auto; }
-.hud-surface .learning-run-result-summary { grid-area: 1 / 1 / 2 / 2; }
-.hud-surface .learning-run-result-report { grid-area: 1 / 2 / 2 / 3; }
-.hud-surface .learning-run-result-actions {
-  grid-area: 2 / 1 / 3 / 3;
-  margin-top: 0;
-  padding: 14px 34px 22px;
-  border-top: 1px solid var(--hud-line);
-  background: var(--hud-cream);
+.hud-surface {
+  --quest-ink: #44382f;
+  --quest-soft: #6e6256;
+  --quest-paper: #fff6dd;
+  --quest-cream: #fffaf0;
+  --quest-grass: #8eb985;
+  --quest-grass-deep: #4f7958;
+  --quest-moss: #315d47;
+  --quest-water: #79bcc5;
+  --quest-water-deep: #397987;
+  --quest-clay: #d56d48;
+  --quest-clay-deep: #9b472f;
+  --quest-butter: #f2cf6b;
+  --quest-wood: #9a6a43;
+  --quest-line: rgba(75, 57, 42, 0.18);
+  --quest-line-strong: rgba(75, 57, 42, 0.34);
+  --quest-shadow: 0 16px 34px rgba(63, 51, 36, 0.16);
+  --quest-shadow-small: 0 7px 16px rgba(63, 51, 36, 0.14);
+  --quest-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
 }
 
-/* P27：印章 42px 在 48px 高的盒子里纵向溢出（scrollHeight 54 vs clientHeight 48），
- * 四个字被削掉下沿。行高要盖住 CJK 衬线的实际字形高度——1.32 实测仍差 2px
- * （57 vs 55），给到 1.45。 */
-.hud-surface .learning-run-result-summary__seal { line-height: 1.45; }
-
-/* P3（DESIGN.md:152）：跳过与「暂时不会」不配印章，改成一行安静的话。它占在印章
- * 的槽位上，所以绿栏不会因为少了一个节点而塌下去，但字号与字重都明确低一档。 */
-.hud-surface .learning-run-result-summary__quiet {
-  margin-top: 22px;
-  color: rgba(255, 248, 232, 0.72);
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1.5;
+.desktop-app[data-theme="night"] .hud-surface,
+.desktop-app[data-theme="dark"] .hud-surface {
+  --quest-ink: #f8ecd2;
+  --quest-soft: #d0c3a9;
+  --quest-paper: #374a3f;
+  --quest-cream: #314238;
+  --quest-grass: #54765b;
+  --quest-grass-deep: #b4d1a9;
+  --quest-moss: #20382c;
+  --quest-water: #477c86;
+  --quest-water-deep: #b4dce1;
+  --quest-line: rgba(255, 244, 218, 0.17);
+  --quest-line-strong: rgba(255, 244, 218, 0.31);
 }
 
-/* P1：这次真说清的条数排在理解账本之前——它是这次作答的成品，账本只是它够不够格
- * 写进长期记录。两者此前共用同一个「已经证明」的说法，用户分不清。 */
-.hud-surface .learning-run-result-evidence [data-role="proved-this-time"] b { color: var(--hud-green); }
-
-/* ── B8：列表焦点卡的主行动（P9）────────────────────────────────────────
- *
- * 那颗按钮此前印着服务端的动词、按下去却只打开详情页。现在它真的开始/继续，
- * 「看详情」拆成下面一条单独的路。三行新文案都按 B4 的地板给 ≥12px，
- * 不再往 8px 那一档里塞要参与决策的句子。                              */
-/* 这三行原本是**给深色底写的近白色**（rgba(255,248,232,…)），可这张焦点卡是
- * 薄荷绿纸——像素采样实测 hint 只有 1.25:1、detail 更低，等于印在纸上但读不到。
- * 与 B6 那条"语音说明浅色字"是同一类错。全部换成卡片的墨色族。            */
-.hud-surface .v3-goal-focus__hint {
-  margin: 10px 0 0;
-  color: #4a3a2b;
+/* Shared, truthful status vocabulary. */
+.hud-surface .objective-mode-badge,
+.hud-surface .v3-objective-state {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid transparent;
+  border-radius: 999px;
   font-size: 12px;
-  line-height: 1.6;
+  font-weight: 800;
+  line-height: 1.2;
 }
-.hud-surface .v3-goal-focus__error {
-  margin: 8px 0 0;
-  color: #8c2f16;
-  font-size: 12px;
-  line-height: 1.6;
-  font-weight: 600;
-}
-.hud-surface .v3-goal-focus__detail {
-  margin-top: 14px;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: #4a3a2b;
-  font-size: 12px;
-  font-weight: 650;
-  text-align: left;
-  text-decoration: underline;
-  text-underline-offset: 3px;
-  cursor: pointer;
-}
-.hud-surface .v3-goal-focus__detail:hover { color: #fff8e8; }
+.hud-surface .objective-mode-badge--formal { color: #fff9e9; background: var(--quest-moss); }
+.hud-surface .objective-mode-badge--practice { color: #674d12; background: var(--quest-butter); }
+.hud-surface .objective-mode-badge--unavailable { color: var(--quest-soft); border-color: var(--quest-line-strong); background: transparent; }
+.hud-surface .v3-objective-state { color: var(--quest-ink); border-color: var(--quest-line); background: rgba(255, 255, 255, 0.38); }
+.hud-surface .v3-objective-state > svg { flex: none; }
 
-/* P16：详情页那排内部版本账本删到只剩创建时间，剩下这句就不该再是 8px
- * （approved-surfaces.css:286-288 那一档）。 */
-.hud-surface .v3-objective-revision span { font-size: 11px; }
+.objective-progress { display: flex; align-items: flex-end; gap: 7px; }
+.objective-progress__seg { display: grid; min-width: 0; flex: 1 1 0; gap: 5px; }
+.objective-progress__bar { height: 7px; border-radius: 999px; background: rgba(65, 54, 42, 0.14); }
+.objective-progress__seg[data-lit="true"] .objective-progress__bar { background: var(--quest-clay); }
+.objective-progress__label,
+.objective-progress__none { color: var(--quest-soft); font-size: 12px; line-height: 1.35; }
+.objective-progress__seg[data-current="true"] .objective-progress__label { color: var(--quest-ink); font-weight: 800; }
 
-/* ── B6：动作区分层（P19）──────────────────────────────────────────────
- *
- * 原来 dock 是「状态 + 一排 flex-wrap 按钮」：7 个控件时状态列被挤到 74px 宽、
- * 折成两行，主按钮掉到第二排。现在两排是定死的版式——上排「状态 + 出口」，
- * 下排「求助 + 主按钮」。出口在上排是有意弱化：它不该和提交抢同一个视觉重量。 */
-.hud-surface .learning-run-dock {
+/* Objective library: one next challenge, a factual route, a quiet index. */
+.hud-surface .objective-expedition {
+  position: relative;
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  grid-template-columns: minmax(300px, 0.58fr) minmax(0, 1.42fr);
+  gap: 14px;
+}
+.hud-surface .objective-expedition__focus,
+.hud-surface .objective-expedition__map,
+.hud-surface .objective-expedition__index {
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  overflow: hidden;
+  border: 4px solid rgba(255, 250, 229, 0.9);
+  box-shadow: var(--quest-shadow);
+}
+.hud-surface .objective-expedition__focus {
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  padding: 22px 22px 18px;
+  color: #fffaf0;
+  border-radius: 31px 25px 34px 27px / 26px 33px 25px 35px;
+  background: var(--quest-grass-deep);
 }
-.hud-surface .learning-run-dock__row {
+.hud-surface .objective-expedition__focus::after {
+  position: absolute;
+  right: -42px;
+  bottom: -56px;
+  width: 150px;
+  height: 120px;
+  border: 18px solid rgba(255, 248, 224, 0.08);
+  border-radius: 58% 42% 52% 48%;
+  content: "";
+  transform: rotate(-14deg);
+  pointer-events: none;
+}
+.hud-surface .objective-expedition__focus > * { position: relative; z-index: 1; }
+.hud-surface .objective-expedition__focus-flags { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.hud-surface .objective-expedition__focus .v3-objective-state { color: #fff9e9; border-color: rgba(255, 249, 233, 0.24); background: rgba(255, 249, 233, 0.09); }
+.hud-surface .objective-expedition__focus-copy { display: grid; gap: 12px; margin-top: 21px; }
+.hud-surface .objective-expedition__next { display: inline-flex; align-items: center; gap: 7px; color: #fff2a5; font-size: 13px; font-weight: 850; }
+.hud-surface .objective-expedition__focus h3 { margin: 0; font: 700 clamp(23px, 2.1vw, 31px)/1.34 "Noto Serif SC", "Songti SC", serif; overflow-wrap: anywhere; }
+.hud-surface .objective-expedition__focus blockquote { margin: 0; color: rgba(255, 250, 240, 0.78); font-size: 14px; line-height: 1.65; }
+.hud-surface .objective-expedition__focus .objective-progress__label { color: rgba(255, 250, 240, 0.68); }
+.hud-surface .objective-expedition__focus .objective-progress__seg[data-current="true"] .objective-progress__label { color: #fffaf0; }
+.hud-surface .objective-expedition__focus .objective-progress__bar { background: rgba(255, 250, 240, 0.17); }
+.hud-surface .objective-expedition__focus .objective-progress__seg[data-lit="true"] .objective-progress__bar { background: var(--quest-butter); }
+.hud-surface .objective-expedition__mode-copy { margin: 0; color: rgba(255, 250, 240, 0.76); font-size: 13px; line-height: 1.55; }
+.hud-surface .objective-expedition__focus-actions { display: grid; gap: 8px; margin-top: auto; padding-top: 22px; }
+.hud-surface .v3-goal-focus__action {
   display: flex;
+  width: 100%;
+  min-height: 64px;
   align-items: center;
   justify-content: space-between;
   gap: 14px;
-}
-.hud-surface .learning-run-dock__status {
-  flex: 1 1 auto;
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-size: 11px;
-}
-.hud-surface .learning-run-dock__row--exit .actions { flex: 0 0 auto; }
-.hud-surface .learning-run-dock__row--act .actions {
-  flex: 1 1 auto;
-  min-width: 0;
-  justify-content: flex-start;
-}
-.hud-surface .learning-run-dock__row--act > .button.primary { flex: 0 0 auto; }
-/* 按钮不许被压扁：实测「改做排序题」「给我一点提示」「更多选择」在 671px 的
- * 求助行里被挤到折成两三个字一行，「更多选择」竖成了一条。 */
-.hud-surface .learning-run-dock .actions .button,
-.hud-surface .learning-run-dock .actions summary {
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
-/* 说明条现在是 dock 的独立一行（原来挤在 .actions 里换行，压在按钮身上）。
- * 字色从 rgba(255,248,232,.7) 改成墨色——那是给深色底写的字，落在
- * --hud-cream 纸面上等于没写（31 号文档 P19 附）。 */
-.hud-surface .learning-run-dock .learning-run-switch-note {
-  flex: 0 0 auto;
-  color: var(--hud-soft);
-  font-size: 11px;
-  line-height: 1.5;
-}
-/* P20：伴星的不可用提示条锚在视口右下，实测正好盖住「暂时不会」与「提交回答」
- * 两个按钮的中心点。作答与结算页给纸面下方留出一条保留带——纸面底边距视口
- * 55px，提示条抬到 63px 就完全落在纸面之外。 */
-.hud-surface.page-16 .companion-unavailable-notice,
-.hud-surface.page-17 .companion-unavailable-notice,
-.hud-surface.page-16 .companion-restore-chip,
-.hud-surface.page-17 .companion-restore-chip {
-  bottom: 63px;
-}
-/* 出口排整排降一档重量：字色更淡、无边框，hover 才回来。 */
-.hud-surface .learning-run-dock__row--exit .actions .button {
-  border-color: transparent;
-  background: none;
-  color: var(--hud-soft);
-}
-.hud-surface .learning-run-dock__row--exit .actions .button:hover {
-  border-color: var(--hud-line-strong);
-  color: var(--hud-ink);
-}
-
-/* P26：作答与结算页上「离开」有三个入口——纸内主按钮、纸外那颗胶囊、Esc。
- * 胶囊先隐藏，但**必须**先给这两页一个自己的初始焦点落点（题干与结果标题的
- * h2 已经带 data-surface-initial-focus），否则 TaskSurface 找不到落点、
- * 键盘用户的焦点会留在左侧 rail 上。 */
-.hud-surface.page-16 .return-home,
-.hud-surface.page-17 .return-home {
-  display: none;
-}
-
-/* ── B7：各题型作答控件统一到 HUD 纸面语法（P23）─────────────────────────
- *
- * 实机对照（同一个 .learning-run-response 容器里）：
- *   排序行  779×58  bg transparent  radius 0   border-bottom 1px --hud-line  pad 13px 7px
- *   选择行  779×40  bg rgba(255,252,244,.55)  radius 8px  border 1px rgba(77,50,31,.15)
- * 字色与字号其实一致，坏的是**容器**：一套是横线纸，一套是旧 task-surface 的
- * 半透明白卡。切题型 = 换产品。这里把选择/配对/判断三条拉回排序那套。
- *
- * 另外按 DESIGN.md:65「衬线体表达正在理解的内容」，选项文字本身就是被理解的对象，
- * 不该是 11px 无衬线——提到 14px 衬线，与文本作答框同级。                   */
-.hud-surface .run-choice-option,
-.hud-surface .run-matching__item {
-  display: flex;
-  width: 100%;
-  min-height: 52px;
-  align-items: center;
-  gap: 8px;
-  padding: 13px 7px;
-  border: 0;
-  border-bottom: 1px solid var(--hud-line);
-  border-radius: 0;
-  background: none;
-  color: var(--hud-ink);
-  font-family: "Noto Serif SC", "Songti SC", serif;
-  font-size: 14px;
-  font-weight: 400;
-  text-align: left;
+  padding: 11px 15px 11px 17px;
+  color: #513729;
+  border: 3px solid rgba(255, 249, 224, 0.86);
+  border-radius: 20px 24px 19px 23px;
+  background: var(--quest-butter);
+  box-shadow: var(--quest-shadow-small);
   cursor: pointer;
+  text-align: left;
 }
-.hud-surface .run-matching__item { justify-content: space-between; gap: 6px; }
-/* 结构也得搬过来：styles.css 那三条旧配方即将删除，这里成为唯一定义处。 */
-.hud-surface .run-choice-list { display: grid; gap: 0; }
-.hud-surface .run-matching { display: grid; gap: 8px; }
-.hud-surface .run-matching__columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.hud-surface .run-matching__col { display: grid; gap: 0; padding: 0; margin: 0; list-style: none; }
-.hud-surface .run-matching__linked { flex: none; color: var(--hud-soft); font-size: 11px; }
-.hud-surface .run-matching__trail { display: flex; align-items: center; gap: 8px; color: var(--hud-soft); font-size: 11px; }
-.hud-surface .run-truefalse { display: grid; gap: 9px; }
-.hud-surface .run-truefalse__actions { display: inline-flex; gap: 8px; }
-/* 排序与配对的行内容同样是「被理解的内容」，不能留在 11px 无衬线：
- * 实测统一选择行之后反过来出现「选择 14px 衬线 / 排序 11px 无衬线」的倒挂。
- * 排序那条走显式类名——它前面新插了位置徽章，任何按位置的 selector 都会指错
- * （styles.css:1413 的 `li > span:nth-child(2)` 现在其实落在 grip 上了）。 */
+.hud-surface .v3-goal-focus__action > span { display: grid; gap: 2px; font: 800 16px/1.35 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .v3-goal-focus__action small { font: 750 12px/1.3 "Noto Sans SC Variable", "Noto Sans SC", sans-serif; }
+.hud-surface .v3-goal-focus__action:disabled { cursor: not-allowed; filter: saturate(0.4); opacity: 0.62; }
+.hud-surface .v3-goal-focus__hint,
+.hud-surface .v3-goal-focus__error { margin: 0; color: rgba(255, 250, 240, 0.78); font-size: 12px; line-height: 1.55; }
+.hud-surface .v3-goal-focus__error { color: #ffe0cc; font-weight: 750; }
+.hud-surface .v3-goal-focus__detail { min-height: 44px; padding: 0; color: #fffaf0; border: 0; background: none; font: inherit; font-size: 13px; font-weight: 750; text-decoration: underline; text-underline-offset: 4px; cursor: pointer; }
+.hud-surface .v3-goal-focus__source { display: flex; min-width: 0; align-items: center; gap: 7px; margin: 14px 0 0; color: rgba(255, 250, 240, 0.66); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.hud-surface .objective-expedition__map {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding: 20px;
+  border-radius: 36px 29px 39px 31px / 30px 39px 29px 37px;
+  color: #3f4b3c;
+  background: #d8e7b9;
+}
+.hud-surface .objective-expedition__map::before,
+.hud-surface .objective-expedition__map::after { position: absolute; content: ""; pointer-events: none; }
+.hud-surface .objective-expedition__map::before { right: -38px; top: 35%; width: 112px; height: 168px; border-radius: 52% 0 0 48%; background: rgba(104, 184, 197, 0.66); }
+.hud-surface .objective-expedition__map::after { left: -27px; bottom: -24px; width: 136px; height: 74px; border-radius: 50%; background: rgba(245, 223, 157, 0.68); transform: rotate(8deg); }
+.hud-surface .objective-expedition__map > * { position: relative; z-index: 1; }
+.hud-surface .objective-expedition__map-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.hud-surface .objective-expedition__map-heading > div { display: flex; align-items: center; gap: 8px; }
+.hud-surface .objective-expedition__map-heading h3 { margin: 0; font: 750 19px/1.3 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .objective-expedition__map-heading p { max-width: 29ch; margin: 0 155px 0 0; color: #5d6859; font-size: 12px; line-height: 1.5; text-align: right; }
+.hud-surface .objective-expedition__tabs { display: none; }
+.hud-surface .objective-expedition__route { position: relative; display: grid; min-height: 0; flex: 1; grid-template-rows: repeat(3, minmax(0, 1fr)); align-items: stretch; gap: 10px; margin-top: 16px; }
+.hud-surface .objective-expedition__route::before { position: absolute; z-index: 2; top: 10%; bottom: 10%; left: 31px; border-left: 3px dashed rgba(79, 112, 80, 0.34); content: ""; pointer-events: none; }
+.hud-surface .objective-quest-region { position: relative; display: grid; min-width: 0; min-height: 0; grid-template-columns: minmax(126px, 0.24fr) minmax(0, 1fr); gap: 12px; padding: 11px 12px; border: 2px solid rgba(255, 252, 233, 0.72); border-radius: 24px 19px 27px 21px; background: rgba(255, 250, 230, 0.46); }
+.hud-surface .objective-quest-region[data-region="active"] { background: rgba(121, 188, 197, 0.3); }
+.hud-surface .objective-quest-region[data-region="mastered"] { background: rgba(255, 247, 216, 0.58); }
+.hud-surface .objective-quest-region > header { position: relative; z-index: 3; display: flex; min-height: 52px; align-items: center; gap: 8px; }
+.hud-surface .objective-quest-region__icon { display: inline-grid; width: 36px; height: 36px; flex: none; place-items: center; color: #fffaf0; border: 3px solid rgba(255, 250, 230, 0.78); border-radius: 50%; background: var(--quest-grass-deep); }
+.hud-surface .objective-quest-region[data-region="active"] .objective-quest-region__icon { background: var(--quest-water-deep); }
+.hud-surface .objective-quest-region[data-region="mastered"] .objective-quest-region__icon { color: #604622; background: var(--quest-butter); }
+.hud-surface .objective-quest-region > header > span:last-child { display: grid; min-width: 0; }
+.hud-surface .objective-quest-region > header strong { font-size: 13px; }
+.hud-surface .objective-quest-region > header small { color: #5d6859; font-size: 12px; line-height: 1.3; }
+.hud-surface .objective-quest-region ol { display: grid; min-height: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(62px, 1fr)); align-content: stretch; gap: 7px; margin: 0; padding: 0; list-style: none; overflow: hidden; }
+.hud-surface .objective-quest-node { display: grid; width: 100%; height: 100%; min-height: 56px; grid-template-columns: 29px minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 8px 9px; color: #44382f; border: 1px solid rgba(83, 66, 48, 0.12); border-radius: 15px 18px 14px 17px; background: rgba(255, 250, 236, 0.74); font: inherit; text-align: left; cursor: pointer; }
+.hud-surface .objective-quest-node[data-primary="true"] { border-color: rgba(155, 71, 47, 0.45); background: #fff6cd; box-shadow: inset 4px 0 0 var(--quest-clay); }
+.hud-surface .objective-quest-node__step { display: inline-grid; width: 29px; height: 29px; place-items: center; color: #fffaf0; border-radius: 50%; background: var(--quest-wood); font-size: 12px; font-weight: 850; }
+.hud-surface .objective-quest-node > span:nth-child(2) { display: grid; min-width: 0; }
+.hud-surface .objective-quest-node strong { font: 750 13px/1.3 "Noto Serif SC", "Songti SC", serif; overflow-wrap: anywhere; }
+.hud-surface .objective-quest-node small { margin-top: 2px; overflow: hidden; color: #6b6258; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.hud-surface .objective-quest-region__empty { padding: 16px 7px; color: #6c7568; font-size: 12px; line-height: 1.5; }
+.hud-surface .objective-quest-region__more { align-self: center; padding: 4px 8px; color: #66705f; font-size: 12px; line-height: 1.4; }
+
+.hud-surface .objective-expedition__index { position: absolute; z-index: 20; top: 15px; right: 15px; display: flex; width: 400px; max-width: calc(100% - 30px); max-height: calc(100% - 30px); flex-direction: column; border-radius: 27px 34px 28px 36px / 34px 27px 36px 29px; background: var(--quest-paper); transition: width 180ms var(--quest-ease-out), box-shadow 180ms var(--quest-ease-out); }
+.hud-surface .objective-expedition__index:not([open]) { width: auto; border-width: 2px; border-radius: 999px; box-shadow: var(--quest-shadow-small); }
+.hud-surface .objective-expedition__index[open] { bottom: 15px; box-shadow: 0 22px 48px rgba(63, 51, 36, 0.28); }
+.hud-surface .objective-expedition__index > summary,
+.hud-surface .objective-brief__dossier > summary { display: flex; min-height: 58px; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 15px; color: var(--quest-ink); cursor: pointer; list-style: none; }
+.hud-surface .objective-expedition__index > summary::-webkit-details-marker,
+.hud-surface .objective-brief__dossier > summary::-webkit-details-marker { display: none; }
+.hud-surface .objective-expedition__index > summary > span,
+.hud-surface .objective-brief__dossier > summary > span { display: flex; align-items: center; gap: 7px; }
+.hud-surface .objective-expedition__index > summary strong { font-size: 14px; }
+.hud-surface .objective-expedition__index:not([open]) > summary { min-height: 44px; padding: 7px 13px; }
+.hud-surface .objective-expedition__index:not([open]) > summary small { margin-left: 8px; }
+.hud-surface .objective-expedition__index > summary small,
+.hud-surface .objective-brief__dossier > summary small { color: var(--quest-soft); font-size: 12px; text-align: right; }
+.hud-surface .objective-expedition__index-body { display: flex; min-height: 0; flex: 1; flex-direction: column; padding: 0 13px 13px; border-top: 1px solid var(--quest-line); }
+.hud-surface .v3-goal-search { display: flex; min-height: 44px; align-items: center; gap: 7px; margin-top: 11px; padding: 0 11px; border: 1px solid var(--quest-line-strong); border-radius: 14px 18px 13px 16px; background: rgba(255, 255, 255, 0.3); }
+.hud-surface .v3-goal-search input { width: 100%; min-width: 0; color: var(--quest-ink); border: 0; outline: 0; background: transparent; font: inherit; font-size: 13px; }
+.hud-surface .v3-goal-filters { display: flex; gap: 5px; margin-top: 8px; overflow-x: auto; padding-bottom: 3px; }
+.hud-surface .v3-goal-filters button { display: inline-flex; min-height: 38px; flex: none; align-items: center; gap: 5px; padding: 0 10px; color: var(--quest-soft); border: 1px solid transparent; border-radius: 999px; background: transparent; font: inherit; font-size: 12px; font-weight: 750; cursor: pointer; }
+.hud-surface .v3-goal-filters button.is-active { color: #fffaf0; background: var(--quest-grass-deep); }
+.hud-surface .v3-goal-list { min-height: 0; margin: 9px 0 0; padding: 0; list-style: none; overflow: auto; }
+.hud-surface .v3-goal-row { display: grid; width: 100%; min-height: 72px; grid-template-columns: 6px minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 10px 4px; color: var(--quest-ink); border: 0; border-bottom: 1px solid var(--quest-line); background: none; text-align: left; cursor: pointer; }
+.hud-surface .v3-goal-row__marker { width: 6px; height: 34px; border-radius: 999px; background: var(--quest-water); }
+.hud-surface .v3-goal-row__marker--stable { background: var(--quest-grass); }
+.hud-surface .v3-goal-row__marker--repair { background: var(--quest-clay); }
+.hud-surface .v3-goal-row__body { display: grid; min-width: 0; gap: 3px; }
+.hud-surface .v3-goal-row__title { overflow: hidden; font: 700 13px/1.35 "Noto Serif SC", "Songti SC", serif; text-overflow: ellipsis; white-space: nowrap; }
+.hud-surface .v3-goal-row__summary { overflow: hidden; color: var(--quest-soft); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.hud-surface .v3-objective-tags { display: flex; min-width: 0; align-items: center; gap: 5px; overflow: hidden; }
+.hud-surface .v3-objective-tags .v3-objective-state { min-height: 23px; padding: 2px 7px; font-size: 12px; }
+.hud-surface .v3-goal-row__facts,
+.hud-surface .v3-goal-row__meta { padding: 0; color: var(--quest-soft); background: none; font-size: 12px; white-space: nowrap; }
+.hud-surface .v3-goal-row__next { color: var(--quest-soft); }
+.hud-surface .v3-goal-row__next small { display: none; }
+.hud-surface .v3-goal-list__empty,
+.hud-surface .v3-goal-list__paging,
+.hud-surface .v3-goal-list__end { padding: 16px 4px; color: var(--quest-soft); font-size: 12px; line-height: 1.55; }
+.hud-surface .v3-goal-list__paging button { min-height: 44px; color: var(--quest-grass-deep); border: 0; background: none; font: inherit; font-weight: 800; cursor: pointer; }
+
+/* Objective detail: one readable challenge brief; dossier stays secondary. */
+.hud-surface .task-surface--objective-detail .approved-surface__content,
+.desktop-app.hud-surface[data-directory-rail="collapsed"] .task-surface--objective-detail .approved-surface__content { left: 88px; }
+.hud-surface .objective-brief { width: 100%; height: 100%; min-height: 0; grid-template-columns: minmax(0, 1fr); overflow: auto; }
+.hud-surface .objective-brief__sheet { display: grid; width: min(920px, 100%); min-height: 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); align-content: start; gap: 0; margin: 0 auto; padding: 0; overflow: hidden; color: var(--quest-ink); border: 4px solid rgba(255, 250, 229, 0.92); border-radius: 33px 27px 38px 29px / 28px 37px 30px 35px; background: var(--quest-paper); box-shadow: var(--quest-shadow); }
+.hud-surface .objective-brief__hero { grid-column: 1 / -1; padding: 26px 34px 22px; border-bottom: 1px solid var(--quest-line); background: rgba(142, 185, 133, 0.18); }
+.hud-surface .objective-brief__flags { display: flex; flex-wrap: wrap; gap: 7px; }
+.hud-surface .objective-brief__hero h3 { max-width: 24ch; margin: 17px 0 0; font: 700 clamp(27px, 3vw, 40px)/1.3 "Noto Serif SC", "Songti SC", serif; overflow-wrap: anywhere; }
+.hud-surface .objective-brief__hero .v3-objective-summary { max-width: 65ch; margin: 11px 0 0; color: var(--quest-soft); font-size: 15px; line-height: 1.75; }
+.hud-surface .objective-brief__facts { display: flex; flex-wrap: wrap; gap: 8px 17px; margin-top: 16px; color: var(--quest-soft); font-size: 12px; }
+.hud-surface .objective-brief__proof,
+.hud-surface .objective-brief__progress { padding: 23px 34px; border-bottom: 1px solid var(--quest-line); }
+.hud-surface .objective-brief__proof { border-right: 1px solid var(--quest-line); }
+.hud-surface .objective-brief__section-title,
+.hud-surface .v3-section-heading,
+.hud-surface .v3-section-heading > div { display: flex; align-items: center; gap: 8px; }
+.hud-surface .objective-brief__section-title h4,
+.hud-surface .v3-section-heading h4 { margin: 0; font: 750 17px/1.35 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .objective-brief__proof > p { margin: 10px 0 0 25px; color: var(--quest-soft); font-size: 14px; line-height: 1.7; }
+.hud-surface .objective-brief__mode { display: grid; grid-template-columns: minmax(0, 1fr); gap: 5px; margin-top: 16px; padding: 12px 14px; border-radius: 15px 19px 14px 18px; background: rgba(142, 185, 133, 0.2); }
+.hud-surface .objective-brief__mode--practice { background: rgba(242, 207, 107, 0.25); }
+.hud-surface .objective-brief__mode--unavailable { background: rgba(111, 98, 85, 0.1); }
+.hud-surface .objective-brief__mode strong { font-size: 13px; }
+.hud-surface .objective-brief__mode span { color: var(--quest-soft); font-size: 13px; line-height: 1.55; }
+.hud-surface .v3-section-heading { justify-content: space-between; }
+.hud-surface .v3-section-heading > span { color: var(--quest-soft); font-size: 12px; }
+.hud-surface .objective-brief__progress .objective-progress { margin-top: 16px; }
+.hud-surface .objective-brief__progress dl { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; margin: 14px 0 0; }
+.hud-surface .objective-brief__progress dl > div { display: grid; min-width: 0; grid-template-columns: 94px minmax(0, 1fr); grid-template-areas: "label value" "label meta"; column-gap: 9px; padding: 8px 10px; border: 1px solid var(--quest-line); border-radius: 14px 17px 13px 16px; background: rgba(255, 255, 255, 0.2); }
+.hud-surface .objective-brief__progress dt { display: flex; align-items: center; gap: 6px; color: var(--quest-soft); font-size: 12px; }
+.hud-surface .objective-brief__progress dt { grid-area: label; }
+.hud-surface .objective-brief__progress dd { grid-area: value; margin: 0; overflow-wrap: anywhere; font: 700 13px/1.35 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .objective-brief__progress small { display: block; grid-area: meta; margin-top: 2px; overflow-wrap: anywhere; color: var(--quest-soft); font-size: 12px; line-height: 1.35; }
+.hud-surface .objective-brief__action { grid-column: 1 / -1; display: flex; width: calc(100% - 68px); min-height: 70px; align-items: center; justify-content: space-between; gap: 18px; margin: 12px 34px; padding: 10px 17px 10px 20px; color: #4e3525; border: 3px solid rgba(255, 249, 224, 0.88); border-radius: 21px 26px 20px 24px; background: var(--quest-butter); box-shadow: var(--quest-shadow-small); text-align: left; cursor: pointer; }
+.hud-surface .objective-brief__action:disabled { cursor: not-allowed; filter: saturate(0.35); opacity: 0.62; }
+.hud-surface .v3-next-action__text { display: grid; gap: 2px; }
+.hud-surface .v3-next-action__label,
+.hud-surface .v3-next-action__why { font-size: 12px; line-height: 1.45; }
+.hud-surface .v3-next-action__verb { font: 750 18px/1.35 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .v3-next-action__go { display: inline-grid; width: 43px; height: 43px; flex: none; place-items: center; color: #fff9e9; border-radius: 50%; background: var(--quest-clay); }
+.hud-surface .v3-action-error { grid-column: 1 / -1; display: flex; align-items: center; gap: 7px; margin: -12px 34px 20px; color: var(--quest-clay-deep); font-size: 13px; }
+.hud-surface .objective-brief__dossier { grid-column: 1 / -1; margin: 0 34px 28px; border-top: 1px solid var(--quest-line); }
+.hud-surface .objective-brief__dossier-body { padding: 4px 15px 18px; color: var(--quest-soft); font-size: 13px; }
+.hud-surface .objective-brief__sheet > .v3-objective-revision { grid-column: 1 / -1; }
+
+/* Focus mode: room chrome and companion yield to the current question. */
+.desktop-app.hud-surface.page-16 .room-control,
+.desktop-app.hud-surface.page-16 .hud-rail,
+.desktop-app.hud-surface.page-16 .home-v2-compact-nav,
+.desktop-app.hud-surface.page-16 .return-home,
+.desktop-app.hud-surface.page-16 .companion-presence,
+.desktop-app.hud-surface.page-16 .companion-unavailable-notice,
+.desktop-app.hud-surface.page-16 .companion-restore-chip { display: none; }
+.desktop-app.hud-surface.page-16 .task-title { opacity: 0; pointer-events: none; }
+.desktop-app.hud-surface.page-16 .content.full,
+.desktop-app.hud-surface.page-16.companion-absent .content.full {
+  inset: 34px 48px !important;
+}
+.desktop-app.hud-surface.page-17 .return-home { display: none; }
+.desktop-app.hud-surface.page-17 .content.full,
+.desktop-app.hud-surface.page-17.companion-absent .content.full { right: 55px; }
+.hud-surface .learning-run-primary-content { position: relative; width: 100%; height: 100%; min-width: 0; min-height: 0; }
+.hud-surface .learning-run-workbench,
+.hud-surface .learning-run-result-board { width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; color: var(--quest-ink); border: 4px solid rgba(255, 250, 229, 0.92); border-radius: 34px 28px 39px 30px / 29px 38px 30px 36px; background: var(--quest-paper); box-shadow: var(--quest-shadow); }
+.hud-surface .learning-run-workbench { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+.hud-surface .learning-run-journey { display: grid; min-width: 0; grid-template-columns: auto minmax(260px, 1.35fr) minmax(360px, 1.4fr) auto; align-items: center; gap: 14px 20px; padding: 12px 21px; color: #fffaf0; background: var(--quest-grass-deep); }
+.hud-surface .learning-run-journey::after { display: none; }
+.hud-surface .learning-run-journey__state { display: inline-flex; min-height: 31px; align-items: center; gap: 8px; padding: 0 11px; border: 1px solid rgba(255, 250, 240, 0.22); border-radius: 999px; font-size: 12px; font-weight: 850; white-space: nowrap; }
+.hud-surface .learning-run-journey__state i { width: 9px; height: 9px; border-radius: 50%; background: var(--quest-butter); box-shadow: 0 0 0 4px rgba(242, 207, 107, 0.15); }
+.hud-surface .learning-run-journey__target { display: grid; min-width: 0; gap: 2px; }
+.hud-surface .learning-run-journey__kicker { margin: 0; color: rgba(255, 250, 240, 0.68); font-size: 12px; font-weight: 750; }
+.hud-surface .learning-run-journey h2 { display: block; margin: 0; overflow: hidden; font: 680 16px/1.4 "Noto Serif SC", "Songti SC", serif; text-overflow: ellipsis; white-space: nowrap; }
+.hud-surface .learning-run-journey dl { display: flex; min-width: 0; gap: 17px; margin: 0; }
+.hud-surface .learning-run-journey dl > div { display: grid; min-width: 0; grid-template-columns: none; gap: 1px; padding: 0; border: 0; }
+.hud-surface .learning-run-journey dt { color: rgba(255, 250, 240, 0.6); font-size: 12px; }
+.hud-surface .learning-run-journey dd { max-width: 13ch; margin: 0; overflow: hidden; font-size: 12px; font-weight: 800; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.hud-surface .learning-run-clock { margin: 0; text-align: right; }
+.hud-surface .learning-run-clock > div:first-child { display: grid; gap: 1px; font-size: 12px; }
+.hud-surface .learning-run-clock b { font-size: 15px; font-variant-numeric: tabular-nums; }
+.hud-surface .learning-run-clock .meta { color: rgba(255, 250, 240, 0.58); font-size: 12px; }
+
+.hud-surface .learning-run-stage { display: flex; min-width: 0; min-height: 0; flex-direction: column; padding: 25px 34px 22px; background: var(--quest-paper); }
+.hud-surface .learning-run-stage__header { flex: none; padding-bottom: 18px; border-bottom: 1px solid var(--quest-line); }
+.hud-surface .learning-run-stage__header > div { display: flex; align-items: center; justify-content: space-between; gap: 16px; color: var(--quest-grass-deep); font-size: 12px; font-weight: 850; }
+.hud-surface .learning-run-stage__header small { color: var(--quest-soft); font-size: 12px; }
+.hud-surface .learning-run-stage__header h2 { max-width: 44ch; margin: 11px 0 0; font: 700 clamp(22px, 2.3vw, 32px)/1.46 "Noto Serif SC", "Songti SC", serif; overflow-wrap: anywhere; }
+.hud-surface .learning-run-stage__header p { max-width: 75ch; margin: 7px 0 0; color: var(--quest-soft); font-size: 14px; line-height: 1.65; }
+.hud-surface .learning-run-response { min-width: 0; min-height: 0; flex: 1; padding: 20px 2px 16px; overflow: auto; color: var(--quest-ink); scrollbar-color: rgba(75, 57, 42, 0.35) transparent; scrollbar-width: thin; }
+.hud-surface .learning-run-response > [role="status"],
+.hud-surface .learning-run-response > [role="alert"] { display: grid; min-height: 100%; place-content: center; justify-items: center; gap: 9px; text-align: center; }
+.hud-surface .learning-run-response .small { font-size: 13px; line-height: 1.6; }
+.hud-surface .learning-run-response .run-text-editor { display: grid !important; min-height: 100%; grid-template-rows: minmax(190px, 1fr) auto; }
+.hud-surface .learning-run-response .run-text-editor textarea,
+.hud-surface .run-voice-input__transcript textarea { display: block; width: 100%; min-height: 100%; padding: 2px 7px 12px; color: var(--quest-ink); border: 0; border-bottom: 1px solid var(--quest-line); outline: 0; background: repeating-linear-gradient(transparent 0 31px, rgba(76, 100, 86, 0.14) 31px 32px); font: 500 15px/32px "Noto Serif SC", "Songti SC", serif; resize: none; }
+.hud-surface .learning-run-response .run-text-editor small { justify-self: end; color: var(--quest-soft); font-size: 12px; }
+.hud-surface .learning-run-response .run-text-editor--compact { min-height: 126px; margin-top: 18px; padding-top: 17px; border-top: 1px solid var(--quest-line); }
+.hud-surface .learning-run-response .run-text-editor--compact > span { margin-bottom: 8px; font-size: 13px; font-weight: 850; }
+.hud-surface .learning-run-hint--shown { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 9px; margin: 13px 0 0; padding: 12px 14px; color: #5a421e; border: 0; border-radius: 15px 19px 14px 18px; background: #f8dda0; transform: none; }
+.hud-surface .learning-run-hint__body { display: grid; gap: 6px; min-width: 0; }
+.hud-surface .learning-run-hint__levels { display: grid; gap: 5px; margin: 0; padding-left: 18px; }
+.hud-surface .learning-run-hint__body,
+.hud-surface .learning-run-hint__body span,
+.hud-surface .learning-run-hint__body small { font-size: 13px; line-height: 1.55; }
+.hud-surface .learning-run-hint__body small { color: var(--quest-clay-deep); font-weight: 750; }
+
+/* Answer families. */
+.hud-surface .run-choice-list,
+.hud-surface .run-matching,
+.hud-surface .run-part-editor,
+.hud-surface .run-bundle-editor { display: grid; gap: 10px; }
+.hud-surface .run-choice-option,
+.hud-surface .run-matching__item { display: flex; width: 100%; min-height: 56px; align-items: center; gap: 11px; padding: 10px 13px; color: var(--quest-ink); border: 1px solid var(--quest-line); border-radius: 15px 19px 14px 18px; background: rgba(255, 255, 255, 0.22); font: 500 14px/1.55 "Noto Serif SC", "Songti SC", serif; text-align: left; cursor: pointer; }
+.hud-surface .run-choice-option.is-selected,
+.hud-surface .run-matching__item.is-active { border-color: rgba(155, 71, 47, 0.46); background: rgba(242, 207, 107, 0.25); box-shadow: inset 4px 0 0 var(--quest-clay); }
+.hud-surface .run-choice-option__mark { display: inline-grid; width: 24px; height: 24px; flex: none; place-items: center; color: #fffaf0; border: 2px solid var(--quest-clay); border-radius: 50%; background: transparent; }
+.hud-surface .run-choice-option.is-selected .run-choice-option__mark { background: var(--quest-clay); }
+.hud-surface .run-matching__columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; }
+.hud-surface .run-matching__col { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.hud-surface .run-matching__item { justify-content: space-between; }
+.hud-surface .run-matching__linked,
+.hud-surface .run-matching__trail { color: var(--quest-soft); font-size: 12px; }
+.hud-surface .run-matching__pairs { display: grid; gap: 7px; margin: 0; padding: 12px 0 0; border-top: 1px solid var(--quest-line); list-style: none; }
+.hud-surface .run-matching__pairs li { display: grid; min-height: 44px; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 5px 9px; border-radius: 13px; background: rgba(121, 188, 197, 0.12); font-size: 13px; }
+.hud-surface :is(.run-order-list, .run-relation-list) { margin: 0; padding: 0; list-style: none; }
+.hud-surface .run-order-list { display: grid; gap: 7px; }
+.hud-surface .run-order-list li { display: grid; min-height: 57px; grid-template-columns: 28px auto minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 8px 10px; border: 1px solid var(--quest-line); border-radius: 14px 18px 13px 17px; background: rgba(255, 255, 255, 0.18); }
+.hud-surface .run-order-list li[aria-grabbed="true"] { border-color: var(--quest-clay); background: rgba(242, 207, 107, 0.25); box-shadow: var(--quest-shadow-small); }
+.hud-surface .run-order-index { color: var(--quest-clay); font: 750 16px/1 "Noto Serif SC", "Songti SC", serif; text-align: center; }
 .hud-surface .run-order-label,
 .hud-surface .run-relation-list li > span:not([class]),
-.hud-surface .run-repair-row > span:first-child {
-  min-width: 0;
-  color: var(--hud-ink);
-  font-family: "Noto Serif SC", "Songti SC", serif;
-  font-size: 14px;
-  line-height: 1.5;
-}
-.hud-surface .run-choice-option:hover,
-.hud-surface .run-matching__item:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.18);
-  color: var(--hud-ink);
-}
-/* 选中态不再靠"整块变白卡"表达：左侧一条陶土色实心标记，与纸面语法同族。 */
-.hud-surface .run-choice-option.is-selected,
-.hud-surface .run-matching__item.is-active {
-  box-shadow: inset 3px 0 0 var(--hud-clay);
-  color: var(--hud-clay);
-  font-weight: 650;
-}
-.hud-surface .run-choice-option__mark {
-  flex: none;
-  color: var(--hud-clay);
-  font-size: 14px;
-  line-height: 1;
-}
-/* P24：位置徽章。衬线、比正文小一档、靠右对齐到一条竖线上，让「第几位」一眼可比。 */
-.hud-surface .run-order-index {
-  width: 26px;
-  color: var(--hud-clay);
-  font-family: "Noto Serif SC", "Songti SC", serif;
-  font-size: 16px;
-  font-weight: 680;
-  font-variant-numeric: tabular-nums;
-  text-align: center;
-}
-/* 这个 li 是**网格**不是 flex（hud-surface.css:5003 写死三列
- * `auto minmax(0,1fr) auto`）。加第四个孩子不改列模板，第四项会掉进隐式列，
- * 文字列被挤到 140px、行高从 58 涨到 92——实机量出来才发现。 */
-.hud-surface .run-order-list li {
-  grid-template-columns: 26px auto minmax(0, 1fr) auto;
-}
-.hud-surface .run-matching__item:disabled { opacity: 0.5; }
-.hud-surface .run-truefalse__claim {
-  padding: 13px 7px;
-  border: 0;
-  border-left: 3px solid var(--hud-line-strong);
-  border-radius: 0;
-  background: none;
-  color: var(--hud-ink);
-  font-family: "Noto Serif SC", "Songti SC", serif;
-  font-size: 14px;
-  line-height: 1.6;
-}
+.hud-surface .run-repair-row > span:first-child { min-width: 0; font: 500 14px/1.55 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .run-order-controls { display: flex; gap: 5px; }
+.hud-surface .run-icon-button { display: inline-grid; width: 44px; height: 44px; place-items: center; padding: 0; color: var(--quest-ink); border: 1px solid var(--quest-line-strong); border-radius: 50%; background: rgba(255, 255, 255, 0.24); cursor: pointer; }
+.hud-surface .run-icon-button:disabled { cursor: not-allowed; opacity: 0.36; }
+.hud-surface .run-relation-controls { display: grid; grid-template-columns: minmax(0, 1fr) minmax(110px, 0.55fr) minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 13px; border-radius: 16px 20px 15px 19px; background: rgba(121, 188, 197, 0.12); }
+.hud-surface .run-relation-list li { display: flex; min-height: 48px; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 5px; border-bottom: 1px solid var(--quest-line); }
+.hud-surface .run-repair-editor { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(230px, 0.65fr); gap: 16px; }
+.hud-surface .run-repair-row { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(130px, 0.75fr) minmax(130px, 0.75fr); align-items: center; gap: 9px; min-height: 54px; padding: 8px 4px; border-bottom: 1px solid var(--quest-line); }
+.hud-surface .run-repair-preview { align-self: start; padding: 15px; border: 2px solid rgba(142, 185, 133, 0.4); border-radius: 17px 21px 16px 20px; background: rgba(142, 185, 133, 0.14); }
+.hud-surface .run-repair-preview h4 { margin: 0 0 9px; font: 750 15px/1.4 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .run-repair-preview ul { display: grid; gap: 7px; margin: 0; padding-left: 19px; }
+.hud-surface .run-repair-preview p,
+.hud-surface .run-repair-preview li { color: var(--quest-soft); font-size: 13px; line-height: 1.55; }
+.hud-surface :is(.run-relation-controls, .run-repair-row) select { width: 100%; min-height: 44px; padding: 0 31px 0 11px; color: var(--quest-ink); border: 1px solid var(--quest-line-strong); border-radius: 13px 17px 12px 16px; background: var(--quest-cream); font: inherit; font-size: 13px; }
+.hud-surface .run-bundle-progress { display: flex; align-items: center; gap: 7px; }
+.hud-surface .run-bundle-progress i { width: 10px; height: 10px; border-radius: 50%; background: rgba(75, 57, 42, 0.16); }
+.hud-surface .run-bundle-progress i.is-current { width: 28px; border-radius: 999px; background: var(--quest-clay); }
+.hud-surface .run-bundle-part { display: grid; gap: 13px; }
+.hud-surface .run-bundle-part h4 { margin: 0; color: var(--quest-grass-deep); font: 800 13px/1.4 "Noto Sans SC Variable", "Noto Sans SC", sans-serif; }
+.hud-surface .run-bundle-review { display: grid; gap: 9px; }
+.hud-surface .run-bundle-review > div { padding: 12px; border-bottom: 1px solid var(--quest-line); }
+.hud-surface .run-bundle-review strong { display: block; margin-bottom: 5px; font-size: 13px; }
+.hud-surface .run-bundle-review p { margin: 0; color: var(--quest-soft); font-size: 13px; line-height: 1.55; }
+.hud-surface .run-voice-input { display: grid; min-height: 0; height: 100%; grid-template-rows: auto auto minmax(0, 1fr); gap: 10px; }
+.hud-surface .run-voice-input__controls { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.hud-surface .run-voice-input__controls .meta,
+.hud-surface .run-voice-input__block,
+.hud-surface .run-voice-input__note { font-size: 12px; line-height: 1.55; }
+.hud-surface .run-voice-input__block,
+.hud-surface .run-voice-input__note { margin: 0; padding: 10px 12px; border-radius: 13px 16px 12px 15px; }
+.hud-surface .run-voice-input__block { color: #6a2f24; border: 1px solid rgba(159, 60, 40, 0.4); background: rgba(214, 122, 92, 0.16); }
+.hud-surface .run-voice-input__note { color: var(--quest-soft); border: 1px solid var(--quest-line); background: rgba(255, 255, 255, 0.15); }
+.hud-surface .run-voice-input__transcript { display: block; min-height: 0; height: 100%; }
+.hud-surface .run-truefalse { display: grid; gap: 12px; }
+.hud-surface .run-truefalse__claim { padding: 16px; border: 1px solid var(--quest-line-strong); border-radius: 15px 19px 14px 18px; background: rgba(255, 255, 255, 0.17); font: 550 15px/1.65 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .run-truefalse__actions { display: flex; gap: 9px; }
 
-/* P25：语音转写框此前只有 width/height/resize，边框与底色全是 UA 默认
- * （夜间还会被 color-scheme 翻成深色块）；文本框的焦点态只换了背景淡洗，
- * 没有环——DESIGN.md:141/173 要的是边界转暖橙 + 3px 焦点环。 */
-.hud-surface .run-voice-input__transcript textarea {
-  padding: 1px 6px 12px;
-  border: 0;
-  border-bottom: 1px solid var(--hud-line);
-  background: none;
-  color: var(--hud-ink);
-  font: 500 14px/32px "Noto Serif SC", "Songti SC", serif;
-}
-.hud-surface .learning-run-response textarea:focus-visible,
-.hud-surface .run-choice-option:focus-visible,
-.hud-surface .run-matching__item:focus-visible,
-.hud-surface .run-icon-button:focus-visible,
-.hud-surface .learning-run-more > summary:focus-visible {
-  outline: 3px solid var(--focus);
-  outline-offset: 3px;
-}
+/* One primary submit, secondary help and a quiet exit. */
+.hud-surface .learning-run-dock { display: flex; flex: none; flex-direction: column; gap: 9px; padding-top: 14px; border-top: 1px solid var(--quest-line); }
+.hud-surface .learning-run-dock__row { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 12px; }
+.hud-surface .learning-run-dock__status { min-width: 0; flex: 1; color: var(--quest-soft); font-size: 12px; line-height: 1.45; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hud-surface .learning-run-dock .actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.hud-surface .learning-run-dock .button,
+.hud-surface .learning-run-more > summary { min-height: 44px; font-size: 13px; white-space: nowrap; }
+.hud-surface .learning-run-dock .button > span { display: grid; text-align: left; }
+.hud-surface .learning-run-action-cost { color: var(--quest-clay-deep); font-size: 12px; font-weight: 750; }
+.hud-surface .learning-run-dock__row--act > .button.primary { min-width: 150px; min-height: 50px; padding-inline: 20px; background: var(--quest-clay); box-shadow: var(--quest-shadow-small); }
+.hud-surface .learning-run-dock__row--exit .button { color: var(--quest-soft); border-color: transparent; background: none; box-shadow: none; }
+.hud-surface .learning-run-switch-note { margin: 0; color: var(--quest-soft); font-size: 12px; line-height: 1.5; }
+.hud-surface .learning-run-more { position: relative; }
+.hud-surface .learning-run-more > summary { display: inline-flex; align-items: center; padding: 0 14px; color: var(--quest-ink); border: 1px solid var(--quest-line-strong); border-radius: 16px 20px 15px 19px; background: var(--quest-paper); font-weight: 750; list-style: none; cursor: pointer; }
+.hud-surface .learning-run-more > summary::-webkit-details-marker { display: none; }
+.hud-surface .learning-run-more__menu { position: absolute; z-index: 20; right: 0; bottom: calc(100% + 8px); display: grid; width: 220px; max-height: min(420px, calc(100vh - 180px)); overflow: auto; padding: 7px; border: 3px solid rgba(255, 250, 229, 0.92); border-radius: 18px 22px 17px 21px; background: var(--quest-paper); box-shadow: var(--quest-shadow-small); }
+.hud-surface .learning-run-more__menu button { display: flex; min-height: 44px; align-items: center; gap: 8px; padding: 7px 10px; color: var(--quest-ink); border: 0; border-radius: 11px 14px 10px 13px; background: transparent; font: inherit; text-align: left; cursor: pointer; }
 
-/* ── B4：目标链路的字号地板（P7 / P13）──────────────────────────────────
- *
- * 实机直方图：列表 61 个可见文本段里 49 段（80%）< 11px，其中 24 段是 8px；
- * 详情 58 段里 53 段（91%）< 11px，41 段是 8px。DESIGN.md:62 说正文与操作
- * 用 12–15px、:63 说元数据用 9–11px——8px 那一整档在合同下沿之外，而且它们
- * 不是元数据：状态标签、知识形态、复习到期、下一步动词的补充说明，全是要参与
- * 决策的句子。
- *
- * 地板取两级：元数据 11px、可交互与成句的文字 12px。抬完必然挤，所以同批做
- * B5（焦点卡改成按内容长高、不再固定 654px 把内容裁掉）。              */
-.hud-surface .v3-goal-focus__topline,
-.hud-surface .v3-objective-state,
-.hud-surface .v3-goal-focus__copy > p,
-.hud-surface .v3-goal-focus__action small,
-.hud-surface .v3-goal-pulse dt,
-.hud-surface .v3-goal-focus__source,
-.hud-surface .v3-goal-ledger__header p,
-.hud-surface .v3-goal-filters button,
-.hud-surface .v3-goal-row__summary,
-.hud-surface .v3-goal-row__meta,
-.hud-surface .v3-goal-row__next small,
-.hud-surface .v3-goal-list__empty span,
-.hud-surface .v3-goal-list__paging,
-.hud-surface .v3-goal-list__end,
-.hud-surface .v3-objective-sheet__header,
-.hud-surface .v3-objective-tags span,
-.hud-surface .v3-action-error,
-.hud-surface .v3-section-heading > span {
-  font-size: 11px;
-}
-.hud-surface .v3-goal-focus blockquote,
-.hud-surface .v3-goal-search input {
-  font-size: 12px;
-}
-/* P15 之后详情页主行动块自己就是那个按钮，字号写在 approved-surfaces.css:247-258
- * 的唯一一处（label 11 / 动词 15 衬线 / 说明 12）。这里不再插手，也不再需要地板——
- * 上一版靠 `.v3-next-action span` 兜底，正因为原文在两个紧凑档里把它打到 4px/5px。 */
-/* 第二批：实机追问出来的——第一批只覆盖了 approved-surfaces.css:181-254，
- * 学习账本三列与整条证据栏还在 8px（13 段）与 10px（5 段）。 */
-.hud-surface .v3-learning-ledger dt,
-.hud-surface .v3-learning-ledger small,
-.hud-surface .v3-lineage-ledger header > span,
-.hud-surface .v3-primary-note small,
-.hud-surface .v3-origin-row__index,
-.hud-surface .v3-origin-row span,
-.hud-surface .v3-origin-row p,
-.hud-surface .v3-origin-row small,
-.hud-surface .v3-lineage-boundary p {
-  font-size: 11px;
-}
-.hud-surface .v3-learning-ledger dd,
-.hud-surface .v3-primary-note strong,
-.hud-surface .v3-origin-row strong,
-.hud-surface .v3-lineage-boundary strong {
-  font-size: 12px;
-}
-
-/* ── B5：焦点卡按内容长高（P8）──────────────────────────────────────────
- *
- * 实机：卡 410×654，内容高 733——**87px 被 overflow:hidden 裁掉**；同时
- * CTA 底边到计数器顶边之间空 281px（占卡高 43%）。两件事同一个根因：
- * `.v3-goal-workbench` 是 `height:100%` 的网格，卡片被拉成整列高，而
- * `.v3-goal-pulse` 用 `margin: auto 0 0` 顶到底部。
- * 抬完字号（B4）只会更挤，所以必须同批改：让卡按内容长，不再撑满列。 */
-.hud-surface .v3-goal-workbench { align-items: start; }
-.hud-surface .v3-goal-focus { min-height: 0; }
-.hud-surface .v3-goal-pulse { margin-top: 22px; }
-/* 右侧账本仍占满整列——它有自己的滚动列表，缩到内容高会让账本下面出现大空洞。 */
-.hud-surface .v3-goal-ledger { align-self: stretch; }
-
-/* P28（B5 的另一半）：结算绿栏 665px 高里有 374px 是空的，同一个病根——
- * `.learning-run-result-summary dl { margin: auto 0 0 }` 把计数器顶到栏底，
- * 中间留出一个洞。改成跟着内容走。
- * 注意区别：详情页那张纸的底部留白是**对的**（纸就是纸），要修的只有这种
- * "被 margin:auto 劈成上下两段、中间悬空"的洞。 */
-.hud-surface .learning-run-result-summary dl { margin-top: 24px; }
+/* Result: achievement first, evidence second, one next challenge. */
+.hud-surface .learning-run-result-board { display: grid; grid-template-columns: minmax(260px, 0.72fr) minmax(0, 1.55fr); grid-template-rows: minmax(0, 1fr) auto; }
+.hud-surface .learning-run-result-summary { grid-area: 1 / 1 / 2 / 2; display: flex; min-width: 0; min-height: 0; flex-direction: column; padding: 29px 27px; color: #fffaf0; background: var(--quest-grass-deep); }
+.hud-surface .learning-run-result-board[data-tone="success"] .learning-run-result-summary { background: var(--quest-moss); }
+.hud-surface .learning-run-result-board[data-tone="practice"] .learning-run-result-summary { color: #554018; background: #e3bc58; }
+.hud-surface .learning-run-result-summary__kicker { color: currentColor; font-size: 12px; font-weight: 850; opacity: 0.68; }
+.hud-surface .learning-run-result-summary__seal { margin-top: 19px; font: 700 clamp(29px, 3vw, 44px)/1.35 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .learning-run-result-summary__quiet { margin-top: 20px; font: 680 19px/1.45 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .learning-run-result-summary > p { margin: 14px 0 0; color: currentColor; font-size: 13px; line-height: 1.65; opacity: 0.74; }
+.hud-surface .learning-run-result-summary .objective-progress { margin-top: 20px; }
+.hud-surface .learning-run-result-summary .objective-progress__label { color: currentColor; opacity: 0.66; }
+.hud-surface .learning-run-result-summary .objective-progress__seg[data-current="true"] .objective-progress__label { color: currentColor; opacity: 1; }
+.hud-surface .learning-run-result-summary .objective-progress__bar { background: rgba(255, 250, 240, 0.18); }
+.hud-surface .learning-run-result-summary .objective-progress__seg[data-lit="true"] .objective-progress__bar { background: var(--quest-butter); }
+.hud-surface .learning-run-result-summary dl { margin: 22px 0 0; }
+.hud-surface .learning-run-result-summary dl > div { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid rgba(255, 250, 240, 0.2); }
 .hud-surface .learning-run-result-summary dt,
-.hud-surface .learning-run-result-summary dd { font-size: 11px; }
+.hud-surface .learning-run-result-summary dd { font-size: 12px; }
+.hud-surface .learning-run-result-summary dt { opacity: 0.66; }
+.hud-surface .learning-run-result-summary dd { margin: 0; font-weight: 850; }
+.hud-surface .learning-run-result-report { grid-area: 1 / 2 / 2 / 3; display: flex; min-width: 0; min-height: 0; flex-direction: column; padding: 28px 33px 22px; overflow: auto; }
+.hud-surface .learning-run-result-report header > span { color: var(--quest-grass-deep); font-size: 12px; font-weight: 850; }
+.hud-surface .learning-run-result-report h2 { max-width: 36ch; margin: 8px 0 0; font: 700 clamp(24px, 2.7vw, 35px)/1.4 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .learning-run-result-companion { display: flex; align-items: flex-start; gap: 9px; margin-top: 18px; padding: 12px 14px; color: var(--quest-ink); border-radius: 14px 18px 13px 17px; background: rgba(142, 185, 133, 0.17); }
+.hud-surface .learning-run-result-companion > svg { flex: none; color: var(--quest-clay); }
+.hud-surface .learning-run-result-companion p { display: grid; gap: 2px; margin: 0; }
+.hud-surface .learning-run-result-companion strong { font-size: 13px; }
+.hud-surface .learning-run-result-companion span { color: var(--quest-soft); font-size: 13px; line-height: 1.55; }
+.hud-surface .learning-run-result-evidence { margin-top: 18px; border-top: 1px solid var(--quest-line); }
+.hud-surface .learning-run-result-evidence > div,
+.hud-surface .learning-run-result-evidence--single { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 20px; padding: 14px 2px; border-bottom: 1px solid var(--quest-line); }
+.hud-surface .learning-run-result-evidence b { font-size: 13px; }
+.hud-surface .learning-run-result-evidence [data-role="proved-this-time"] b { color: var(--quest-grass-deep); }
+.hud-surface .learning-run-result-evidence p { margin: 0; color: var(--quest-soft); font-size: 13px; line-height: 1.65; }
+.hud-surface .learning-run-result-rubric { margin-top: 8px; border-top: 1px solid var(--quest-line); }
+.hud-surface .learning-run-result-rubric > b { display: block; padding: 13px 2px 5px; font-size: 13px; }
+.hud-surface .learning-run-result-rubric ul { margin: 0; padding: 0; list-style: none; }
+.hud-surface .learning-run-result-rubric li { padding: 10px 2px; border-bottom: 1px solid var(--quest-line); }
+.hud-surface .learning-run-result-rubric__head { color: var(--quest-ink); font-size: 13px; font-weight: 850; }
+.hud-surface .learning-run-result-rubric li[data-verdict="covered"] .learning-run-result-rubric__head { color: var(--quest-grass-deep); }
+.hud-surface .learning-run-result-rubric li[data-verdict="missing"] .learning-run-result-rubric__head,
+.hud-surface .learning-run-result-rubric li[data-verdict="contradicted"] .learning-run-result-rubric__head { color: var(--quest-clay-deep); }
+.hud-surface .learning-run-result-rubric li p { margin: 4px 0 0; color: var(--quest-soft); font-size: 13px; line-height: 1.6; }
+.hud-surface .learning-run-result-reveal { margin-top: 14px; }
+.hud-surface .learning-run-result-reveal .button { min-height: 44px; }
+.hud-surface .learning-run-result-reveal__body { margin-top: 10px; padding: 15px; border: 1px solid var(--quest-line); border-radius: 15px 19px 14px 18px; background: rgba(255, 255, 255, 0.17); }
+.hud-surface .learning-run-result-reveal__body h3 { margin: 0 0 7px; }
+.hud-surface .learning-run-result-reveal__body p,
+.hud-surface .learning-run-result-reveal__answer { margin: 0 0 7px; color: var(--quest-soft); font-size: 13px; line-height: 1.65; }
+.hud-surface .learning-run-result-reveal__answer { color: var(--quest-ink); font-weight: 800; }
+.hud-surface .learning-run-next-step { display: grid; gap: 5px; margin-top: 18px; padding: 14px 16px; color: #594116; border-radius: 16px 20px 15px 19px; background: rgba(242, 207, 107, 0.55); }
+.hud-surface .learning-run-next-step span { font-size: 12px; font-weight: 850; }
+.hud-surface .learning-run-next-step strong { font: 700 15px/1.45 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .learning-run-next-step p { margin: 0; color: #6b523b; font-size: 12px; line-height: 1.55; }
+.hud-surface .learning-run-result-actions { grid-area: 2 / 1 / 3 / 3; display: flex; gap: 8px; margin: 0; padding: 13px 33px 17px; border-top: 1px solid var(--quest-line); background: var(--quest-paper); }
+.hud-surface .learning-run-result-actions .button { min-height: 44px; }
 
-/* ── B4 剩下的两条：提示面板（P21）与紧凑档（P33）────────────────────────
- *
- * 提示此前挂在左侧导航栏里：正文 9px、宽 207px，而"看过提示这轮只计练习分"
- * 那句惩罚说明实测 **7.5px**——全链路最小的字，却是最该看清的一句。JSX 已把
- * 整个面板搬进题面区（题干正下方），这里补上它在新位置该有的字号与颜色。 */
-.hud-surface .learning-run-stage .learning-run-hint {
-  margin: 0 0 14px;
-  padding: 11px 13px;
-  font-size: 12px;
-  line-height: 1.6;
+/* The one-time success ceremony. Any click/key/Esc exits immediately in React. */
+.hud-surface .learning-run-ceremony { position: absolute; z-index: 80; inset: 0; display: grid; place-items: center; overflow: hidden; color: #fff9e9; border-radius: 34px; background: rgba(37, 74, 53, 0.94); cursor: pointer; animation: quest-ceremony-in 260ms var(--quest-ease-out) both; }
+.hud-surface .learning-run-ceremony__glow { position: absolute; width: min(64vw, 680px); aspect-ratio: 1; border-radius: 50%; background: rgba(255, 226, 126, 0.18); transform: scale(0.35); animation: quest-ceremony-glow 1350ms var(--quest-ease-out) both; }
+.hud-surface .learning-run-ceremony__content { position: relative; z-index: 2; display: grid; max-width: 620px; justify-items: center; gap: 10px; padding: 30px; text-align: center; }
+.hud-surface .learning-run-ceremony__stamp { display: inline-grid; width: 112px; height: 112px; place-items: center; color: #6d3d24; border: 8px double #9d5632; border-radius: 50%; background: #f7dda1; box-shadow: 0 12px 30px rgba(29, 48, 36, 0.28); font: 750 24px/1.1 "Noto Serif SC", "Songti SC", serif; transform: scale(1.35) rotate(-8deg); animation: quest-stamp 620ms 160ms var(--quest-ease-out) both; }
+.hud-surface .learning-run-ceremony h2 { margin: 7px 0 0; font: 700 clamp(28px, 4vw, 48px)/1.3 "Noto Serif SC", "Songti SC", serif; animation: quest-copy-in 500ms 430ms var(--quest-ease-out) both; }
+.hud-surface .learning-run-ceremony p { max-width: 48ch; margin: 0; color: rgba(255, 249, 233, 0.78); font-size: 14px; line-height: 1.65; animation: quest-copy-in 500ms 530ms var(--quest-ease-out) both; }
+.hud-surface .learning-run-ceremony small { margin-top: 10px; color: rgba(255, 249, 233, 0.58); font-size: 12px; animation: quest-copy-in 500ms 650ms var(--quest-ease-out) both; }
+.hud-surface .learning-run-ceremony__leaf { position: absolute; z-index: 1; width: 28px; height: 54px; border-radius: 85% 12% 85% 12%; background: var(--quest-butter); opacity: 0; }
+.hud-surface .learning-run-ceremony__leaf--one { left: 18%; top: 20%; animation: quest-leaf-one 1100ms 220ms var(--quest-ease-out) both; }
+.hud-surface .learning-run-ceremony__leaf--two { right: 17%; top: 25%; background: var(--quest-water); animation: quest-leaf-two 1150ms 300ms var(--quest-ease-out) both; }
+.hud-surface .learning-run-ceremony__leaf--three { left: 28%; bottom: 15%; background: var(--quest-clay); animation: quest-leaf-three 1050ms 380ms var(--quest-ease-out) both; }
+@keyframes quest-ceremony-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes quest-ceremony-glow { from { opacity: 0; transform: scale(0.35); } to { opacity: 1; transform: scale(1); } }
+@keyframes quest-stamp { from { opacity: 0; transform: scale(1.35) rotate(-8deg); } to { opacity: 1; transform: scale(1) rotate(-3deg); } }
+@keyframes quest-copy-in { from { opacity: 0; transform: translateY(13px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes quest-leaf-one { from { opacity: 0; transform: translate(-24px, 48px) rotate(-35deg); } to { opacity: 0.78; transform: translate(0, 0) rotate(18deg); } }
+@keyframes quest-leaf-two { from { opacity: 0; transform: translate(32px, 44px) rotate(38deg); } to { opacity: 0.78; transform: translate(0, 0) rotate(-14deg); } }
+@keyframes quest-leaf-three { from { opacity: 0; transform: translate(-20px, 42px) rotate(-28deg); } to { opacity: 0.72; transform: translate(0, 0) rotate(26deg); } }
+
+/* Dialogs and processing remain legible at every scale. */
+.hud-surface .learning-run-assessing__wait { margin-left: auto; font-size: 12px; font-weight: 800; }
+.hud-surface .learning-run-assessing__answer { display: grid; gap: 5px; margin: 12px 0 0; padding: 12px 14px; color: var(--quest-ink); border: 1px solid var(--quest-line); border-radius: 14px 17px 13px 16px; background: rgba(255, 255, 255, 0.17); font-size: 13px; line-height: 1.6; }
+.hud-surface .learning-run-assessing__answer .meta { font-size: 12px; }
+.hud-surface .run-confirmation-backdrop { position: fixed; z-index: 100; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(39, 33, 27, 0.55); }
+.hud-surface .run-confirmation { width: min(460px, calc(100vw - 40px)); padding: 25px; color: var(--quest-ink); border: 4px solid rgba(255, 250, 229, 0.94); border-radius: 24px 29px 23px 27px; background: var(--quest-paper); box-shadow: var(--quest-shadow); }
+.hud-surface .run-confirmation h2 { margin: 0; font: 700 22px/1.4 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .run-confirmation p { color: var(--quest-soft); font-size: 14px; line-height: 1.65; }
+.hud-surface .run-confirmation .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.hud-surface .run-confirmation .button { min-height: 44px; }
+
+/* Focus, hover and pressed feedback. */
+.hud-surface :is(button, summary, input, textarea, select):focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+@media (hover: hover) and (pointer: fine) {
+  .hud-surface :is(.objective-quest-node, .v3-goal-row, .run-choice-option, .run-matching__item):hover { border-color: var(--quest-line-strong); background-color: rgba(255, 255, 255, 0.38); }
+  .hud-surface :is(.v3-goal-focus__action, .objective-brief__action):hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 10px 19px rgba(63, 51, 36, 0.19); }
+  .hud-surface .run-icon-button:hover:not(:disabled) { background: var(--quest-butter); }
 }
-.hud-surface .learning-run-stage .learning-run-hint__body,
-.hud-surface .learning-run-stage .learning-run-hint__body > span,
-.hud-surface .learning-run-stage .learning-run-hint__levels li,
-.hud-surface .learning-run-stage .learning-run-hint__levels span {
-  font-size: 12px;
-  line-height: 1.6;
+.hud-surface :is(.v3-goal-focus__action, .objective-brief__action):active:not(:disabled) { transform: translateY(0) scale(0.985); }
+.hud-surface :is(.v3-goal-focus__action, .objective-brief__action) { transition: transform 180ms var(--quest-ease-out), box-shadow 180ms var(--quest-ease-out); }
+
+/* Compact contract: one lane at a time, vertical reading, no horizontal overflow. */
+@media (max-width: 980px), (max-height: 620px) {
+  .hud-surface .objective-expedition { display: block; overflow-y: auto; }
+  .hud-surface .objective-expedition__focus,
+  .hud-surface .objective-expedition__map { min-height: 270px; margin-bottom: 12px; }
+  .hud-surface .objective-expedition__focus { min-height: 310px; }
+  .hud-surface .objective-expedition__map { min-height: 300px; }
+  .hud-surface .objective-expedition__map-heading p { margin-right: 0; }
+  .hud-surface .objective-expedition__tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; margin-top: 12px; }
+  .hud-surface .objective-expedition__tabs button { display: flex; min-height: 44px; align-items: center; justify-content: center; gap: 6px; padding: 0 7px; color: #4d5a48; border: 1px solid rgba(75, 57, 42, 0.16); border-radius: 999px; background: rgba(255, 250, 230, 0.45); font: inherit; font-size: 12px; font-weight: 800; cursor: pointer; }
+  .hud-surface .objective-expedition__tabs button[aria-selected="true"] { color: #fffaf0; background: var(--quest-grass-deep); }
+  .hud-surface .objective-expedition__route { display: block; }
+  .hud-surface .objective-expedition__route::before { display: none; }
+  .hud-surface .objective-quest-region { display: none; height: 205px; flex-direction: column; }
+  .hud-surface .objective-expedition__route[data-compact-region="ready"] [data-region="ready"],
+  .hud-surface .objective-expedition__route[data-compact-region="active"] [data-region="active"],
+  .hud-surface .objective-expedition__route[data-compact-region="mastered"] [data-region="mastered"] { display: flex; }
+  .hud-surface .objective-expedition__index,
+  .hud-surface .objective-expedition__index:not([open]) { position: relative; top: auto; right: auto; bottom: auto; width: 100%; max-width: none; max-height: none; min-height: 0; margin-bottom: 12px; }
+  .hud-surface .objective-expedition__index[open] { bottom: auto; min-height: 330px; }
+  .hud-surface .learning-run-journey { grid-template-columns: auto minmax(180px, 1fr) auto; gap: 9px 13px; padding: 11px 15px; }
+  .hud-surface .learning-run-journey__kicker,
+  .hud-surface .learning-run-journey dl { display: none; }
+  .hud-surface .learning-run-journey h2 { font-size: 14px; }
+  .hud-surface .learning-run-stage { padding: 18px 21px 16px; }
+  .hud-surface .learning-run-stage__header h2 { font-size: clamp(19px, 2.6vw, 27px); }
+  .hud-surface .learning-run-result-board { grid-template-columns: minmax(210px, 0.62fr) minmax(0, 1.38fr); }
+  .hud-surface .learning-run-result-summary { padding: 22px 20px; }
+  .hud-surface .learning-run-result-report { padding: 22px 24px 17px; }
+  .hud-surface .run-repair-editor { grid-template-columns: 1fr; }
 }
-/* 惩罚说明从 7.5px 灰字提到 12px 陶土色：它改变这次作答的计分性质。 */
-.hud-surface .learning-run-stage .learning-run-hint__body small {
-  color: var(--hud-clay);
-  font-size: 12px;
-  line-height: 1.5;
-}
-/* P33：紧凑档（720–760px，`.hud-surface` 自己 min-width 720px）此前把
- * .button 打到 6px/20px 高、.meta 打到 5px、确认框正文 5px。同特异性、源码
- * 顺序在后即可稳定抬回来。 */
+
 @media (max-width: 760px) {
-  .hud-surface .button {
-    min-height: 30px;
-    padding: 0 10px;
-    font-size: 11px;
+  .desktop-app.hud-surface.page-10 .companion-presence,
+  .desktop-app.hud-surface.page-10 .companion-hud,
+  .desktop-app.hud-surface.page-10 .companion-unavailable-notice,
+  .desktop-app.hud-surface.page-10 .companion-restore-chip,
+  .desktop-app.hud-surface.page-11 .companion-presence,
+  .desktop-app.hud-surface.page-11 .companion-hud,
+  .desktop-app.hud-surface.page-11 .companion-unavailable-notice,
+  .desktop-app.hud-surface.page-11 .companion-restore-chip { display: none; }
+  .desktop-app.hud-surface.page-10 .approved-surface__content,
+  .desktop-app.hud-surface.page-11 .approved-surface__content { right: 14px; }
+  .desktop-app.hud-surface.page-16 .content.full,
+  .desktop-app.hud-surface.page-16.companion-absent .content.full { inset: 13px 11px 12px !important; }
+  .desktop-app.hud-surface.page-17 .content.full,
+  .desktop-app.hud-surface.page-17.companion-absent .content.full { right: 20px; left: 20px; }
+  .hud-surface .task-surface--objective-detail .approved-surface__content,
+  .desktop-app.hud-surface[data-directory-rail="collapsed"] .task-surface--objective-detail .approved-surface__content { right: 14px; left: 54px; }
+  .hud-surface .objective-expedition__focus {
+    height: calc(100vh - 80px);
+    min-height: 0;
+    padding: 12px 15px 10px;
   }
-  .hud-surface .small,
-  .hud-surface .meta { font-size: 9px; }
-  .hud-surface .run-confirmation p { font-size: 10px; line-height: 1.6; }
-  .hud-surface .task-title p { font-size: 9px; }
-}
-/* 焦点卡那颗 CTA 的动词被 approved-surfaces.css:542 在这一档打到 9px。它是列表页
- * 唯一真的会开始作答的按钮，和详情页主行动块是同一个东西，所以跟着一起抬到 12px。
- * 这一档按**高度**生效，只量默认窗口看不见它——B8 的实机因此改成跑三档。 */
-@media (max-width: 900px), (max-height: 520px) {
-  .hud-surface .v3-goal-focus__action span:not(small) { font-size: 12px; }
+  .hud-surface .objective-expedition__focus-copy { gap: 6px; margin-top: 8px; }
+  .hud-surface .objective-expedition__next { font-size: 12px; }
+  .hud-surface .objective-expedition__focus h3 { font-size: 24px; line-height: 1.23; }
+  .hud-surface .objective-expedition__focus blockquote {
+    display: -webkit-box;
+    max-height: 40px;
+    overflow: hidden;
+    font-size: 12px;
+    line-height: 1.55;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+  .hud-surface .objective-expedition__mode-copy,
+  .hud-surface .v3-goal-focus__hint,
+  .hud-surface .v3-goal-focus__source { display: none; }
+  .hud-surface .objective-expedition__focus-actions { gap: 2px; margin-top: 7px; padding-top: 0; }
+  .hud-surface .v3-goal-focus__action { min-height: 49px; padding: 6px 12px 6px 14px; border-width: 2px; }
+  .hud-surface .v3-goal-focus__action > span { font-size: 14px; }
+  .hud-surface .v3-goal-focus__detail { min-height: 30px; font-size: 12px; }
+  .hud-surface .objective-brief__hero,
+  .hud-surface .objective-brief__proof,
+  .hud-surface .objective-brief__progress { padding: 20px; }
+  .hud-surface .objective-brief__sheet { grid-template-columns: minmax(0, 1fr); }
+  .hud-surface .objective-brief__proof { border-right: 0; }
+  .hud-surface .objective-brief__progress dl { grid-template-columns: 1fr; }
+  .hud-surface .objective-brief__sheet { padding-bottom: 78px; }
+  .hud-surface .objective-brief__action {
+    position: fixed;
+    z-index: 24;
+    right: 18px;
+    bottom: 13px;
+    left: 132px;
+    width: auto;
+    min-height: 56px;
+    margin: 0;
+    padding-block: 8px;
+  }
+  .hud-surface .objective-brief__action .v3-next-action__why { display: none; }
+  .hud-surface .objective-brief__dossier { margin: 0 20px 22px; }
+  .hud-surface .learning-run-workbench,
+  .hud-surface .learning-run-result-board { border-width: 3px; border-radius: 24px; }
+  .hud-surface .learning-run-journey { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .hud-surface .learning-run-journey__state { min-height: 27px; padding-inline: 8px; font-size: 12px; }
+  .hud-surface .learning-run-clock .meta { display: none; }
+  .hud-surface .learning-run-stage { padding: 13px 16px 12px; }
+  .hud-surface .learning-run-stage__header { padding-bottom: 10px; }
+  .hud-surface .learning-run-stage__header h2 { margin-top: 6px; font-size: 18px; line-height: 1.35; }
+  .hud-surface .learning-run-stage__header p { display: none; }
+  .hud-surface .learning-run-response { padding: 10px 1px 8px; }
+  .hud-surface .learning-run-dock { gap: 6px; padding-top: 8px; }
+  .hud-surface .learning-run-dock__row--exit { display: none; }
+  .hud-surface .learning-run-dock__row--act { align-items: flex-end; }
+  .hud-surface .learning-run-dock__row--act .actions { max-height: 46px; overflow-x: auto; flex-wrap: nowrap; }
+  .hud-surface .learning-run-dock__status { display: none; }
+  .hud-surface .learning-run-dock .button,
+  .hud-surface .learning-run-more > summary { min-height: 44px; padding-inline: 10px; font-size: 12px; }
+  .hud-surface .run-matching__columns,
+  .hud-surface .run-relation-controls,
+  .hud-surface .run-repair-row { grid-template-columns: 1fr; }
+  .hud-surface .learning-run-result-board { display: flex; flex-direction: column; overflow-y: auto; }
+  .hud-surface .learning-run-result-summary { flex: none; min-height: 190px; padding: 18px 20px; }
+  .hud-surface .learning-run-result-summary__seal { margin-top: 8px; font-size: 27px; }
+  .hud-surface .learning-run-result-summary > p { margin-top: 6px; }
+  .hud-surface .learning-run-result-summary .objective-progress { margin-top: 11px; }
+  .hud-surface .learning-run-result-summary dl { display: flex; gap: 13px; margin-top: 10px; }
+  .hud-surface .learning-run-result-summary dl > div { display: grid; padding: 6px 0; border: 0; }
+  .hud-surface .learning-run-result-report { flex: none; overflow: visible; padding: 20px; }
+  .hud-surface .learning-run-result-evidence > div,
+  .hud-surface .learning-run-result-evidence--single { grid-template-columns: 1fr; gap: 5px; }
+  .hud-surface .learning-run-result-actions { position: sticky; bottom: 0; flex: none; padding: 10px 20px 14px; }
 }
 
-/* P10：22 种 chip 同权重的真根因是 `approved-surfaces.css:246` 写的
- * `.v3-objective-tags span { padding; background; border-radius }`——它把**所有**
- * 后代 span 都刷成 chip，所以知识形态、进展、创建日期全都长成一个带底的小药丸。
- * 只有状态那一个该是 chip，其余拿掉容器、留成一句事实。 */
-.hud-surface .v3-goal-row__facts,
-.hud-surface .v3-goal-row__meta {
-  padding: 0;
-  border-radius: 0;
-  background: none;
-  color: var(--v3-soft);
-}
-.hud-surface .v3-goal-row__facts { color: #5f5245; }
-
-/* ── B2：让 data-outcome 真的驱动视觉（P2）───────────────────────────────
- *
- * 这两个属性此前从 JSX 发出去、全仓没有任何一条 CSS 接手，所以「已理解」和
- * 「无法评估」是像素级相同的一张纸——outcome 完全靠那三个字扛。现在分三档：
- * 成立（暖金印章 + 绿栏转深）、练习（绿栏保留但印章降一档，它不是验证）、
- * 不成立（去饱和到石板绿，不出庆祝）。
- * 只用 hud-pages.css:15-21 已有的 token，不新增（DESIGN.md:197）。        */
-.hud-surface .learning-run-result-board[data-outcome="demonstrated"] .learning-run-result-summary {
-  background: var(--hud-green);
-  box-shadow: inset 0 0 0 2px var(--hud-gold);
-}
-.hud-surface .learning-run-result-board[data-outcome="demonstrated"] .learning-run-result-summary__seal {
-  color: var(--hud-butter);
-}
-.hud-surface .learning-run-result-board[data-outcome="demonstrated"] .learning-run-result-report h2 {
-  color: var(--hud-ink);
-}
-/* 练习不是验证：印章降成与主张同级的墨色，靠 kicker 说明白它是什么。 */
-.hud-surface .learning-run-result-board[data-outcome="practice_completed"] .learning-run-result-summary__seal {
-  color: rgba(255, 248, 232, 0.82);
-}
-/* 不成立的三档共用一张安静的纸。partial 也算这一档：它的意思是"还有缺口"，
- * 而实机量出来它此前**哪一档都不在**——既没拿绿栏也没拿石板蓝，于是和
- * practice_completed 只差一个印章色（两两对比实测 1 处差异，通不过"至少 2 处"）。 */
-.hud-surface .learning-run-result-board[data-outcome="not_assessable"] .learning-run-result-summary,
-.hud-surface .learning-run-result-board[data-outcome="needs_repair"] .learning-run-result-summary,
-.hud-surface .learning-run-result-board[data-outcome="partial"] .learning-run-result-summary,
-.hud-surface .learning-run-result-board[data-outcome="skipped"] .learning-run-result-summary,
-.hud-surface .learning-run-result-board[data-outcome="declared_unable"] .learning-run-result-summary {
-  background: var(--hud-blue);
-}
-.hud-surface .learning-run-result-board[data-outcome="no_result"] .learning-run-result-summary {
-  background: var(--hud-soft);
-}
-/* 这里**不写** partial 的"这次说清了"配色规则，虽然 §9.3 的直觉是想让两半分开上色：
- * 库里 21 条 partial 的 rubric 判定实测全是 `not_assessable` 或 `missing`，
- * 没有一条带 `covered`（`tmp-objflow-partial-scan.mjs` 逐条读过）。
- * 也就是说 `[data-outcome="partial"] [data-role="proved-this-time"]` 这个组合
- * 在真实数据下永远不成立，写了就是给一个不存在的形状留死规则。 */
-
-/* 一次性压印：只在 data-acknowledgement="active" 上跑，而那个属性本身就只有
- * demonstrated 且本次会话真跑完才为真（learning-run-result-policy.ts:123），
- * 所以"只反馈一次"由状态保证，不是靠动画时长凑。只动 transform/opacity。 */
-@keyframes objective-seal-press {
-  from { opacity: 0; transform: scale(1.16) rotate(-3.5deg); }
-  to { opacity: 1; transform: none; }
-}
-.hud-surface .learning-run-result-board[data-acknowledgement="active"] .learning-run-result-summary__seal {
-  animation: objective-seal-press 240ms var(--hud-ease-out) both;
-}
-/* 减少动效不等于没有反馈：印章照样在，只是直接落在终态。
- * data-motion-mode 挂在 .desktop-app 上（App.tsx），与 styles.css:1278 同一写法。 */
-.desktop-app[data-motion-mode="off"] .learning-run-result-board[data-acknowledgement="active"] .learning-run-result-summary__seal {
-  animation: none;
-}
+/* Lite keeps acknowledgment but removes travel; off/reduced is static. */
+.desktop-app[data-motion-mode="lite"] .learning-run-ceremony { animation-duration: 160ms; }
+.desktop-app[data-motion-mode="lite"] .learning-run-ceremony__glow { animation-duration: 380ms; }
+.desktop-app[data-motion-mode="lite"] .learning-run-ceremony__stamp { animation-duration: 280ms; animation-delay: 40ms; }
+.desktop-app[data-motion-mode="lite"] .learning-run-ceremony :is(h2, p, small) { animation-duration: 220ms; animation-delay: 90ms; }
+.desktop-app[data-motion-mode="lite"] .learning-run-ceremony__leaf { display: none; }
+.desktop-app[data-motion-mode="off"] .learning-run-ceremony *,
+.desktop-app[data-motion-mode="off"] .learning-run-ceremony { animation: none !important; }
 @media (prefers-reduced-motion: reduce) {
-  .hud-surface .learning-run-result-board[data-acknowledgement="active"] .learning-run-result-summary__seal {
-    animation: none;
-  }
+  .hud-surface *,
+  .hud-surface *::before,
+  .hud-surface *::after { scroll-behavior: auto !important; }
+  .hud-surface .learning-run-ceremony *,
+  .hud-surface .learning-run-ceremony,
+  .hud-surface :is(.v3-goal-focus__action, .objective-brief__action) { animation: none !important; transition: none !important; transform: none !important; }
 }
 
-/* ── B10：贯穿列表 / 详情 / 结算的那一条进度带（§9.1）───────────────────
- *
- * 三段是**刻度**，不是三个状态：走到第 N 段，就把第 1..N 格画满。
- * 没有读数时一格都不画，末尾补一个 —（DESIGN.md:178：不许拿 0 冒充"还没答过"）。
- * 只用已存在的 token（DESIGN.md:197：先有代码声明，再谈新 token）。        */
-.objective-progress { display: flex; align-items: flex-end; gap: 6px; }
-.objective-progress__seg { display: grid; min-width: 0; flex: 1 1 0; gap: 4px; justify-items: stretch; }
-.objective-progress__bar {
-  height: 5px;
-  border-radius: 3px 4px 3px 4px;
-  background: var(--v3-line);
-  transition: background-color 220ms var(--v3-ease);
-}
-.objective-progress__seg[data-lit="true"] .objective-progress__bar { background: var(--v3-clay); }
-.objective-progress__label {
-  /* 三段标签落在三种纸上（薄荷绿焦点卡、奶油详情纸、结算页绿/石板栏），
-   * 所以取最暗的那一档：像素采样在薄荷绿上实测 --v3-soft 只有 2.62:1。
-   * 走到哪一段由**条**表达，标签不再靠变淡来分层。 */
-  color: var(--v3-ink);
-  font-size: 11px;
-  line-height: 1.35;
-  white-space: nowrap;
-}
-.objective-progress__seg[data-current="true"] .objective-progress__label { font-weight: 700; }
-.objective-progress__seg[data-lit="false"] .objective-progress__label { opacity: 0.62; }
-.objective-progress__none { color: var(--v3-ink); font-size: 11px; }
-/* 结算页那张绿纸上的读数比列表卡重要一档：动词那句就在它上面。 */
-.hud-surface .learning-run-result-summary .objective-progress { margin-top: 10px; }
-/* 焦点卡顶部：三段带是这张卡的第一行，先回答"走到哪"，再说"这是什么"。 */
-.hud-surface .v3-goal-focus .objective-progress { margin: 0 0 10px; }
-.hud-surface .v3-objective-intro .objective-progress { margin: 0 24px 12px; }
-
-/* ── §11 收尾：复习队列里的成句文字（2026-09-22 实机量出来的）────────────
- *
- * B4 的地板当时只列了理解目标链路，复习那屏没进清单。实机扫下来：
- * 今日学习 0 段成句低于 11px（5 段全是 DESIGN.md:63 允许的元数据计数），
- * 复习有 6 段。这里只抬**成句的**那三条——"第 N 张 / 共 25 张""排期第 N 轮"
- * 这类计数 9px 是合同允许的，跟着一起抬会把卡面撑满，那是拿一致性换版面。
- *
- * 住在 hud-surface.css 的是别的会话正在改的文件，所以和 B7/B8 一样落在
- * 这一层：同特异性、加载顺序在后（有守卫钉着）。                          */
-.hud-surface .deck-foot__hint {
-  /* 整屏唯一的操作说明，9px 灰字——和 P21 那条 7.5px 惩罚说明同一个病。 */
-  font-size: 12px;
-}
-.hud-surface .queue-reason > p {
-  font-size: 12px;
-  line-height: 1.55;
-}
+/* Review queue copy shares this late-loaded readability floor. */
+.hud-surface .deck-foot__hint,
+.hud-surface .queue-reason > p,
 .hud-surface .queue-reason__order,
-.hud-surface .queue-reason__order button {
-  /* "后续顺序：A → B → C" 是要读的卡片标题，不是计数。 */
-  font-size: 12px;
-  line-height: 1.55;
-}
+.hud-surface .queue-reason__order button { font-size: 12px; line-height: 1.55; }

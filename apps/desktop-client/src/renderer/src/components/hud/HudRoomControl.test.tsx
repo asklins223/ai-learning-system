@@ -97,11 +97,11 @@ describe("顶栏灵动岛的折叠结构", () => {
     const { root, trigger } = renderIsland();
     expect(root.hasAttribute("data-expanded")).toBe(false);
 
-    fireEvent.click(screen.getByRole("button", { name: "展开房间控制" }));
+    fireEvent.click(screen.getByRole("button", { name: "展开学习空间控制" }));
     expect(root.getAttribute("data-expanded")).toBe("true");
     expect(trigger.getAttribute("aria-expanded")).toBe("true");
 
-    fireEvent.click(screen.getByRole("button", { name: "收起房间控制" }));
+    fireEvent.click(screen.getByRole("button", { name: "收起学习空间控制" }));
     expect(root.hasAttribute("data-expanded")).toBe(false);
     expect(trigger.getAttribute("aria-expanded")).toBe("false");
   });
@@ -115,13 +115,13 @@ describe("顶栏灵动岛的折叠结构", () => {
     expect(chip.hasAttribute("inert")).toBe(false);
     expect(trigger.hasAttribute("inert")).toBe(false);
 
-    fireEvent.click(screen.getByRole("button", { name: "展开房间控制" }));
+    fireEvent.click(screen.getByRole("button", { name: "展开学习空间控制" }));
     slots.forEach((slot) => expect(slot.hasAttribute("inert")).toBe(false));
   });
 
   it("Esc 收起岛并把焦点还给印章", () => {
     const { root, trigger } = renderIsland();
-    fireEvent.click(screen.getByRole("button", { name: "展开房间控制" }));
+    fireEvent.click(screen.getByRole("button", { name: "展开学习空间控制" }));
     expect(root.getAttribute("data-expanded")).toBe("true");
 
     fireEvent.keyDown(window, { key: "Escape" });
@@ -250,7 +250,7 @@ describe("再点同一个槽位收起它的卡", () => {
   });
 
   function openAccountCard() {
-    fireEvent.click(screen.getByRole("button", { name: "展开房间控制" }));
+    fireEvent.click(screen.getByRole("button", { name: "展开学习空间控制" }));
     fireEvent.click(screen.getByRole("button", { name: /^当前登录账号/ }));
     expect(document.querySelectorAll(".room-control-menu")).toHaveLength(1);
   }
@@ -294,7 +294,7 @@ describe("再点同一个槽位收起它的卡", () => {
     stubAccountGateway();
     useRoomStore.getState().setSpaceIdentity({ name: "我的书房", role: "owner", isPersonal: true });
     render(<div className="hud-surface"><HudRoomControl /></div>);
-    fireEvent.click(screen.getByRole("button", { name: "展开房间控制" }));
+    fireEvent.click(screen.getByRole("button", { name: "展开学习空间控制" }));
     fireEvent.click(screen.getByRole("button", { name: /^当前学习空间/ }));
     expect(document.querySelectorAll(".room-control-menu")).toHaveLength(1);
 

@@ -87,7 +87,7 @@ const headingMarkup = (queue) => `
   </header>
 `
 
-const returnMarkup = '<button class="return-control" type="button"><span aria-hidden="true">←</span><span>返回书房</span></button>'
+const returnMarkup = '<button class="return-control" type="button"><span aria-hidden="true">←</span><span>返回学习空间</span></button>'
 
 const enrich = (queue) => ({
   ...queue,

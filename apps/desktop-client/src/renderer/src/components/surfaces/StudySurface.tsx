@@ -14,6 +14,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 import type { ActivityTargetV1, TodayActivityV1 } from "@ailearn/shared/activity-surface-contracts";
+import type { AllWorkspacesStatsOverviewV1 } from "@ailearn/shared/stats-overview-contracts";
 import { SETTINGS_ATTENTION_AI_CONSENT } from "../../app/companion-consent-gate";
 import { useRoomStore } from "../../app/room-store";
 import type { RoomIntent } from "../../app/room-machine";
@@ -21,6 +22,7 @@ import { createRequestMeta, unwrapGatewayResult } from "../../app/desktop-client
 import { HudPage } from "../hud/HudPage";
 import { useHudPage } from "../hud/use-hud-page";
 import { SurfaceDataState, useDayAnchor, useSurfaceProjection } from "./surface-data";
+import { buildAllSpacesSummary, type AllSpacesSummary } from "./all-spaces-summary";
 import {
   anomalyStep,
   buildTodayAnomalyGroups,
@@ -383,26 +385,100 @@ function LogStream({
 }
 
 /**
- * 伴星栏。
+ * 伴星卡。
  *
  * 上一版这里是"今日概要"，内容是左栏底部那句话的复述（"今天还没有留下记录"），
- * 252px 的栏里 60% 是空的。删掉复述之后，这一栏只剩它真正独有的东西：伴星日记
- * 的入口，以及它和这条日志的关系（读的是同一批权威表）。
+ * 252px 的栏里 60% 是空的。删掉复述之后，这张卡只剩它真正独有的东西：伴星日记
+ * 的入口，以及它和这条日志的关系（读的是同一批权威表）。右栏现在有两张卡，
+ * 上面那张是「全部空间」——见下。
  */
-function CompanionRail({ onOpen }: { readonly onOpen: () => void }) {
+/**
+ * 「全部空间」栏。
+ *
+ * 这一页（以及首页、看板、伴星日记）的数字全都是**当前空间**的，读者却把它们
+ * 读成"我的"——切走一个空间，那边的进度就再也看不见了。这一栏是唯一一条按
+ * 账号扇出的读数：每个活跃空间一行，加一个合计。
+ *
+ * 三条不撒谎的规矩：
+ * - 读不出来就说读不出来（加载/失败各自成句），不拿当前空间的数字顶替"全部"；
+ * - 合计里少了几个空间（扇出上限）就写在下面，不让合计冒充全部；
+ * - 当前空间由服务端标记，不由渲染层按名字猜。
+ */
+function AllSpacesPanel({
+  summary,
+  loading,
+  failure,
+  onRetry,
+}: {
+  readonly summary: AllSpacesSummary | null;
+  readonly loading: boolean;
+  readonly failure: string | null;
+  readonly onRetry: () => void;
+}) {
   return (
-    <aside className="day-rail" aria-label="伴星">
-      <span className="tag">伴星</span>
+    <section className="day-spaces" aria-labelledby="today-all-spaces-title">
+      <span className="tag">全部空间</span>
       <div className="day-rail__card">
         <h2>
-          <Sparkles size={13} strokeWidth={2.2} aria-hidden="true" />
-          伴星日记
+          <Layers size={13} strokeWidth={2.2} aria-hidden="true" />
+          <span id="today-all-spaces-title">我在每个空间的进度</span>
         </h2>
-        <p>伴星每天凌晨 1 点，把昨天的学习与对话整理成一篇日记。</p>
-        <p className="day-rail__why">它整理的就是这一页上的这些记录。</p>
-        <button type="button" className="button" onClick={onOpen}>打开伴星</button>
+        {loading ? (
+          <p className="day-rail__why" role="status">正在读取全部空间…</p>
+        ) : failure !== null || summary === null ? (
+          <div className="day-spaces__failure">
+            <p role="status">全部空间的统计暂时读不到，本页其余数字仍然只算当前空间。</p>
+            <button type="button" className="button" onClick={onRetry}>重试</button>
+          </div>
+        ) : (
+          <>
+            <ul className="day-spaces__list" aria-label="每个空间各自的进度">
+              {summary.rows.map((row) => (
+                <li className="day-spaces__row" key={row.workspaceId} data-current={row.isCurrent || undefined}>
+                  <span className="day-spaces__head">
+                    <b>{row.name}</b>
+                    <small>{row.kindLabel} · {row.roleLabel}</small>
+                    {row.isCurrent ? <em className="day-spaces__current">当前空间</em> : null}
+                  </span>
+                  <span className="day-spaces__numbers">
+                    {row.metrics.map((metric) => (
+                      <span key={metric.key}>{metric.label} {metric.value}</span>
+                    ))}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <p className="day-spaces__total">
+              <b>合计</b>
+              <span className="day-spaces__numbers">
+                {summary.totalMetrics.map((metric) => (
+                  <span key={metric.key}>{metric.label} {metric.value}</span>
+                ))}
+              </span>
+            </p>
+            {summary.totalDegraded ? (
+              <p className="day-rail__why">某个空间的活跃卡片太多，合计里的明细按前 2000 张卡计算。</p>
+            ) : null}
+            {summary.skippedNote ? <p className="day-rail__why">{summary.skippedNote}</p> : null}
+            <p className="day-rail__why">本页其余数字都只算当前空间；只有这里是全部空间。</p>
+          </>
+        )}
       </div>
-    </aside>
+    </section>
+  );
+}
+
+function CompanionRail({ onOpen }: { readonly onOpen: () => void }) {
+  return (
+    <div className="day-rail__card">
+      <h2>
+        <Sparkles size={13} strokeWidth={2.2} aria-hidden="true" />
+        伴星日记
+      </h2>
+      <p>伴星每天凌晨 1 点，把昨天的学习与对话整理成一篇日记。</p>
+      <p className="day-rail__why">它整理的就是这一页上的这些记录。</p>
+      <button type="button" className="button" onClick={onOpen}>打开伴星</button>
+    </div>
   );
 }
 
@@ -415,6 +491,7 @@ export function StudySurface() {
   const setActiveSourceId = useRoomStore((state) => state.setActiveSourceId);
   const setSettingsSection = useRoomStore((state) => state.setSettingsSection);
   const setSettingsAttention = useRoomStore((state) => state.setSettingsAttention);
+  const spaceIdentity = useRoomStore((state) => state.spaceIdentity);
   useHudPage("today");
 
   // 日锚点先于数据读取确定：窗口是"读者的今天"，刷新焦点时页面会自己跟上
@@ -428,12 +505,24 @@ export function StudySurface() {
     return unwrapGatewayResult(result);
   }, [dayWindow.from, dayWindow.to], { refreshOnFocus: true });
 
+  // 「全部空间」是**另一条**读数：它不随当前空间变，所以也不跟日锚点/空间绑定，
+  // 只在进入这一页时读一次（失败就地给重试，不冒充"全部"）。
+  const allSpaces = useSurfaceProjection<AllWorkspacesStatsOverviewV1>(async ({ workspaceEpoch }) => {
+    const meta = createRequestMeta(workspaceEpoch);
+    const result = await window.ailearn.stats.getOverviewAll({ meta });
+    return unwrapGatewayResult(result);
+  }, []);
+
   const rows: readonly TodayLogRow[] = useMemo(() => (data ? buildTodayLogRows(data.events) : []), [data]);
   const groups: readonly TodayAnomalyGroup[] = useMemo(
     () => (data ? sortAnomalyGroups(buildTodayAnomalyGroups(data.anomalies)) : []),
     [data],
   );
   const verdict = useMemo(() => (data ? buildTodayVerdict(data) : null), [data]);
+  const allSpacesSummary: AllSpacesSummary | null = useMemo(
+    () => (allSpaces.data ? buildAllSpacesSummary(allSpaces.data) : null),
+    [allSpaces.data],
+  );
   const sharedStep = useMemo(() => sharedAnomalyStep(groups), [groups]);
   const logNote = useMemo(() => (data ? todayLogTruncationNote(data) : null), [data]);
   const anomalyNote = useMemo(() => (data ? todayAnomalyTruncationNote(data) : null), [data]);
@@ -489,6 +578,11 @@ export function StudySurface() {
           <p className="day-head__date">
             <time dateTime={dayIso(nowMs)}>{todayDateLabel(nowMs)}</time>
             <span>{todayWeekdayLabel(nowMs)}</span>
+          </p>
+          {/* 这一页的每一个数字都是"这个空间的今天"，不是"我的今天"。以前这里
+              只有日期，读者只能自己猜口径——现在把限定词写在数字旁边。 */}
+          <p className="day-head__scope">
+            当前空间{spaceIdentity ? ` · ${spaceIdentity.name}` : ""}
           </p>
           {reading ? null : (
             <div className="day-head__actions">
@@ -549,7 +643,18 @@ export function StudySurface() {
               <LogStream rows={rows} note={logNote} onOpen={openTarget} onPick={invoke} />
             </div>
 
-            <CompanionRail onOpen={() => invoke("open-companion-center")} />
+            {/* 右栏两张卡：上面那张回答"我在别的空间还有多少没做"（这一页唯一
+                不按当前空间切的数字），下面那张才是伴星入口。 */}
+            <aside className="day-rail" aria-label="全部空间与伴星">
+              <AllSpacesPanel
+                summary={allSpacesSummary}
+                loading={allSpaces.loading}
+                failure={allSpaces.failure}
+                onRetry={() => void allSpaces.reload()}
+              />
+              <span className="tag">伴星</span>
+              <CompanionRail onOpen={() => invoke("open-companion-center")} />
+            </aside>
           </>
         ) : null}
       </section>

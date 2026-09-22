@@ -13,7 +13,7 @@ import { useRoomStore } from "../../app/room-store";
 /**
  * 结算页的结构回归（31-objective-flow-ui-review P5）。
  *
- * 出口按钮此前长在 `overflow:auto` 的报告列里，判定一多就把「返回书房」顶到
+ * 出口按钮此前长在 `overflow:auto` 的报告列里，判定一多就把「返回学习空间」顶到
  * 折叠线以下——1440×810 实测按钮底边 789、纸面底边 755，用户看不到出口。
  * 这里钉住结构：出口是结算板的直接子节点，不在报告列内部。几何由 CDP 探针量
  * （scripts/tmp-objflow-s14-measure.mjs），jsdom 量不了。
@@ -197,7 +197,7 @@ describe("LearningRunSurface · 结算页结构", () => {
     await waitFor(() => expect(document.querySelector(".learning-run-result-actions")).not.toBeNull());
 
     const buttons = [...document.querySelectorAll<HTMLButtonElement>(".learning-run-result-actions button")];
-    expect(buttons.map((b) => b.textContent)).toEqual(["返回书房", "查看理解目标"]);
+    expect(buttons.map((b) => b.textContent)).toEqual(["返回学习空间", "查看理解目标"]);
     expect(buttons[0]?.className).toContain("primary");
   });
 

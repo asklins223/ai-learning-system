@@ -119,7 +119,7 @@ describe("homePresentation", () => {
 
     expect(homePresentation(presentation({ primaryFocus: { state: "empty" } }), false, null)).toMatchObject({
       title: "从一份真正想弄懂的材料开始",
-      primaryLabel: "查看书房目录",
+      primaryLabel: "查看学习空间目录",
       primaryIntent: null,
       primaryLoading: false,
       retry: false,
@@ -299,7 +299,7 @@ describe("homePresentation", () => {
   it("does not fabricate a note from dashboard mode when RoomProjection has no note", () => {
     expect(homePresentation(projection({ mode: "notes_without_objectives" }), false, null)).toMatchObject({
       title: "从一份真正想弄懂的材料开始",
-      primaryLabel: "查看书房目录",
+      primaryLabel: "查看学习空间目录",
       primaryIntent: null,
       note: null,
       noteCount: null,
@@ -340,7 +340,7 @@ describe("homePresentation", () => {
   it("derives the blocking-loading state without inventing an empty room", () => {
     expect(homePresentation(null, true, null)).toEqual({
       title: "正在整理今天的书桌…",
-      detail: "书房正在读取你的学习位置",
+      detail: "学习空间正在读取你的学习位置",
       primaryLabel: "正在准备",
       primaryIntent: null,
       retry: false,
@@ -383,8 +383,8 @@ describe("homePresentation", () => {
   it("keeps an empty room honest about totals it cannot know", () => {
     expect(homePresentation(presentation(), false, null)).toEqual({
       title: "从一份真正想弄懂的材料开始",
-      detail: "书房目录已经把学习路径和全部功能整理好了",
-      primaryLabel: "查看书房目录",
+      detail: "学习空间目录已经把学习路径和全部功能整理好了",
+      primaryLabel: "查看学习空间目录",
       primaryIntent: null,
       retry: false,
       blockingLoading: false,
@@ -520,8 +520,8 @@ describe("homePresentation", () => {
       activeRunSummary: { state: "data", data: { activeCount: 1, items: [] } },
     }), false, "temporary offline")).toEqual({
       title: "从一份真正想弄懂的材料开始",
-      detail: "书房目录已经把学习路径和全部功能整理好了",
-      primaryLabel: "查看书房目录",
+      detail: "学习空间目录已经把学习路径和全部功能整理好了",
+      primaryLabel: "查看学习空间目录",
       primaryIntent: null,
       retry: false,
       blockingLoading: false,

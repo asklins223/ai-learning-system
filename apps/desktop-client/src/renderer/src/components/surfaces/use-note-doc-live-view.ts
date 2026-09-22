@@ -24,8 +24,20 @@ import { createCommandId, createRequestMeta, unwrapGatewayResult } from "../../a
 
 const FRAGMENT_KEY = "content";
 const REMOTE_ORIGIN = "remote";
+/**
+ * 草稿并回文档时用的来源标签。它必须**不是** `REMOTE_ORIGIN`：那份草稿是"我上次敲的、
+ * 还没交出去的"，并进来之后要能重新变成待提交的增量（见下面 `record` 里那条判据），
+ * 否则恢复出来的字只是画在屏幕上，永远交不上去。
+ */
+const DRAFT_ORIGIN = "draft";
 /** 连着几帧会一帧一帧地来，逐帧回读会把编辑区打回原形，所以合并成一次。 */
 const RELOAD_DEBOUNCE_MS = 400;
+/**
+ * 草稿落盘的节拍，比自动保存（界面那 1.2 秒）**快一半**：自动保存要等一次往返，而草稿
+ * 要挡的正是"往返还没回来就刷新/崩溃"那一段，比它慢就等于没做。与自动保存同一种节拍
+ * ——停笔才写，不是每次按键。
+ */
+const DRAFT_SAVE_DEBOUNCE_MS = 600;
 
 // 渲染进程没有 `Buffer`（那是主进程那一侧的类型环境），所以自己走 btoa/atob。
 const b64 = (bytes: Uint8Array): string => {
@@ -44,6 +56,34 @@ const unB64 = (text: string): Uint8Array => {
 function decodeUpdate(text: string): Uint8Array | null {
   const bytes = unB64(text);
   return b64(bytes) === text ? bytes : null;
+}
+
+/**
+ * 这份草稿里有没有当前文档还不知道的操作。有 = 它比屏幕上这一份新，要接回来。
+ *
+ * 判据是**状态向量**，不是时间戳：草稿那份时间来自本机、屏幕这一份来自服务端，比大小
+ * 只会在两边时钟偏了的时候判反，而判反的两种后果都不小（把旧草稿接回来 = 凭空复活；
+ * 把新草稿当旧的丢掉 = 用户敲的字没了）。yjs 的时钟是每个客户端一条单调计数，状态向量
+ * 能精确回答"草稿里这些操作我是不是都有了"，与墙上时间无关。
+ *
+ * 草稿自己的状态向量从**增量本身**读（`encodeStateVectorFromUpdate`），不把它 apply 到
+ * 一份空文档上再问：增量引用的结构在那份起点里，空文档上 apply 会因为缺依赖被挂起，
+ * 于是每一份草稿都被判成"什么都没有"——这个功能会静默失效（这条正是用例抓出来的）。
+ *
+ * 于是"提交成功、只是清草稿那一步没走完"的那一份在这里正好被判成旧的：不恢复，顺手
+ * 清掉——否则每次打开这篇都会说一句"恢复了草稿"，而它其实已经在服务端了。
+ */
+function draftAddsAnything(doc: Y.Doc, update: Uint8Array): boolean {
+  try {
+    const known = Y.decodeStateVector(Y.encodeStateVector(doc));
+    for (const [client, clock] of Y.decodeStateVector(Y.encodeStateVectorFromUpdate(update))) {
+      if ((known.get(client) ?? 0) < clock) return true;
+    }
+    return false;
+  } catch {
+    // 解不开的一份草稿当"没有"：半条更新并进文档比丢掉它更坏。
+    return false;
+  }
 }
 
 const projectableBlockTypes = new Set<string>(noteBlockTypeV1Schema.options);
@@ -93,6 +133,11 @@ export type NoteDocLiveView = {
   /** 本机有没有还没交出去的改动。判据是"攒着没发的增量条数"，不是界面自己猜。 */
   dirty: boolean;
   /**
+   * 上一次没交出去的那几个字接回来了（非空 = 已经并进这份文档，且写进本机的那一份
+   * 时间是这个）。界面据此说一句"草稿已恢复"；确认交出去之后它自己变回 `null`。
+   */
+  restoredDraft: { savedAt: string } | null;
+  /**
    * 文档此刻的正文（含本机没交出去的部分）。阅读态画的就是这一份——它比 HTTP 回读新，
    * 因为回读要等作者那台机器把自动保存发出去、再等服务端刷进投影（实窗量到 3.5 秒）。
    */
@@ -126,29 +171,116 @@ export function useNoteDocLiveView(
   const [revision, setRevision] = useState(0);
   const [seeded, setSeeded] = useState(false);
   const [dirty, setDirty] = useState(false);
+  const [restoredDraft, setRestoredDraft] = useState<{ savedAt: string } | null>(null);
   const pendingRef = useRef<string[]>([]);
+  /** 最近一次写下去的那份草稿（合并后的 base64）：同一份不重复落盘。 */
+  const draftWrittenRef = useRef<string | null>(null);
+  const draftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const blockRef = useRef<number | null>(null);
   const presenceNameRef = useRef(presenceName);
   presenceNameRef.current = presenceName;
   const changeRef = useRef(onRemoteChange);
   changeRef.current = onRemoteChange;
 
+  /**
+   * 把此刻还没交出去的那几个增量落到本机（草稿）。
+   *
+   * 写的是**合并过的一条增量**，不是整篇正文：正文存成本地副本，恢复时就得覆盖，而覆盖
+   * 会抹掉对端在这期间写进文档的字（那正是这一批要消灭的形状）；增量走 CRDT 合并，
+   * 别人的部分一个字不动。
+   */
+  const saveDraft = useCallback(async (targetNoteId: string | null, updates: readonly string[]): Promise<void> => {
+    const docApi = window.ailearn?.note?.doc;
+    if (!targetNoteId || updates.length === 0 || !docApi?.draftSave) return;
+    let merged: string;
+    try {
+      merged = b64(Y.mergeUpdates(updates.map((item) => unB64(item))));
+    } catch {
+      // 合并都合不起来的一份东西不该落盘：写下去只会让下一次打开读回一份解不开的草稿。
+      return;
+    }
+    // 同一份不重复写：自动保存失败重试的那段时间里，每次停笔都重写一遍是白写的。
+    if (merged === draftWrittenRef.current) return;
+    draftWrittenRef.current = merged;
+    try {
+      await docApi.draftSave({
+        meta: createRequestMeta(epochRef?.current ?? undefined),
+        noteId: targetNoteId,
+        update: merged,
+      });
+    } catch {
+      // 写不进去只是"这一次没保住"，不该把编辑器上的字或自动保存带塌：那条路照旧，
+      // 下一次停笔还会再试。
+      draftWrittenRef.current = null;
+    }
+  }, [epochRef]);
+
+  /** 停笔 `DRAFT_SAVE_DEBOUNCE_MS` 之后落一次盘；每敲一下只是把这次定时器往后推。 */
+  const armDraftSave = useCallback((): void => {
+    if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
+    draftTimerRef.current = setTimeout(() => {
+      draftTimerRef.current = null;
+      void saveDraft(targetRef.current, pendingRef.current);
+    }, DRAFT_SAVE_DEBOUNCE_MS);
+  }, [saveDraft]);
+
+  /**
+   * 清草稿：确认交出去之后调（判据见 `flush`）。写不下去/清不掉都不影响正文——
+   * 接回来的时候还会再判一次"它是不是已经并进这份文档了"（`draftAddsAnything`），
+   * 所以一份没清掉的旧草稿不会变成"每次打开都提示恢复"。
+   */
+  const clearDraft = useCallback((targetNoteId: string): void => {
+    draftWrittenRef.current = null;
+    setRestoredDraft(null);
+    const docApi = window.ailearn?.note?.doc;
+    if (!docApi?.draftClear) return;
+    void docApi.draftClear({
+      meta: createRequestMeta(epochRef?.current ?? undefined),
+      noteId: targetNoteId,
+    }).catch(() => undefined);
+  }, [epochRef]);
+
+  /**
+   * 读回这一篇在本机的草稿。读不到（没有、主进程还没这条通道、身份不全、那一条坏了）
+   * 一律当没有：少接回一份草稿只是少了"上次没交出去的字"，而误接一份不该接的会把
+   * 别人的正文并进这一篇——两种错的代价不对称。
+   */
+  const readDraft = useCallback(async (
+    docApi: NonNullable<typeof window.ailearn>["note"]["doc"],
+    targetNoteId: string,
+  ): Promise<{ update: string; savedAt: string } | null> => {
+    if (!docApi.draftGet) return null;
+    try {
+      const response = await docApi.draftGet({ meta: createRequestMeta(epochRef?.current ?? undefined), noteId: targetNoteId });
+      return response.ok ? response.data.draft : null;
+    } catch {
+      return null;
+    }
+  }, [epochRef]);
+
   const targetRef = useRef<string | null>(noteId);
   if (noteId !== null && targetRef.current !== noteId) {
     // 只有"真的换了一篇"才丢掉这份文档。`noteId` 短暂为空是这一屏在重新读取
     // （保存之后那次回读就会这样），不是换篇——跟着一起清会把**本机还没交出去的字**
     // 也清掉，症状是刚敲的几句在每次自动保存之后凭空没了（实窗量到过一次）。
-    const switching = targetRef.current !== null;
+    const previousNoteId = targetRef.current;
+    const switching = previousNoteId !== null;
     targetRef.current = noteId;
     if (switching) {
+      // 换篇之前先把上一篇没交出去的那几个增量落到本机。卸载那一次保存要等这次渲染
+      // 提交之后才跑，而那时下面已经把 `pendingRef` 清空了——所以必须在这儿先写，
+      // 否则"切一篇笔记"就是这条路上唯一会丢字的地方。
+      void saveDraft(previousNoteId, pendingRef.current);
       // 先丢再建：反过来的话这一次渲染里"新的那一篇"仍然读到上一篇的正文，那一屏
       // 会把上一篇印在下一篇上（这条被用例抓到过一次，症状就是换篇后块数不减）。
       docRef.current?.destroy();
       docRef.current = null;
       pendingRef.current = [];
       blockRef.current = null;
+      draftWrittenRef.current = null;
       setDirty(false);
       setSeeded(false);
+      setRestoredDraft(null);
       setStream({ peers: [], authorizedScope: null, failure: null });
     }
   }
@@ -171,6 +303,9 @@ export function useNoteDocLiveView(
       // "打开一篇没动过"的笔记一进门就显示未提交，并白上一次送。
       if (update.length === 0) return;
       pendingRef.current.push(b64(update));
+      // 本机改动一出现就把草稿那次落盘重新计时：这条路上丢字的窗口是"最后一次停笔到
+      // 自动保存成功之间"，所以草稿要比自动保存更早写下去。
+      armDraftSave();
       // 本地改动也要推进那份投影的"版本号"：只靠 `setDirty(true)` 会漏——一次保存里
       // `setLocalTitle` 刚把它置真，`flush` 立刻又置假，React 批量之后状态值没变，
       // 一次渲染都不发生，投影 memo 于是交出**改写之前**的旧标题（实测量到的正是
@@ -180,7 +315,7 @@ export function useNoteDocLiveView(
     };
     doc.on("update", record);
     return () => { doc.off("update", record); };
-  }, [doc]);
+  }, [armDraftSave, doc]);
 
   // 起点：主进程给的那份编码。它已经把本机存着、还没送出去的编辑合并进去了，
   // 所以离线改过的字在这里是"接着改"，不是"被服务端那份覆盖"。
@@ -193,17 +328,47 @@ export function useNoteDocLiveView(
     if (!docApi?.state) return undefined;
     let disposed = false;
     void docApi.state({ meta: meta(), noteId })
-      .then((response) => {
+      .then(async (response) => {
         if (disposed || !response.ok) return;
         const bytes = decodeUpdate(response.data.update);
         if (bytes) Y.applyUpdate(doc, bytes, REMOTE_ORIGIN);
         if (response.workspaceEpoch && epochRef) epochRef.current = response.workspaceEpoch;
+        // 本机草稿：上一次没交出去、主进程那份里也没有的那几个操作。并回来用的是
+        // `DRAFT_ORIGIN`（不是 `REMOTE_ORIGIN`），于是它们重新变成"待提交的增量"——
+        // 自动保存照旧会把它们送出去，而不是只画在屏幕上的一份死文本。
+        //
+        // **只在它比这份文档新时才接**：判据见 `draftAddsAnything`。已经并进去过的那一份
+        // 在这里被判成旧的，顺手清掉，于是不会有"每次打开都提示恢复了草稿"这种假象。
+        const draft = await readDraft(docApi, noteId);
+        if (disposed) return;
+        if (draft) {
+          const draftBytes = decodeUpdate(draft.update);
+          if (draftBytes && draftAddsAnything(doc, draftBytes)) {
+            Y.applyUpdate(doc, draftBytes, DRAFT_ORIGIN);
+            setRestoredDraft({ savedAt: draft.savedAt });
+          } else {
+            clearDraft(noteId);
+          }
+        }
         setSeeded(true);
         setRevision((value) => value + 1);
       })
       .catch(() => undefined);
     return () => { disposed = true; };
-  }, [doc, noteId]);
+  }, [clearDraft, doc, noteId, readDraft]);
+
+  /**
+   * 卸载（换页、切空间、刷新）时把还压着的那几个增量写下去。刷新是这条路上唯一没有
+   * "下一次停笔"的场景——渲染进程一没，只有已经落到盘上的那一份还在，所以这里不能
+   * 只靠那个 debounce。
+   */
+  useEffect(() => () => {
+    if (draftTimerRef.current) {
+      clearTimeout(draftTimerRef.current);
+      draftTimerRef.current = null;
+    }
+    void saveDraft(targetRef.current, pendingRef.current);
+  }, [saveDraft]);
 
   useEffect(() => {
     const api = window.ailearn;
@@ -310,9 +475,18 @@ export function useNoteDocLiveView(
       pendingRef.current = [];
       blockRef.current = null;
       setDirty(false);
+      // 确认交出去了就清草稿，判据与上面清 `pendingRef` 用的是**同一个** `via`：
+      //  - `uploaded`：服务端回了 revision，已经落盘；
+      //  - `stream`：增量并进了主进程那份共享文档、由 provider 送出去（界面这一侧从此
+      //    不再是它唯一的副本）；
+      //  - `unchanged`：那份文档本来就已经有这几个操作。
+      // `queued`（没网，只攒在本机）与 null（什么都没交）不算——那几句字此刻只有本机
+      // 这一份草稿，留着才对。留着也不会变成"旧的盖新的"：接回来走 CRDT 合并，而且
+      // 重挂载时还会先判一次"是不是已经并进这份文档了"。
+      clearDraft(noteId);
     }
     return via;
-  }, [noteId]);
+  }, [clearDraft, noteId]);
 
   const setLocalTitle = useCallback((title: string, titleSource: "auto" | "manual"): void => {
     const map = doc.getMap<unknown>("meta");
@@ -338,6 +512,7 @@ export function useNoteDocLiveView(
     authorizedScope: stream.authorizedScope,
     failure: stream.failure,
     dirty,
+    restoredDraft,
     flush,
     setLocalTitle,
     setLocalBlock,

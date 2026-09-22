@@ -1310,10 +1310,83 @@
 .hud-surface .settings-rows { display: grid; gap: 5px; margin-top: 10px; }
 .hud-surface .settings-rows--split { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px 14px; }
 
-/* 音色那一组：行内「在用 + 用这一身 + 试听」三个动作排一行；播放器只画一只、
-   反复换源，所以它占满整行，不挤在某一行的控件位里。 */
+/* 音色那一组：行内「在用 + 用这一身 + 试听」三个动作排一行。行里的按钮走紧凑档
+   ——`.button` 本体是 38px 高的主操作尺寸，塞进 10px 内边距的行里会把行撑开。 */
 .hud-surface .settings-voice__actions { display: inline-flex; align-items: center; gap: 6px; }
-.hud-surface .settings-voice__player { display: block; width: 100%; height: 34px; margin-top: 9px; }
+.hud-surface .settings-voice__actions .button { min-height: 26px; padding: 0 10px; font-size: 10px; }
+
+/* 生效那一行：底色 + 一圈内描边。不用左侧色条，因为这一列的行本来就没有边框，
+   加一条竖色边会变成"卡片被贴了标签"，而不是"这行是当前选择"。 */
+.hud-surface .settings-row--selected {
+  background: var(--hud-cream);
+  box-shadow: inset 0 0 0 1px rgba(189, 90, 49, 0.34);
+}
+
+/* 试听播放器：自己画。原生 <audio controls> 是浏览器的灰条，字体、圆角、配色
+   都不属于这套纸面，而且没试听过的时候它显示 0:00 / 0:00，看起来像坏了。 */
+.hud-surface .settings-voice__source { display: none; }
+.hud-surface .settings-voice__player {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 118px auto;
+  align-items: center;
+  gap: 11px;
+  margin-top: 9px;
+  padding: 9px 12px;
+  border-radius: 15px 19px 14px 17px;
+  background: rgba(255, 255, 255, 0.34);
+}
+.hud-surface .settings-voice__toggle {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--hud-line-strong);
+  border-radius: 11px 13px 10px 12px;
+  background: var(--hud-cream);
+  color: var(--hud-ink);
+  cursor: pointer;
+  transition: transform 140ms var(--hud-ease-out), background-color 140ms ease;
+}
+.hud-surface .settings-voice__toggle:hover:not(:disabled) { transform: translateY(-1px); background: var(--hud-butter); }
+.hud-surface .settings-voice__toggle:active:not(:disabled) { transform: scale(0.95); transition-duration: 110ms; }
+.hud-surface .settings-voice__toggle:disabled { opacity: 0.45; cursor: default; }
+.hud-surface .settings-voice__reading b { display: block; font: 650 12px/1.35 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .settings-voice__reading small {
+  display: block;
+  margin-top: 2px;
+  color: var(--hud-soft);
+  font-size: 10px;
+  line-height: 1.5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hud-surface .settings-voice__track {
+  position: relative;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--hud-line);
+  overflow: hidden;
+}
+.hud-surface .settings-voice__track i {
+  position: absolute;
+  inset: 0;
+  border-radius: 2px;
+  background: var(--hud-clay);
+  transform-origin: left center;
+  transition: transform 120ms linear;
+}
+.hud-surface .settings-voice__time {
+  color: var(--hud-soft);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+@media (prefers-reduced-motion: reduce) {
+  .hud-surface .settings-voice__toggle, .hud-surface .settings-voice__toggle:hover:not(:disabled) { transform: none; }
+  .hud-surface .settings-voice__track i { transition: none; }
+}
 .hud-surface .settings-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -1727,7 +1800,9 @@
 /* `workspace.list` has no pagination, so the card holds an account's whole
    space list itself: the card grows with the rows but stops before leaving the
    viewport, keeping the invite row reachable no matter how many spaces the
-   account carries. */
+   account carries. 按 20+ 行实测过这条"空间一多也不出屏"：搜索行、两个分组
+   标题和所有行都滚在这个盒子里，`100vh - 96px` 正是药丸 77px 顶偏移之下留得
+   下的高度（77 + (100vh - 96) = 100vh - 19）。 */
 .hud-surface .room-control-menu .home-menu {
   max-height: min(560px, calc(100vh - 96px));
   overflow-y: auto;
@@ -1778,6 +1853,23 @@
    gap above it is stated. */
 .hud-surface .room-control-menu .home-menu .sub { margin-top: 9px; }
 
+/* 空间一多，列表就分成「个人空间 / 协作空间」两组、组内按最近使用排序，顶上再
+   给一行按名字过滤的搜索框（出不出现由组件里的 `SPACE_SEARCH_MINIMUM` 决定）。
+   分组标题沿用设置页分组标题的字重与字距（9px / 800 / 0.08em），颜色留在正文
+   色系里：它是这张卡中两组唯一的区分文字，太淡就读不到了。 */
+.hud-surface .room-control-menu .space-group__title {
+  margin: 14px 0 0;
+  color: var(--hud-soft);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+/* 搜索行只是一格占满整行的输入框：皮肤挂到下面邀请码输入框那条规则上，
+   不在同一个盒子里再写一份。 */
+.hud-surface .room-control-menu .space-search { margin-top: 12px; }
+.hud-surface .room-control-menu .space-search input { width: 100%; }
+
 /* The compact preview sizes (.home-menu 168px @ ≤760px, i.e. the 200%-scaling
    viewport) were drawn for mockup sample rows. Real Chinese workspace names and
    role labels need more room than that, so the real menu widens — still inside
@@ -1788,8 +1880,10 @@
 
 /* The mockup writes the invite field as a decorative `<div>`; the real input
    takes that same box so both invite rows keep the mockup's 38px height and
-   the card's own paper palette. */
+   the card's own paper palette. 空间菜单顶上那行搜索框用同一张皮：同一张卡里
+   两处输入框各写一套皮肤，迟早会有一处对不上。 */
 .hud-surface .room-control-menu .invite-line input,
+.hud-surface .room-control-menu .space-search input,
 .hud-surface .first-space .invite-line input {
   min-width: 0;
   flex: 1;
@@ -1804,6 +1898,7 @@
 /* The mockup's decorative box draws its prompt in `#8a7969`, which is what the
    empty field has to read as. */
 .hud-surface .room-control-menu .invite-line input::placeholder,
+.hud-surface .room-control-menu .space-search input::placeholder,
 .hud-surface .first-space .invite-line input::placeholder { color: #8a7969; }
 
 /* A disabled slot still has to read as the mockup's chip, and the UA would
@@ -4831,7 +4926,6 @@
    the server-authorized interaction. The palette stays deliberately small:
    green for context, cream for work, peach for the one primary action, and a
    single butter strip for a hint or next step. */
-.hud-surface .learning-run-workbench,
 .hud-surface .learning-run-result-board {
   width: 100%;
   height: 100%;
@@ -4844,11 +4938,6 @@
   box-shadow: var(--hud-shadow);
 }
 .hud-surface .learning-run-primary-content { width: 100%; height: 100%; min-width: 0; min-height: 0; }
-
-.hud-surface .learning-run-workbench {
-  display: grid;
-  grid-template-columns: minmax(248px, 0.29fr) minmax(0, 1fr);
-}
 
 .hud-surface .learning-run-journey {
   position: relative;
@@ -5455,9 +5544,7 @@
   /* Compact LearningRun: compress whitespace and layout, not legibility.
      Body text keeps a 9px floor and interactive controls keep >=24px hit
      targets instead of scaling the whole type ramp down. */
-  .hud-surface .learning-run-workbench,
   .hud-surface .learning-run-result-board { border-width: 2px; border-radius: 19px 16px 21px 17px / 17px 22px 16px 20px; }
-  .hud-surface .learning-run-workbench { grid-template-columns: minmax(124px, 0.29fr) minmax(0, 1fr); }
   .hud-surface .learning-run-journey { padding: 14px 13px 12px; }
   .hud-surface .learning-run-journey::after { right: -36px; bottom: -52px; width: 110px; height: 110px; border-width: 11px; }
   .hud-surface .learning-run-journey__state { gap: 4px; font-size: 9px; }
@@ -6963,4 +7050,3 @@
   .hud-surface .companion-center[data-active-tab="memory"] .companion-filter-group { grid-column: 2; grid-row: 2; }
   .hud-surface .companion-center[data-active-tab="memory"] .companion-record-list { grid-row: 3; }
 }
-

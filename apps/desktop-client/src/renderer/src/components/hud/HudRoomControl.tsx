@@ -301,7 +301,7 @@ export function HudRoomControl({ decorative = false }: { readonly decorative?: b
         ref={rootRef}
         className="room-control"
         role="group"
-        aria-label="房间控制"
+        aria-label="学习空间控制"
         data-expanded={isExpanded || undefined}
         inert={decorative || onboardingOpen || undefined}
       >
@@ -336,8 +336,8 @@ export function HudRoomControl({ decorative = false }: { readonly decorative?: b
           className={destination === "room" ? "active" : undefined}
           disabled={decorative}
           inert={!isExpanded || undefined}
-          aria-label="返回理解书房"
-          title="返回房间总览"
+          aria-label="返回学习空间"
+          title="返回学习空间总览"
           onClick={() => collapseThen(() => invoke("home"))}
         >
           <House aria-hidden="true" />
@@ -346,8 +346,8 @@ export function HudRoomControl({ decorative = false }: { readonly decorative?: b
           type="button"
           disabled={decorative}
           inert={!isExpanded || undefined}
-          aria-label={theme === "day" ? "切换到夜间书房" : "切换到日间书房"}
-          title={theme === "day" ? "夜间书房" : "日间书房"}
+          aria-label={theme === "day" ? "切换到夜间场景" : "切换到日间场景"}
+          title={theme === "day" ? "夜间场景" : "日间场景"}
           onClick={toggleTheme}
         >
           {/* key 触发重挂载：日夜互换时图标做一个 200ms 的落位小动画。 */}
@@ -421,8 +421,8 @@ export function HudRoomControl({ decorative = false }: { readonly decorative?: b
           type="button"
           className="room-control-trigger"
           aria-expanded={isExpanded}
-          aria-label={isExpanded ? "收起房间控制" : "展开房间控制"}
-          title={isExpanded ? "收起" : "房间控制"}
+          aria-label={isExpanded ? "收起学习空间控制" : "展开学习空间控制"}
+          title={isExpanded ? "收起" : "学习空间控制"}
           inert={decorative || undefined}
           onClick={toggleExpanded}
         >

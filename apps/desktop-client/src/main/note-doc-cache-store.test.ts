@@ -9,6 +9,7 @@ import {
   NOTE_DOC_PENDING_LIMIT,
   type NoteDocCacheEntryV1,
   type NoteDocCacheKey,
+  type NoteDocDraftV1,
 } from "./note-doc-cache-store.ts";
 
 const SUBJECT = randomUUID();
@@ -32,6 +33,12 @@ const entry = (over: Partial<NoteDocCacheEntryV1> = {}): NoteDocCacheEntryV1 => 
   shareScope: "private",
   epochAtRest: 2,
   updatedAt: "2026-09-21T00:00:00.000Z",
+  ...over,
+});
+
+const draft = (over: Partial<NoteDocDraftV1> = {}): NoteDocDraftV1 => ({
+  update: "kQQBoAEKYAAAAAAAAAAAAAA=",
+  savedAt: "2026-09-21T00:10:00.000Z",
   ...over,
 });
 
@@ -138,5 +145,65 @@ describe("本机笔记文档缓存", () => {
     await expect(store.set(key(), entry({
       pending: Array.from({ length: NOTE_DOC_PENDING_LIMIT + 1 }, () => "kQBo"),
     }))).rejects.toThrow();
+  });
+
+  it("草稿跨重启回得来：刷新/崩溃前没交出去的那一条还在", async () => {
+    const store = new FileNoteDocCacheStore(filePath);
+    await store.set(key(), entry());
+    expect(await store.setDraft(key(), draft({ update: "kQQBoAEKYAAAAAAAAAAAAAB=" }))).toBe(true);
+
+    const reopened = new FileNoteDocCacheStore(filePath);
+    expect(await reopened.getDraft(key())).toMatchObject({ update: "kQQBoAEKYAAAAAAAAAAAAAB=" });
+    // 与本机那份文档同住一格：读草稿不会把文档那一半挤掉。
+    expect((await reopened.get(key()))?.docState).toBe(entry().docState);
+  });
+
+  it("另一个空间 / 另一个账号读不到这一份草稿", async () => {
+    const store = new FileNoteDocCacheStore(filePath);
+    await store.set(key(), entry());
+    await store.setDraft(key(), draft());
+    // 这一条不是"设计上应该如此"的推演，是判据本身：草稿与正文同一条边界
+    // `(subjectId, workspaceId, noteId)`。少了 workspaceId，另一个空间里同名的那一篇
+    // 就能把这里的字复活过去（跨空间正文缝合）；少了 subjectId，同一台机器上的另一个
+    // 账号就能读到别人的私有笔记草稿。
+    expect(await store.getDraft(key({ workspaceId: OTHER_WORKSPACE }))).toBeNull();
+    expect(await store.getDraft(key({ subjectId: OTHER_SUBJECT }))).toBeNull();
+    expect(await store.getDraft(key({ noteId: randomUUID() }))).toBeNull();
+    expect(await store.getDraft(key())).not.toBeNull();
+  });
+
+  it("确认交出去之后草稿清掉，本机那份文档不动", async () => {
+    const store = new FileNoteDocCacheStore(filePath);
+    await store.set(key(), entry({ revision: 7 }));
+    await store.setDraft(key(), draft());
+    expect(await store.clearDraft(key())).toBe(true);
+    // 本来就没有的那一次要如实回答 false：确认提交之后每次都会问一次，落盘那一层
+    // 据此跳过整份重写。
+    expect(await store.clearDraft(key())).toBe(false);
+
+    expect(await store.getDraft(key())).toBeNull();
+    expect((await store.get(key()))?.revision).toBe(7);
+    // 清掉这件事也要落到盘上，不能只活在内存里——否则重启之后那份草稿又回来了。
+    const reopened = new FileNoteDocCacheStore(filePath);
+    expect(await reopened.getDraft(key())).toBeNull();
+  });
+
+  it("落盘本机文档那一次不顺手抹掉草稿（打开笔记时两次 IPC 谁先到不确定）", async () => {
+    const store = new MemoryNoteDocCacheStore();
+    await store.set(key(), entry());
+    await store.setDraft(key(), draft());
+    // `noteDocState` 那条路会再落一次文档（`persistNoteDocLocal`）。它若把草稿一起换掉，
+    // 抢在 `draftGet` 之前到的那一次就把要恢复的东西删了。
+    await store.set(key(), entry({ revision: 8, updatedAt: "2026-09-21T00:11:00.000Z" }));
+    expect(await store.getDraft(key())).not.toBeNull();
+  });
+
+  it("本机还没有这一篇的文档时不凭空造一条草稿", async () => {
+    const store = new MemoryNoteDocCacheStore();
+    // 草稿是"本机那一份文档里还没交出去的部分"，那一份必须有服务端的祖先；
+    // 没有祖先的一份接回编辑器，一改就是复制块。
+    expect(await store.setDraft(key(), draft())).toBe(false);
+    expect(await store.get(key())).toBeNull();
+    expect(await store.getDraft(key())).toBeNull();
   });
 });

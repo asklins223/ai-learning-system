@@ -141,6 +141,8 @@ function companionProjection(revision: number): CompanionHomeProjectionV1 {
       },
       unlockedEffectIds: [],
       equippedEffectId: null,
+      // 0266：空间级打扰开关（契约必填）。
+      proactiveMuted: false,
       updatedAt: `2026-09-11T08:00:0${revision}.000Z`,
     },
   });

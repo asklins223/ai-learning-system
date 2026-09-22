@@ -114,7 +114,7 @@ try {
     await window.waitForTimeout(450)
   }
 
-  const trigger = window.getByLabel('展开房间控制')
+  const trigger = window.getByLabel('展开学习空间控制')
   await trigger.waitFor({ state: 'visible' })
   const actionContract = await window.locator('.action-rail').evaluate((rail) => {
     const style = getComputedStyle(rail)

@@ -531,7 +531,7 @@ export function DirectoryRail({ readOnly = false }: { readonly readOnly?: boolea
 
   const portalTarget = portalHost ?? document.body;
   return createPortal(
-    <nav ref={railRef} className="hud-rail" aria-label="书房目录">
+    <nav ref={railRef} className="hud-rail" aria-label="学习空间目录">
       {DIRECTORY_ITEMS.map((item) => {
         const active = item.id === activeId;
         return (
@@ -561,7 +561,7 @@ export function DirectoryRail({ readOnly = false }: { readonly readOnly?: boolea
           <path d="m7 9 5 5 5-5" />
         </svg>
       </button>
-      <span className="nav-island-copy">书房目录</span>
+      <span className="nav-island-copy">学习空间目录</span>
     </nav>,
     portalTarget,
   );

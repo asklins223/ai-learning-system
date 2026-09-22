@@ -294,6 +294,7 @@ const COMPANION_ROOM_PROFILE = companionRoomProfileV1Schema.parse({
   },
   unlockedEffectIds: ["effect.page-ribbon"],
   equippedEffectId: "effect.page-ribbon",
+  proactiveMuted: false,
   updatedAt: "2026-08-23T00:00:03.000Z",
 });
 
@@ -334,6 +335,7 @@ const COMPANION_ROOM_PATCH = companionRoomProfilePatchV1Schema.parse({
     window: "keepsake.first-note",
   },
   equippedEffectId: null,
+  proactiveMuted: false,
 });
 
 afterEach(() => {
@@ -538,6 +540,8 @@ describe("DesktopGateway", () => {
       workspaceType: "personal",
       isPersonal: true,
       personalWorkspaceId: SESSION_WORKSPACE_ID,
+      // 0261：服务端边界令牌（本机 epoch 的权威值）。
+      workspaceEpoch: 1,
     };
 
     function fakeStore(initial: string | null = null, available = true) {
@@ -712,6 +716,7 @@ describe("DesktopGateway", () => {
           workspaceType: "collaborative",
           isPersonal: false,
           personalWorkspaceId: null,
+          workspaceEpoch: 1,
         }), { status: 200 });
       }
       return new Response(JSON.stringify({}), { status: 200 });
@@ -2266,6 +2271,7 @@ describe("DesktopGateway · 重认证那道门不该把空间换掉", () => {
     workspaceType: workspaceId === COLLAB ? "collaborative" : "personal",
     isPersonal: workspaceId === PERSONAL,
     personalWorkspaceId: PERSONAL,
+    workspaceEpoch: 1,
   });
 
   const listBody = () => ({

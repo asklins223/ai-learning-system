@@ -479,7 +479,7 @@ function AuthLampControl({
   });
 
   const isNight = scene === "night";
-  const actionLabel = "调整书房时间";
+  const actionLabel = "调整场景时间";
   const systemDescription = `${systemTimeLabel} · ${authSceneLabel(systemScene)}`;
 
   return (
@@ -514,7 +514,7 @@ function AuthLampControl({
         <span className="desktop-access-gate__lamp-control-label" aria-hidden="true">时段</span>
       </button>
       {timeMenuOpen ? (
-        <div ref={timeMenuRef} id="desktop-gate-time-menu" className="desktop-access-gate__time-menu" role="group" aria-label="选择书房时间">
+        <div ref={timeMenuRef} id="desktop-gate-time-menu" className="desktop-access-gate__time-menu" role="group" aria-label="选择场景时间">
           <button
             type="button"
             className="desktop-access-gate__time-option desktop-access-gate__time-option--system"

@@ -74,6 +74,6 @@ describe("目标链路的用户可见文案", () => {
     }
     // App.tsx 的默认值也算一个 label 来源。
     const app = read("src/renderer/src/App.tsx");
-    expect(app).toMatch(/returnTarget\?\.label \?\? "返回书房"/);
+    expect(app).toMatch(/returnTarget\?\.label \?\? "返回学习空间"/);
   });
 });

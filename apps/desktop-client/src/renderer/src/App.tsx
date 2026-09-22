@@ -132,7 +132,7 @@ export function RoomExperience() {
       <RunRecoveryNotice />
       <HudRoomControl />
       {surface
-        ? <HudReturn label={returnTarget?.label ?? "返回书房"} onReturn={returnTarget?.run ?? (() => invoke("home"))} />
+        ? <HudReturn label={returnTarget?.label ?? "返回学习空间"} onReturn={returnTarget?.run ?? (() => invoke("home"))} />
         : null}
       <main id="main-content" inert={onboardingOpen || undefined}>
         <h1 className="sr-only">理解书房</h1>

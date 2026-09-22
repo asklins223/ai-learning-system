@@ -618,7 +618,7 @@ async function captureRegistrationGate(window) {
     || desktop.ambientCanvasAriaHidden !== 'true'
     || !desktop.lampControl
     || desktop.lampControlDisabled
-    || desktop.lampControlLabel !== '调整书房时间'
+    || desktop.lampControlLabel !== '调整场景时间'
     || !desktop.panel
     || !desktop.heading
     || desktop.headingScrollWidth > desktop.headingClientWidth + 1
@@ -921,7 +921,7 @@ try {
       || gateDesktop.gateScrollWidth > gateDesktop.gateClientWidth + 1
       || !gateDesktop.lampControl
       || gateDesktop.lampControlDisabled
-      || gateDesktop.lampControlLabel !== '调整书房时间'
+      || gateDesktop.lampControlLabel !== '调整场景时间'
       || gateDesktop.controls.some((control) => !control || control.height < 44 || control.left < -1 || control.right > gateDesktop.viewport.width + 1)
     ) {
       throw new Error(`DesktopAccessGate desktop action contract drifted: ${JSON.stringify(gateDesktop)}`)
@@ -1713,11 +1713,11 @@ try {
   await window.screenshot({ path: resolve(reviewRoot, 'desktop-companion-live2d.png') })
   await window.getByRole('button', { name: '收起伴星' }).click()
   await window.waitForTimeout(400)
-  await window.getByLabel('展开房间控制').click()
+  await window.getByLabel('展开学习空间控制').click()
   if (await window.locator('.island-panel button').count() !== 5) throw new Error('Room control island is incomplete')
   await window.waitForTimeout(400)
   await window.screenshot({ path: resolve(reviewRoot, 'desktop-controls.png') })
-  await window.getByLabel('收起房间控制').click()
+  await window.getByLabel('收起学习空间控制').click()
   await window.getByLabel('切换书房灯光').click({ force: true })
   await window.waitForFunction(
     () => document.querySelector('.desktop-app')?.getAttribute('data-theme') === 'night',

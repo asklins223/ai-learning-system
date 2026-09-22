@@ -547,4 +547,45 @@ describe("笔记协同的 IPC 通道", () => {
     await handler(DESKTOP_IPC_CHANNELS.noteDocState)(second.event, { meta, noteId: NOTE_ID });
     expect(second.restored).toHaveLength(1);
   });
+
+  // ─── 本机草稿（刷新/崩溃不丢字）────────────────────────────────────
+
+  it("草稿的键由主进程按当前身份拼：另一个空间那一格读不到", async () => {
+    const store = new MemoryNoteDocCacheStore();
+    const { event } = await setup({ workspaceType: "personal", role: "owner", noteDocCache: store });
+    // 先读过一次起点才有可挂的那一条（草稿不凭空建条目）。
+    await handler(DESKTOP_IPC_CHANNELS.noteDocState)(event, { meta, noteId: NOTE_ID });
+
+    const update = makeUpdate("draft");
+    const saved = await handler(DESKTOP_IPC_CHANNELS.noteDocDraftSave)(event, { meta, noteId: NOTE_ID, update });
+    expect(saved).toMatchObject({ ok: true, data: { saved: true } });
+
+    // 界面只报了 noteId，三段键是这里按会话拼的。少了 workspaceId，另一个空间里同名的
+    // 那一篇就能把这里的字复活过去——正是批次 1 立这条键要防的跨空间正文缝合。
+    expect(await store.getDraft(cacheKey)).toMatchObject({ update });
+    expect(await store.getDraft({ ...cacheKey, workspaceId: "44444444-4444-4444-8444-444444444444" })).toBeNull();
+    expect(await store.getDraft({ ...cacheKey, subjectId: "88888888-8888-4888-8888-888888888888" })).toBeNull();
+
+    const read = await handler(DESKTOP_IPC_CHANNELS.noteDocDraftGet)(event, { meta, noteId: NOTE_ID });
+    expect(read).toMatchObject({ ok: true, data: { draft: { update } } });
+
+    const cleared = await handler(DESKTOP_IPC_CHANNELS.noteDocDraftClear)(event, { meta, noteId: NOTE_ID });
+    expect(cleared).toMatchObject({ ok: true, data: { cleared: true } });
+    expect(await handler(DESKTOP_IPC_CHANNELS.noteDocDraftGet)(event, { meta, noteId: NOTE_ID }))
+      .toMatchObject({ ok: true, data: { draft: null } });
+    // 清草稿只清草稿：本机那份文档还在（下一句仍能读回正文的起点）。
+    expect(await store.get(cacheKey)).not.toBeNull();
+  });
+
+  it("没有本机那一份文档时草稿不收：凭空造一条会让编辑器接一棵没有祖先的树", async () => {
+    const store = new MemoryNoteDocCacheStore();
+    const { event } = await setup({ workspaceType: "personal", role: "owner", noteDocCache: store });
+    const saved = await handler(DESKTOP_IPC_CHANNELS.noteDocDraftSave)(event, {
+      meta,
+      noteId: NOTE_ID,
+      update: makeUpdate("draft"),
+    });
+    expect(saved).toMatchObject({ ok: true, data: { saved: false } });
+    expect(await store.get(cacheKey)).toBeNull();
+  });
 });

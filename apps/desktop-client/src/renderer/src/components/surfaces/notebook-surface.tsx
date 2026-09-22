@@ -837,7 +837,7 @@ export function NotebookSurface() {
   // 编辑/阅读模式，而不是每次都被重置成阅读页。
   const switchMode = (next: "read" | "edit") => {
     // The reading page renders the server version, so a draft still waiting for
-    // the debounce has to be committed first — otherwise switching to 只读查看
+    // the debounce has to be committed first — otherwise switching to 预览此版本
     // looked exactly like losing the last sentence.
     if (next === "read" && dirty && note?.permissions.canSave && !saving) void save("auto");
     setMode(next);
@@ -903,7 +903,7 @@ export function NotebookSurface() {
   ) : failure ? (
     <SurfaceDataState kind="error" message="研究册暂时不可用" detail={failure} onRetry={() => void reload()} />
   ) : !note ? (
-    <SurfaceDataState kind="empty" message="当前书房还没有主笔记" detail="这篇笔记没有给出可编辑的版本，这一页不会在本机另存草稿。" />
+    <SurfaceDataState kind="empty" message="当前学习空间还没有主笔记" detail="这篇笔记没有给出可编辑的版本，这一页不会在本机另存草稿。" />
   ) : null;
 
   const clips = (
@@ -965,6 +965,17 @@ export function NotebookSurface() {
   const generationLiveNote = noteGeneration ? (
     <p className="small notebook-note notebook-generation-live" role="status">
       学习卡{cardGenerationStatusLabel(noteGeneration.status)} · 后台进行中，可随时回到本页，进度不会丢失。
+    </p>
+  ) : null;
+
+  /**
+   * 上次没交出去、这一次开门接回来的那几个字。这一句必须说：屏幕上的正文比服务器上的新，
+   * 而用户并没有做过任何让它变新的动作，不说他只会以为这篇一直就是这样。写在纸面上、
+   * 不用弹窗：它是一条状态，不是一次需要处理的打断。
+   */
+  const restoredDraftNote = noteDocLive.restoredDraft ? (
+    <p className="small notebook-note" role="status">
+      本机草稿已恢复：{formatClock(noteDocLive.restoredDraft.savedAt)} 之前还没交上去的改动已经接回来，接着写会自动一起提交。
     </p>
   ) : null;
 
@@ -1237,6 +1248,7 @@ export function NotebookSurface() {
           {saving ? "正在提交刚才的编辑…" : "有未提交编辑，切回编辑继续写。"}
         </p>
       ) : null}
+      {restoredDraftNote}
       {saveState === "error" ? (
         <p className="small notebook-note" role="alert">
           保存没成功：{saveFailure}
@@ -1309,7 +1321,7 @@ export function NotebookSurface() {
   /**
    * 编辑页固定在纸面顶部的两条：状态/版本那一行，和格式工具栏。
    *
-   * 它们原先随正文一起滚——一篇两屏的笔记里，写到第二屏就再够不到"只读查看"，
+   * 它们原先随正文一起滚——一篇两屏的笔记里，写到第二屏就再够不到"预览此版本"，
    * 也看不到这一版提交没有。现在纸面是一个纵向 flex：这两条装进
    * `.notebook-chrome`（不参与滚动），只有 `.notebook-scroll` 里的正文滚动。
    */
@@ -1332,7 +1344,7 @@ export function NotebookSurface() {
             className="ribbon-action"
             onClick={() => switchMode("read")}
           >
-            只读查看
+            预览此版本
           </button>
         </div>
       </div>
@@ -1440,6 +1452,7 @@ export function NotebookSurface() {
         onRetry={imageUploads.retry}
         onDismiss={imageUploads.dismiss}
       />
+      {restoredDraftNote}
       {saveFailure ? <p className="small notebook-note" role="alert">保存没成功：{saveFailure}</p> : null}
       {generationReason ? <p className="small notebook-note">{generationReason}</p> : null}
       {generationFailure ? <p className="small notebook-note" role="alert">{generationFailure}</p> : null}

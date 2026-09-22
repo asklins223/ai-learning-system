@@ -236,7 +236,6 @@
 .v3-goal-list__paging button { min-height: 30px; padding: 0 14px; border: 1px solid rgba(82, 91, 69, 0.28); border-radius: 999px; background: rgba(255, 252, 235, 0.7); color: var(--v3-ink); font: inherit; cursor: pointer; }
 .v3-goal-list__paging button:disabled { cursor: wait; opacity: 0.58; }
 
-.v3-objective-workspace { display: grid; height: 100%; min-height: 0; grid-template-columns: minmax(0, 1.18fr) minmax(285px, 0.82fr); gap: 16px; }
 .v3-objective-sheet { display: flex; min-width: 0; min-height: 0; flex-direction: column; padding: 0; overflow: auto; border: 4px solid rgba(255, 252, 235, 0.88); border-radius: 31px 42px 29px 38px; background: #fff2cf; box-shadow: var(--v3-shadow); scrollbar-color: rgba(91, 73, 56, 0.46) transparent; scrollbar-width: thin; }
 .v3-objective-intro { padding: 20px 24px 11px; }
 .v3-objective-sheet__header { display: flex; align-items: center; justify-content: space-between; gap: 14px; color: var(--v3-soft); font-size: 8px; font-variant-numeric: tabular-nums; }
@@ -447,7 +446,6 @@
   .v3-goal-list__empty strong { font-size: 7px; }
   .v3-goal-list__empty span { font-size: 5px; }
 
-  .v3-objective-workspace { grid-template-columns: minmax(0, 1.15fr) minmax(142px, 0.85fr); gap: 7px; }
   .v3-objective-sheet { gap: 0; padding: 0; border-width: 2px; border-radius: 16px 21px 15px 19px; }
   .v3-objective-intro { padding: 9px 11px 5px; }
   .v3-objective-sheet__header { gap: 7px; font-size: 4px; }

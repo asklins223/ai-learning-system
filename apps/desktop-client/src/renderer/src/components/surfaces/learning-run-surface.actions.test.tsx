@@ -178,6 +178,12 @@ function renderRun(base = snapshot()) {
   return harness;
 }
 
+async function confirmHintDowngrade() {
+  const dialog = await screen.findByRole("alertdialog", { name: "看提示后，本轮会转为练习" });
+  expect(dialog.textContent).toContain("不会写入正式掌握");
+  fireEvent.click(screen.getByRole("button", { name: "确认查看提示" }));
+}
+
 afterEach(() => {
   cleanup();
   useRoomStore.setState({ activeRunId: null, activeObjectiveId: null, surface: null, returnTarget: null });
@@ -209,6 +215,7 @@ describe("LearningRunSurface · 动作区", () => {
     expect(label(/查看第/)).toBeUndefined();
 
     fireEvent.click(first!);
+    await confirmHintDowngrade();
     await waitFor(() => expect(state.actions[0]).toEqual({ kind: "request_hint", level: 1 }));
 
     const second = await waitFor(() => label(/^再看一层提示/));
@@ -231,6 +238,7 @@ describe("LearningRunSurface · 动作区", () => {
     const label = (text: RegExp) => screen.getAllByRole("button").find((button) => text.test(button.textContent ?? ""));
 
     fireEvent.click((await waitFor(() => label(/^给我一点提示/)))!);
+    await confirmHintDowngrade();
     await waitFor(() => expect(state.actions[0]).toEqual({ kind: "request_hint", level: 1 }));
 
     // 面板是 `auto minmax(0,1fr)` 两列网格（图标占第一列），所以直接子项必须**恰好**
@@ -387,6 +395,7 @@ describe("LearningRunSurface · 动作区", () => {
     renderRun();
     const button = await waitFor(() => screen.getAllByRole("button").find((item) => /^给我一点提示/.test(item.textContent ?? "")));
     fireEvent.click(button!);
+    await confirmHintDowngrade();
     await waitFor(() => expect(document.body.textContent).toContain("只计练习分"));
   });
 });

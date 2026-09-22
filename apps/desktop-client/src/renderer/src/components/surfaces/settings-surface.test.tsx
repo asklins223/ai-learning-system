@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import type { GatewayResultV1, SessionContextV1, WorkspaceAiSettingsV1 } from "@ailearn/shared/desktop-ipc-contracts";
 import { AI_CONSENT_VERSION } from "@ailearn/shared/desktop-ipc-contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { QWEN_TTS_VOICE_OPTIONS } from "@ailearn/shared/tts-voice-catalog";
 import { useRoomStore } from "../../app/room-store";
 import { SETTINGS_ATTENTION_AI_CONSENT } from "../../app/companion-consent-gate";
 import { SETTINGS_ATTENTION_MS, SettingsSurface } from "./settings-surface";
@@ -102,6 +103,8 @@ function installApi(options: {
   readonly role?: "owner" | "member";
   readonly ai?: WorkspaceAiSettingsV1;
   readonly companionAllowed?: boolean;
+  /** 读到就抛：界面必须是"未读到"，不能把 config 默认演成用户的选择。 */
+  readonly voiceUnavailable?: boolean;
   /** 声音偏好的读取结果；null = 这个账号没设过（服务端回默认并标 explicit:false）。 */
   readonly voice?: {
     readonly version: 1;
@@ -140,15 +143,18 @@ function installApi(options: {
       },
       // 声音：默认回"没用过"，用例自己改成显式偏好。
       voicePreference: {
-        get: vi.fn(async () => ok(
-          options.voice ?? {
+        get: vi.fn(async () => {
+          if (options.voiceUnavailable) throw new Error("voice preference unavailable");
+          return ok(
+            options.voice ?? {
             version: 1 as const,
             engine: "qwen" as const,
             voice: "longhua_v3.1",
-            explicit: false,
-            updatedAt: null,
-          },
-        )),
+              explicit: false,
+              updatedAt: null,
+            },
+          );
+        }),
         patch: vi.fn(async (input: { engine: "qwen" | "edge"; voice: string }) => {
           calls.push({ method: "voicePreference.patch", input });
           return ok({
@@ -157,19 +163,6 @@ function installApi(options: {
             voice: input.voice,
             explicit: true,
             updatedAt: "2026-09-22T00:00:00.000Z",
-          });
-        }),
-      },
-      voicePreview: {
-        synthesize: vi.fn(async (input: { engine: "qwen" | "edge"; voice: string }) => {
-          calls.push({ method: "voicePreview.synthesize", input });
-          return ok({
-            version: 1 as const,
-            mimeType: "audio/mpeg" as const,
-            // 一段合法 mp3 帧的 base64：内容不被解析，只要求 atob 得给出字节。
-            audioBase64: "fRwAeACRgAgAAAAAAAD/",
-            byteLength: 12,
-            voice: input.voice,
           });
         }),
       },
@@ -279,11 +272,13 @@ beforeEach(() => {
   useRoomStore.setState({ settingsSection: "account", surface: "settings" });
 });
 
+afterEach(() => {
+  cleanup();
+  // 这三个必须留在 afterEach 体内：先前它们被拼到块外面，等于整个文件只跑一次，
+  // 于是 blob 计数在相邻用例之间累加，"点了几次试听"这种断言就各说各话。
   Reflect.deleteProperty(URL, "createObjectURL");
   Reflect.deleteProperty(URL, "revokeObjectURL");
   createdObjectUrls.length = 0;
-afterEach(() => {
-  cleanup();
   Reflect.deleteProperty(window, "ailearn");
   Reflect.deleteProperty(window, "ResizeObserver");
   Reflect.deleteProperty(navigator, "clipboard");
@@ -783,12 +778,34 @@ describe("设置页的退出登录", () => {
 });
 
 // ─── 设置 → 语音与伴星：引擎、音色与试听 ─────────────────────────────────
+it("播放读数跟着音频事件走：接线不能只挂在挂载 effect 上", async () => {
+  // <audio> 渲染在「语音与伴星」这一屏里，一次性 effect 跑的时候它还不存在。
+  // 真窗口里踩到过：音频在放，读数却永远停在 0:00 / 0:00、进度条一动不动。
+  await openVoiceSection();
+  const audio = document.querySelector("audio.settings-voice__source") as HTMLAudioElement;
+  Object.defineProperty(audio, "duration", { configurable: true, value: 5.87 });
+  Object.defineProperty(audio, "currentTime", { configurable: true, value: 3.59 });
+  const spy = vi.fn();
+  audio.play = spy;
+  const last = QWEN_TTS_VOICE_OPTIONS.length - 1;
+  fireEvent.click(screen.getAllByText("试听")[last]);
+  await waitFor(() => expect(spy).toHaveBeenCalled());
+  // 媒体事件在真实浏览器里总是稍后的任务，不会在 play() 里同步吐出来
+  await act(async () => {
+    audio.dispatchEvent(new Event("loadedmetadata"));
+    audio.dispatchEvent(new Event("play"));
+    audio.dispatchEvent(new Event("timeupdate"));
+  });
+  await waitFor(() => expect(screen.getByText("0:03 / 0:05")).toBeTruthy());
+  const bar = document.querySelector(".settings-voice__track i") as HTMLElement;
+  expect(bar.style.transform).toContain("0.6");
+  expect(screen.getByRole("button", { name: "暂停试听" })).toBeTruthy();
+});
 
-async function openVoiceSection(
-  voice?: Parameters<typeof installApi>[0]["voice"],
-) {
+
+async function openVoiceSection(options: Parameters<typeof installApi>[0] = {}) {
   // installApi 自己会把桩挂到 window.ailearn（那个属性不可重新赋值），用例只改它的成员。
-  const { api, calls } = installApi(voice ? { voice } : {});
+  const { api, calls } = installApi(options);
   render(<SettingsSurface />);
   await screen.findByText("理解空间", { selector: ".space-identity h3" });
   openSection("语音与伴星");
@@ -798,17 +815,22 @@ async function openVoiceSection(
 
 it("声音分组：千问下画满目录里的 5 个音色，并在用的那一条标出来", async () => {
   await openVoiceSection();
-  for (const name of ["龙华", "龙安灵希", "龙安灵心", "龙安风悦", "龙安欢"]) {
-    expect(screen.getAllByText(name).length).toBeGreaterThan(0);
+  // 名单从目录取，不再抄一遍数字：删一条音色时，这里跟着缩，不会留下断言不过的用例
+  expect(QWEN_TTS_VOICE_OPTIONS.length).toBeGreaterThan(1);
+  for (const option of QWEN_TTS_VOICE_OPTIONS) {
+    expect(screen.getAllByText(option.name).length).toBeGreaterThan(0);
   }
   // 默认那条（服务端回 longhua_v3.1）必须带"在用"，其余行不带。
   expect(screen.getAllByText("在用").length).toBe(1);
-  expect(screen.getAllByText("试听").length).toBe(5);
+  expect(screen.getAllByText("试听").length).toBe(QWEN_TTS_VOICE_OPTIONS.length);
+  // 未生效的行不挂"在用"，也不该被画成选中档
+  expect(document.querySelectorAll(".settings-row--selected").length).toBe(1);
+  expect(screen.getByText("尚未开始")).toBeTruthy();
 });
 
 it("切到 Edge-TTS：列表只剩固定那一条，写入带成对的引擎与音色", async () => {
   const { calls } = await openVoiceSection();
-  fireEvent.click(screen.getByRole("button", { name: "Edge-TTS" }));
+  fireEvent.click(screen.getByRole("radio", { name: "Edge-TTS" }));
   await waitFor(() => {
     const write = calls.find((call) => call.method === "voicePreference.patch");
     expect(write?.input).toEqual({
@@ -825,10 +847,14 @@ it("切到 Edge-TTS：列表只剩固定那一条，写入带成对的引擎与�
 
 it("点某一行「用这一身」：写进去的就是那一行的 voice", async () => {
   const { calls } = await openVoiceSection();
-  const rows = screen.getAllByText("用这一身");
-  // 默认那条自己不给出这个按钮，所以 5 行里是 4 个。
-  expect(rows.length).toBe(4);
-  fireEvent.click(rows[1]);
+  const rows = screen.getAllByRole("button", { name: "用这一身" });
+  // 生效那一行根本不给这个按钮（不是给一个点不动的）：45° 之外它还占着一格位置，
+  // 留着只会让五行看起来都有同一个可点的动作。
+  expect(rows.length).toBe(QWEN_TTS_VOICE_OPTIONS.length - 1);
+  const inUseRow = screen.getByText("在用").closest(".settings-row") as HTMLElement;
+  expect(inUseRow.textContent).toContain("龙华");
+  expect(within(inUseRow).queryByRole("button", { name: "用这一身" })).toBeNull();
+  fireEvent.click(rows[0]);
   await waitFor(() => {
     const write = calls.find((call) => call.method === "voicePreference.patch");
     expect((write?.input as { voice: string }).voice).toBe("longanlingxi_v3.1");
@@ -836,49 +862,38 @@ it("点某一行「用这一身」：写进去的就是那一行的 voice", asyn
   });
 });
 
-it("试听：调合成、把返回的字节挂上播放器并发声", async () => {
+it("试听：放的是本地录音，一次上游调用都不发", async () => {
   const { calls } = await openVoiceSection();
-  const audio = document.querySelector("audio.settings-voice__player") as HTMLAudioElement | null;
-  expect(audio).not.toBeNull();
+  const audio = document.querySelector("audio.settings-voice__source") as HTMLAudioElement;
+  expect(audio).toBeTruthy();
   const played: string[] = [];
   audio.play = () => {
     played.push(audio.src);
     return Promise.resolve();
   };
-  fireEvent.click(screen.getAllByText("试听")[2]);
-  await waitFor(() => {
-    expect(calls.some((call) => call.method === "voicePreview.synthesize")).toBe(true);
-    expect(played.length).toBe(1);
-  });
-  const call = calls.find((item) => item.method === "voicePreview.synthesize");
-  expect((call?.input as { voice: string }).voice).toBe("longanlingxin_v3.1");
-  expect(createdObjectUrls.length).toBe(1);
-  expect(audio.src).toContain("blob:mock/");
+  const target = QWEN_TTS_VOICE_OPTIONS[QWEN_TTS_VOICE_OPTIONS.length - 1];
+  fireEvent.click(screen.getAllByText("试听")[QWEN_TTS_VOICE_OPTIONS.length - 1]);
+  await waitFor(() => expect(played.length).toBe(1));
+  // 源就是目录里那条音色对应的资产：不是 blob（那要现合成），也不是 http
+  expect(played[0]).toContain(`assets/companion/voice-preview-v1/${target.voice}.mp3`);
+  expect(played[0].startsWith("blob:")).toBe(false);
+  expect(screen.getByText("用哪套声音合成")).toBeTruthy();
+  await waitFor(() => expect(screen.getByText(`正在试听：${target.name}`)).toBeTruthy());
+  expect(calls.filter((c) => String(c.method).toLowerCase().includes("preview")).length).toBe(0);
 });
 
-it("试听失败：给出这一句的失败读数，不把选择改掉", async () => {
-  const { api, calls } = await openVoiceSection();
-  api.companion.voicePreview.synthesize = vi.fn(async () => {
-    calls.push({ method: "voicePreview.synthesize", input: "boom" });
-    throw new Error("gateway down");
-  }) as never;
-  const before = (calls.filter((c) => c.method === "voicePreference.patch")).length;
+it("录音放不出来：给出这一句的失败读数，不把选择改掉", async () => {
+  const { calls } = await openVoiceSection();
+  const before = calls.filter((c) => c.method === "voicePreference.patch").length;
   fireEvent.click(screen.getAllByText("试听")[0]);
-  await waitFor(() => expect(screen.getByText("这一段没试听成")).toBeTruthy());
-  expect((calls.filter((c) => c.method === "voicePreference.patch")).length).toBe(before);
+  const audio = document.querySelector("audio.settings-voice__source") as HTMLAudioElement;
+  audio.dispatchEvent(new Event("error"));
+  await waitFor(() => expect(screen.getByText("这段试听录音没能放出来。")).toBeTruthy());
+  expect(calls.filter((c) => c.method === "voicePreference.patch").length).toBe(before);
 });
 
 it("没读到偏好：不画音色列表，也不把默认值演成用户的选择", async () => {
-  const { api } = await openVoiceSection();
-  api.companion.voicePreference.get = vi.fn(async () => {
-    throw new Error("nope");
-  }) as never;
-  // 重读一次：把"读不到"这一态真正推到界面上。
-  api.companion.voicePreference.get = vi.fn(async () => {
-    throw new Error("nope");
-  }) as never;
-  fireEvent.click(screen.getByText("作答方式"));
-  openSection("语音与伴星");
+  await openVoiceSection({ voiceUnavailable: true });
   expect(screen.getByText("未读到")).toBeTruthy();
   expect(screen.queryByText("试听")).toBeNull();
 });

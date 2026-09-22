@@ -81,7 +81,7 @@ export const HUD_PAGES: Readonly<Record<HudPageId, HudPageDefinition>> = {
     id: "login",
     number: "02",
     title: "登录",
-    subtitle: "进入理解书房",
+    subtitle: "进入学习空间",
     plate: "home",
     companion: { mode: "hidden", seat: "none", framing: "bust", interaction: "none", proactive: "silent", draggable: false },
   },
@@ -245,8 +245,7 @@ export const HUD_PAGES: Readonly<Record<HudPageId, HudPageDefinition>> = {
     subtitle: "问题怎么问，桌面就提供怎样的作答工具",
     plate: "review",
     companion: {
-      mode: "assessment", seat: "right", framing: "bust", interaction: "on-demand", proactive: "silent", draggable: false,
-      starter: "需要时点我。我只会给提示，不会替你作答。",
+      mode: "hidden", seat: "none", framing: "bust", interaction: "none", proactive: "silent", draggable: false,
     },
     wide: true,
   },

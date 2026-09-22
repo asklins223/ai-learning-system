@@ -77,6 +77,18 @@
     letter-spacing:.08em;
     color:var(--log-meta);
   }
+  /* 口径标签：这一页的数字是"这个空间的今天"。用纸面系统里最轻的一档，
+     它要一直看得见（不能靠 hover），但不能和日期抢第一眼。 */
+  & .day-head__scope{
+    flex:none;
+    margin:0;
+    padding:3px 9px;
+    border:1px dashed var(--log-rule-solid);
+    border-radius:var(--log-r-sm);
+    font:600 10.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+    letter-spacing:.06em;
+    color:var(--log-meta);
+  }
   & .day-head__actions{
     display:flex;
     align-items:center;
@@ -609,8 +621,9 @@
     overflow-y:auto;
     padding:2px 0 2px 24px;
   }
-  /* 分隔线用会淡出的细线，不用整条实边：伴星栏只有一张卡，实边会把下方空出来的
-     纸面读成一个空盒子。淡出到 76% 处收尾，读起来是"这一列到此为止"。 */
+  /* 分隔线用会淡出的细线，不用整条实边：右栏的卡是"能读完就收尾"的短文，
+     实边会把下方空出来的纸面读成一个空盒子。淡出到 76% 处收尾，读起来是
+     "这一列到此为止"。 */
   & > .day-rail:before{
     content:"";
     position:absolute;
@@ -621,10 +634,98 @@
     background:linear-gradient(180deg,var(--log-rule-solid) 0,var(--log-rule-solid) 30%,transparent 76%);
   }
   /* .tag 是 butter 底色，纸面也是暖色：给标签补一圈纸边，边界才读得出来 */
-  & .day-rail > .tag{
+  & .day-rail > .tag,
+  & .day-spaces > .tag{
     flex:none;
     margin-bottom:10px;
     box-shadow:inset 0 0 0 1px rgba(73,47,29,.24);
+  }
+  /* 「全部空间」栏：本页唯一按账号扇出的读数，排在伴星卡上面。 */
+  & .day-spaces{
+    display:flex;
+    flex-direction:column;
+    align-items:flex-start;
+    width:100%;
+    margin-bottom:18px;
+  }
+  & .day-spaces__list{
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+    margin:0;
+    padding:0;
+    list-style:none;
+  }
+  & .day-spaces__row{
+    display:flex;
+    flex-direction:column;
+    gap:3px;
+    padding:7px 8px;
+    border-radius:var(--log-r-sm);
+    background:rgba(255,252,238,.5);
+  }
+  /* 当前空间那一行给一道左沿：颜色不是唯一载体，同时有"当前空间"四个字。 */
+  & .day-spaces__row[data-current]{
+    box-shadow:inset 3px 0 0 var(--log-focus);
+  }
+  & .day-spaces__head{
+    display:flex;
+    align-items:baseline;
+    flex-wrap:wrap;
+    gap:6px;
+    min-width:0;
+  }
+  & .day-spaces__head b{
+    overflow:hidden;
+    font:650 11.5px/1.5 "Noto Serif SC","Songti SC",serif;
+    color:var(--log-ink);
+    text-overflow:ellipsis;
+    white-space:nowrap;
+  }
+  & .day-spaces__head small{
+    font-size:9.5px;
+    line-height:1.5;
+    color:var(--log-meta);
+  }
+  & .day-spaces__current{
+    padding:1px 6px;
+    border-radius:999px;
+    background:rgba(184,90,49,.14);
+    font:600 9.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+    font-style:normal;
+    letter-spacing:.04em;
+    color:var(--log-focus);
+  }
+  & .day-spaces__numbers{
+    display:flex;
+    flex-wrap:wrap;
+    gap:4px 10px;
+    font:500 10.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+    font-variant-numeric:tabular-nums;
+    color:var(--log-body);
+  }
+  & .day-spaces__total{
+    display:flex;
+    flex-direction:column;
+    gap:3px;
+    margin:10px 0 0;
+    padding-top:9px;
+    border-top:1px dashed var(--log-rule-solid);
+  }
+  & .day-spaces__total b{
+    font:650 11.5px/1.5 "Noto Serif SC","Songti SC",serif;
+    color:var(--log-ink);
+  }
+  & .day-spaces__failure{
+    display:flex;
+    flex-direction:column;
+    align-items:flex-start;
+  }
+  & .day-spaces__failure p{
+    margin:0;
+    font-size:11px;
+    line-height:1.6;
+    color:var(--log-body);
   }
   & .day-rail__card{
     width:100%;

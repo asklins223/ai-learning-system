@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { SessionContextV1, WorkspaceSummaryV1 } from "@ailearn/shared/desktop-ipc-contracts";
 import { createRequestMeta, gatewayErrorMessage, unwrapGatewayResult } from "../../app/desktop-client";
 import { useRoomStore } from "../../app/room-store";
 import { spaceRoleLabel } from "../../app/space-identity";
+import { markSpaceUsed, readSpaceRecents, type SpaceRecents } from "../../app/space-recents";
 import { readAuthenticatedSession } from "../../app/surface-session";
 import { publishGateInvalidation } from "../../app/gate-invalidation";
 import { requestSpaceSwitchReceipt, SPACE_MENU_REFRESH_EVENT } from "./space-menu-events";
@@ -22,6 +23,43 @@ function roleLabel(workspace: WorkspaceSummaryV1): string {
 }
 
 /**
+ * 搜索框出现的门槛：少于这些个空间就不画它。
+ *
+ * 卡片一屏大约放得下六行（`hud-surface.css` 里那张卡的 max-height 是 560px，
+ * 减掉标题、两行表单和留白），而 ADR-0009 的配额（一个个人空间 + 三个协作空间）
+ * 决定了今天真实账号最多也就四个空间：这时候整张列表一眼看完，一个空搜索框只是
+ * 白占一行。到第五个开始，扫读不如过滤，框才出现。阈值不是"多少算多"的观点，
+ * 是这张卡什么时候开始滚动的实测结果。
+ */
+export const SPACE_SEARCH_MINIMUM = 5;
+
+/**
+ * 分组只按空间的**类型**分，不按 `isPersonal`：后者说的是"是不是我的"。万一被
+ * 拉进别人的个人空间，它仍然是个人空间，不该混进协作空间里；而"我的"那一份身份
+ * 由行上的 `spaceRoleLabel` 说（个人空间 · 所有者 / 成员 · 只读），不靠分组暗示。
+ */
+function groupOf(workspace: WorkspaceSummaryV1): "personal" | "collaborative" {
+  return workspace.workspaceType === "personal" ? "personal" : "collaborative";
+}
+
+/**
+ * 最近使用的排在前面；没用过的保持服务端顺序。`sort` 是稳定的，所以 0 与 0 之间
+ * 不会互相打乱——这正是"首次使用（本机还没有记录）时回落到服务端顺序"。
+ */
+function sortByRecentUse(
+  workspaces: readonly WorkspaceSummaryV1[],
+  recents: SpaceRecents,
+): WorkspaceSummaryV1[] {
+  return [...workspaces].sort((left, right) =>
+    (recents[right.workspaceId] ?? 0) - (recents[left.workspaceId] ?? 0));
+}
+
+/** 只按名字过滤：`toLowerCase` 对汉字是恒等，所以中文走子串、英文不区分大小写。 */
+function matchesQuery(workspace: WorkspaceSummaryV1, normalizedQuery: string): boolean {
+  return workspace.name.toLowerCase().includes(normalizedQuery);
+}
+
+/**
  * The learning-space menu the room control's space key opens (mockup page 04,
  * "returning user" state, i.e. 04B). Every row is a real gateway fact: spaces
  * come from `workspace.list`, entering one goes through `workspace.switch`, and
@@ -29,6 +67,11 @@ function roleLabel(workspace: WorkspaceSummaryV1): string {
  *
  * `notice` carries the one message the gate has nowhere else to report — an
  * invite code that failed to redeem during sign-in.
+ *
+ * 空间一多这张卡就得自己扛住（`workspace.list` 全量返回、没有分页）：列表分成
+ * 个人空间 / 协作空间两组、组内按本机记下的最近使用排序，长到一屏放不下时再给
+ * 一行按名字过滤的搜索框。搜索、分组、排序都只是**读法**，进入空间仍然只有
+ * `workspace.switch` 一条路。
  */
 export function HudAccountMenu({
   notice,
@@ -47,6 +90,13 @@ export function HudAccountMenu({
     ready: false,
   });
   const [inviteCode, setInviteCode] = useState("");
+  /** 按名字过滤的查询词。组件每次开合都会重挂载，所以离开菜单即清空。 */
+  const [query, setQuery] = useState("");
+  /**
+   * 本机记下的"最近进入"。渲染前同步读一次：切换会让门禁重挂载整个房间，
+   * 所以每次进入空间都要先把时间戳写进 localStorage，重挂载后才读得回来。
+   */
+  const [recents, setRecents] = useState<SpaceRecents>(() => readSpaceRecents());
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   /**
@@ -56,6 +106,9 @@ export function HudAccountMenu({
    */
   const [armedSwitchFor, setArmedSwitchFor] = useState<string | null>(null);
   const [newSpaceName, setNewSpaceName] = useState("");
+  /** 分组标题的 id：`<section aria-labelledby>` 用它，标题既能读出来也能跳过去。 */
+  const personalGroupId = useId();
+  const collaborativeGroupId = useId();
   const activeRunId = useRoomStore((store) => store.activeRunId);
 
   /**
@@ -76,7 +129,9 @@ export function HudAccountMenu({
         meta: createRequestMeta(epochRef.current),
         name,
       });
-      unwrapGatewayResult(response);
+      // 主进程建好就进去了，所以这次进入也要记进本机记录：重挂载后新空间才会
+      // 排在协作空间那一组的第一个，而不是落到服务端顺序的末尾。
+      setRecents(markSpaceUsed(unwrapGatewayResult(response).workspaceId));
       requestSpaceSwitchReceipt(name);
       publishGateInvalidation("stale_workspace");
     } catch (error) {
@@ -139,6 +194,9 @@ export function HudAccountMenu({
       });
       if (response.workspaceEpoch) epochRef.current = response.workspaceEpoch;
       unwrapGatewayResult(response);
+      // 真实进入才叫"最近使用"。先落盘再回调：`onSwitched` 会触发门禁失效并
+      // 重挂载本组件，重挂载时读到的必须是刚写下的这一条。
+      setRecents(markSpaceUsed(workspace.workspaceId));
       onSwitched?.(workspace.name);
     } catch (error) {
       setMessage(gatewayErrorMessage(error));
@@ -179,6 +237,60 @@ export function HudAccountMenu({
 
   const currentId = state.session?.workspace?.workspaceId ?? null;
   const status = message ?? notice ?? null;
+  /**
+   * 过滤只在搜索框真的画出来时生效：列表短的时候它根本没渲染，别让一个残留的
+   * 查询词把行悄悄藏掉。匹配大小写不敏感，中文按子串。
+   */
+  const searchable = state.workspaces.length >= SPACE_SEARCH_MINIMUM;
+  const normalizedQuery = query.trim().toLowerCase();
+  const visible = searchable && normalizedQuery
+    ? state.workspaces.filter((workspace) => matchesQuery(workspace, normalizedQuery))
+    : state.workspaces;
+  // 先分组、再各自按最近使用排序：个人空间用得多不该把协作空间挤到后面去，
+  // 两组各自有序，标题才始终对得上内容。
+  const personalSpaces = sortByRecentUse(
+    visible.filter((workspace) => groupOf(workspace) === "personal"),
+    recents,
+  );
+  const collaborativeSpaces = sortByRecentUse(
+    visible.filter((workspace) => groupOf(workspace) === "collaborative"),
+    recents,
+  );
+
+  const renderSpaceRow = (workspace: WorkspaceSummaryV1) => {
+    const current = workspace.workspaceId === currentId;
+    // Row-level busy: the whole column stays locked (one switch at a time), but
+    // the row in flight names itself so the press has a visible, announced target.
+    const rowBusy = busy === workspace.workspaceId;
+    return (
+      <button
+        key={workspace.workspaceId}
+        type="button"
+        className="space-row"
+        aria-current={current ? "true" : undefined}
+        data-current={current || undefined}
+        aria-busy={rowBusy || undefined}
+        data-busy={rowBusy || undefined}
+        // 当前行没有可做的动作：禁用并交给 data-current 的样式，
+        // 而不是让一次点击无声无息。
+        disabled={busy !== null || current}
+        onClick={() => void enter(workspace)}
+      >
+        <span className="space-seal">{workspace.name.slice(0, 1)}</span>
+        <div>
+          <b>{workspace.name}</b>
+          <div className="small">{current ? `当前 · ${roleLabel(workspace)}` : roleLabel(workspace)}</div>
+        </div>
+        {rowBusy
+          ? <span className="tag">进入中…</span>
+          : current
+            ? <span className="tag green">已选择</span>
+            : armedSwitchFor === workspace.workspaceId
+              ? <span className="tag red">再点确认</span>
+              : <span aria-hidden="true">›</span>}
+      </button>
+    );
+  };
 
   return (
     <div ref={rootRef} className="home-menu" aria-label="学习空间" tabIndex={-1}>
@@ -196,41 +308,37 @@ export function HudAccountMenu({
           {state.workspaces.length === 0 ? (
             <p className="sub">这个账号还没有可用的学习空间。</p>
           ) : null}
-          {state.workspaces.map((workspace) => {
-            const current = workspace.workspaceId === currentId;
-            // Row-level busy: the whole column stays locked (one switch at a
-            // time), but the row in flight names itself so the press has a
-            // visible, announced target.
-            const rowBusy = busy === workspace.workspaceId;
-            return (
-              <button
-                key={workspace.workspaceId}
-                type="button"
-                className="space-row"
-                aria-current={current ? "true" : undefined}
-                data-current={current || undefined}
-                aria-busy={rowBusy || undefined}
-                data-busy={rowBusy || undefined}
-                // 当前行没有可做的动作：禁用并交给 data-current 的样式，
-                // 而不是让一次点击无声无息。
-                disabled={busy !== null || current}
-                onClick={() => void enter(workspace)}
-              >
-                <span className="space-seal">{workspace.name.slice(0, 1)}</span>
-                <div>
-                  <b>{workspace.name}</b>
-                  <div className="small">{current ? `当前 · ${roleLabel(workspace)}` : roleLabel(workspace)}</div>
-                </div>
-                {rowBusy
-                  ? <span className="tag">进入中…</span>
-                  : current
-                    ? <span className="tag green">已选择</span>
-                    : armedSwitchFor === workspace.workspaceId
-                      ? <span className="tag red">再点确认</span>
-                      : <span aria-hidden="true">›</span>}
-              </button>
-            );
-          })}
+          {searchable ? (
+            <div className="space-search">
+              <input
+                type="search"
+                value={query}
+                maxLength={50}
+                autoComplete="off"
+                spellCheck={false}
+                aria-label="搜索学习空间"
+                placeholder="搜索学习空间"
+                onChange={(event) => setQuery(event.target.value)}
+              />
+            </div>
+          ) : null}
+          {state.workspaces.length > 0 && visible.length === 0 ? (
+            <p className="sub">没有匹配「{query.trim()}」的学习空间。</p>
+          ) : null}
+          {/* 个人空间单独一组：它和协作空间的读写规则不一样，混在一列里只能靠
+              行上的小字分辨，空间一多就分不出来了。 */}
+          {personalSpaces.length > 0 ? (
+            <section className="space-group" aria-labelledby={personalGroupId}>
+              <h3 className="space-group__title" id={personalGroupId}>个人空间</h3>
+              {personalSpaces.map(renderSpaceRow)}
+            </section>
+          ) : null}
+          {collaborativeSpaces.length > 0 ? (
+            <section className="space-group" aria-labelledby={collaborativeGroupId}>
+              <h3 className="space-group__title" id={collaborativeGroupId}>协作空间</h3>
+              {collaborativeSpaces.map(renderSpaceRow)}
+            </section>
+          ) : null}
           <form
             className="invite-line"
             onSubmit={(event) => { event.preventDefault(); void join(); }}

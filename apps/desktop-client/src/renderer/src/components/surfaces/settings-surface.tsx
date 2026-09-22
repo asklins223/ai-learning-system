@@ -18,6 +18,8 @@ import {
   MessageCircle,
   MessagesSquare,
   Mic,
+  Pause,
+  Play,
   Moon,
   RefreshCw,
   SearchCheck,
@@ -45,6 +47,8 @@ import type { CompanionAnswerModePreferenceV1, CompanionVoicePreferenceV1 } from
 import {
   EDGE_TTS_VOICE_OPTIONS,
   QWEN_TTS_VOICE_OPTIONS,
+  TTS_PREVIEW_TEXT,
+  findTtsVoiceOption,
   type TtsEngineV1,
   type TtsVoiceOptionV1,
 } from "@ailearn/shared/tts-voice-catalog";
@@ -210,6 +214,11 @@ const DATA_POLICY_FIELDS: ReadonlyArray<readonly [keyof AiDataPolicyV1, string, 
   ["auditLogging", "记录 AI 审计日志", "每次外发都留下可追溯的记录，供你回看。"],
 ];
 
+const formatVoiceTime = (seconds: number): string => {
+  const total = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+};
+
 const TTS_ENGINE_OPTIONS: ReadonlyArray<readonly [TtsEngineV1, string]> = [
   ["qwen", "千问"],
   ["edge", "Edge-TTS"],
@@ -266,6 +275,7 @@ function SettingRow({
   title,
   detail,
   children,
+  selected = false,
 }: {
   /** The drawn glyph in front of the copy. Capability lists use it; rows that
    *  are pure label/value pairs leave it out and start at the card's edge. */
@@ -275,9 +285,11 @@ function SettingRow({
   /** The right-hand cell: a chip, a switch, a button, a value — or nothing, in
    *  which case the copy keeps the full width. */
   readonly children?: React.ReactNode;
+  /** 这一行就是当前生效的选择。列表里五行长得一模一样时，"哪个在用"不该靠读小字。 */
+  readonly selected?: boolean;
 }) {
   return (
-    <div className="settings-row">
+    <div className={selected ? "settings-row settings-row--selected" : "settings-row"}>
       {mark ? <span className="settings-row__mark" aria-hidden="true">{mark}</span> : null}
       <span className="settings-row__body">
         <b>{title}</b>
@@ -404,12 +416,17 @@ export function SettingsSurface() {
   const [voicePreference, setVoicePreference] = useState<CompanionVoicePreferenceV1 | null>(null);
   const [voicePreferenceRead, setVoicePreferenceRead] = useState(false);
   const [voiceSaving, setVoiceSaving] = useState(false);
-  /** 正在试听的 voice（null = 没有）；用来禁用按钮并给出"正在合成"的读数。 */
-  const [voicePreviewing, setVoicePreviewing] = useState<string | null>(null);
+  /** 录音放不出来时的读数（例如资产没打进包）：控件在响但没声音，比没控件更难查。 */
   const [voicePreviewError, setVoicePreviewError] = useState<string | null>(null);
   const voiceAudioRef = useRef<HTMLAudioElement | null>(null);
-  /** 上一次的 blob URL：换试听就回收，不然每点一次漏一段音频在内存里。 */
-  const voicePreviewUrlRef = useRef<string | null>(null);
+  /** 播放器读数：只有真合成回来才有值，没试听过时界面讲的是"将要念的那句"。 */
+  const [voicePlayer, setVoicePlayer] = useState<{
+    readonly name: string;
+    readonly voice: string;
+    readonly at: number;
+    readonly total: number;
+    readonly playing: boolean;
+  } | null>(null);
   const [inventoryEpoch, setInventoryEpoch] = useState(0);
   const [auxiliaryEpoch, setAuxiliaryEpoch] = useState(0);
   const epochRef = useRef<number | undefined>(undefined);
@@ -1048,37 +1065,64 @@ export function SettingsSurface() {
   };
 
   /**
-   * 试听：服务端用目录里那句固定话合成一段，回来直接响。
+   * 播放器读数：换掉原生 <audio controls> 之后，进度、时长和"在放哪一身"全由这几个事件供。
    *
-   * 文本不在这里拼——试听句只有目录里那一份，界面听到的就是它。渲染进程没有
-   * Buffer，所以 base64 走 atob 再包成 Blob；上一次的 URL 在换新的一段时回收。
+   * 不能挂在一次性 mount effect 上：<audio> 渲染在「语音与伴星」这一屏里，effect 跑的
+   * 那一刻它还不存在（真窗口实测：音频在放，读数却永远停在 0:00 / 0:00、进度条一动不动）。
+   * 所以改成第一次要用它之前接线，按元素身份去重。
    */
-  const previewVoice = async (engine: TtsEngineV1, voice: string) => {
-    if (voicePreviewing !== null) return;
-    setVoicePreviewing(voice);
+  const wiredAudioRef = useRef<HTMLAudioElement | null>(null);
+  const voiceAudioHandlersRef = useRef<Record<string, EventListener> | null>(null);
+  const wireVoiceAudio = () => {
+    const element = voiceAudioRef.current;
+    if (!element || wiredAudioRef.current === element) return;
+    const patch = (next: Partial<{ at: number; total: number; playing: boolean }>) =>
+      setVoicePlayer((prev) => (prev ? { ...prev, ...next } : prev));
+    const handlers: Record<string, EventListener> = {
+      loadedmetadata: () => patch({ total: Number.isFinite(element.duration) ? element.duration : 0 }),
+      timeupdate: () => patch({ at: element.currentTime }),
+      play: () => patch({ playing: true }),
+      pause: () => patch({ playing: false }),
+      ended: () => patch({ playing: false }),
+      error: () => setVoicePreviewError("这段试听录音没能放出来。"),
+    };
+    for (const [event, handler] of Object.entries(handlers)) element.addEventListener(event, handler);
+    wiredAudioRef.current = element;
+    voiceAudioHandlersRef.current = handlers;
+  };
+
+  /**
+   * 试听：直接放渲染进程里的那段录音。
+   *
+   * 这里刻意不再调服务端。挑声音天然要把同一句话反复听好几遍，每听一遍就合成一次
+   * 是白花钱；录音按当前 model + voice + instruction 生成，改那三样要重新生成资产
+   * （见 public/assets/companion/voice-preview-v1/PROVENANCE.md）。
+   */
+  const previewVoice = (option: TtsVoiceOptionV1) => {
     setVoicePreviewError(null);
-    try {
-      const response = await window.ailearn.companion.voicePreview.synthesize({
-        meta: createRequestMeta(epochRef.current),
-        engine,
-        voice,
-      });
-      const result = unwrapGatewayResult(response);
-      const bytes = Uint8Array.from(atob(result.audioBase64), (ch) => ch.charCodeAt(0));
-      const url = URL.createObjectURL(new Blob([bytes], { type: result.mimeType }));
-      if (voicePreviewUrlRef.current) URL.revokeObjectURL(voicePreviewUrlRef.current);
-      voicePreviewUrlRef.current = url;
-      const element = voiceAudioRef.current;
-      if (element) {
-        element.src = url;
-        // 用户点的就是"放给我听"，不再要求二次点击；自动播放被拦时静默留着控件。
-        await element.play().catch(() => undefined);
-      }
-    } catch (error) {
-      setVoicePreviewError(gatewayErrorMessage(error));
-    } finally {
-      setVoicePreviewing(null);
+    setVoicePlayer({ name: option.name, voice: option.voice, at: 0, total: 0, playing: false });
+    const element = voiceAudioRef.current;
+    if (!element) return;
+    wireVoiceAudio();
+    element.src = option.previewAsset;
+    element.load();
+    // 用户点的就是"放给我听"，不再要求二次点击；被自动播放策略拦下时播放器仍可手动按。
+    void element.play().catch(() => undefined);
+  };
+
+  useEffect(() => () => {
+    const element = wiredAudioRef.current;
+    const handlers = voiceAudioHandlersRef.current;
+    if (element && handlers) {
+      for (const [event, handler] of Object.entries(handlers)) element.removeEventListener(event, handler);
     }
+  }, []);
+
+  const toggleVoicePlayer = () => {
+    const element = voiceAudioRef.current;
+    if (!element || !voicePlayer) return;
+    if (element.paused) void element.play().catch(() => undefined);
+    else element.pause();
   };
 
   const copyInviteToken = async (token: string) => {
@@ -1696,7 +1740,7 @@ export function SettingsSurface() {
                   />
                   <span className="settings-theme__label">
                     {value === "day" ? <Sun size={14} aria-hidden="true" /> : <Moon size={14} aria-hidden="true" />}
-                    {value === "day" ? "日间书房" : "夜间书房"}
+                    {value === "day" ? "日间场景" : "夜间场景"}
                   </span>
                   {active ? (
                     <span className="settings-theme__check" aria-hidden="true"><Check size={13} strokeWidth={3} /></span>
@@ -1736,7 +1780,7 @@ export function SettingsSurface() {
         <section className="settings-group">
           <h3 className="settings-group__title">首页引导</h3>
           <div className="settings-rows">
-            <SettingRow title="重播首次进入引导" detail="回到书房并重播入场说明，不改动任何学习记录。">
+            <SettingRow title="重播首次进入引导" detail="回到学习空间并重播入场说明，不改动任何学习记录。">
               <button
                 className="button"
                 type="button"
@@ -1767,24 +1811,26 @@ export function SettingsSurface() {
       key={option.voice}
       title={option.name}
       detail={option.note || "官方没有给这一条额外的说明，听上面的试听。"}
+      selected={inUse}
     >
       <span className="settings-voice__actions">
         {inUse ? <span className="tag green">在用</span> : null}
-        <button
-          type="button"
-          className="ghost"
-          disabled={inUse || voiceSaving}
-          onClick={() => void changeVoice(option.engine, option.voice)}
-        >
-          用这一身
-        </button>
+        {inUse ? null : (
+          <button
+            type="button"
+            className="button ghost"
+            disabled={voiceSaving}
+            onClick={() => void changeVoice(option.engine, option.voice)}
+          >
+            用这一身
+          </button>
+        )}
         <button
           type="button"
           className="button"
-          disabled={voicePreviewing !== null}
-          onClick={() => void previewVoice(option.engine, option.voice)}
+          onClick={() => previewVoice(option)}
         >
-          {voicePreviewing === option.voice ? "正在合成" : "试听"}
+          试听
         </button>
       </span>
     </SettingRow>
@@ -1802,7 +1848,7 @@ export function SettingsSurface() {
             <div className="settings-block__head">
               <div>
                 <b>伴星大小</b>
-                <p>只影响伴星在房间与页面里的显示比例，位置由你自己拖动决定。</p>
+                <p>只影响伴星在场景与页面里的显示比例，位置由你自己拖动决定。</p>
               </div>
             </div>
             <HudSlider
@@ -1896,8 +1942,33 @@ export function SettingsSurface() {
               : null}
           </div>
 
-          {/* 一个播放器反复换源，而不是每条一个 audio：试听多了会留下一排进度各异的控件。 */}
-          <audio ref={voiceAudioRef} className="settings-voice__player" controls />
+          {/* 一个播放器反复换源，而不是每条一个 audio：试听多了会留下一排进度各异的控件。
+              控件全部自己画：原生 controls 是浏览器的灰色条，和这套纸面没有关系，
+              而且没试听过的时候它显示 0:00 / 0:00，看起来像坏了。 */}
+          <div className="settings-voice__player" data-empty={voicePlayer ? undefined : "true"}>
+            <button
+              type="button"
+              className="settings-voice__toggle"
+              disabled={!voicePlayer}
+              aria-label={voicePlayer?.playing ? "暂停试听" : "播放试听"}
+              onClick={toggleVoicePlayer}
+            >
+              {voicePlayer?.playing ? <Pause size={14} aria-hidden="true" /> : <Play size={14} aria-hidden="true" />}
+            </button>
+            <span className="settings-voice__reading">
+              <b>{voicePlayer ? `正在试听：${voicePlayer.name}` : "还没有试听过"}</b>
+              <small>{voicePlayer ? TTS_PREVIEW_TEXT : "点某一行的「试听」，她会用同一句话念给你听：" + TTS_PREVIEW_TEXT}</small>
+            </span>
+            <span className="settings-voice__track" aria-hidden="true">
+              <i style={{ transform: `scaleX(${voicePlayer && voicePlayer.total > 0 ? voicePlayer.at / voicePlayer.total : 0})` }} />
+            </span>
+            <span className="settings-voice__time">
+              {voicePlayer
+                ? `${formatVoiceTime(voicePlayer.at)} / ${formatVoiceTime(voicePlayer.total)}`
+                : "尚未开始"}
+            </span>
+          </div>
+          <audio ref={voiceAudioRef} className="settings-voice__source" preload="none" />
           {voicePreviewError ? (
             <SettingsInlineState title="这一段没试听成" detail={voicePreviewError} tone="error" />
           ) : null}
@@ -2055,7 +2126,7 @@ export function SettingsSurface() {
 
           <section className="settings-group">
             <h3 className="settings-group__title">伴星授权</h3>
-            <p className="settings-group__note">由上面的同意与数据策略推导，这一组只读。</p>
+            <p className="settings-group__note">由上面的同意与数据策略推导，这一组不能单独修改。</p>
             <div className="settings-rows settings-rows--split">
               <SettingRow mark={<BookOpen size={15} />} title="伴星读取工作区内容" detail="决定伴星能看到哪些来源、笔记与目标。">
                 <CapabilityChip value={companion?.["companion.read"]} reason={actionReason(companion?.["companion.read"])} />
@@ -2194,7 +2265,7 @@ export function SettingsSurface() {
             <SettingsInlineState title="本机能力状态暂时不可用" detail={capabilityFailure} tone="error" onRetry={() => void load()} />
           ) : (
             <div className="settings-rows settings-rows--split">
-              <SettingRow mark={<Clipboard size={15} />} title="剪贴板链接识别" detail="回到书房时只识别刚复制的链接；导入前一定先问你。">
+              <SettingRow mark={<Clipboard size={15} />} title="剪贴板链接识别" detail="回到学习空间时只识别刚复制的链接；导入前一定先问你。">
                 <CapabilityChip kind="native" value={capabilities?.nativeCapabilities.clipboard} reason={nativeReason(capabilities?.nativeCapabilities.clipboard)} />
               </SettingRow>
               <SettingRow mark={<Bell size={15} />} title="系统通知" detail="学习提醒通道；未接入时不会伪装成可配置开关。">

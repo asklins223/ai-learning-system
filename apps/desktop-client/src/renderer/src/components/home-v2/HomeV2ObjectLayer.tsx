@@ -74,7 +74,7 @@ function RegionFeatureMenu({ zone, onBack }: { readonly zone: ObjectZone; readon
     <nav className="home-v2-region-menu" data-region={zone} aria-label={`${copy.label}功能`}>
       <header>
         <span><strong>{copy.label}</strong><small>{copy.detail}</small></span>
-        <button type="button" onClick={onBack} aria-label={`退出${copy.label}`} title="回到房间总览"><X size={18} aria-hidden="true" /></button>
+        <button type="button" onClick={onBack} aria-label={`退出${copy.label}`} title="回到学习空间总览"><X size={18} aria-hidden="true" /></button>
       </header>
       <div className="home-v2-region-menu__features">
         {features.map((definition, index) => {
@@ -211,7 +211,7 @@ export function HomeV2ObjectLayer() {
       runFeature("current-target");
       return;
     }
-    if (home.primaryLabel === "查看书房目录") {
+    if (home.primaryLabel === "查看学习空间目录") {
       runFeature("catalog");
       return;
     }

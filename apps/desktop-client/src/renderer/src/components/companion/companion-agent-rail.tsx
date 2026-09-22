@@ -39,9 +39,12 @@ import {
  * 1. **文案只用 `safeLabel`**（收敛层已经保证），这里不合成描述。
  * 2. **不做表演**：状态点只在 `running` 呼吸、`waiting_confirmation` 脉冲；其余是静态
  *    的落定态。方案 §5 明确不做第二层打字机、不做循环旋转光晕。
- * 3. **收不收由回合状态决定，不由计时器猜**：`assistant.final` 后 400ms 收成一行摘要；
+ * 3. **收不收由回合状态决定，退场由气泡决定**：`assistant.final` 后 400ms 收成一行摘要；
  *    用户按停止保留 2s（让他看见"停在这里"）；出错**不自动收**——错误必须被看见。
- *    收起后的摘要也不是常驻：done 态再停留 ~5s 整条退场（完整留痕在历史抽屉）。
+ *    轨道自己**不计时退场**：它跟着头顶那条消息气泡一起消失（见 `companionAgentRailVisible`
+ *    与 `leaving`）。以前它按"轮结束 + 5.4s"自己收，而气泡要等朗读和停留计时（实测
+ *    15s 以上），两条时间线各走各的；更要命的是 `stopped`/`failed` 分支根本没有退场
+ *    条件，那行摘要就永久挂在头顶。
  */
 
 /** 本 run 的真实消耗。来自 `companion_turn_runs`，不是客户端数事件数出来的。 */
@@ -53,6 +56,21 @@ export interface CompanionAgentRailProgress {
 }
 
 export type CompanionAgentRailTurnState = "running" | "done" | "stopped" | "failed";
+
+/**
+ * 轨道在不在，只有一个判据：**这一轮调用过工具**，并且**此刻头顶有消息气泡**。
+ *
+ * 第二个条件是 2026-09-22 补的：轨道以前自己计时退场（轮结束 + 5.4s），而气泡要等朗读
+ * 露完再停留，两条时间线互不知情——气泡还说着话轨道就没了；而 `stopped`/`failed` 两个
+ * 分支压根没设退场计时，那行摘要从此永久挂在头顶（停止之后气泡早就收了，轨道还在）。
+ * 过程留痕本来就在历史抽屉里，头顶这一条的寿命就该等于气泡的寿命。
+ */
+export function companionAgentRailVisible(
+  nodes: CompanionAgentNodes,
+  bubblePresent: boolean,
+): boolean {
+  return bubblePresent && nodes.some((node) => node.kind === "tool");
+}
 
 /**
  * 工具名 → 图标。方案 §1 要求「按工具名映射（打开卡片/复习/星图等）」。
@@ -109,6 +127,7 @@ export function CompanionAgentRail({
   progress,
   turnState,
   tight = false,
+  leaving = false,
 }: {
   readonly nodes: CompanionAgentNodes;
   readonly progress: CompanionAgentRailProgress | null;
@@ -119,39 +138,31 @@ export function CompanionAgentRail({
    * 步数与工具次数，信息不丢。
    */
   readonly tight?: boolean;
+  /** 消息气泡正在退场：轨道同拍淡出，不留在原地等下一帧。 */
+  readonly leaving?: boolean;
 }) {
   const [collapsed, setCollapsed] = useState(false);
-  /** done 态摘要停留期满后的退场标记：true 时整条轨道卸载（留痕在抽屉）。 */
-  const [expired, setExpired] = useState(false);
 
   /**
    * 收起时机。`final` 后 400ms 收（让最后一步的落定被看见），停止后 2s 收
    * （"停在这里"需要停留），出错不收（错误被自动折叠掉等于没提示）。
    *
-   * 收起 ≠ 消失：摘要行在 done 态再停留 ~5s 就整条退场。以前没有退场条件，
-   * 上一轮的「1 次工具」会永久挂在头顶（连下一轮纯闲聊都在挂）——完整过程
-   * 留痕本来就在历史抽屉里，头顶不需要一条读起来像"没跑过的新任务"的常驻摘要。
+   * 这里只管"收成摘要"，不管消失——消失跟着气泡走（见文件头第 3 条约束）。
    */
   useEffect(() => {
     if (turnState === "running" || turnState === "failed") {
       setCollapsed(false);
-      setExpired(false);
       return;
     }
     if (turnState === "stopped") {
-      setExpired(false);
       const timer = window.setTimeout(() => setCollapsed(true), 2_000);
       return () => window.clearTimeout(timer);
     }
     const collapseTimer = window.setTimeout(() => setCollapsed(true), 400);
-    const expireTimer = window.setTimeout(() => setExpired(true), 5_400);
-    return () => {
-      window.clearTimeout(collapseTimer);
-      window.clearTimeout(expireTimer);
-    };
+    return () => window.clearTimeout(collapseTimer);
   }, [turnState]);
 
-  if (nodes.length === 0 || expired) return null;
+  if (nodes.length === 0) return null;
 
   const folded = collapsed || tight;
   const { hiddenCount, visible } = visibleAgentNodes(nodes);
@@ -165,6 +176,7 @@ export function CompanionAgentRail({
       data-turn={turnState}
       data-collapsed={folded || undefined}
       data-tight={tight || undefined}
+      data-leaving={leaving || undefined}
       role="status"
       aria-live="polite"
       aria-label="Mao 正在做的事"

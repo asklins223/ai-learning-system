@@ -7,7 +7,7 @@ type SurfaceReturnControlProps = {
   readonly disabled?: boolean;
 };
 
-export function SurfaceReturnControl({ className, label = "返回书房", disabled = false }: SurfaceReturnControlProps) {
+export function SurfaceReturnControl({ className, label = "返回学习空间", disabled = false }: SurfaceReturnControlProps) {
   const invoke = useRoomStore((state) => state.invoke);
 
   return (
@@ -16,7 +16,7 @@ export function SurfaceReturnControl({ className, label = "返回书房", disabl
       type="button"
       disabled={disabled}
       onClick={() => invoke("home")}
-      aria-label="关闭任务面并返回房间"
+      aria-label="关闭任务面并返回学习空间"
       data-surface-initial-focus="true"
     >
       <ArrowLeft size={17} aria-hidden="true" />

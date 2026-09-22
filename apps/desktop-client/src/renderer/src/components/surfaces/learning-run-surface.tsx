@@ -4,14 +4,18 @@ import {
   ArrowLeft,
   ArrowRight,
   ArrowUp,
+  Check,
   GripVertical,
+  Link2,
   Lightbulb,
   LoaderCircle,
   Pause,
   Play,
   Plus,
   RotateCcw,
+  Sparkles,
   Trash2,
+  X,
 } from "lucide-react";
 import type {
   ArtifactPayload,
@@ -71,6 +75,7 @@ import { ObjectiveProgressBand } from "./ObjectiveProgressBand";
 import { progressSegmentForOutcome } from "./objective-progress-band";
 import { VoiceTeachbackEditor } from "./run-voice-input";
 import { microphoneAvailabilityCopy, probeMicrophone, type MicrophoneAvailability } from "../voice-capability";
+import { learningRunFeedback } from "./objective-quest-presentation";
 
 type ResultState =
   | { kind: "idle" }
@@ -136,16 +141,6 @@ const outcomeSeal: Record<LearningRunOutcome, string> = {
   declared_unable: "已记录",
 };
 
-const outcomeHeadline: Record<LearningRunOutcome, string> = {
-  demonstrated: "这次回答提供了足够证据",
-  partial: "这次只证明了一部分",
-  needs_repair: "这次结果显示仍有内容需要修补",
-  not_assessable: "这次回答没有形成可评估的证据",
-  practice_completed: "本次练习已经完成",
-  skipped: "本次已跳过",
-  declared_unable: "已记录暂时不会",
-};
-
 const facetLabels: Record<string, string> = {
   recall: "回忆",
   paraphrase: "复述",
@@ -172,6 +167,68 @@ const verdictLabels: Record<string, string> = {
  * 同位置同颜色——用户分不清自己到底做成了什么。
  */
 const SEALLESS_OUTCOMES: ReadonlySet<LearningRunOutcome> = new Set(["skipped", "declared_unable"]);
+
+function LearningRunCeremony({
+  active,
+  headline,
+  achievement,
+  onFinish,
+}: {
+  readonly active: boolean;
+  readonly headline: string;
+  readonly achievement: string;
+  readonly onFinish: () => void;
+}) {
+  const motionMode = useRoomStore((state) => state.motionMode);
+  const reducedMotion = useRoomStore((state) => state.reducedMotion);
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    if (!active) {
+      setVisible(false);
+      return;
+    }
+    if (motionMode === "off" || reducedMotion) {
+      setVisible(false);
+      onFinish();
+      return;
+    }
+    setVisible(true);
+    const duration = motionMode === "lite" ? 700 : 2_600;
+    const finish = () => {
+      setVisible(false);
+      onFinish();
+    };
+    const timer = window.setTimeout(finish, duration);
+    const skip = () => finish();
+    window.addEventListener("pointerdown", skip, { once: true });
+    window.addEventListener("keydown", skip, { once: true });
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("pointerdown", skip);
+      window.removeEventListener("keydown", skip);
+    };
+  }, [active, motionMode, onFinish, reducedMotion]);
+
+  if (!visible) return null;
+  return (
+    <div className="learning-run-ceremony" role="status" aria-live="polite" aria-label={`${headline}。${achievement}`}>
+      <div className="learning-run-ceremony__glow" aria-hidden="true" />
+      <i className="learning-run-ceremony__leaf learning-run-ceremony__leaf--one" aria-hidden="true" />
+      <i className="learning-run-ceremony__leaf learning-run-ceremony__leaf--two" aria-hidden="true" />
+      <i className="learning-run-ceremony__leaf learning-run-ceremony__leaf--three" aria-hidden="true" />
+      <div className="learning-run-ceremony__content">
+        <div className="learning-run-ceremony__stamp" aria-hidden="true">
+          <Sparkles size={20} />
+          <strong>过关</strong>
+        </div>
+        <h2>{headline}</h2>
+        <p>{achievement}</p>
+        <small>点击或按任意键跳过</small>
+      </div>
+    </div>
+  );
+}
 
 /**
  * 这次真说清了些什么——只从逐条判定里数，不看 demonstratedFacets。后者是理解
@@ -610,10 +667,11 @@ function PartEditor({
     };
     return (
       <div className="run-repair-list">
-        {part.publicElementIds.map((elementId) => {
-          const operation = operations.find((candidate) => repairOperationTarget(candidate) === elementId);
-          return (
-            <div className="run-repair-row" key={elementId}>
+        <div className="run-repair-list__source">
+          {part.publicElementIds.map((elementId) => {
+            const operation = operations.find((candidate) => repairOperationTarget(candidate) === elementId);
+            return (
+              <div className="run-repair-row" key={elementId}>
               <span>{indexedPublicLabel(labels, part.publicElementIds, elementId, "元素")}</span>
               <select aria-label={`${indexedPublicLabel(labels, part.publicElementIds, elementId, "元素")}的修正动作`} value={operation?.op ?? ""} onChange={(event) => updateOperation(elementId, event.target.value)}>
                 <option value="">保持不变</option>
@@ -642,9 +700,23 @@ function PartEditor({
                   {part.publicElementIds.map((id, index) => <option key={id} value={index}>第 {index + 1} 位</option>)}
                 </select>
               ) : null}
-            </div>
-          );
-        })}
+              </div>
+            );
+          })}
+        </div>
+        <aside className="run-repair-preview" aria-live="polite">
+          <strong><Check size={15} aria-hidden="true" />修补预览</strong>
+          {operations.length ? (
+            <ul>
+              {operations.map((operation, index) => {
+                const targetId = repairOperationTarget(operation);
+                const target = targetId ? indexedPublicLabel(labels, part.publicElementIds, targetId, "元素") : "当前位置";
+                const action = operation.op === "replace" ? "替换" : operation.op === "remove" ? "移除" : operation.op === "move" ? `移动到第 ${operation.toIndex + 1} 位` : "在后面插入";
+                return <li key={`${operation.op}-${targetId}-${index}`}><span>{target}</span><b>{action}</b></li>;
+              })}
+            </ul>
+          ) : <p>还没有修改；原内容会保持不变。</p>}
+        </aside>
       </div>
     );
   }
@@ -673,8 +745,20 @@ function ChoiceEditor({
           aria-checked={value === id}
           className={`run-choice-option${value === id ? " is-selected" : ""}`}
           onClick={() => onChange(id)}
+          onKeyDown={(event) => {
+            if (!["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight"].includes(event.key)) return;
+            event.preventDefault();
+            const offset = event.key === "ArrowDown" || event.key === "ArrowRight" ? 1 : -1;
+            const nextIndex = (index + offset + ids.length) % ids.length;
+            onChange(ids[nextIndex]!);
+            window.requestAnimationFrame(() => {
+              event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("[role='radio']")[nextIndex]?.focus();
+            });
+          }}
         >
-          <span className="run-choice-option__mark" aria-hidden="true">{value === id ? "●" : "○"}</span>
+          <span className="run-choice-option__mark" aria-hidden="true">
+            {value === id ? <Check size={15} strokeWidth={3} /> : null}
+          </span>
           {indexedPublicLabel(labels, ids, id, `第 ${index + 1} 个选项`)}
         </button>
       ))}
@@ -777,10 +861,17 @@ function MatchingEditor({
         </ul>
       </div>
       {value.length > 0 ? (
-        <p className="run-matching__trail" role="status">
-          已连 {value.length} 对
-          <button type="button" className="text-action" onClick={() => { onChange([]); setActiveLeft(null); }}>全部重连</button>
-        </p>
+        <div className="run-matching__result" role="status">
+          <div className="run-matching__trail"><Link2 size={14} aria-hidden="true" />已连 {value.length} 对<button type="button" className="text-action" onClick={() => { onChange([]); setActiveLeft(null); }}>全部重连</button></div>
+          <ul className="run-matching__pairs" aria-label="已经组成的配对">
+            {value.map((pair) => (
+              <li key={`${pair.leftId}-${pair.rightId}`}>
+                <span>{labels?.[pair.leftId] ?? pair.leftId}</span><ArrowRight size={13} aria-hidden="true" /><span>{labels?.[pair.rightId] ?? pair.rightId}</span>
+                <button type="button" className="run-icon-button" aria-label={`撤销${labels?.[pair.leftId] ?? pair.leftId}的配对`} onClick={() => onChange(value.filter((candidate) => candidate.leftId !== pair.leftId))}><X size={13} aria-hidden="true" /></button>
+              </li>
+            ))}
+          </ul>
+        </div>
       ) : null}
     </div>
   );
@@ -797,32 +888,144 @@ function OrderingEditor({
   readonly value: string[];
   readonly onChange: (value: string[]) => void;
 }) {
+  const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
+  const [grabbedIndex, setGrabbedIndex] = useState<number | null>(null);
+  const [announcement, setAnnouncement] = useState("尚未调整顺序");
+
+  const moveTo = (fromIndex: number, toIndex: number) => {
+    if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0 || fromIndex >= value.length || toIndex >= value.length) return;
+    const next = [...value];
+    const [moved] = next.splice(fromIndex, 1);
+    next.splice(toIndex, 0, moved!);
+    onChange(next);
+    setAnnouncement(`${indexedPublicLabel(labels, ids, moved!, "排序项")}已移到第 ${toIndex + 1} 位`);
+  };
   const move = (index: number, offset: -1 | 1) => {
     const nextIndex = index + offset;
     if (nextIndex < 0 || nextIndex >= value.length) return;
-    const next = [...value];
-    [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
-    onChange(next);
+    moveTo(index, nextIndex);
   };
 
   return (
-    <ol className="run-order-list" aria-label="可调整顺序的内容">
-      {value.map((id, index) => (
-        <li key={`${id}-${index}`}>
-          {/* 排序题的全部认知负荷在「谁在第几位」，此前屏幕上没有任何位置标记
-              （<ol> 的 list-style 被关掉，也没有别的编号），移动按钮又在 500px 外
-              的最右端——用户要自己在心里编号（31 号文档 P24）。 */}
-          <b className="run-order-index">{index + 1}</b>
-          <GripVertical size={16} aria-hidden="true" />
-          <span className="run-order-label">{indexedPublicLabel(labels, ids, id, "排序项")}</span>
-          <span className="run-order-controls">
-            <button type="button" className="run-icon-button" disabled={index === 0} onClick={() => move(index, -1)} aria-label={`将${indexedPublicLabel(labels, ids, id, "排序项")}上移`}><ArrowUp size={14} aria-hidden="true" /></button>
-            <button type="button" className="run-icon-button" disabled={index === value.length - 1} onClick={() => move(index, 1)} aria-label={`将${indexedPublicLabel(labels, ids, id, "排序项")}下移`}><ArrowDown size={14} aria-hidden="true" /></button>
-          </span>
-        </li>
-      ))}
-      {ids.length === 0 ? <li className="run-empty-row">这道题没有给出可以排序的内容。</li> : null}
-    </ol>
+    <div className="run-ordering">
+      <p className="meta">拖动路标调整顺序；键盘按空格抓取，再用方向键移动。</p>
+      <ol className="run-order-list" aria-label="可调整顺序的内容">
+        {value.map((id, index) => (
+          <li
+            key={id}
+            draggable
+            data-dragging={draggedIndex === index ? "true" : "false"}
+            onDragStart={() => setDraggedIndex(index)}
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={(event) => { event.preventDefault(); if (draggedIndex !== null) moveTo(draggedIndex, index); setDraggedIndex(null); }}
+            onDragEnd={() => setDraggedIndex(null)}
+          >
+            <b className="run-order-index">{index + 1}</b>
+            <button
+              type="button"
+              className="run-order-grip"
+              aria-pressed={grabbedIndex === index}
+              aria-label={`${indexedPublicLabel(labels, ids, id, "排序项")}，当前第 ${index + 1} 位。按空格抓取后用上下方向键移动`}
+              onKeyDown={(event) => {
+                if (event.key === " " || event.key === "Enter") {
+                  event.preventDefault();
+                  setGrabbedIndex(grabbedIndex === index ? null : index);
+                  setAnnouncement(grabbedIndex === index ? "已放下" : `已抓取第 ${index + 1} 项`);
+                } else if (event.key === "Escape") {
+                  setGrabbedIndex(null);
+                  setAnnouncement("已取消移动");
+                } else if (grabbedIndex === index && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+                  event.preventDefault();
+                  const nextIndex = Math.max(0, Math.min(value.length - 1, index + (event.key === "ArrowUp" ? -1 : 1)));
+                  moveTo(index, nextIndex);
+                  setGrabbedIndex(nextIndex);
+                  window.requestAnimationFrame(() => document.querySelectorAll<HTMLButtonElement>(".run-order-grip")[nextIndex]?.focus());
+                }
+              }}
+            ><GripVertical size={17} aria-hidden="true" /></button>
+            <span className="run-order-label">{indexedPublicLabel(labels, ids, id, "排序项")}</span>
+            <span className="run-order-controls">
+              <button type="button" className="run-icon-button" disabled={index === 0} onClick={() => move(index, -1)} aria-label={`将${indexedPublicLabel(labels, ids, id, "排序项")}上移`}><ArrowUp size={14} aria-hidden="true" /></button>
+              <button type="button" className="run-icon-button" disabled={index === value.length - 1} onClick={() => move(index, 1)} aria-label={`将${indexedPublicLabel(labels, ids, id, "排序项")}下移`}><ArrowDown size={14} aria-hidden="true" /></button>
+            </span>
+          </li>
+        ))}
+        {ids.length === 0 ? <li className="run-empty-row">这道题没有给出可以排序的内容。</li> : null}
+      </ol>
+      <p className="sr-only" aria-live="polite">{announcement}</p>
+    </div>
+  );
+}
+
+type StructuredBundleInteraction = Extract<LearningTaskPublic["activeVariant"]["interaction"], { kind: "structured_bundle" }>;
+type StructuredBundlePayload = Extract<ArtifactPayload, { kind: "structured_bundle" }>;
+
+function StructuredBundleEditor({
+  interaction,
+  value,
+  onChange,
+  onReviewReady,
+}: {
+  readonly interaction: StructuredBundleInteraction;
+  readonly value: StructuredBundlePayload;
+  readonly onChange: (value: StructuredBundlePayload) => void;
+  readonly onReviewReady: () => void;
+}) {
+  const [activePart, setActivePart] = useState(0);
+  const reviewing = activePart >= interaction.parts.length;
+  const part = interaction.parts[Math.min(activePart, interaction.parts.length - 1)];
+  const partValue = value.partAnswers[Math.min(activePart, value.partAnswers.length - 1)];
+
+  if (reviewing) {
+    return (
+      <div className="run-bundle-review">
+        <header><Check size={18} aria-hidden="true" /><div><strong>提交前再看一遍</strong><span>两个证明片段都完成后，整组答案会一起提交。</span></div></header>
+        <ol>
+          {interaction.parts.map((item, index) => (
+            <li key={item.partId}><span>片段 {index + 1}</span><strong>{item.kind === "ordering" ? "顺序整理" : item.kind === "relation" ? "关系搭建" : "纠错修补"}</strong><button type="button" className="text-action" onClick={() => setActivePart(index)}>返回修改</button></li>
+          ))}
+        </ol>
+        <button type="button" className="button" onClick={() => setActivePart(Math.max(0, interaction.parts.length - 1))}>返回上一步</button>
+      </div>
+    );
+  }
+
+  if (!part || !partValue) return <p className="run-inline-error">组合题的片段数据不完整，请重新同步。</p>;
+  const labels = part.kind === "ordering"
+    ? part.publicTokenLabels
+    : part.kind === "relation"
+      ? part.publicNodeLabels
+      : part.publicElementLabels;
+  const replacementLabels = part.kind === "repair" ? part.replacementOptionLabels : undefined;
+  return (
+    <div className="run-bundle-editor">
+      <div className="run-bundle-progress" role="status" aria-label={`组合证明，第 ${activePart + 1} 个，共 ${interaction.parts.length} 个`}>
+        {interaction.parts.map((item, index) => <i key={item.partId} data-active={index <= activePart ? "true" : "false"} />)}
+        <span>{activePart + 1} / {interaction.parts.length}</span>
+      </div>
+      <section className="run-bundle-part">
+        <h4>第 {activePart + 1} 个证明片段</h4>
+        <PartEditor
+          part={part}
+          value={partValue}
+          labels={labels}
+          replacementLabels={replacementLabels}
+          onChange={(nextPart) => {
+            const next = [...value.partAnswers] as [StructuredPartAnswerV1] | [StructuredPartAnswerV1, StructuredPartAnswerV1];
+            next[activePart] = nextPart;
+            onChange({ ...value, partAnswers: next });
+          }}
+        />
+      </section>
+      <footer className="run-bundle-nav">
+        <button type="button" className="button" disabled={activePart === 0} onClick={() => setActivePart((current) => Math.max(0, current - 1))}>上一个片段</button>
+        <button type="button" className="button primary" onClick={() => {
+          const next = activePart + 1;
+          setActivePart(next);
+          if (next >= interaction.parts.length) onReviewReady();
+        }}>{activePart === interaction.parts.length - 1 ? "复核整组答案" : "下一个片段"}</button>
+      </footer>
+    </div>
   );
 }
 
@@ -830,10 +1033,12 @@ function InteractionEditor({
   task,
   value,
   onChange,
+  onStructuredReview,
 }: {
   readonly task: LearningTaskPublic;
   readonly value: ArtifactPayload;
   readonly onChange: (value: ArtifactPayload) => void;
+  readonly onStructuredReview: () => void;
 }) {
   const interaction = task.activeVariant.interaction;
 
@@ -911,37 +1116,7 @@ function InteractionEditor({
   }
 
   if (interaction.kind === "structured_bundle" && value.kind === "structured_bundle") {
-    return (
-      <div className="run-bundle-editor">
-        {interaction.parts.map((part, index) => {
-          const partValue = value.partAnswers[index];
-          const labels = part.kind === "ordering"
-            ? part.publicTokenLabels
-            : part.kind === "relation"
-              ? part.publicNodeLabels
-              : part.kind === "repair"
-                ? part.publicElementLabels
-                : undefined;
-          const replacementLabels = part.kind === "repair" ? part.replacementOptionLabels : undefined;
-          return (
-            <section className="run-bundle-part" key={part.partId}>
-              <h4>第 {index + 1} 个证明片段</h4>
-              <PartEditor
-                part={part}
-                value={partValue}
-                labels={labels}
-                replacementLabels={replacementLabels}
-                onChange={(nextPart) => {
-                  const next = [...value.partAnswers] as [StructuredPartAnswerV1] | [StructuredPartAnswerV1, StructuredPartAnswerV1];
-                  next[index] = nextPart;
-                  onChange({ ...value, partAnswers: next });
-                }}
-              />
-            </section>
-          );
-        })}
-      </div>
-    );
+    return <StructuredBundleEditor interaction={interaction} value={value} onChange={onChange} onReviewReady={onStructuredReview} />;
   }
 
   return <p className="run-inline-error">这道题要的作答方式这台电脑给不了，已经停住没有提交。</p>;
@@ -994,6 +1169,8 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   const [dirty, setDirty] = useState(false);
   const [draftWriteBusy, setDraftWriteBusy] = useState(false);
   const [draftWriteBlocked, setDraftWriteBlocked] = useState(false);
+  const [orderingTouched, setOrderingTouched] = useState(false);
+  const [structuredReviewReady, setStructuredReviewReady] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
   const [resultState, setResultState] = useState<ResultState>({ kind: "idle" });
   const [targetReveal, setTargetReveal] = useState<TargetRevealState>({ kind: "idle" });
@@ -1013,6 +1190,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   const [resyncing, setResyncing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [pendingAction, setPendingAction] = useState<LearningRunAllowedActionV2 | null>(null);
+  const [pendingHintAction, setPendingHintAction] = useState<Extract<LearningRunAllowedActionV2, { kind: "request_hint" }> | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [resultPollTick, setResultPollTick] = useState(0);
   const [resultQueryBusy, setResultQueryBusy] = useState(false);
@@ -1066,6 +1244,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   const primaryHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const focusKeyRef = useRef<string | null>(null);
   const confirmationHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const hintConfirmationHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const confirmationReturnFocusRef = useRef<HTMLElement | null>(null);
   const recoveryHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const unavailableHeadingRef = useRef<HTMLHeadingElement | null>(null);
@@ -1073,6 +1252,10 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   const resultOutcome = resultState.kind === "result" ? resultState.value.result.outcome : null;
   const demonstratedResult = resultOutcome !== null && shouldConfirmCompanionForOutcome(resultOutcome);
   const showResult = resultState.kind === "result" || resultState.kind === "terminal";
+  const finishResultCeremony = useCallback(() => {
+    setResultAcknowledgementActive(false);
+    setCompanionMoment("idle");
+  }, [setCompanionMoment]);
 
   useEffect(() => {
     onPageChange(showResult ? "result" : "assessment");
@@ -1122,6 +1305,8 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
     setEditor(null);
     setDraftWriteBusy(false);
     setDraftWriteBlocked(false);
+    setOrderingTouched(false);
+    setStructuredReviewReady(false);
     setReturnContract(null);
     setResultState({ kind: "idle" });
     setResultAcknowledgementActive(false);
@@ -1133,6 +1318,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
     setSubmitting(false);
     setActionBusy(false);
     setPendingAction(null);
+    setPendingHintAction(null);
     setHints([]);
     setActiveReviewTarget(null);
     setCompanionMoment("idle");
@@ -1153,10 +1339,10 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   useEffect(() => {
     const content = primaryContentRef.current;
     if (!content) return;
-    if (pendingAction) content.setAttribute("inert", "");
+    if (pendingAction || pendingHintAction) content.setAttribute("inert", "");
     else content.removeAttribute("inert");
     return () => content.removeAttribute("inert");
-  }, [pendingAction]);
+  }, [pendingAction, pendingHintAction]);
 
   useEffect(() => {
     if (!snapshot) return;
@@ -1252,6 +1438,8 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
       setDraftRevision(0);
       setDraftStatus("尚未输入");
       setDirty(false);
+      setOrderingTouched(false);
+      setStructuredReviewReady(false);
     }
     const draftEditorRevision = editorRevisionRef.current;
 
@@ -1281,7 +1469,10 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
         setDraftStatus("已保留本地未同步输入，正在继续保存…");
       } else if (editorRevisionMatchesRequest(draftEditorRevision, editorRevisionRef.current)) {
         setDraftStatus("已找回你没写完的草稿");
-        if (draft.payload) setEditor(editorFromDraft(draft.payload));
+        if (draft.payload) {
+          setEditor(editorFromDraft(draft.payload));
+          if (draft.payload.kind === "ordering") setOrderingTouched(true);
+        }
       } else {
         setDraftStatus("已取回草稿；你刚写的还没存上");
       }
@@ -1569,6 +1760,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
       if (canAcknowledge && acknowledgedResultKeyRef.current !== resultKey) {
         acknowledgedResultKeyRef.current = resultKey;
         setResultAcknowledgementActive(true);
+        setCompanionMoment("confirm");
         // The one-shot confirmation is unlocked only by a trusted,
         // demonstrated result observed after processing in this mount. Keep
         // it pending until the cottage has fully returned to its idle phase;
@@ -1636,6 +1828,8 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   const updateEditor = (next: ArtifactPayload) => {
     editorRevisionRef.current += 1;
     setEditor(next);
+    if (next.kind === "ordering") setOrderingTouched(true);
+    if (next.kind === "structured_bundle") setStructuredReviewReady(false);
     setDirty(true);
     setDraftWriteBlocked(false);
     setDraftStatus(recovery === "draft" ? "先把草稿存上，再继续写" : "有未保存修改");
@@ -1643,6 +1837,14 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
 
   const submit = async (payload: ArtifactPayload) => {
     if (!snapshot?.activeTask || !window.ailearn || submitting || resyncing || recovery !== null) return;
+    if (payload.kind === "ordering" && !orderingTouched) {
+      setDraftStatus("先调整一次顺序，确认这不是题目给出的随机初始排列");
+      return;
+    }
+    if (payload.kind === "structured_bundle" && !structuredReviewReady) {
+      setDraftStatus("先完成全部片段并复核整组答案，再提交");
+      return;
+    }
     if (payload.kind !== "declared_unable" && !payloadIsReady(payload)) {
       setDraftStatus("先完成当前任务，再提交可信证据");
       return;
@@ -1810,6 +2012,18 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
     await dispatchAction(action, true);
   };
 
+  const closeHintConfirmation = () => {
+    setPendingHintAction(null);
+    window.requestAnimationFrame(() => primaryHeadingRef.current?.focus({ preventScroll: true }));
+  };
+
+  const confirmHint = async () => {
+    const action = pendingHintAction;
+    if (!action) return;
+    setPendingHintAction(null);
+    await dispatchAction(action, true);
+  };
+
   const handleConfirmationKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (event.key === "Escape") {
       event.preventDefault();
@@ -1837,6 +2051,12 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
     const frame = window.requestAnimationFrame(() => confirmationHeadingRef.current?.focus({ preventScroll: true }));
     return () => window.cancelAnimationFrame(frame);
   }, [pendingAction]);
+
+  useEffect(() => {
+    if (!pendingHintAction) return;
+    const frame = window.requestAnimationFrame(() => hintConfirmationHeadingRef.current?.focus({ preventScroll: true }));
+    return () => window.cancelAnimationFrame(frame);
+  }, [pendingHintAction]);
 
   /**
    * 语音替代项在麦克风不可用时**保留但禁用**，并把原因写在旁边（复盘 #8）：
@@ -1914,7 +2134,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
     : returnContract?.returnTargetV2 ?? null;
   const returnTarget = contractTarget ?? snapshot.returnTargetV2;
   const exitRoute = routeForReturnTarget(returnTarget);
-  const exitDestinationLabel = exitRoute.kind === "review.queue" ? "回到复习队列" : "返回书房";
+  const exitDestinationLabel = exitRoute.kind === "review.queue" ? "回到复习队列" : "返回学习空间";
   // 「同步中」是内部词：用户要知道的不是数据在同步，而是回去之后落点还没定。
   const resultReturnLabel = returnContract?.status === "projection_pending" ? `确认中 · ${exitDestinationLabel}` : exitDestinationLabel;
   const recoveryHeading = recovery === "draft" ? "草稿版本需要同步" : "上一动作结果需要确认";
@@ -1923,7 +2143,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
     : processingPhase === "assessing"
       ? "回答已锁定，正在评估"
       : phaseLabels[processingPhase];
-  const busy = pendingAction !== null || actionBusy || resyncing || recovery !== null;
+  const busy = pendingAction !== null || pendingHintAction !== null || actionBusy || resyncing || recovery !== null;
   const actionLinks = [
     ...alternativeActions,
     ...snapshot.allowedActions.filter((action) => ["pause", "resume", "request_hint", "activate_followup", "finish_current_evidence", "finish_without_commit", "retry_prepare", "retry_assessment", "retry_commit"].includes(action.kind)),
@@ -1990,13 +2210,23 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
       <button
         key={actionKey(action)}
         type="button"
-        className="button"
+      className="button"
         disabled={busy || (isHint && hintsExhausted) || blockedSwitch}
         title={blockedSwitch ? microphoneReason : undefined}
-        onClick={() => void dispatchAction(action)}
+        onClick={() => {
+          const needsDowngradeConfirmation = isHint
+            && hints.length === 0
+            && snapshot.publishedTargetEligibility === "eligible"
+            && Boolean(activeTask?.assistancePolicy.exposureLowersTrust);
+          if (needsDowngradeConfirmation && action.kind === "request_hint") {
+            setPendingHintAction(action);
+            return;
+          }
+          void dispatchAction(action);
+        }}
       >
         {actionIcon(action)}
-        {label}
+        <span>{label}{isHint && hints.length === 0 && snapshot.publishedTargetEligibility === "eligible" && activeTask?.assistancePolicy.exposureLowersTrust ? <small className="learning-run-action-cost">使用后转为练习</small> : null}</span>
       </button>
     );
   };
@@ -2006,14 +2236,22 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   const moreActions = actionLinks.filter((action) =>
     action.kind !== "request_hint" && !quickActionKeys.has(actionKey(action)));
   const thisTime = thisTimeVerdicts(result ?? undefined);
+  const feedback = result ? learningRunFeedback(result) : null;
+  const runModeLabel = snapshot.publishedTargetEligibility === "eligible" && !hints.some((entry) => entry.downgraded)
+    ? "正式挑战"
+    : snapshot.publishedTargetEligibility === "blocked"
+      ? "暂不计入掌握"
+      : "练习关";
 
   return (
     <>
-      <div ref={primaryContentRef} className="learning-run-primary-content" aria-hidden={pendingAction ? true : undefined}>
+      <div ref={primaryContentRef} className="learning-run-primary-content" aria-hidden={pendingAction || pendingHintAction ? true : undefined}>
       {result || terminal ? (
-        <section className="learning-run-result-board" data-outcome={result ? result.outcome : "no_result"} data-acknowledgement={resultAcknowledgementActive ? "active" : "idle"}>
+        <>
+        {result && feedback ? <LearningRunCeremony active={resultAcknowledgementActive} headline={feedback.headline} achievement={feedback.achievement} onFinish={finishResultCeremony} /> : null}
+        <section className="learning-run-result-board" data-outcome={result ? result.outcome : "no_result"} data-tone={feedback?.tone ?? "neutral"} data-acknowledgement={resultAcknowledgementActive ? "active" : "idle"}>
           <aside className="learning-run-result-summary" data-tone={demonstratedResult ? "confirmed" : "neutral"}>
-            <span className="learning-run-result-summary__kicker">本次练习</span>
+            <span className="learning-run-result-summary__kicker">{result?.outcome === "practice_completed" ? "练习关完成" : "远征结果"}</span>
             {result && !SEALLESS_OUTCOMES.has(result.outcome) ? (
               <strong className="learning-run-result-summary__seal">{outcomeSeal[result.outcome]}</strong>
             ) : (
@@ -2033,17 +2271,27 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
                 <div><dt>这次说清</dt><dd>{thisTime.coveredCount} 条</dd></div>
               ) : null}
               <div><dt>用时</dt><dd>{formatClock(clock.seconds)}</dd></div>
-              <div><dt>算进理解</dt><dd>{result ? `${result.demonstratedFacets.length} 项` : "—"}</dd></div>
-              <div><dt>仍有缺口</dt><dd>{result ? `${result.gapFacets.length} 项` : "—"}</dd></div>
+              {result?.demonstratedFacets.length ? (
+                <div><dt>算进理解</dt><dd>{result.demonstratedFacets.length} 项</dd></div>
+              ) : null}
+              {result?.gapFacets.length ? (
+                <div><dt>仍有缺口</dt><dd>{result.gapFacets.length} 项</dd></div>
+              ) : null}
             </dl>
           </aside>
           <article className="learning-run-result-report">
             <header>
               <span>{runOriginLabel(snapshot.originV2)}</span>
               <h2 ref={primaryHeadingRef} tabIndex={-1} data-surface-initial-focus="true">
-                {result ? outcomeHeadline[result.outcome] : "这次旅程没有形成新的学习结果"}
+                {feedback?.headline ?? "这次旅程没有形成新的学习结果"}
               </h2>
             </header>
+            {feedback ? (
+              <div className="learning-run-result-companion" role="status">
+                <Sparkles size={17} aria-hidden="true" />
+                <p><strong>{feedback.tone === "success" ? "伴星回来了" : "这次线索已收好"}</strong><span>{feedback.achievement}</span></p>
+              </div>
+            ) : null}
             {result ? (
               <div className="learning-run-result-evidence">
                 {thisTime.coveredFacets.length ? (
@@ -2134,12 +2382,15 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
             <button type="button" className="button" onClick={openObjective}>查看理解目标</button>
           </div>
         </section>
+        </>
       ) : (
         <section className="learning-run-workbench" data-phase={snapshot.phase} data-interaction={activeTask?.activeVariant.interaction.kind ?? "none"}>
           <aside className="learning-run-journey">
-            <div className="learning-run-journey__state"><i aria-hidden="true" />{phaseLabels[snapshot.phase]}</div>
-            <span className="learning-run-journey__kicker">{runOriginLabel(snapshot.originV2)}</span>
-            <h2 title={snapshot.target.publicSummary}>{snapshot.target.publicSummary}</h2>
+            <div className="learning-run-journey__state"><i aria-hidden="true" />{runModeLabel}</div>
+            <div className="learning-run-journey__target">
+              <span className="learning-run-journey__kicker">{phaseLabels[snapshot.phase]} · {runOriginLabel(snapshot.originV2)}</span>
+              <h2 title={snapshot.target.publicSummary}>{snapshot.target.publicSummary}</h2>
+            </div>
             <dl>
               <div><dt>当前位置</dt><dd>{activeTask ? `问题 ${activeTask.sequence}` : phaseLabels[processingPhase]}</dd></div>
               <div><dt>作答方式</dt><dd>{activeTask ? interactionLabel(activeTask) : "等待下一步"}</dd></div>
@@ -2166,7 +2417,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
             {/* P21（B4）：求助面板从左侧导航栏搬进题面区。此前提示文字落在侧栏里
                 207px 宽的一栏、9px 字号，而"看过提示这轮只计练习分"那句只有 **7.5px**
                 ——全链路最小、却是最该看清的一句；求助信息和它要帮的题还隔着 250px。 */}
-            <div className={`learning-run-hint${hints.length > 0 ? " learning-run-hint--shown" : ""}`} role={hints.length > 0 ? "status" : undefined}>
+            {hints.length > 0 ? <div className="learning-run-hint learning-run-hint--shown" role="status">
               <Lightbulb size={15} aria-hidden="true" />
               {/*
                 提示正文必须包在一个元素里（2026-09-21 实机截图）：
@@ -2177,21 +2428,17 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
                 第三行内容再怎么加也挤不到正文列。
               */}
               <div className="learning-run-hint__body">
-                {hints.length > 0 ? (
-                  <ol className="learning-run-hint__levels">
-                    {hints.map((entry) => (
-                      <li key={entry.level}><span>{entry.text}</span></li>
-                    ))}
-                  </ol>
-                ) : (
-                  <span>卡住时可以先要一条提示，或换一种作答方式。</span>
-                )}
+                <ol className="learning-run-hint__levels">
+                  {hints.map((entry) => (
+                    <li key={entry.level}><span>{entry.text}</span></li>
+                  ))}
+                </ol>
                 {hints.some((entry) => entry.downgraded) ? <small>看过提示之后，这张卡本轮只计练习分，不再计正式理解分。</small> : null}
               </div>
-            </div>
+            </div> : null}
             <div className="learning-run-response">
               {canAnswerNow && activeTask ? (
-                <InteractionEditor task={activeTask} value={editor ?? emptyEditor(activeTask)} onChange={updateEditor} />
+                <InteractionEditor task={activeTask} value={editor ?? emptyEditor(activeTask)} onChange={updateEditor} onStructuredReview={() => setStructuredReviewReady(true)} />
             ) : unresolvedResultFailure ? (
               <div role="alert">
                 <strong className="title">暂时无法确认最终学习结果</strong>
@@ -2302,7 +2549,12 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
                 <button
                   type="button"
                   className="button primary"
-                  disabled={busy || submitting || !editor || (editor.kind !== "declared_unable" && !payloadIsReady(editor))}
+                  disabled={busy
+                    || submitting
+                    || !editor
+                    || (editor.kind !== "declared_unable" && !payloadIsReady(editor))
+                    || (editor.kind === "ordering" && !orderingTouched)
+                    || (editor.kind === "structured_bundle" && !structuredReviewReady)}
                   onClick={() => editor && void submit(editor)}
                 >
                   {submitting ? <LoaderCircle size={15} aria-hidden="true" /> : <ArrowRight size={15} aria-hidden="true" />}
@@ -2325,6 +2577,22 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
         </section>
       )}
       </div>
+
+      {pendingHintAction ? (
+        <div className="run-confirmation-backdrop run-hint-confirmation-backdrop">
+          <div className="run-confirmation run-hint-confirmation" role="alertdialog" aria-modal="true" aria-labelledby="learning-run-hint-confirmation-title" aria-describedby="learning-run-hint-confirmation-description" onKeyDown={(event) => {
+            if (event.key === "Escape") { event.preventDefault(); closeHintConfirmation(); }
+          }}>
+            <Lightbulb size={22} aria-hidden="true" />
+            <h2 id="learning-run-hint-confirmation-title" ref={hintConfirmationHeadingRef} tabIndex={-1}>看提示后，本轮会转为练习</h2>
+            <p id="learning-run-hint-confirmation-description">提示可以帮你继续走，但这次回答不会写入正式掌握。你仍然可以完成练习，并在之后重新正式验证。</p>
+            <div className="actions">
+              <button type="button" className="button primary" onClick={() => void confirmHint()}>确认查看提示</button>
+              <button type="button" className="button" onClick={closeHintConfirmation}>先自己想想</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {pendingAction ? (
         <div className="run-confirmation-backdrop">

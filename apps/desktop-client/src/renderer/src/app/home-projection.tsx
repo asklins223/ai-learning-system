@@ -141,7 +141,7 @@ export function HomeProjectionProvider({ children }: { children: ReactNode }) {
       if (session.status !== "authenticated" || !session.workspace) {
         if (generation === requestGenerationRef.current) {
           scopeRef.current = null;
-          setState({ projection: null, loading: false, failure: "请先登录后再读取学习书房。" });
+          setState({ projection: null, loading: false, failure: "请先登录后再读取学习空间。" });
         }
         return;
       }

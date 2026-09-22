@@ -7,6 +7,10 @@ import type {
   ActivityEventV1,
   TodayActivityV1,
 } from "@ailearn/shared/activity-surface-contracts";
+import type {
+  AllWorkspacesStatsOverviewV1,
+  StatsOverviewV1,
+} from "@ailearn/shared/stats-overview-contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SETTINGS_ATTENTION_AI_CONSENT } from "../../app/companion-consent-gate";
 import { useRoomStore } from "../../app/room-store";
@@ -98,19 +102,74 @@ function activity(overrides: Partial<TodayActivityV1> = {}): TodayActivityV1 {
   };
 }
 
-function installApi(result: GatewayResultV1<TodayActivityV1> | Error) {
+function statsOverview(overrides: Partial<StatsOverviewV1> = {}): StatsOverviewV1 {
+  return {
+    noteCount: 0,
+    cardCount: 0,
+    activeCardCount: 0,
+    evidenceCount: 0,
+    pendingReviewCount: 0,
+    hardEvidenceCount: 0,
+    capped: false,
+    activeObjectiveCount: 0,
+    objectiveReviewDueCount: 0,
+    ...overrides,
+  };
+}
+
+/**
+ * 两个空间：当前那个（理解空间，个人）与另一个（共学小组，协作）。
+ * 数字刻意取不同值——如果界面把"全部空间"渲染成了当前空间的数字，测试会当场红。
+ */
+function allSpaces(overrides: Partial<AllWorkspacesStatsOverviewV1> = {}): AllWorkspacesStatsOverviewV1 {
+  return {
+    version: 1,
+    workspaces: [
+      {
+        workspaceId: "55555555-5555-4555-8555-555555555555",
+        workspaceName: "理解空间",
+        role: "owner",
+        isPersonal: true,
+        isCurrent: true,
+        overview: statsOverview({ noteCount: 3, cardCount: 7, activeObjectiveCount: 2, pendingReviewCount: 1 }),
+      },
+      {
+        workspaceId: "66666666-6666-4666-8666-666666666666",
+        workspaceName: "共学小组",
+        role: "member",
+        isPersonal: false,
+        isCurrent: false,
+        overview: statsOverview({ noteCount: 5, cardCount: 9, activeObjectiveCount: 1, pendingReviewCount: 4 }),
+      },
+    ],
+    total: statsOverview({ noteCount: 8, cardCount: 16, activeObjectiveCount: 3, pendingReviewCount: 5 }),
+    capped: false,
+    skippedWorkspaceCount: 0,
+    ...overrides,
+  };
+}
+
+function installApi(
+  result: GatewayResultV1<TodayActivityV1> | Error,
+  spacesResult: GatewayResultV1<AllWorkspacesStatsOverviewV1> | Error = ok(allSpaces()),
+) {
   const getToday = vi.fn(async () => {
     if (result instanceof Error) throw result;
     return result;
+  });
+  const getOverviewAll = vi.fn(async () => {
+    if (spacesResult instanceof Error) throw spacesResult;
+    return spacesResult;
   });
   Object.defineProperty(window, "ailearn", {
     configurable: true,
     value: {
       auth: { getState: vi.fn(async () => ok(session())) },
       activity: { getToday },
+      stats: { getOverviewAll },
     },
   });
-  return { getToday };
+  return { getToday, getOverviewAll };
 }
 
 /** 判断条按钮靠 scrollIntoView 把读者送到分诊区；这里换成本地 spy 才断言得到。 */
@@ -136,6 +195,7 @@ afterEach(() => {
     activeRunId: null,
     settingsSection: "account",
     settingsAttention: null,
+    spaceIdentity: null,
   });
   vi.restoreAllMocks();
 });
@@ -319,5 +379,60 @@ describe("today log surface", () => {
     const open = await screen.findByRole("button", { name: /去处理 学习旅程超过/ });
     open.click();
     expect(useRoomStore.getState()).toMatchObject({ destination: "validation", activeRunId: RUN_ID });
+  });
+});
+
+/**
+ * 审计：「任何'我的总览'在语义上都是'当前空间的总览'，但文案用的是'我'」。
+ * 这一组用例钉住两件事——本页数字带上了"当前空间"限定；"全部空间"栏给的是
+ * 每个空间各自的数字与合计，而不是当前空间那一份的复述。
+ */
+describe("all-spaces scope", () => {
+  it("labels the page's own numbers as the current space", async () => {
+    useRoomStore.setState({ spaceIdentity: { name: "理解空间", role: "owner", isPersonal: true } });
+    installApi(ok(activity({ events: [event()] })));
+    render(<StudySurface />);
+
+    expect(await screen.findByText("当前空间 · 理解空间")).toBeTruthy();
+  });
+
+  it("shows every space's numbers plus a total, and marks which one is current", async () => {
+    installApi(ok(activity()));
+    render(<StudySurface />);
+
+    const list = await screen.findByRole("list", { name: "每个空间各自的进度" });
+    const rows = within(list).getAllByRole("listitem");
+    expect(rows).toHaveLength(2);
+    // 两个空间的数字各自成行：不是当前空间那一份的复述。
+    expect(within(rows[0]).getByText("笔记 3")).toBeTruthy();
+    expect(within(rows[0]).getByText("当前空间")).toBeTruthy();
+    expect(within(rows[1]).getByText("共学小组")).toBeTruthy();
+    expect(within(rows[1]).getByText("协作 · 成员")).toBeTruthy();
+    expect(within(rows[1]).getByText("笔记 5")).toBeTruthy();
+    expect(within(rows[1]).queryByText("当前空间")).toBeNull();
+
+    // 合计是两行之和，不是任何单行。
+    const total = document.querySelector(".day-spaces__total");
+    expect(total?.textContent).toContain("笔记 8");
+    expect(total?.textContent).toContain("待复习 5");
+    // 口径写在脸上：这一栏是全部空间，本页其余数字不是。
+    expect(screen.getByText("本页其余数字都只算当前空间；只有这里是全部空间。")).toBeTruthy();
+  });
+
+  it("says how many spaces are missing from the total instead of faking completeness", async () => {
+    installApi(ok(activity()), ok(allSpaces({ capped: true, skippedWorkspaceCount: 2 })));
+    render(<StudySurface />);
+
+    expect(await screen.findByText("还有 2 个空间没有计入合计。")).toBeTruthy();
+  });
+
+  it("never substitutes the current space's numbers when the all-spaces read fails", async () => {
+    installApi(ok(activity()), new Error("gateway down"));
+    render(<StudySurface />);
+
+    expect(await screen.findByText("全部空间的统计暂时读不到，本页其余数字仍然只算当前空间。")).toBeTruthy();
+    // 读不到就不给数字，也不留一行"合计"装作读到了。
+    expect(document.querySelector(".day-spaces__total")).toBeNull();
+    expect(screen.queryByRole("list", { name: "每个空间各自的进度" })).toBeNull();
   });
 });

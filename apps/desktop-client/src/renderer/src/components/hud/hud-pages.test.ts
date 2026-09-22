@@ -59,21 +59,25 @@ describe("HUD companion surface policies", () => {
     for (const page of EXPECTED_PAGES.filter((id) => !["home", "login", "register"].includes(id))) {
       const policy = HUD_PAGES[page].companion;
       expect(policy.proactive).toBe("silent");
-      expect(policy.interaction).toBe("on-demand");
+      expect(policy.interaction).toBe(page === "assessment" ? "none" : "on-demand");
       expect(policy.draggable).toBe(false);
     }
   });
 
   it("uses compact fail-closed assessment policies", () => {
-    for (const page of ["assessment", "result"] as const) {
-      expect(HUD_PAGES[page].companion).toMatchObject({
-        mode: "assessment",
-        framing: "bust",
-        interaction: "on-demand",
-        proactive: "silent",
-        draggable: false,
-      });
-    }
+    expect(HUD_PAGES.assessment.companion).toMatchObject({
+      mode: "hidden",
+      interaction: "none",
+      proactive: "silent",
+      draggable: false,
+    });
+    expect(HUD_PAGES.result.companion).toMatchObject({
+      mode: "assessment",
+      framing: "bust",
+      interaction: "on-demand",
+      proactive: "silent",
+      draggable: false,
+    });
   });
 
   it("does not register the history drawer as a HUD page", () => {

@@ -158,6 +158,21 @@ describe("列表焦点卡的主行动", () => {
     expect(next).not.toContain("开始首次验证");
   });
 
+  it("地图节点保留完整目标标题，远征册默认不抢占路线空间", async () => {
+    const title = "主流零样本 TTS 技术范式与跨语言声学建模";
+    installApi([listItem({ conceptLabel: title })]);
+    render(<ObjectiveLibrarySurface />);
+
+    const node = await waitFor(() => {
+      const button = document.querySelector<HTMLButtonElement>(".objective-quest-node");
+      expect(button).not.toBeNull();
+      return button;
+    });
+    expect(node?.textContent).toContain(title);
+    expect(node?.getAttribute("title")).toBe(title);
+    expect(document.querySelector(".objective-expedition__index")?.hasAttribute("open")).toBe(false);
+  });
+
   it("来源行被省略号截断时，完整标题仍然拿得到", async () => {
     installApi([listItem()]);
     render(<ObjectiveLibrarySurface />);
@@ -179,10 +194,10 @@ describe("读取计数的说法", () => {
    * 31 号文档 P12 撤回后留下的那一条：`已载入 16 / 16 条` 里的斜杠让人以为外面
    * 还有一个更大的池子没读进来，而 `nextCursor` 为 null 时并没有。搜索框的
    * placeholder 同理——它承诺的范围要跟着实际范围走。
-   */
+  */
   const counter = async () => {
-    await waitFor(() => expect(document.querySelector(".v3-goal-ledger__header p")).not.toBeNull());
-    return document.querySelector(".v3-goal-ledger__header p")?.textContent ?? "";
+    await waitFor(() => expect(document.querySelector(".objective-expedition__index > summary small")).not.toBeNull());
+    return document.querySelector(".objective-expedition__index > summary small")?.textContent ?? "";
   };
 
   it("全部读完时只说总数，不再摆一个 16 / 16", async () => {
