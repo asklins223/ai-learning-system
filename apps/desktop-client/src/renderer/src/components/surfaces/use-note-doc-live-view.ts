@@ -51,8 +51,11 @@ const projectableBlockTypes = new Set<string>(noteBlockTypeV1Schema.options);
 /**
  * 文档 → 读投影的块。认不出的类型**当段落画**而不是丢掉那块：那可能只是这份文档里有
  * 对端那一版客户端新增的块类型，因为一个标签没认出来就不画人家写的字，是最坏的一种"保守"。
+ *
+ * 单独导出是为了让跨进程向量的对拍用例能跑到**这一条**解码路径本身（编辑器那一侧与
+ * 服务端那一侧各解一遍同一串字节），而不是在测试里抄一份。
  */
-function projectBlocks(doc: Y.Doc): NoteBlockProjectionV1[] {
+export function projectBlocks(doc: Y.Doc): NoteBlockProjectionV1[] {
   const json = yXmlFragmentToProsemirrorJSON(doc.getXmlFragment(FRAGMENT_KEY)) as { content?: unknown[] };
   return pmNodesToNoteBlocks((json.content ?? []) as never).map((block, ordinal) => ({
     ordinal,

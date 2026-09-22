@@ -1,15 +1,16 @@
 /**
- * 服务端内核 ↔ 跨进程向量的对拍（批次 4.4 建立，批次 C 换形状之后重新闭合）。
+ * 服务端这一侧的向量对拍（批次 4.4 建立，C2 之后字节来源换过一次）。
  *
- * 这份用例回答一个问题：**主进程那边解码的字节，确实是这份内核写出去的语义**。
- * 两边没法共用源码（同一个进程里两份 yjs 会让 `instanceof` 跨份静默判假），所以"两份
- * 实现悄悄分叉"只能由这条机器发现。向量现在是 `Y.XmlFragment` 那一版的编码，且由
- * **主进程那份**内核产出——服务端解它必须得到 `expectedBlocks`：哪一边改了字段、属性、
- * 块容器或行内标记的序列化，哪一边自己红。
+ * 这串字节现在**由这份内核自己产出**（生成器：`apps/api/scripts/note-doc-vector-generate.mts`），
+ * 所以这一条量的是两件别的东西查不到的事：① 库里那份编码读得回来（写侧形状一改，
+ * 已经存进去的字节就解不出同样的块）；② 期望值不是抄的——同一份投影从这里出去，交给
+ * 编辑器那一侧的第二条用例（`apps/desktop-client/.../note-doc-conformance.test.ts`）独立解一遍。
+ * 两份实现的分叉由"同一串字节两边各解一次"发现，因为它们没法共用源码：同一个进程里出现
+ * 两份 yjs 会让 `instanceof Y.XmlText` 静默判假。
  *
  * 换形状那一段路上它一度是断开的（旧字节是 `Y.Array<Y.Map>`，新内核解出 0 块）。当时
  * 没有把期望值改掉让它重新变绿，而是把"解出 0 块"写成断言——分叉要看得见才不会再被
- * 遮回去。现在两端都在 fragment 上了，向量与期望值一起换，这条恢复成本来的样子。
+ * 遮回去。现在两端都在 fragment 上，那条断言跟着回到"解得出同样的块"。
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -27,7 +28,7 @@ import {
 
 const vectorBytes = () => new Uint8Array(Buffer.from(NOTE_DOC_CONFORMANCE.snapshotBase64, "base64"));
 
-test("固定向量解出与主进程那份内核一致的块与标题", () => {
+test("固定向量解得出期望的块与标题（多行代码、块级来源引用、图片资产都在）", () => {
   const doc = docFromSnapshot(vectorBytes());
   const title = readNoteTitle(doc);
   const blocks = projectFragmentBlocks(doc);
