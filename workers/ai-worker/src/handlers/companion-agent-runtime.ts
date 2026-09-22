@@ -211,6 +211,59 @@ export function partitionPersonaPatch(
  */
 const AGENT_LOOP_MAX_STEPS = 4;
 
+/**
+ * 终答步违约（工具已收起、provider 仍然回 tool_calls）时一次性宽限多给的步数。
+ *
+ * 是 **2 不是 1**：多给的那一步要把她真正要的工具跑掉，之后还得留一步强制收尾——
+ * 只加一步的话那一步依旧是 `finalAnswerOnly`（判据是 `stepCount >= 步数预算`），
+ * 工具仍然不在面上，等于白走一步。
+ */
+const AGENT_LOOP_GRACE_STEPS = 2;
+
+/**
+ * 允许走宽限的最低剩余时间。
+ *
+ * 一刀切到 `deadlineAt` 会把宽限变成**更贵的失败**：宽限回合要两次 provider 调用
+ * （跑工具 + 收尾作答），实机单次伴星调用 1.5–4s，剩下的时间不够时宁可直接用
+ * 她已经说出的那句话交付，也不要跑到一半被预算拦停。`deadlineAt` 本身已经扣掉
+ * 了 AGENT_PERSISTENCE_MARGIN_MS，所以这里不必再为终态事务留量。
+ */
+const AGENT_LOOP_GRACE_MIN_REMAINING_MS = 20_000;
+
+/**
+ * 终答步收起工具之后 provider 仍然回 tool_calls 时，怎么处理这一步。
+ *
+ * 2026-09-22 实测：最近的 3 次 INTERNAL_ERROR 里 **2 次是这一条**
+ * （`provider returned tool calls on a tools-disabled final step`），而原来的处理是
+ * `finishStep(failed)` + 抛错整轮失败。用户看到的是"报错"，可她已经把这轮的话说出
+ * 去一大半（afecc8d2 报错前已下发 82 字、9e484924 已下发 149 字）——这是最难看的
+ * 一种失败：内容几乎都在，只差最后一步没让她做完。
+ *
+ * 两条出口都**不执行没在她面上的写操作**以外的东西：
+ * - `grace`：预算、时限、工具名三个条件都满足时多给 AGENT_LOOP_GRACE_STEPS 步，
+ *   把她要的那次查询真跑掉再收尾（"我这就去翻" 之后真的有翻）；
+ * - `deliver`：任一条件不满足就丢掉这些调用，按她已经产出的文本交付。文本为空时
+ *   下游仍走 EMPTY_AGENT_RESPONSE——不为了"看起来成功"伪造内容。
+ *
+ * 只宽限一次（额度由调用方持有）：provider 在收尾步上反复违约时，第二轮直接落到
+ * `deliver`，步数上界因此是确定的（预算 + 2），不会把 110s 的 handler 超时吃光。
+ */
+export function planWithheldFinalStepCalls(input: {
+  graceAlreadyUsed: boolean;
+  /** 这一步要调、但不在本轮工具面上的名字。含未知名字时不给宽限。 */
+  unknownToolNames: string[];
+  /** 距离 `deadlineAt` 还剩多少毫秒。 */
+  remainingMs: number;
+  /** 当前生效的步数预算（含此前已给的宽限）。 */
+  stepBudget: number;
+}): "grace" | "deliver" {
+  if (input.graceAlreadyUsed) return "deliver";
+  if (input.unknownToolNames.length > 0) return "deliver";
+  if (input.stepBudget + AGENT_LOOP_GRACE_STEPS > COMPANION_AGENT_MAX_STEPS) return "deliver";
+  if (input.remainingMs < AGENT_LOOP_GRACE_MIN_REMAINING_MS) return "deliver";
+  return "grace";
+}
+
 export type CompanionAgentLoopResult =
   | { status: "completed"; text: string; blocks: CompanionContentBlockV1[]; memoryRefs: unknown[] }
   | { status: "waiting_for_confirmation"; proposalId: string; memoryRefs: unknown[] };
@@ -2611,7 +2664,14 @@ export async function runCompanionAgentLoop(args: {
     text,
     TRUNCATED_REPLY_MIN_CHARS[args.activeness ?? "active"],
   );
-  while (stepCount < budget.maxSteps) {
+  /**
+   * 本轮**实际生效**的步数预算。合同快照 `budget` 保持声明值不动（它是审计口径），
+   * 只有终答步违约宽限时这个局部值抬高，见 planWithheldFinalStepCalls。
+   */
+  let stepBudget = budget.maxSteps;
+  /** 终答步违约的宽限额度：整轮一次。 */
+  let finalStepGraceUsed = false;
+  while (stepCount < stepBudget) {
     if (args.ctx.signal.aborted) throw new Error("companion agent aborted");
     if (Date.now() >= deadlineAt) {
       throw new CompanionAgentBudgetExceededError("companion agent deadline exceeded");
@@ -2627,7 +2687,7 @@ export async function runCompanionAgentLoop(args: {
     // lose the whole turn with no assistant.final. It also guarantees a write
     // tool can never be proposed on the final step, so a confirmation always
     // leaves at least one step to report the result back.
-    const finalAnswerOnly = stepCount >= budget.maxSteps;
+    const finalAnswerOnly = stepCount >= stepBudget;
     const stepRequest: AgentTurnRequest = {
       role: AgentRole.COMPANION_AGENT,
       systemPrompt: [
@@ -2661,7 +2721,7 @@ export async function runCompanionAgentLoop(args: {
         ...(toolDefinitions.length > 0
           ? ["只有在你确实要调用工具时，调用之前才用一句话说明打算做什么然后停下，把结论留到工具结果回来之后；如果你这一轮不调用工具，就把答复完整说完，不要为了简短而省略该说的内容。"]
           : []),
-        `当前 Agent 预算：最多 ${budget.maxSteps} 步。`,
+        `当前 Agent 预算：最多 ${stepBudget} 步。`,
         ...(finalAnswerOnly
           ? ["这是最后一步：不再提供工具，请直接用已有信息给出最终答复。不要把前面步骤已经对用户说过的话原样再说一遍——这里要给出结论或补充新信息。"]
           : []),
@@ -2923,11 +2983,46 @@ export async function runCompanionAgentLoop(args: {
       }
     }
     if (finalAnswerOnly && calls.length > 0) {
-      // Tools were withheld on the final step. A provider that still emits tool
-      // calls violates the request contract; fail closed instead of executing a
-      // call we did not offer or looping past the step budget.
-      await finishStep(event, stepId, "failed", undefined, "AGENT_TOOL_CALL_LIMIT");
-      throw new Error("provider returned tool calls on a tools-disabled final step");
+      // 终答步的工具面是收起的（见上面 finalAnswerOnly 的注释），provider 仍然回
+      // tool_calls 就是违反请求合同。原来这里 `finishStep(failed)` + 抛错整轮失败，
+      // 实机 2026-09-22 这是 INTERNAL_ERROR 的头号成因（3 次里 2 次），而她报错前
+      // 已经把这轮的话说出去一大半——用户看到的是"事情差一步做成、结果弹报错"。
+      // 现在按 planWithheldFinalStepCalls 走两条 fail-open 出口，都不执行她没被
+      // 给到的工具之外的东西：要么多给一步把这次查询真跑掉再收尾，要么丢掉这些
+      // 调用、用她已经产出的文本交付。
+      const unknownToolNames = calls
+        .map((call) => String(call.name ?? ""))
+        .filter((name) => !toolDefinitions.some((tool) => tool.name === name));
+      if (planWithheldFinalStepCalls({
+        graceAlreadyUsed: finalStepGraceUsed,
+        unknownToolNames,
+        remainingMs: deadlineAt - Date.now(),
+        stepBudget,
+      }) === "grace") {
+        finalStepGraceUsed = true;
+        stepBudget += AGENT_LOOP_GRACE_STEPS;
+        logger.warn(
+          { runId: args.read.runId, stepCount, tools: calls.map((call) => call.name), stepBudget },
+          "companion final step asked for tools that were withheld; granting one grace round",
+        );
+      } else {
+        logger.warn(
+          {
+            runId: args.read.runId,
+            stepCount,
+            tools: calls.map((call) => call.name),
+            unknownToolNames,
+            reason: finalStepGraceUsed ? "grace-already-used"
+              : unknownToolNames.length > 0 ? "unknown-tool"
+                : stepBudget + AGENT_LOOP_GRACE_STEPS > COMPANION_AGENT_MAX_STEPS
+                  ? "step-budget"
+                  : "deadline",
+            chars: String(result.content ?? "").trim().length,
+          },
+          "companion final step tool calls dropped; delivering what she said",
+        );
+        calls = [];
+      }
     }
     // "让她做事/报数，她一句话就收尾"闸（方案 29 §4.3，实机 2026-09-21）：同一轮里
     // 工具面是齐的、步数预算是够的，她却一步没调工具。三种形态都不能当终答交付：
@@ -2963,7 +3058,7 @@ export async function runCompanionAgentLoop(args: {
       stepCalls: calls.length,
       toolCallCount,
       finalAnswerOnly,
-      withinBudget: stepCount < budget.maxSteps && Date.now() < deadlineAt,
+      withinBudget: stepCount < stepBudget && Date.now() < deadlineAt,
       userAskedForAction,
       hasUnverifiedClaims: unverifiedClaims.length > 0 || unverifiedQuotes.length > 0,
       looksLikeUnfulfilledNarration: looksLikeUnfulfilledActionNarration(said),

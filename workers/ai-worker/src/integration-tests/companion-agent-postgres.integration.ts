@@ -241,6 +241,39 @@ test("Agent：工具循环的审计行与 agent.tool SSE 事件符合共享合�
   }
 });
 
+/**
+ * 终答步 provider 违约（工具面已收起、仍然回 tool_calls）→ 整轮不得失败（方案 29 §12.8）。
+ *
+ * 实机 2026-09-22：最近 3 次 INTERNAL_ERROR 里 **2 次是这一条**，而她报错前已经把
+ * 这轮的话说出去一大半（afecc8d2 82 字、9e484924 149 字）——用户看到的是"事情差
+ * 一步做成，结果弹报错"。原来的处理是 `finishStep(failed)` + 抛错。
+ *
+ * 这里用 mock 的剧本标记复现违约（带标记时每步都要工具，否则走不到终答步）。
+ * 步数钉死在 6 = 声明预算 4 + 宽限 2：宽限整轮只给一次，provider 反复违约时步数
+ * 上界必须是确定的（把这条改回"每次都宽限"，本用例就会红）。
+ */
+test("Agent：终答步仍回 tool_calls → 给一次宽限并交付答复，不判 failed", async () => {
+  const { workspaceId, userId } = await seedBase();
+  const f = await seedAgentRun(workspaceId, userId, {
+    userText: "看一下我的学习进度【mock:tool-after-withheld】",
+  });
+  try {
+    await invoke(workspaceId, userId, { runId: f.runId });
+    const s = await readState(workspaceId, userId, f);
+    const types = s.events.map((e) => (e as { type: string }).type);
+
+    assert.equal(s.run.status, "succeeded", "provider 违约不得把 run 判成 failed");
+    assert.ok(types.includes("assistant.final"), "必须交付终态答复");
+    assert.equal(types.includes("error"), false, "违约步不得向用户下发 error 帧");
+    assert.equal(Number(s.run.step_count), 6, "步数 = 声明 4 + 宽限 2，只宽限一次");
+    assert.ok(Number(s.run.tool_call_count) >= 4,
+      "她违约要的那次查询必须真的执行掉，而不是把这句话当承诺交付");
+    assert.equal(s.assistant.length, 1, "一轮一条答复");
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("Agent 确认续跑：带 proposalId 重新入队 → 同一次 run 回填结果并产出最终答复", async () => {
   const { workspaceId, userId } = await seedBase();
   const f = await seedAgentRun(workspaceId, userId, { userText: "看一下我的学习进度" });

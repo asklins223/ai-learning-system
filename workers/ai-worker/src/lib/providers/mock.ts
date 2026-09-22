@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type {
   AIProvider,
   ProviderUsage,
@@ -78,24 +79,36 @@ export class MockProvider implements AIProvider {
 
     if (role === "companion_agent") {
       const toolResult = request.messages.find((message) => message.role === "tool");
+      /**
+       * 开发/测试剧本：用户文本里带 `【mock:tool-after-withheld】` 时，模型在
+       * **工具面已收起**的那一步仍然回 tool_calls——这是真实 provider 违约的形状
+       * （方案 29 §12.8：2026-09-22 实测 3 次 INTERNAL_ERROR 里 2 次是这一条）。
+       * 带这个标记时每一步都要求工具，否则 loop 第 2 步就作答了、走不到终答步；
+       * 同时**照样带回文本**，因为真实那次她报错前已经说出去 82 / 149 字。
+       */
+      const scriptedWithheldViolation = request.messages.some((message) =>
+        message.role === "user" && String(message.content ?? "").includes("【mock:tool-after-withheld】"));
+      const wantsToolCall = scriptedWithheldViolation || !toolResult;
       const outputText = toolResult
         ? `已读取伴星工具结果：${String(toolResult.content).slice(0, 400)}`
         : request.tools.length > 0
           ? "我先读取一下当前上下文。"
           : "我在这里，准备好陪你学习了。";
-      if (!toolResult) {
+      if (wantsToolCall) {
         const contextTool = request.tools.find((tool) => tool.name === "companion_read_context");
-        if (contextTool) {
+        if (contextTool || scriptedWithheldViolation) {
           toolCalls.push({
-            id: `call_companion_context_${Date.now()}`,
-            name: contextTool.name,
+            // id 每步唯一：同毫秒的两次 `Date.now()` 会让"工具事件覆盖的调用集合
+            // 与审计行同一批"那条断言随机变红。
+            id: `call_companion_context_${randomUUID()}`,
+            name: "companion_read_context",
             arguments: {},
           });
         }
       }
       const usage = this.estimateUsage(JSON.stringify(request), outputText);
       return {
-        content: toolCalls.length > 0 ? null : outputText,
+        content: toolCalls.length > 0 && !scriptedWithheldViolation ? null : outputText,
         toolCalls,
         finishReason: toolCalls.length > 0 ? "tool_calls" : "stop",
         usage,
@@ -256,7 +269,7 @@ fingerprint: `mock:${this.modelId}:${this.visionModelId}:native_tools`,
     options: ChatOptions,
     signal: AbortSignal | undefined,
     onDelta: (deltaText: string) => void,
-  ): Promise<{ content: string }> {
+  ): Promise<{ content: string; toolCalls?: AgentTurnResult["toolCalls"]; finishReason?: string }> {
     if (signal?.aborted) throw new Error("aborted before chatCompletionStream");
     const result = await this.chatCompletion(messages, options, signal);
     const content = result.content;
@@ -267,7 +280,26 @@ fingerprint: `mock:${this.modelId}:${this.visionModelId}:native_tools`,
       if (piece.length > 0) onDelta(piece);
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
-    return { content };
+    /**
+     * 剧本 `【mock:tool-after-withheld】` 的流式那一半：伴星的**终答步**走的是这条
+     * 路径（`finalAnswerOnly` 一步恒可流式），所以违约必须在这里也复现得出来。
+     * 判据与 executeAgentTurn 那侧一致：这一步没给工具面（`options.tools` 空）
+     * 却仍然回 tool_calls。
+     */
+    const withheldTools = !options.tools || options.tools.length === 0;
+    const scriptedWithheldViolation = withheldTools && messages.some((message) =>
+      message.role === "user"
+        && String(message.content ?? "").includes("【mock:tool-after-withheld】"));
+    if (!scriptedWithheldViolation) return { content };
+    return {
+      content,
+      toolCalls: [{
+        id: `call_companion_context_${randomUUID()}`,
+        name: "companion_read_context",
+        arguments: {},
+      }],
+      finishReason: "tool_calls",
+    };
   }
 
   /**

@@ -21,6 +21,7 @@ import {
   joinVisibleSegmentsDeduped,
   partitionPersonaPatch,
   planStepSteer,
+  planWithheldFinalStepCalls,
   stepHoldChars,
   steerableToolNames,
   runStreamingAgentStep,
@@ -603,6 +604,34 @@ test("planStepSteer：额度用尽后不再重复补同一条", () => {
   assert.equal(planStepSteer({
     ...steerInput, hasUnverifiedClaims: false, lookupClaim: true, lookupClaimSteered: true,
   }).steer, false);
+});
+
+// ─── #8 终答步 provider 违约的两条 fail-open 出口 ────────────────────────
+/** 三个条件都满足：预算 4（合同上限 8）、剩余时间够、工具名都在面上。 */
+const withheldStep = {
+  graceAlreadyUsed: false,
+  unknownToolNames: [] as string[],
+  remainingMs: 60_000,
+  stepBudget: 4,
+};
+
+test("planWithheldFinalStepCalls：宽限一次，且多给的是两步（跑工具 + 强制收尾）", () => {
+  assert.equal(planWithheldFinalStepCalls(withheldStep), "grace");
+  // 只加一步的话那一步依旧满足 `stepCount >= 步数预算`，工具仍然不在面上——
+  // 白走一步、她还是要拿这句话收尾。
+  assert.equal(planWithheldFinalStepCalls({ ...withheldStep, graceAlreadyUsed: true }), "deliver",
+    "宽限整轮只给一次，provider 反复违约时步数上界必须是确定的");
+});
+
+test("planWithheldFinalStepCalls：预算、时限、未知工具任一不满足就按已说文本交付", () => {
+  // 合同上限 8 步：6 + 2 = 8 仍在界内，7 就越界。
+  assert.equal(planWithheldFinalStepCalls({ ...withheldStep, stepBudget: 6 }), "grace");
+  assert.equal(planWithheldFinalStepCalls({ ...withheldStep, stepBudget: 7 }), "deliver");
+  // 时间线是边界值本身：低于它宁可直接交付，也不要跑到一半被预算拦停。
+  assert.equal(planWithheldFinalStepCalls({ ...withheldStep, remainingMs: 20_000 }), "grace");
+  assert.equal(planWithheldFinalStepCalls({ ...withheldStep, remainingMs: 19_999 }), "deliver");
+  assert.equal(planWithheldFinalStepCalls({ ...withheldStep, unknownToolNames: ["companion_x"] }), "deliver",
+    "她没被给到的工具不能借宽限这一步混进来执行");
 });
 
 // ─── §12.3 笔记检索：逐词命中，不是整串子串 ──────────────────────────────
