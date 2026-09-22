@@ -59,8 +59,25 @@ const storageEntrySchema = noteDocCacheEntryV1Schema.extend({
   noteId: uuidSchema,
 });
 
+/**
+ * 本机那份缓存的**格式版本，只此一处**：读的那道 schema 与写出去的那次 `parse` 都用它。
+ *
+ * `2` = `docState` / `pending` 里是 `Y.XmlFragment` 那份形状的编码（批次 C）。
+ * 为什么必须进位而不是"能解就算"：数组形状的那一份解出来是 `blocks` 这个 Y.Array，
+ * 新内核读 `content` 这个 XmlFragment 得到**空正文**。接回编辑器的后果不是显示为空，
+ * 是用户接着打字之后，主进程把这份文档交出去、服务端按 fragment 投影，把那一版的
+ * `note_blocks` 行**清空**。所以旧的那一份在这里必须当"本机没有"，不能逐条兼容。
+ * 代价照实说：换形状之前攒在这台机器上、还没交出去的编辑会丢——而那些增量本来也
+ * 不能安全地交出去。
+ *
+ * 文件名里原来还嵌着一个 `v1`（`note-doc-cache-v1.json`），与这个数是两处说法、迟早打架；
+ * 去掉之后还发现读与写各有一份字面量（进位时只改了一处，结果写出去的文件自己读不回来，
+ * 五条用例当场红）。所以：**进位只改这一行**。
+ */
+export const NOTE_DOC_CACHE_VERSION = 2;
+
 const storageSchema = z.strictObject({
-  version: z.literal(1),
+  version: z.literal(NOTE_DOC_CACHE_VERSION),
   entries: z.array(storageEntrySchema).max(ENTRY_LIMIT * 2),
 });
 
@@ -162,7 +179,7 @@ export class FileNoteDocCacheStore implements NoteDocCacheStore {
     // 写入、清理、切空间可能并发；把"整份快照 + 改名"排队，旧的临时文件永远
     // 赢不了最后一次改名。
     const write = this.flushQueue.then(async () => {
-      const payload = storageSchema.parse({ version: 1, entries: this.memory.snapshot() });
+      const payload = storageSchema.parse({ version: NOTE_DOC_CACHE_VERSION, entries: this.memory.snapshot() });
       await mkdir(dirname(this.filePath), { recursive: true });
       const temporaryPath = `${this.filePath}.${randomUUID()}.tmp`;
       await writeFile(temporaryPath, JSON.stringify(payload), { mode: 0o600 });

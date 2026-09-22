@@ -472,7 +472,7 @@ app.whenReady().then(async () => {
     ),
     // 决定 7：断网可编辑要能跨过重启，所以这份是本机的那一篇正文，落盘。
     noteDocCache: new FileNoteDocCacheStore(
-      resolve(app.getPath('userData'), 'note-doc-cache-v1.json')
+      resolve(app.getPath('userData'), 'note-doc-cache.json')
     )
   })
 

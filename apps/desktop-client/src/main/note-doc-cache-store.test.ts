@@ -41,7 +41,7 @@ describe("本机笔记文档缓存", () => {
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "note-doc-cache-"));
-    filePath = join(dir, "note-doc-cache-v1.json");
+    filePath = join(dir, "note-doc-cache.json");
   });
 
   afterEach(async () => {
@@ -76,10 +76,26 @@ describe("本机笔记文档缓存", () => {
   it("坏文件等于本机没有这一份，不部分恢复", async () => {
     await writeFile(
       filePath,
-      JSON.stringify({ version: 1, entries: [{ ...key(), ...entry(), docState: "不是 base64 !!!" }] }),
+      JSON.stringify({ version: 2, entries: [{ ...key(), ...entry(), docState: "不是 base64 !!!" }] }),
     );
     const store = new FileNoteDocCacheStore(filePath);
     expect(await store.get(key())).toBeNull();
+  });
+
+  it("上一版（数组形状）的那一份整机不接回来，哪怕它自己完全合法", async () => {
+    // 这条管的是换形状留下的一次性风险：数组形状的 `docState` 是新内核眼里的**空正文**，
+    // 接回编辑器 → 用户接着打字 → 服务端按 fragment 投影 → 那一版的 `note_blocks` 行被清空。
+    // 所以判据必须是版本，不能是"能不能解"——下面这份是合法 base64、字段齐全的一份旧数据。
+    await writeFile(
+      filePath,
+      JSON.stringify({ version: 1, entries: [{ ...key(), ...entry({ savedAt: "数组形状那一份" }) }] }),
+    );
+    const store = new FileNoteDocCacheStore(filePath);
+    expect(await store.get(key())).toBeNull();
+    // 同一个文件位置一旦被新版本写过，旧的那一份就再也回不来（不是"读到一半混着用"）。
+    expect(await store.set(key(), entry({ savedAt: "新形状那一份" }))).toBe(true);
+    const reopened = new FileNoteDocCacheStore(filePath);
+    expect((await reopened.get(key()))?.savedAt).toBe("新形状那一份");
   });
 
   it("一份大到不该占缓存时明说不收，而不是截断正文", async () => {
