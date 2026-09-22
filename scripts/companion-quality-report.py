@@ -784,6 +784,16 @@ def collect(since: str | None) -> dict:
     # 真正该由这条抓的是"工具成功了却没有块"（card 那六周就是这个形状）。
     producer_since = since_clause(since, "created_at")
 
+    # **两侧必须同一口径**：脚本轮的消息已经被清掉（§14.9 的清理），但它们的
+    # `companion_agent_tool_calls` 还在——只按工具那侧计数，就会造出
+    # "生产端成功过、块却是 0"的假警报（实测：清理后立刻出现 diagram 0/1产、
+    # card 0/2产 两条 ⚠，而被点名的 run 正是被清掉的那些脚本轮）。
+    # 脚本轮的判据用两条并集：登记表（老口径）+ `user_message_id IS NULL`（清理后的事实）。
+    scripted_runs_sql = (
+        "run_id NOT IN (SELECT id FROM companion_turn_runs WHERE user_message_id IS NULL)"
+        + scripted_exclusion("run_id", scripted)
+    )
+
     def producer_branch(kind: str, names: str) -> str:
         listed = ", ".join(f"'{name}'" for name in names)
         return f"""
@@ -792,6 +802,7 @@ def collect(since: str | None) -> dict:
                                      ||left(run_id::text, 8), ' ' ORDER BY created_at), 70) runs
                 FROM companion_agent_tool_calls
                WHERE status = 'succeeded' AND name IN ({listed}) {producer_since}
+                 AND {scripted_runs_sql}
         """
 
     producer_rows = rows(f"""

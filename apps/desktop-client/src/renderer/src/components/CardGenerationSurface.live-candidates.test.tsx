@@ -1,10 +1,18 @@
 // @vitest-environment jsdom
 
-import { randomUUID } from "node:crypto";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CardGenerationSurface } from "./CardGenerationSurface";
 import { useRoomStore } from "../app/room-store";
+
+/**
+ * 夹具里的 uuid。
+ *
+ * **不要** `import { randomUUID } from "node:crypto"`：这个文件跑在 renderer 工程里
+ * （tsconfig.web.json，没有 node 类型），那一行会让整个包的 `npm run typecheck` 变红。
+ * 浏览器的 `crypto.randomUUID()` 在 jsdom 下同样可用，且不需要 node 类型。
+ */
+const randomUUID = (): string => globalThis.crypto.randomUUID();
 
 /**
  * 生成中那一屏在"逐张落盘"之后必须有的样子（方案 A1 · B4）。
@@ -49,7 +57,6 @@ function stubGateway(options: {
     candidateRevisionId: randomUUID(),
     revision: 1,
     runId: RUN_ID,
-    planRevisionId: "plan-rev-1",
     planVersion: 1,
     planObjectiveLocalId: `obj-${index + 1}`,
     recommendation: { recommended: true, reasonCodes: ["mechanism_gap"] },
