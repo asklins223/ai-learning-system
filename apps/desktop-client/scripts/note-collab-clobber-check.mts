@@ -102,8 +102,10 @@ async function window(port: number, email: string, password: string) {
     return `insertText=${document.execCommand("insertText", false, `｜${mark}`)}`;
   }, text);
   const chip = () => page.evaluate(() => document.querySelector(".editor-head .tag")?.textContent?.trim() ?? null);
+  /** 批次 E 那句同段提示：只认这个类（`role="status"` 会被保存回执抢去）。 */
+  const cowriters = () => page.evaluate(() => document.querySelector(".notebook-cowriters")?.textContent?.trim() ?? null);
   const bodyHas = (text) => page.evaluate((mark) => document.querySelector(".ProseMirror")?.textContent?.includes(mark) ?? false, text);
-  return { page, editState, type, chip, bodyHas };
+  return { page, editState, type, chip, bodyHas, cowriters };
 }
 
 const stamp = new Date().toISOString().slice(11, 19).replace(/:/g, "");
@@ -114,6 +116,13 @@ const owner = await session("owner@ailearn.local", "ailearn_owner");
 const a = await window(Number(process.env.PORT_A ?? 9311), "owner@ailearn.local", "ailearn_owner");
 const b = await window(Number(process.env.PORT_B ?? 9312), "owner@ailearn.local", "ailearn_owner");
 console.log("两边都在编辑态:", a.editState, b.editState);
+if (!a.editState || !b.editState) {
+  // 两条腿都得自证到了被测那一屏：有一腿没到，后面每一个读数都不属于被测路径
+  // （实窗量到过一整轮"服务端没有、提示也没有"，真因只是其中一屏还停在登录页）。
+  // 与其打出一串会被当成结论的空读数，不如就此停住并说清是哪一屏。
+  console.log("这一轮作废：有窗口没进编辑态。上面那行打出了它那一屏的开头。");
+  process.exit(1);
+}
 
 // 同一对窗口顺手量在场那一排（批次 4.4 的 presence）：印章数 = 1 个自己 + 对端，
 // 名字是对端自己广播的，不是查名册查出来的。
@@ -156,4 +165,12 @@ const first = afterSim?.[0]?.content ?? "";
 console.log(`同一光标位置两边各插一句 → 块数 ${(blocksBefore?.length ?? 0)}→${afterSim?.length ?? 0}`);
 console.log(">>> 两句都在第一段里:", first.includes(SIM_A) && first.includes(SIM_B), "| 第一段:", first.slice(0, 120));
 console.log(">>> 有没有多出一块:", (afterSim?.length ?? 0) > (blocksBefore?.length ?? 0) ? "多出来了（两份拷贝在并发插入）" : "没有");
+
+/**
+ * 批次 E：同一块里有人，屏上得出现一句文字（不是颜色）。两边此刻的光标都在同一段末尾，
+ * 所以两句都该在；读数取的是 `.notebook-cowriters` 的文本，名字来自对端自己报的 awareness。
+ */
+await wait(3000);
+console.log("A 看到的同段提示:", await a.cowriters());
+console.log("B 看到的同段提示:", await b.cowriters());
 process.exit(0);
