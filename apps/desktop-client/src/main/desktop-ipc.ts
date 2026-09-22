@@ -83,7 +83,6 @@ import {
   markdownImportResultV1Schema,
   memberListResultV1Schema,
   NOTE_DOC_BLOCKS_MAX_COUNT,
-  noteDocSubmittedBlockV1Schema,
   noteDocStateResultV1Schema,
   noteDocWriteResultV1Schema,
   noteDocPresenceResultV1Schema,
@@ -93,6 +92,7 @@ import {
   searchDriftResultV1Schema,
   searchReindexResultV1Schema,
   type DesktopRouteKindM2,
+  NOTE_DOC_UPDATE_MAX_CHARS,
 } from "@ailearn/shared/desktop-ipc-contracts";
 import {
   NOTE_DOC_PRESENCE_MAX_CHARS,
@@ -132,10 +132,12 @@ import {
   companionAccountPatchSchema,
   companionAccountStateV1Schema,
   companionAnswerModePreferenceV1Schema,
+  companionVoicePreferenceV1Schema,
   companionOverviewSchema,
   onboardingTransitionRequestSchema,
   onboardingTransitionResponseSchema,
 } from "@ailearn/shared/companion-shell-contracts";
+import { ttsEngineV1Schema } from "@ailearn/shared/tts-voice-catalog";
 import {
   companionHomeProjectionV1Schema,
   companionRoomProfilePatchV1Schema,
@@ -538,20 +540,13 @@ const noteDocStateInputSchema = z.strictObject({
  * （同一份 CRDT 状态，多个窗口共用），没有连接就主进程取一次起点、就地差分、走 HTTP。
  * 一条规则："改了就发这里"。
  */
-const noteDocSyncBlocksInputSchema = z.strictObject({
+const noteDocSyncUpdateInputSchema = z.strictObject({
   ...m1InputBase,
   commandId: commandIdSchema,
   noteId: uuidSchema,
-  // 上限与下行帧同一处定义：两边各写一个数，迟早一边放行一边拒收。
-  //
-  // **缺省 = 这次只改标题，正文一个字都不动**；空数组则是"作者把正文删光了"。
-  // 两者必须是两种表达：合并成一种的话，改名就会把整篇笔记清空——而那正是
-  // 这一批要消灭的那类"静默销毁用户内容"。
-  blocks: z.array(noteDocSubmittedBlockV1Schema).max(NOTE_DOC_BLOCKS_MAX_COUNT).optional(),
-  title: z.strictObject({ title: z.string().max(200), titleSource: z.enum(["auto", "manual"]) }).optional(),
-}).refine((value) => value.blocks !== undefined || value.title !== undefined, {
-  // 什么都不带的提交是一次没有意义的往返（还要取一次编辑起点），直接拒。
-  message: "note_doc_submit_empty",
+  // 本机文档产生的 yjs 增量（base64）。上限与下行帧同一处定义：两边各写一个数，
+  // 迟早一边放行一边拒收。空增量界面就不该发（主进程仍会如实回 `unchanged`）。
+  update: z.string().min(1).max(NOTE_DOC_UPDATE_MAX_CHARS),
 });
 const noteSetShareInputSchema = z.strictObject({
   ...m1InputBase,
@@ -680,6 +675,18 @@ const markdownImportInputSchema = z.strictObject({
 const answerModePatchInputSchema = z.strictObject({
   ...m1InputBase,
   preference: z.enum(["voice", "silent", "text", "any"]),
+});
+// 设置 → 语音与伴星：写偏好与试听都只收 engine + voice。
+// voice 的取值合法性由合同层的 superRefine 把关（引擎与音色必须成对），这里不重述清单。
+const voicePreferencePatchInputSchema = z.strictObject({
+  ...m1InputBase,
+  engine: ttsEngineV1Schema,
+  voice: z.string().min(1).max(120),
+});
+const voicePreviewInputSchema = z.strictObject({
+  ...m1InputBase,
+  engine: ttsEngineV1Schema,
+  voice: z.string().min(1).max(120),
 });
 const revokeOutputSchema = z.strictObject({ revoked: z.literal(true) });
 const memberRemoveOutputSchema = z.strictObject({ removed: z.literal(true) });
@@ -1364,7 +1371,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
       emit("noteDoc", { kind: "note_doc_event", noteId, event }, activeWorkspaceEpoch);
     })).then((handle) => {
       // 服务端说这篇不该有实时连接（仅自己可见）时拿到的是 null：不建连，
-      // 但写入照常——`syncNoteDocBlocks` 没连接就走 HTTP 那同一个增量口。
+      // 但写入照常——`syncNoteDocUpdate` 没连接就走 HTTP 那同一个增量口。
       if (!handle) return;
       // 建连期间可能已经退订、切了空间或改了角色——那条连接不属于这里了。
       if (!hasNoteDocSubscription(noteId) || !noteDocStreamAllowed() || streamWorkspaceEpoch !== activeWorkspaceEpoch) {
@@ -1927,6 +1934,32 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     assertEpoch(input.meta, activeWorkspaceEpoch);
     return gateway.setAnswerModePreference(input.preference, input.meta.requestId);
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionAnswerModePreferenceV1Schema);
+
+  // 音色与引擎偏好（账号级跨设备）+ 试听。整组归 settings.section，与作答模态偏好同一道闸。
+  installHandler(DESKTOP_IPC_CHANNELS.companionVoicePreferenceGet, runtimeInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.getCompanionVoicePreference(input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionVoicePreferenceV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionVoicePreferencePatch, voicePreferencePatchInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.setCompanionVoicePreference(
+      { engine: input.engine, voice: input.voice },
+      input.meta.requestId,
+    );
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionVoicePreferenceV1Schema);
+
+  // 试听的回执是 mp3 的 base64：正文与 companionVoiceSpeak 同一形状，复用那个 schema。
+  installHandler(DESKTOP_IPC_CHANNELS.companionVoicePreview, voicePreviewInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.previewCompanionVoice(
+      { engine: input.engine, voice: input.voice },
+      input.meta.requestId,
+    );
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionVoiceSpeakResultV1Schema);
 
   installHandler(DESKTOP_IPC_CHANNELS.roomGetProjection, runtimeInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "room.home");
@@ -2523,7 +2556,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     return result;
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, noteDocStateResultV1Schema);
 
-  installHandler(DESKTOP_IPC_CHANNELS.noteDocSyncBlocks, noteDocSyncBlocksInputSchema, options, async (_event, _window, input): Promise<NoteDocWriteResultV1> => {
+  installHandler(DESKTOP_IPC_CHANNELS.noteDocSyncUpdate, noteDocSyncUpdateInputSchema, options, async (_event, _window, input): Promise<NoteDocWriteResultV1> => {
     requireM2Route(contract, "note.detail");
     assertEpoch(input.meta, activeWorkspaceEpoch);
     // 可写性这里一律不判：判据只在服务端那一处（WS 侧 `Authenticated("readonly")`、
@@ -2535,7 +2568,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     const stream = noteDocStreams.get(input.noteId);
     const onStream = Boolean(stream && stream.workspaceEpoch === activeWorkspaceEpoch && stream.authorizedScope === "read-write");
     if (onStream && stream) {
-      const update = stream.handle.applyBlocks(input.blocks ?? null, input.title);
+      const update = stream.handle.applyLocal(input.update);
       // 本机没产生任何增量时不报"同步中"——那一次什么都没写，报成提交过就是在骗回执。
       return update === null
         ? { via: "unchanged", revision: null, savedAt: new Date().toISOString() }
@@ -2543,10 +2576,9 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     }
     // 出口由网关如实报：uploaded（服务端已落盘）/ unchanged（这次没改动）/
     // queued（没网，已攒在本机文档里）。
-    const receipt = await gateway.syncNoteDocBlocks(
+    const receipt = await gateway.syncNoteDocUpdate(
       input.noteId,
-      input.blocks ?? null,
-      input.title,
+      input.update,
       input.meta.requestId,
     );
     // 落盘跟着这次写走：`queued` 的那几条不留在内存里过夜就又没了。

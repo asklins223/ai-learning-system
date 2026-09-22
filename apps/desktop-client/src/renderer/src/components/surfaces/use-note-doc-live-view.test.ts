@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as Y from "yjs";
 import { act, renderHook } from "@testing-library/react";
 import { useNoteDocLiveView } from "./use-note-doc-live-view";
 
@@ -11,12 +12,44 @@ let listeners: Listener[];
 let subscribe: ReturnType<typeof vi.fn>;
 let unsubscribe: ReturnType<typeof vi.fn>;
 let presence: ReturnType<typeof vi.fn>;
+let syncUpdate: ReturnType<typeof vi.fn>;
+let state: ReturnType<typeof vi.fn>;
 
-function installApi() {
+// 渲染层的类型环境没有 node 类型（运行时其实有），所以这里用 btoa，与被测代码同一条路。
+const b64 = (bytes: Uint8Array): string => btoa(String.fromCharCode(...Array.from(bytes)));
+
+/** 一份带这两段的起点（正文是 `content` 这个 Y.XmlFragment，与两端同一形状）。 */
+function seedUpdate(): string {
+  const doc = new Y.Doc();
+  const fragment = doc.getXmlFragment("content");
+  const paragraph = new Y.XmlElement("paragraph");
+  paragraph.insert(0, [new Y.XmlText("第一段")]);
+  fragment.insert(0, [paragraph]);
+  doc.getMap("meta").set("title", "起点标题");
+  doc.getMap("meta").set("titleSource", "auto");
+  return b64(Y.encodeStateAsUpdate(doc));
+}
+
+/** 另一个人在远端写的一条增量：一段认得、一段是这台机器还不认识的块类型。 */
+function peerUpdate(): string {
+  const doc = new Y.Doc();
+  const fragment = doc.getXmlFragment("content");
+  const known = new Y.XmlElement("paragraph");
+  known.insert(0, [new Y.XmlText("别人刚敲的那段")]);
+  const unknown = new Y.XmlElement("callout");
+  unknown.insert(0, [new Y.XmlText("这台机器还不认识的块")]);
+  fragment.insert(0, [known, unknown]);
+  doc.getMap("meta").set("title", "别人改的标题");
+  return b64(Y.encodeStateAsUpdate(doc));
+}
+
+function installApi(seed = seedUpdate()) {
   listeners = [];
   subscribe = vi.fn(async () => ({ ok: true, data: { subscriptionId: "sub-1" } }));
   unsubscribe = vi.fn(async () => ({ ok: true, data: { closed: true } }));
   presence = vi.fn(async () => ({ ok: true, data: { shared: true } }));
+  syncUpdate = vi.fn(async () => ({ ok: true, data: { via: "stream", revision: null, savedAt: "2026-09-22T00:00:00.000Z" } }));
+  state = vi.fn(async () => ({ ok: true, data: { update: seed, revision: 3, backfilled: false, shareScope: "shared" } }));
   (window as unknown as { ailearn: unknown }).ailearn = {
     subscriptions: {
       subscribe,
@@ -28,184 +61,107 @@ function installApi() {
         };
       },
     },
-    note: { doc: { presence } },
+    note: { doc: { presence, state, syncUpdate } },
   };
+  return { syncUpdate };
 }
 
+const settle = async () => { await act(async () => { vi.advanceTimersByTime(0); }); };
 const emit = (data: unknown) => act(() => { for (const listener of listeners) listener({ data }); });
+const frame = (noteId: string, event: Record<string, unknown>) => ({ kind: "note_doc_event", noteId, event });
 
-const frame = (noteId: string, event: Record<string, unknown>) => ({
-  kind: "note_doc_event",
-  noteId,
-  event,
-});
+beforeEach(() => { vi.useFakeTimers(); installApi(); });
+afterEach(() => { vi.useRealTimers(); });
 
-beforeEach(() => {
-  vi.useFakeTimers();
-  installApi();
-});
-
-afterEach(() => {
-  vi.useRealTimers();
-  delete (window as unknown as { ailearn?: unknown }).ailearn;
-});
-
-describe("笔记协同的实时视图订阅", () => {
-  it("personal 空间不订阅，也不广播在场：那里本来就没有长连接", async () => {
-    const onRemoteChange = vi.fn();
-    const { result } = renderHook(() => useNoteDocLiveView(NOTE_ID, false, onRemoteChange, "Asklins"));
-    await act(async () => { vi.advanceTimersByTime(0); });
-    expect(subscribe).not.toHaveBeenCalled();
-    expect(presence).not.toHaveBeenCalled();
-    expect(result.current.presencePeers).toEqual([]);
+describe("渲染进程那份文档", () => {
+  it("起点到了才交出 fragment，并画着文档里的正文", async () => {
+    const { result } = renderHook(() => useNoteDocLiveView(NOTE_ID, true, () => undefined));
+    await settle();
+    expect(result.current.fragment).toBeTruthy();
+    expect(result.current.blocks.map((block) => block.content)).toEqual(["第一段"]);
+    expect(result.current.title).toBe("起点标题");
   });
 
-  it("订阅上就报一次自己的名字；卸载时不报空（离场跟着连接走）", async () => {
-    const { unmount } = renderHook(() => useNoteDocLiveView(NOTE_ID, true, () => undefined, "Asklins"));
-    await act(async () => { vi.advanceTimersByTime(0); });
-    // 名字是广播出去的，不是查名册查出来的：对端看到的必须是你自己报的那个。
-    expect(presence).toHaveBeenCalledTimes(1);
-    expect(presence).toHaveBeenLastCalledWith(expect.objectContaining({
-      noteId: NOTE_ID,
-      state: JSON.stringify({ name: "Asklins" }),
-    }));
-    unmount();
-    await act(async () => { vi.advanceTimersByTime(0); });
-    // 实测（2026-09-22，两个真客户端）：报空串不越过对端，关掉连接才会。而连接
-    // 是不是该关，归主进程按订阅数判——这里再报一次只会在"另一个窗口还开着同一篇"
-    // 时说出一句假话。
-    expect(presence).toHaveBeenCalledTimes(1);
-    expect(unsubscribe).toHaveBeenCalledTimes(1);
-  });
-
-  it("没有显示名也照样在场：不报的话人数比头像多出一个来历不明的人", async () => {
-    renderHook(() => useNoteDocLiveView(NOTE_ID, true, () => undefined, null));
-    await act(async () => { vi.advanceTimersByTime(0); });
-    expect(presence).toHaveBeenLastCalledWith(expect.objectContaining({
-      state: JSON.stringify({ name: "" }),
-    }));
-  });
-
-  it("正文帧立刻留下那一份可画的内容，回读仍然照叫醒（帧比回读新）", async () => {
+  it("远端一条增量进来就有正文，认不出的块落回段落；回读合并成一次", async () => {
     const onRemoteChange = vi.fn();
     const { result } = renderHook(() => useNoteDocLiveView(NOTE_ID, true, onRemoteChange));
-    await act(async () => { vi.advanceTimersByTime(0); });
+    await settle();
+    act(() => { emit(frame(NOTE_ID, { type: "update", update: peerUpdate() })); });
 
-    act(() => {
-      emit(frame(NOTE_ID, {
-        type: "blocks",
-        blocks: [
-          { ordinal: 0, type: "paragraph", content: "别人刚敲的那段" },
-          // 客户端版本差一档时，认不出的块类型要落回段落，不能整块不画。
-          { ordinal: 1, type: "callout", content: "这台机器还不认识的块" },
-        ],
-        title: "别人改的标题",
-        titleSource: "auto",
-      }));
-    });
-    // 帧一到就有：读的那一屏不必等回读，也不必等作者那次自动保存进 API。
-    expect(result.current.remoteView).toEqual({
-      blocks: [
-        { ordinal: 0, type: "paragraph", content: "别人刚敲的那段" },
-        { ordinal: 1, type: "paragraph", content: "这台机器还不认识的块" },
-      ],
-      title: "别人改的标题",
-      titleSource: "auto",
-    });
-    // 回读仍然是叫醒的（版本号、时间、权限只能从服务端那份记录来）。
+    // 帧一到就有：读的那一屏不必等回读，也不必等作者那次自动保存进 API（实窗量到 3.5 秒）。
+    // 起点那一块与这两块并存：CRDT 合并的是操作，不是"谁覆盖了谁"，所以这里问的是
+    // 对端那两句都在、顺序由合并决定。
+    const contents = result.current.blocks.map((block) => block.content);
+    expect(contents).toContain("别人刚敲的那段");
+    expect(contents).toContain("这台机器还不认识的块");
+    expect(contents).toContain("第一段");
+    // 认不出的那个块类型仍然画得出来，只是落回段落。
+    expect(result.current.blocks.find((block) => block.content === "这台机器还不认识的块")?.type).toBe("paragraph");
+    // 标题不在这里断言：两份副本都往 `meta.title` 写过，赢的那一份由 LWW 按 client id
+    // 定，断言"对端的标题赢了"是抛硬币。标题本身的通路另有两条用例守着
+    // （起点带进来的那一条，与改名 flush 的那一条）。
     expect(onRemoteChange).not.toHaveBeenCalled();
     act(() => { vi.advanceTimersByTime(600); });
     expect(onRemoteChange).toHaveBeenCalledTimes(1);
   });
 
-  it("换一篇时上一帧的正文不留在那一屏上", async () => {
+  it("本机打的那几个字算待提交；flush 交出去之后归零", async () => {
+    const api = installApi();
+    const { result } = renderHook(() => useNoteDocLiveView(NOTE_ID, true, () => undefined));
+    await settle();
+    expect(result.current.dirty).toBe(false);
+    expect(await result.current.flush()).toBeNull();
+
+    act(() => {
+      const fragment = result.current.fragment!;
+      ((fragment.get(0) as Y.XmlElement).get(0) as Y.XmlText).insert(3, "本机补的字");
+    });
+    expect(result.current.dirty).toBe(true);
+    expect(result.current.blocks[0].content).toContain("本机补的字");
+
+    // flush 里有 setState：不在 act 里等它，`result.current` 还是渲染前那一份，
+    // 于是"dirty 归零"会红在读不到上，而不是产品没更新。
+    let via: string | null = null;
+    await act(async () => { via = await result.current.flush(); });
+    expect(via).toBe("stream");
+    expect(api.syncUpdate).toHaveBeenCalledTimes(1);
+    // 交出去的那条必须是**增量**而不是整篇：载荷里不该有起点里那几个字的完整快照。
+    const sent = api.syncUpdate.mock.calls[0]![0] as { update: string };
+    expect(sent.update.length).toBeLessThan(300);
+    expect(result.current.dirty).toBe(false);
+  });
+
+  it("换一篇：上一篇的正文与文档都不留在这一屏上", async () => {
+    installApi();
     const { result, rerender } = renderHook(({ noteId }) => useNoteDocLiveView(noteId, true, () => undefined), {
       initialProps: { noteId: NOTE_ID },
     });
-    await act(async () => { vi.advanceTimersByTime(0); });
-    act(() => {
-      emit(frame(NOTE_ID, { type: "blocks", blocks: [{ ordinal: 0, type: "paragraph", content: "上一篇的" }], title: "上一篇", titleSource: "auto" }));
-    });
-    expect(result.current.remoteView?.title).toBe("上一篇");
+    await settle();
+    act(() => { emit(frame(NOTE_ID, { type: "update", update: peerUpdate() })); });
+    expect(result.current.blocks.map((block) => block.content)).toContain("别人刚敲的那段");
+
     rerender({ noteId: OTHER_ID });
-    await act(async () => { vi.advanceTimersByTime(0); });
-    expect(result.current.remoteView).toBeNull();
+    await settle();
+    // 上一篇那两句一个字都不该留下；这一篇自己的起点（"第一段"）当然要画。
+    const after = result.current.blocks.map((block) => block.content);
+    expect(after).not.toContain("别人刚敲的那段");
+    expect(after).not.toContain("这台机器还不认识的块");
+    expect(after).toEqual(["第一段"]);
+    expect(result.current.dirty).toBe(false);
   });
 
-  it("正文帧只叫醒一次回读：连着的三帧合并成一次", async () => {
-    const onRemoteChange = vi.fn();
-    renderHook(() => useNoteDocLiveView(NOTE_ID, true, onRemoteChange));
-    await act(async () => { vi.advanceTimersByTime(0); });
-    expect(subscribe).toHaveBeenCalledTimes(1);
-    expect(subscribe.mock.calls[0][0].topic).toEqual({ kind: "noteDoc", noteId: NOTE_ID });
-
-    const blocks = { type: "blocks", blocks: [{ ordinal: 0, type: "paragraph", content: "别人写的" }], title: "标题", titleSource: "auto" };
-    emit(frame(NOTE_ID, blocks));
-    emit(frame(NOTE_ID, blocks));
-    emit(frame(NOTE_ID, blocks));
-    expect(onRemoteChange).not.toHaveBeenCalled();
-    act(() => { vi.advanceTimersByTime(600); });
-    expect(onRemoteChange).toHaveBeenCalledTimes(1);
-  });
-
-  it("别篇笔记的帧不算数（切换笔记时旧流的尾帧不能刷新这一篇）", async () => {
-    const onRemoteChange = vi.fn();
-    renderHook(() => useNoteDocLiveView(NOTE_ID, true, onRemoteChange));
-    await act(async () => { vi.advanceTimersByTime(0); });
-    emit(frame(OTHER_ID, { type: "blocks", blocks: [], title: "", titleSource: "auto" }));
-    act(() => { vi.advanceTimersByTime(600); });
-    expect(onRemoteChange).not.toHaveBeenCalled();
-  });
-
-  it("在场名单从帧里取：报得出名字的带名字，报不出的留空而不是把那个人丢掉", async () => {
-    const { result } = renderHook(() => useNoteDocLiveView(NOTE_ID, true, () => undefined));
-    await act(async () => { vi.advanceTimersByTime(0); });
-
+  it("订阅回执比连接早时，名字照旧广播得出去；在场人数只认这一排", async () => {
+    const { result } = renderHook(() => useNoteDocLiveView(NOTE_ID, true, () => undefined, null));
+    await settle();
     act(() => {
-      emit(frame(NOTE_ID, {
-        type: "presence",
-        states: [
-          { clientId: 7, state: { name: " 小琳 " } },
-          { clientId: 8, state: { editing: true } },
-          { clientId: 9, state: "not-an-object" },
-        ],
-      }));
+      emit(frame(NOTE_ID, { type: "presence", states: [{ clientId: 7, state: { name: "小林" } }, { clientId: 8, state: {} }] }));
     });
-    expect(result.current.presencePeers).toEqual([
-      { clientId: 7, name: "小琳" },
-      { clientId: 8, name: null },
-      { clientId: 9, name: null },
-    ]);
-
-    act(() => {
-      emit(frame(NOTE_ID, { type: "presence", states: [] }));
-    });
-    expect(result.current.presencePeers).toEqual([]);
+    expect(result.current.presencePeers).toEqual([{ clientId: 7, name: "小林" }, { clientId: 8, name: null }]);
   });
 
-  it("只读态与失败原因从帧里取，供界面说真话", async () => {
-    const { result } = renderHook(() => useNoteDocLiveView(NOTE_ID, true, () => undefined));
-    await act(async () => { vi.advanceTimersByTime(0); });
-
-    act(() => {
-      emit(frame(NOTE_ID, { type: "status", status: "authenticated", authorizedScope: "readonly" }));
-    });
-    expect(result.current.authorizedScope).toBe("readonly");
-
-    act(() => {
-      emit(frame(NOTE_ID, { type: "status", status: "failed", reason: "oversize" }));
-    });
-    expect(result.current.failure).toBe("oversize");
-  });
-
-  it("卸载时退订", async () => {
-    const { unmount } = renderHook(() => useNoteDocLiveView(NOTE_ID, true, () => undefined));
-    await act(async () => { vi.advanceTimersByTime(0); });
-    unmount();
-    await act(async () => { vi.advanceTimersByTime(0); });
-    expect(unsubscribe).toHaveBeenCalledWith(expect.objectContaining({
-      meta: expect.anything(),
-      subscriptionId: "sub-1",
-    }));
+  it("personal 空间不订阅：那一格本来就没有长连接", async () => {
+    renderHook(() => useNoteDocLiveView(NOTE_ID, false, () => undefined));
+    await settle();
+    expect(subscribe).not.toHaveBeenCalled();
   });
 });

@@ -1,8 +1,7 @@
 import { HocuspocusProvider, HocuspocusProviderWebsocket } from "@hocuspocus/provider";
 import WebSocketPolyfill from "ws";
-import { NOTE_DOC_BLOCKS_MAX_JSON_CHARS, type NoteDocStreamEventV1 } from "@ailearn/shared/desktop-ipc-contracts";
-import { createNoteDocState, type NoteDocState, type NoteDocView } from "./note-doc-state.ts";
-import type { NoteDocBlock } from "./note-doc-fragment.ts";
+import { NOTE_DOC_UPDATE_MAX_CHARS, type NoteDocStreamEventV1 } from "@ailearn/shared/desktop-ipc-contracts";
+import { createNoteDocState, type NoteDocState } from "./note-doc-state.ts";
 
 /**
  * 笔记协同的本机传输（4.3 建立；4.4 起它持有文档，provider 只是文档的一个出口）。
@@ -44,24 +43,28 @@ export type NoteDocFailureReason = "permission_denied" | "oversize" | "invalid_u
 export type NoteDocPresenceState = { clientId: number; state: Record<string, unknown> };
 
 export type NoteDocTransportEvent =
-  /** 文档的当前样子。任何一方的改动都以它为准，界面不需要知道这条增量是谁写的。 */
-  | ({ type: "blocks" } & NoteDocView)
+  /**
+   * 别人写进来的那一条增量。
+   *
+   * 下行交的是**增量本身**而不是投影结果：界面那一侧持有同一份文档，收到就 apply，
+   * 编辑器自己重画。以前这里发的是 blocks，于是界面要再拼一份"我看到的正文"，
+   * 那份拷贝落后于文档时就把对端的字算成了自己删掉的（批次 C 的立项理由）。
+   */
+  | { type: "update"; update: string }
   | { type: "presence"; states: NoteDocPresenceState[] }
   | { type: "status"; status: NoteDocConnectionStatus; authorizedScope?: "read-write" | "readonly"; reason?: NoteDocFailureReason };
 
 /** 网关包一层后交给 IPC 的句柄：`stop()` 之后所有方法都是空操作。 */
 export type NoteDocWatchHandle = {
-  /** 返回本次产出的增量；`null` = 这次提交没让文档动一下（界面据此报"未改动"而不是"同步中"）。 */
-  applyBlocks: (blocks: NoteDocBlock[] | null, title?: { title: string; titleSource: string }) => string | null;
-  view: () => NoteDocView;
+  /** 把界面本机的增量并进影子文档；返回该上行出去的合并增量，`null` = 文档一个字没动。 */
+  applyLocal: (update: string) => string | null;
   setPresence: (state: string) => void;
   stop: () => void;
 };
 
 export type NoteDocTransportHandle = {
-  /** 把界面的 blocks 差分并进文档；返回这次产生的 yjs 增量（什么都没变则 null）。 */
-  applyBlocks: (blocks: NoteDocBlock[] | null, title?: { title: string; titleSource: string }) => string | null;
-  view: () => NoteDocView;
+  /** 把界面本机的增量并进文档；返回这次产生的 yjs 增量（什么都没变则 null）。 */
+  applyLocal: (update: string) => string | null;
   seed: (update: string) => void;
   setPresence: (state: string) => void;
   close: () => void;
@@ -146,20 +149,18 @@ export function createHocuspocusNoteDocTransport(): NoteDocTransport {
     const emit = (event: NoteDocTransportEvent): void => {
       if (!closed) onEvent(event);
     };
-    const emitBlocks = (): void => {
-      if (closed) return;
-      const view = state.view();
+    // 只把**别人写的**那几条转给界面：本机的刚从界面来，回它一份是回声；provider 自己
+    // 的合并帧也不是"对面改了字"。判据是 origin——`attachRemoteOrigin` 登记的就是它。
+    state.doc.on("update", (update: Uint8Array, origin: unknown) => {
+      if (closed || origin !== provider) return;
       // 上限与 IPC 两侧共用 contracts 里那个数：一边放行一边拒收的症状是一帧静默消失。
-      if (JSON.stringify(view).length > NOTE_DOC_BLOCKS_MAX_JSON_CHARS) {
+      if (update.length * 1.34 > NOTE_DOC_UPDATE_MAX_CHARS) {
         // 超帧**不**截断（那会让界面看到半篇正文），改报 oversize，让界面退回 HTTP 重读。
         emit({ type: "status", status: "failed", reason: "oversize" });
         return;
       }
-      emit({ type: "blocks", ...view });
-    };
-    // 文档任何一次变化都折算成一个 blocks 帧：远端同步、本机提交、打底都走同一条，
-    // 界面只需要认"正文变了"这一种信号。
-    state.doc.on("update", emitBlocks);
+      emit({ type: "update", update: Buffer.from(update).toString("base64") });
+    });
 
     provider.on("status", ({ status }: { status: string }) => {
       emit({
@@ -183,8 +184,7 @@ export function createHocuspocusNoteDocTransport(): NoteDocTransport {
     provider.awareness?.on("update", emitPresence);
 
     return {
-      applyBlocks: (blocks, title) => state.submitBlocks(blocks, title),
-      view: () => state.view(),
+      applyLocal: (update) => state.applyLocal(update),
       seed: (update) => state.seed(update),
       setPresence: (presence) => {
         if (presence.length > NOTE_DOC_PRESENCE_MAX_CHARS) throw new Error("note_doc_presence_too_large");
@@ -230,8 +230,8 @@ export const defaultNoteDocTransport: NoteDocTransport = createHocuspocusNoteDoc
  */
 export function toNoteDocStreamEvent(event: NoteDocTransportEvent): NoteDocStreamEventV1 | null {
   switch (event.type) {
-    case "blocks":
-      return { type: "blocks", blocks: event.blocks, title: event.title, titleSource: event.titleSource };
+    case "update":
+      return { type: "update", update: event.update };
     case "presence":
       return { type: "presence", states: event.states };
     case "status":

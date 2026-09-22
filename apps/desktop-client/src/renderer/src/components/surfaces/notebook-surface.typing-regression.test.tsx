@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render } from "@testing-library/react";
+import { noteDocResult } from "../../test-support/note-doc-fixtures";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NotebookSurface } from "./notebook-surface";
 import { useRoomStore } from "../../app/room-store";
@@ -68,11 +69,12 @@ function stubGatewayForNote(initialBlocks: readonly { ordinal: number; type: str
       // 自动保存走的是文档增量（批次 4.4）。这条用例测的是"敲字之后恰好提交一次、
       // 页面不塌"，mock 必须挂在页面真的会调的那个口上，否则它绿的是旧路。
       doc: {
-        state: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { blocks: [], title: "", titleSource: "auto", revision: 0, backfilled: false } })),
-        syncBlocks: vi.fn(async (input: { blocks?: typeof state.blocks; title?: { title: string } }) => {
+        state: vi.fn(async () => noteDocResult()),
+        // 现在是"标题写进文档 meta + 一条增量上行"：mock 要挂在页面真会调的那个口上，
+        // 否则它绿的是已经不存在的那条路。
+        syncUpdate: vi.fn(async () => {
           state.saveCount += 1;
-          if (input.title) state.title = input.title.title;
-          if (input.blocks) state.blocks = input.blocks.map((block) => ({ ...block }));
+          state.title = "已提交的标题";
           return {
             ok: true as const,
             workspaceEpoch: 1,
@@ -134,6 +136,10 @@ describe("NotebookSurface · 编辑器挂载与输入", () => {
     expect(paper).toBeTruthy();
     const body = document.getElementById("notebook-surface-body");
     expect(body).toBeTruthy();
+    // 编辑器等起点 apply 完才挂：先挂就是先画一份自己的文档、再被起点换掉，那正是
+    // 这批要消灭的形状。上面那串假时钟已经把起点冲进去了，所以这里同步断言。
+    // 不用 `waitFor`：这个文件开着 fake timers，testing-library 的轮询推不动，
+    // 元素**已经在了**它也会等到超时——那是一条假红；同步断言红了就是真没挂上。
     const prosemirror = body?.querySelector(".ProseMirror[contenteditable='true']");
     expect(prosemirror).toBeTruthy();
     expect(prosemirror?.getAttribute("aria-label")).toBe("笔记正文编辑区");

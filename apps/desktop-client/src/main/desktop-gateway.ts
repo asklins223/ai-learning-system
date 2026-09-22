@@ -81,9 +81,7 @@ import {
   createNoteDocState,
   mergeNoteDocUpdates,
   type NoteDocState,
-  type NoteDocView,
 } from "./note-doc-state.ts";
-import type { NoteDocBlock } from "./note-doc-fragment.ts";
 import {
   NOTE_DOC_PREFIX,
   defaultNoteDocTransport,
@@ -460,7 +458,7 @@ type NoteDocLocalSession = {
  */
 const NOTE_DOC_PENDING_MAX = 200;
 
-/** `syncNoteDocBlocks` 的出口：三条路各自说清自己走到了哪一步。 */
+/** `syncNoteDocUpdate` 的出口：三条路各自说清自己走到了哪一步。 */
 export type NoteDocSyncOutcome = {
   via: "uploaded" | "unchanged" | "queued";
   revision: number;
@@ -3040,6 +3038,58 @@ export class DesktopGateway {
     return response;
   }
 
+  /**
+   * 设置 → 语音与伴星：读/写"这一身"。走 JSON 通道，回执由 IPC 层的
+   * companionVoicePreferenceV1Schema 把关（服务端未设置时回 config 默认并标 explicit:false，
+   * 所以这里不需要再补一层默认值）。
+   */
+  async getCompanionVoicePreference(requestId?: string) {
+    await this.ensureConnected(requestId);
+    const result = await this.request("/voice/preference", { method: "GET" }, true, true, requestId);
+    const parsed = companionVoicePreferenceV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  async setCompanionVoicePreference(
+    input: { engine: TtsEngineV1; voice: string },
+    requestId?: string,
+  ) {
+    await this.ensureConnected(requestId);
+    const result = await this.request("/voice/preference", {
+      method: "PATCH",
+      body: JSON.stringify({ version: 1, ...input }),
+    }, true, true, requestId);
+    const parsed = companionVoicePreferenceV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  /**
+   * 试听一条音色：文本由服务端固定，这里只提交 engine + voice。
+   * 与 speakCompanionVoice 同一形状（raw audio/mpeg → base64 回渲染进程）。
+   */
+  async previewCompanionVoice(
+    input: { engine: TtsEngineV1; voice: string },
+    requestId?: string,
+  ): Promise<CompanionVoiceSpeakResultV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.requestAudioBytes(
+      "/voice/tts/preview",
+      { method: "POST", body: JSON.stringify({ version: 1, ...input }) },
+      requestId,
+    );
+    const parsed = companionVoiceSpeakResultV1Schema.safeParse({
+      version: 1,
+      mimeType: "audio/mpeg",
+      audioBase64: Buffer.from(result.bytes).toString("base64"),
+      byteLength: result.bytes.byteLength,
+      voice: input.voice,
+    });
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
   async speakCompanionVoice(
     request: CompanionVoiceSpeakRequestV1,
     requestId?: string,
@@ -3897,8 +3947,7 @@ export class DesktopGateway {
       },
     });
     return {
-      applyBlocks: (blocks, title) => (stopped ? null : handle.applyBlocks(blocks, title)),
-      view: () => (stopped ? { blocks: [], title: "", titleSource: "auto" } : handle.view()),
+      applyLocal: (update) => (stopped ? null : handle.applyLocal(update)),
       setPresence: (state) => {
         if (stopped) return;
         handle.setPresence(state);
@@ -3934,8 +3983,11 @@ export class DesktopGateway {
     // 归属每次都记：一篇从 shared 撤回成 private 的笔记，本机下一次离线打开时
     // 要按最新那一位决定建不建连接。
     session.shareScope = parsed.data.shareScope;
+    // 起点交的是**这一台机器上看到的那份状态**，不是服务端那一串原字节：本机如果已经
+    // 攒了没送出去的编辑，界面重启后必须接着它们，而不是从服务端那份重开一篇、
+    // 再把没送出去的改动当成别人的覆盖掉。`seed` 之后 `encodeState()` 就是两者合并的结果。
     return {
-      ...session.state.view(),
+      update: session.state.encodeState(),
       revision: parsed.data.revision,
       backfilled: parsed.data.backfilled,
       shareScope: parsed.data.shareScope,
@@ -3958,39 +4010,63 @@ export class DesktopGateway {
    *
    * 不传 `blocks`（`null`）= 这次只改标题，正文一个字都不动。
    */
-  async syncNoteDocBlocks(
+  /** 列表里改名：标题写进本机那份文档的 `meta`，之后与正文走同一条上行。 */
+  async syncNoteDocTitle(
     noteId: string,
-    blocks: NoteDocBlock[] | null,
-    title: { title: string; titleSource: string } | undefined,
+    title: string,
+    titleSource: string,
     requestId?: string,
   ): Promise<NoteDocSyncOutcome> {
     const safeNoteId = this.safeUuid(noteId);
+    await this.ensureNoteDocSeeded(safeNoteId, requestId);
+    return this.settleNoteDocUpdate(
+      safeNoteId,
+      this.noteDocLocalSession(safeNoteId).state.applyTitle(title, titleSource),
+      requestId,
+    );
+  }
+
+  /**
+   * 取一次编辑起点（没取过的话）。界面打开这篇、或本机在自己那份上写一个字段之前，
+   * 都要先有它——没网的时候也要，因为那时候起点的唯一来源就是本机存的那一份。
+   */
+  private async ensureNoteDocSeeded(safeNoteId: string, requestId?: string): Promise<void> {
     const session = this.noteDocLocalSession(safeNoteId);
-    if (!session.seeded) {
-      const start = await this.request(
-        `/v2/notes/${safeNoteId}/doc-state`,
-        { method: "GET" },
-        true,
-        true,
-        requestId,
-      );
-      const parsed = noteDocServerStateV1Schema.safeParse(start.body);
-      if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
-      session.state.seed(parsed.data.update);
-      session.seeded = true;
-      session.revision = parsed.data.revision;
-      session.savedAt = parsed.data.savedAt;
-      // 归属也一并留下：这条路上没走过 `getNoteDocState`，不落这一位的话，
-      // 本机那份永远"不可持久化"，离线队列又只能在内存里活一次。
-      session.shareScope = parsed.data.shareScope;
-    }
-    const update = session.state.submitBlocks(blocks, title);
-    if (update !== null) {
+    if (session.seeded) return;
+    const start = await this.request(
+      `/v2/notes/${safeNoteId}/doc-state`,
+      { method: "GET" },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = noteDocServerStateV1Schema.safeParse(start.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    session.state.seed(parsed.data.update);
+    session.seeded = true;
+    session.revision = parsed.data.revision;
+    session.savedAt = parsed.data.savedAt;
+    // 归属也一并留下：这条路上没走过 `getNoteDocState`，不落这一位的话，
+    // 本机那份永远"不可持久化"，离线队列又只能在内存里活一次。
+    session.shareScope = parsed.data.shareScope;
+  }
+
+  /**
+   * 本机一条增量（或"什么都没有"）之后的同一段收尾：压队列、合并、上送、如实回报
+   * 走到哪一步。正文与标题两条来源共用它——两条路"走到了哪"必须是同一个答案。
+   */
+  private async settleNoteDocUpdate(
+    safeNoteId: string,
+    produced: string | null,
+    requestId?: string,
+  ): Promise<NoteDocSyncOutcome> {
+    const session = this.noteDocLocalSession(safeNoteId);
+    if (produced !== null) {
       if (session.pending.length >= NOTE_DOC_PENDING_MAX) {
         // 不再往上堆：把"攒了多少"如实报出来，界面才能说"先联网再改"。
         throw new DesktopGatewayFailure("result_unknown", "resync_first");
       }
-      session.pending.push(update);
+      session.pending.push(produced);
     }
     if (session.pending.length === 0) {
       return { via: "unchanged", revision: session.revision, savedAt: session.savedAt };
@@ -4003,7 +4079,7 @@ export class DesktopGateway {
       if (!isOfflineFailure(error)) {
         // 权限/尺寸/非法编码这类错误重发一百次也是同一个结果，不能留在队列里
         // 让它变成"每次输入都重试一次的死循环"。只退掉这一次刚压进去的那条。
-        if (update !== null) session.pending.pop();
+        if (produced !== null) session.pending.pop();
         throw error;
       }
       return { via: "queued", revision: session.revision, savedAt: session.savedAt };
@@ -4012,6 +4088,20 @@ export class DesktopGateway {
     session.revision = receipt.revision;
     session.savedAt = receipt.savedAt;
     return { via: "uploaded", revision: receipt.revision, savedAt: receipt.savedAt };
+  }
+
+  async syncNoteDocUpdate(
+    noteId: string,
+    update: string,
+    requestId?: string,
+  ): Promise<NoteDocSyncOutcome> {
+    const safeNoteId = this.safeUuid(noteId);
+    await this.ensureNoteDocSeeded(safeNoteId, requestId);
+    return this.settleNoteDocUpdate(
+      safeNoteId,
+      this.noteDocLocalSession(safeNoteId).state.applyLocal(update),
+      requestId,
+    );
   }
 
   /** 长连接建立前把攒下的增量交出去：连上了还压着一批，界面上就是"已经同步"的假象。 */

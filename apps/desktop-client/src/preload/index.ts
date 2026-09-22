@@ -245,6 +245,14 @@ const desktopApi: AILearnDesktopApiM2 = {
     answerMode: {
       get: (input) => invoke(DESKTOP_IPC_CHANNELS.companionAnswerModeGet, input),
       patch: (input) => invoke(DESKTOP_IPC_CHANNELS.companionAnswerModePatch, input)
+    },
+    // 设置 → 语音与伴星：引擎/音色偏好，以及试听一条音色。
+    voicePreference: {
+      get: (input) => invoke(DESKTOP_IPC_CHANNELS.companionVoicePreferenceGet, input),
+      patch: (input) => invoke(DESKTOP_IPC_CHANNELS.companionVoicePreferencePatch, input)
+    },
+    voicePreview: {
+      synthesize: (input) => invoke(DESKTOP_IPC_CHANNELS.companionVoicePreview, input)
     }
   },
   note: {
@@ -258,7 +266,8 @@ const desktopApi: AILearnDesktopApiM2 = {
     // presence 都走这里，实时下行是 `subscriptions` 上 kind=noteDoc 的事件。
     doc: {
       state: (input) => invoke(DESKTOP_IPC_CHANNELS.noteDocState, input),
-      syncBlocks: (input) => invoke(DESKTOP_IPC_CHANNELS.noteDocSyncBlocks, input),
+      syncUpdate: (input) => invoke(DESKTOP_IPC_CHANNELS.noteDocSyncUpdate, input),
+      syncTitle: (input) => invoke(DESKTOP_IPC_CHANNELS.noteDocSyncTitle, input),
       presence: (input) => invoke(DESKTOP_IPC_CHANNELS.noteDocPresence, input),
     },
     // 「共享给空间」/「取消共享」：归属是作者的一个动作，不是编辑权限的一部分。

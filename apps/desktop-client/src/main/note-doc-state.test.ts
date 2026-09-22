@@ -1,122 +1,134 @@
 /**
- * 本机文档状态的收敛与回声规则（批次 4.4）。
+ * 影子文档的收敛与回声规则（批次 4.4 建立，C2 之后它只转手增量）。
  *
- * 这里测的是"渲染层能不能只说 blocks"这个决定的地基：两份状态从同一份字节出发，
- * 各自改不同的块，交换一次增量之后必须都收敛到"两处改动都在"。以及一条不对称的
- * 风险：远端更新如果被当成本机的，会被原样发回去（回声），所以它也在这里钉住。
+ * C2 之前这份状态机收的是 blocks、由主进程替界面差分；现在增量在渲染进程产生，这里
+ * 只负责：并进影子文档、认出哪些是本机写的（要上行）、哪些是别人写的（不能再发回去）。
+ * 所以用例的"改一处"都改成**构造一条真实的本机增量**（打开文档、改那段 `YXmlText`、
+ * 取 state vector 之差），而不是交一份 blocks 让主进程去猜——那个"猜"就是丢字的来源。
+ *
+ * 一条不对称的风险仍在这里钉住：远端更新被当成本机的，就会原样发回去（回声）。
  */
 import { describe, expect, it } from "vitest";
+import * as Y from "yjs";
 import { createNoteDocState } from "./note-doc-state";
-import { emptyNoteDoc, setNoteTitle, snapshotOf, syncNoteBlocksForEditor } from "./note-doc-fragment";
+import { emptyNoteDoc, setNoteTitle, snapshotOf, writeNoteBlocks } from "./note-doc-fragment";
 
-function baseBytes() {
+const BLOCKS = [
+  { type: "heading", content: "标题" },
+  { type: "paragraph", content: "第一段" },
+  { type: "paragraph", content: "第二段" },
+];
+
+function baseBytes(): string {
   const doc = emptyNoteDoc();
-  syncNoteBlocksForEditor(doc, [
-    { type: "heading", content: "标题" },
-    { type: "paragraph", content: "第一段" },
-    { type: "paragraph", content: "第二段" },
-  ]);
+  writeNoteBlocks(doc, BLOCKS);
   setNoteTitle(doc, "标题", "auto");
   const bytes = snapshotOf(doc);
   doc.destroy();
   return Buffer.from(bytes).toString("base64");
 }
 
-describe("本机文档状态", () => {
-  it("seed 打底、submitBlocks 返回增量，另一份状态应用后两边一致", () => {
+const unB64 = (text: string): Uint8Array => new Uint8Array(Buffer.from(text, "base64"));
+const b64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString("base64");
+
+/** 第 `nodeIndex` 个块节点里那条行内容（`Y.XmlElement` 没有 `firstChild()`，取子节点用 `get(i)`）。 */
+function inlineText(fragment: Y.XmlFragment, nodeIndex: number): Y.XmlText {
+  return (fragment.get(nodeIndex) as Y.XmlElement).get(0) as Y.XmlText;
+}
+
+/**
+ * 模拟"编辑器里打了一次字"：从起点开一份文档，改第 `blockIndex` 块的那条文本，
+ * 交回**这一次产生的增量**。增量而不是整篇——界面上行的就是这个东西。
+ */
+function localBodyEdit(seed: string, nodeIndex: number, at: number, text: string): string {
+  const doc = new Y.Doc();
+  Y.applyUpdate(doc, unB64(seed));
+  const before = Y.encodeStateVector(doc);
+  inlineText(doc.getXmlFragment("content"), nodeIndex).insert(at, text);
+  const update = Y.encodeStateAsUpdate(doc, before);
+  doc.destroy();
+  return b64(update);
+}
+
+describe("影子文档的增量转手", () => {
+  it("seed 打底、本机一条增量应用后两边一致", () => {
     const base = baseBytes();
     const a = createNoteDocState();
     const b = createNoteDocState();
     a.seed(base);
     b.seed(base);
 
-    const delta = a.submitBlocks([
-      { type: "heading", content: "标题" },
-      { type: "paragraph", content: "第一段（A 改的）" },
-      { type: "paragraph", content: "第二段" },
-    ]);
+    const delta = a.applyLocal(localBodyEdit(base, 1, 3, "（A 改的）"));
     expect(delta).toBeTruthy();
     b.applyRemote(delta!);
 
-    expect(b.view().blocks.map((block) => block.content))
-      .toEqual(["标题", "第一段（A 改的）", "第二段"]);
-    expect(a.view().blocks.map((block) => block.content))
-      .toEqual(b.view().blocks.map((block) => block.content));
+    expect(b.encodeState()).not.toBe(base);
+    // 收敛的定义是"两份状态互相包含"：把 b 的整份状态并进 a，a 不该再产生任何新操作。
+    const before = unB64(a.encodeState()).length;
+    a.applyRemote(b.encodeState());
+    expect(a.encodeState().length).toBeGreaterThan(before - 1);
+    expect(a.applyLocal(b.encodeState())).toBeNull();
     a.dispose();
     b.dispose();
   });
 
-  it("两边各改一块，交换后两处都在、块数不涨", () => {
+  it("两边各改一段的不同位置：交换之后两处都在、块数不涨", () => {
     const base = baseBytes();
     const a = createNoteDocState();
     const b = createNoteDocState();
     a.seed(base);
     b.seed(base);
 
-    const deltaA = a.submitBlocks([
-      { type: "heading", content: "标题" },
-      { type: "paragraph", content: "第一段（A）" },
-      { type: "paragraph", content: "第二段" },
-    ]);
-    const deltaB = b.submitBlocks([
-      { type: "heading", content: "标题" },
-      { type: "paragraph", content: "第一段" },
-      { type: "paragraph", content: "第二段（B）" },
-    ]);
+    const deltaA = a.applyLocal(localBodyEdit(base, 1, 0, "A起的头"));
+    const deltaB = b.applyLocal(localBodyEdit(base, 1, 3, "B插的腰"));
     a.applyRemote(deltaB!);
     b.applyRemote(deltaA!);
 
-    expect(a.view().blocks.map((block) => block.content))
-      .toEqual(["标题", "第一段（A）", "第二段（B）"]);
-    expect(b.view().blocks).toEqual(a.view().blocks);
+    const merged = new Y.Doc();
+    Y.applyUpdate(merged, unB64(a.encodeState()));
+    const text = inlineText(merged.getXmlFragment("content"), 1).toString();
+    expect(merged.getXmlFragment("content").length).toBe(BLOCKS.length);
+    expect(text).toContain("A起的头");
+    expect(text).toContain("B插的腰");
     a.dispose();
     b.dispose();
+    merged.destroy();
   });
 
   it("远端更新不产生本机增量（回声会被原样发回去）", () => {
     const base = baseBytes();
     const local = createNoteDocState();
-    const other = createNoteDocState();
     local.seed(base);
-    other.seed(base);
-
-    const delta = other.submitBlocks([
-      { type: "heading", content: "标题" },
-      { type: "paragraph", content: "远端改的" },
-      { type: "paragraph", content: "第二段" },
-    ]);
-    local.applyRemote(delta!);
-    expect(local.view().blocks[1].content).toBe("远端改的");
-    // seed 与 applyRemote 都不该吐增量：它们是"别人写进来的"，再发回去就是回声。
-    // 注意这里必须拿**当前**视图：交回旧视图等于把远端那次改动覆盖掉（那是合法写入，
-    // 会真的产出增量），也正是"提交的 blocks 必须是最新视图 + 本地打字"这条约束的由来。
-    expect(local.submitBlocks(local.view().blocks.map((block) => ({ type: block.type, content: block.content }))))
-      .toBeNull();
+    const remote = localBodyEdit(base, 1, 0, "远端写的");
+    expect(local.applyRemote(remote)).toBeUndefined();
+    // 再交一次同一条增量：Yjs 幂等，没有新操作就不会有本机增量可上行。
+    expect(local.applyLocal(remote)).toBeNull();
     local.dispose();
-    other.dispose();
   });
 
-  it("什么都没改时 submitBlocks 返回 null（不空转一次上送）", () => {
+  it("什么都没改时 applyLocal 返回 null（不空转一次上送）", () => {
+    const base = baseBytes();
     const state = createNoteDocState();
-    state.seed(baseBytes());
-    const same = state.view().blocks.map((block) => ({ type: block.type, content: block.content }));
-    expect(state.submitBlocks(same)).toBeNull();
+    state.seed(base);
+    const empty = b64(Y.encodeStateAsUpdate(new Y.Doc()));
+    expect(state.applyLocal(empty)).toBeNull();
     state.dispose();
   });
 
-  it("标题走同一份文档：改名不会动正文块", () => {
+  it("标题走同一份文档：改名不动正文，且它自己就是那条增量", () => {
+    const base = baseBytes();
     const state = createNoteDocState();
-    state.seed(baseBytes());
-    const blocks = state.view().blocks;
-    const delta = state.submitBlocks(
-      blocks.map((block) => ({ type: block.type, content: block.content })),
-      { title: "人工起的标题", titleSource: "manual" },
-    );
+    state.seed(base);
+    const delta = state.applyTitle("人工起的标题", "manual");
     expect(delta).toBeTruthy();
-    const view = state.view();
-    expect(view.title).toBe("人工起的标题");
-    expect(view.titleSource).toBe("manual");
-    expect(view.blocks.map((block) => block.content)).toEqual(["标题", "第一段", "第二段"]);
+    // 同一个名字再写一次不该产出增量（否则每存一次都白上一次送）。
+    expect(state.applyTitle("人工起的标题", "manual")).toBeNull();
+
+    const after = new Y.Doc();
+    Y.applyUpdate(after, unB64(state.encodeState()));
+    expect(String(after.getMap<unknown>("meta").get("title"))).toBe("人工起的标题");
+    expect(inlineText(after.getXmlFragment("content"), 1).toString()).toBe("第一段");
     state.dispose();
+    after.destroy();
   });
 });

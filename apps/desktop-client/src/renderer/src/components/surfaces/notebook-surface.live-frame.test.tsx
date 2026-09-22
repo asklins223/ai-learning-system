@@ -1,29 +1,37 @@
 // @vitest-environment jsdom
 
+import { noteDocResult, peerUpdate, seedUpdate } from "../../test-support/note-doc-fixtures";
+
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NotebookSurface } from "./notebook-surface";
 import { useRoomStore } from "../../app/room-store";
 
 /**
- * 协同帧与"回读到的那一份"谁该上屏（批次 4.4 的实窗结论），两条方向相反的规则。
+ * 别人改了这一篇，我这屏该画什么（批次 4.4 的实窗结论，批次 C2 换成文档之后重写）。
  *
- * **阅读态画那一帧。** 为什么在真窗口里量到才信：作者那台机器的自动保存要过本机
- * debounce 才发出去（实测量到敲完 3.5 秒 API 才看得见那段），而协同帧是改动一进
- * 活文档就发的。于是"帧叫醒一次 HTTP 回读"这条链读到的是**还没刷新**的那份——
- * 读的人看到的是上一次的正文，而且没有第二帧来纠它。jsdom 里把这条喂成"服务端
- * 仍返回旧正文"，界面就得画帧里那份。
+ * 形状变了但**要防的事故一件没变**：下行现在是一条 yjs 增量，界面这一侧就持有这份文档，
+ * 阅读态与编辑态画的是同一份。于是过去那套"帧 vs 回读二选一""编辑态干脆不接帧"都没有
+ * 存在理由了——那两个来源并存正是 2026-09-22 实测到的那次覆盖的根（第二个人的页面看不
+ * 到对方那段、标签写着「已同步」，他随手敲一个字就把对方那句按块删掉）。
  *
- * **编辑态：没动过就跟上那一份，动过就守住自己的字。** 两边都在这文件里钉着——
- * 前者关掉的是实测到的丢字（旧页一次提交把对方那句按块删掉），后者关掉的是
- * 反向的覆盖（别人的改动盖掉我没保存的句子）。逐字符合并仍要 `y-prosemirror`。
+ * 这里钉住的四件事：
+ *  1. 正文只由这份文档给（帧把它推进了，屏上就是新的；那次回读还停在旧的也一样）。
+ *  2. 没有帧时画的是这一篇自己的文档，不是占位话、也不是上一篇。
+ *  3. 我没动过标题时，别人的改名直接上屏。
+ *  4. 我改了标题时，别人的改名不许顶掉我那一段——而这一屏必须仍然标着"有未提交编辑"，
+ *     否则自动保存不会再来第二次，我起的名字就凭空没了。
+ *
+ * 增量夹具必须是**从同一起点改出来的**（见 `note-doc-fixtures` 的说明）：另建一篇塞进来
+ * 在 CRDT 里是并发插入，合出来是两块，用例绿了也证明不了真窗口里的那次合并。
  */
 
 const NOTE_ID = "11111111-1111-4111-8111-111111111111";
 const VERSION_ID = "22222222-4222-4222-8222-222222222222";
-const STALE = "服务端这一份还是旧的";
-const REMOTE = "别人刚交上来的那一份";
-const FRESH = "帧里这一份是新的";
+const SEED_TITLE = "起点标题";
+const STALE = "这一段还没人动过";
+const FRESH = "别人刚写进来的那一段";
+const RENAMED = "别人改的那个名字";
 const MINE = "我正在写的那一句";
 
 type Listener = (event: { data: unknown }) => void;
@@ -51,12 +59,13 @@ function notePayload(title: string, content: string) {
 }
 
 /**
- * `reads` 不给 = 每次都返回同一份旧正文（模拟那次抢跑的回读）。
- * 给了序列 = 按次序一份一份返回，用来让"第二次回读确实带回新东西"可断言。
+ * 起点正文与回读正文给**同一句话**：生产里这两份同源（都来自这一篇），分开给就会让
+ * "屏上画的是文档投影"这件事永远看不出来——它和回读那份不一样时，谁在上面都说不清。
  */
-function stub(reads: Array<[string, string]> = []) {
+function stub() {
   listeners = [];
   let call = 0;
+  const seed = seedUpdate(SEED_TITLE, [STALE]);
   window.ailearn = {
     contract: { enabledRoutes: ["note.detail"] },
     auth: { getState: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { status: "authenticated", workspace: { workspaceId: "w-1" } } })) },
@@ -74,13 +83,13 @@ function stub(reads: Array<[string, string]> = []) {
     },
     note: {
       get: vi.fn(async () => {
-        const [title, content] = reads.length ? reads[Math.min(call, reads.length - 1)] : [STALE, STALE];
         call += 1;
-        return notePayload(title, content);
+        // 永远回同一份旧正文：模拟那次抢在作者自动保存之前的回读（实窗量到 3.5 秒）。
+        return notePayload(STALE, STALE);
       }),
       doc: {
-        state: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { blocks: [], title: "", titleSource: "auto", revision: 0, backfilled: false, shareScope: "shared" } })),
-        syncBlocks: vi.fn(async () => { throw new Error("gateway unavailable"); }),
+        state: vi.fn(async () => noteDocResult({ update: seed })),
+        syncUpdate: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { via: "stream", revision: null, savedAt: new Date().toISOString() } })),
         presence: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { shared: true } })),
       },
     },
@@ -104,7 +113,7 @@ function stub(reads: Array<[string, string]> = []) {
       },
     },
   } as unknown as typeof window.ailearn;
-  return { reads: () => call };
+  return { seed, reads: () => call };
 }
 
 /** 让挂起的一串 Promise（含自动保存的 debounce）都跑掉。 */
@@ -121,19 +130,17 @@ async function open(mode: "read" | "edit") {
   await settle();
 }
 
-const deliverFrame = () => act(() => {
+const deliverFrame = (stubbed: { seed: string }, changes: { text?: string; title?: string }) => act(() => {
+  const update = peerUpdate(stubbed.seed, changes);
   for (const listener of listeners) {
-    listener({
-      data: {
-        kind: "note_doc_event",
-        noteId: NOTE_ID,
-        event: { type: "blocks", blocks: [{ ordinal: 0, type: "paragraph", content: FRESH }], title: FRESH, titleSource: "auto" },
-      },
-    });
+    listener({ data: { kind: "note_doc_event", noteId: NOTE_ID, event: { type: "update", update } } });
   }
 });
 
 const titleValue = () => (document.getElementById("notebook-surface-title") as HTMLInputElement | null)?.value ?? null;
+/** 保存状态那一枚标签就是 `dirty` 的脸：脏=「草稿」，干净=「已同步」。 */
+const saveTag = () => document.querySelector(".tag.red")?.textContent?.trim() ?? null;
+const readingParagraphs = () => Array.from(document.querySelectorAll(".reading-body p")).map((node) => node.textContent?.trim() ?? "");
 
 function memberRoom() {
   useRoomStore.setState({
@@ -155,65 +162,69 @@ afterEach(() => {
   useRoomStore.setState({ activeNoteRef: null, spaceIdentity: null, accountIdentity: null });
 });
 
-describe("阅读态用那一帧的正文", () => {
-  it("回读还没刷新时，读的人看到的就是帧里那份", async () => {
-    stub();
+describe("阅读态画这一篇自己的文档", () => {
+  it("对端改了那一段：回读还停在旧的，读的人看到的也必须是新的", async () => {
+    const stubbed = stub();
     memberRoom();
     await open("read");
-    expect(document.body.textContent).toContain(STALE);
-    deliverFrame();
-    expect(document.body.textContent).toContain(FRESH);
-    expect(document.querySelector(".title")?.textContent).toBe(FRESH);
+    // 起点先上屏：这一句同时也是"帧根本没 apply"时的对照组。
+    expect(readingParagraphs()).toEqual([STALE]);
+    const readsBefore = stubbed.reads();
+
+    deliverFrame(stubbed, { text: FRESH, title: RENAMED });
+    // 回读是 debounce 之后才叫醒的（400ms），所以这里推得比那一格久。
+    await settle(8);
+
+    // 只有一段：对端改的就是那一段，合并不是"再添一句"。块数涨了就是两份历史没同源。
+    expect(readingParagraphs()).toEqual([FRESH]);
+    expect(document.querySelector(".title")?.textContent).toBe(RENAMED);
+    // 叫醒一次回读仍然要做（版本号、权限只能从那次回读取），但它不是正文的来源。
+    expect(stubbed.reads()).toBeGreaterThan(readsBefore);
   });
 
-  it("没有帧可画时仍老实回显读到的那一份（不是占位话，也不是上一篇）", async () => {
+  it("没有帧时画的就是这份文档，不是占位话、也不是上一篇", async () => {
     stub();
     memberRoom();
     await open("read");
-    expect(document.querySelector(".title")?.textContent).toBe(STALE);
-    // 断正文那一段的字，不数 `p` 的个数：空正文也有一句"这一版正文还没有段落"占位，
-    // 只数个数的那条写法对"读到的那份根本没画出来"是哑的。
-    expect(document.querySelector(".reading-body > p")?.textContent).toBe(STALE);
+    expect(readingParagraphs()).toEqual([STALE]);
+    // 断具体那句话，不数 `p` 的个数：空正文也有一句"这一版正文还没有段落"占位，
+    // 只数个数的那条写法对"根本没画出来"是哑的。
+    expect(document.body.textContent).not.toContain("这一版正文还没有段落");
   });
 });
 
-describe("编辑态：没动过就跟上新的一份，动过就守住自己的字", () => {
-  /**
-   * 判"作者手上有没有待提交的改动"只能跟**本机上一次交出去/接进来的那一份**比。
-   * 此前它比的是"草稿 vs 那次 HTTP 读回来的正文"，而那份会过期（作者的自动保存要过
-   * 本机 debounce 才进 API，实测量到 3.5 秒）——于是第二个人的页面既看不到对方那段、
-   * 标签还写着「已同步」，他随手再敲一个字就把对方那句按块删了
-   * （2026-09-22 两个真窗口实测：服务端里对方那段不见了）。
-   *
-   * 这两条一起钉住分界：没动 → 跟上（那次覆盖就没有发生的条件）；动了 → 我的字优先。
-   * "动了"这一侧仍不接远端改动，逐字符合并要把编辑器绑成 CRDT（`y-prosemirror`）
-   * 才做得到，届时这条要连着改。
-   */
-  it("我什么都没动时，远端那一帧直接进我这一屏", async () => {
-    const { reads } = stub([[STALE, STALE], [REMOTE, REMOTE]]);
+describe("编辑态：标题跟着别人那份走，我改的那一段不被顶掉", () => {
+  it("我没动过标题时，别人的改名直接上屏，且这一屏不算脏", async () => {
+    const stubbed = stub();
     ownerRoom();
     await open("edit");
-    const readsBefore = reads();
+    expect(titleValue()).toBe(SEED_TITLE);
+    expect(saveTag()).toBe("已同步");
 
-    deliverFrame();
-    await settle();
-    expect(reads()).toBeGreaterThan(readsBefore);
-    // 上屏的是帧里那份——既不是回读到的旧的，也不是编辑器里原来那段。
-    expect(titleValue()).toBe(FRESH);
+    deliverFrame(stubbed, { title: RENAMED });
+    await settle(2);
+
+    expect(titleValue()).toBe(RENAMED);
+    // 跟上别人的改名不能顺手把这一屏标成"我有待提交的改动"——那一标就再也下不来，
+    // 而且下一次自动保存会把别人的名字原样送回服务端。
+    expect(saveTag()).toBe("已同步");
   });
 
-  it("我改了标题时，远端那一帧与那次回读都不许动我写的字", async () => {
-    const { reads } = stub([[STALE, STALE], [REMOTE, REMOTE]]);
+  it("我改了标题时，别人的改名不许动我写的字，且仍然标着未提交", async () => {
+    const stubbed = stub();
     ownerRoom();
     await open("edit");
     const title = document.getElementById("notebook-surface-title") as HTMLInputElement;
     fireEvent.input(title, { target: { value: MINE } });
     await settle(2);
-    const readsBefore = reads();
 
-    deliverFrame();
-    await settle();
-    expect(reads()).toBeGreaterThan(readsBefore);
+    deliverFrame(stubbed, { title: RENAMED });
+    await settle(2);
+
     expect(titleValue()).toBe(MINE);
+    // 这一条是上一句的配套：守住我的字之后必须仍然承认"还没交出去"。少了它，"守住"
+    // 与"已经把这份覆盖掉了"在屏上长得一样，而前者要是让界面读成干净，改名就丢了。
+    expect(saveTag()).toBe("草稿");
+    expect(document.body.textContent).not.toContain(RENAMED);
   });
 });

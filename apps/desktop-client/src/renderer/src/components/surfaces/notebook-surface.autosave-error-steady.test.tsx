@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 
+import { noteDocResult, peerUpdate, seedUpdate } from "../../test-support/note-doc-fixtures";
+
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NotebookSurface } from "./notebook-surface";
@@ -70,8 +72,8 @@ function stubGatewayWithFailingSave() {
       // 自动保存现在走文档增量（批次 4.4），所以"提交失败"要钉在这一条路上；
       // 还挂在 `save` 上的话，这个用例测的就已经不是页面真正走的那条路了。
       doc: {
-        state: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { blocks: [], title: "", titleSource: "auto", revision: 0, backfilled: false } })),
-        syncBlocks: vi.fn(async () => {
+        state: vi.fn(async () => noteDocResult()),
+        syncUpdate: vi.fn(async () => {
           state.saveAttempts += 1;
           throw new Error("gateway unavailable");
         }),

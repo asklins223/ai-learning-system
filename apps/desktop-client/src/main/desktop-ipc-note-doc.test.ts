@@ -8,6 +8,8 @@
  * 写不进去。
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import * as Y from "yjs";
+import { emptyNoteDoc, projectNoteBlocks, writeNoteBlocks } from "./note-doc-fragment";
 import {
   DESKTOP_IPC_CHANNELS,
   DESKTOP_IPC_CONTRACT_VERSION,
@@ -40,6 +42,28 @@ vi.mock("electron", () => ({
   BrowserWindow: class BrowserWindow {},
   ipcMain: { handle: electronMock.handle, on: vi.fn() },
 }));
+
+/** 一条真实的本机增量：主进程只看 base64 规范形，不看内容，所以这里不编字符串。 */
+/** 服务端起点的那份编码：带一个真的正文块，好让"读到的是服务端那份"这类断言
+ * 能解出字来验，而不是只看字符串不为空。 */
+const bodyUpdate = (): string => {
+  const doc = emptyNoteDoc();
+  writeNoteBlocks(doc, [{ type: "paragraph", content: "正文" }]);
+  return Buffer.from(Y.encodeStateAsUpdate(doc)).toString("base64");
+};
+const decodedBody = (update: string): string => {
+  const doc = emptyNoteDoc();
+  Y.applyUpdate(doc, Buffer.from(update, "base64"));
+  const body = projectNoteBlocks(doc).map((block) => block.content).join("");
+  doc.destroy();
+  return body;
+};
+
+const makeUpdate = (key: string): string => {
+  const doc = new Y.Doc();
+  doc.getMap("probe").set(key, key);
+  return Buffer.from(Y.encodeStateAsUpdate(doc)).toString("base64");
+};
 
 const NOTE_ID = "33333333-3333-4333-8333-333333333333";
 const WORKSPACE_EPOCH = 9;
@@ -81,8 +105,7 @@ async function setup(session: {
   const gate = new Promise<void>((resolve) => { releaseStream = resolve; });
   const streamHandle = {
     // 返回一条增量 = 这次提交确实改了文档（回执 `stream`）；返回 null 是"没改动"。
-    applyBlocks: vi.fn(() => "AA==" as string | null),
-    view: vi.fn(() => ({ blocks: [], title: "", titleSource: "auto" })),
+    applyLocal: vi.fn(() => "AA==" as string | null),
     setPresence: vi.fn(),
     stop: vi.fn(),
   };
@@ -96,9 +119,7 @@ async function setup(session: {
   };
   const uploadNoteDocUpdate = vi.fn(async () => ({ revision: 7, savedAt: "2026-09-21T00:00:00.000Z" }));
   const getNoteDocState = vi.fn(async () => ({
-    blocks: [{ ordinal: 0, type: "paragraph", content: "正文" }],
-    title: "标题",
-    titleSource: "auto",
+    update: bodyUpdate(),
     revision: 3,
     backfilled: false,
     // 归属来自服务端：`private` 的那篇主进程不会为它建长连接（写入照旧）。
@@ -149,7 +170,7 @@ async function setup(session: {
     })),
     watchNoteDocument,
     uploadNoteDocUpdate,
-    syncNoteDocBlocks: syncViaGateway,
+    syncNoteDocUpdate: syncViaGateway,
     // 网关那两个新动作在 IPC 这边只管调用；本机文档与队列的真实行为
     // 在 `desktop-gateway.test.ts` 里对着网关本身验。
     flushNoteDocPending: vi.fn(async () => undefined),
@@ -219,7 +240,10 @@ describe("笔记协同的 IPC 通道", () => {
     send.mockClear();
     // 这就是风险 3 的那一条：kind 白名单或 payload union 漏一处，下面就是 0 次调用。
     const onEvent = watchNoteDocument.mock.calls[0][1] as (e: unknown) => void | Promise<void>;
-    await onEvent({ noteId: NOTE_ID, type: "blocks", blocks: [{ ordinal: 0, type: "paragraph", content: "别人的改动" }], title: "标题", titleSource: "auto" });
+    // 同一条增量走两头：`makeUpdate` 每次的 client id 不同，分两次调就会
+    // 期望值与实发值不等（那量的就不再是"帧到没到"了）。
+    const peerUpdate = makeUpdate("peer");
+    await onEvent({ noteId: NOTE_ID, type: "update", update: peerUpdate });
     expect(send).toHaveBeenCalledTimes(1);
     const [channel, payload] = send.mock.calls[0];
     expect(channel).toBe(DESKTOP_IPC_CHANNELS.subscriptionsEvent);
@@ -229,7 +253,7 @@ describe("笔记协同的 IPC 通道", () => {
       data: {
         kind: "note_doc_event",
         noteId: NOTE_ID,
-        event: { type: "blocks", blocks: [{ ordinal: 0, type: "paragraph", content: "别人的改动" }], title: "标题", titleSource: "auto" },
+        event: { type: "update", update: peerUpdate },
       },
     });
 
@@ -248,14 +272,14 @@ describe("笔记协同的 IPC 通道", () => {
     await settle();
     expect(watchNoteDocument).not.toHaveBeenCalled();
 
-    const written = await handler(DESKTOP_IPC_CHANNELS.noteDocSyncBlocks)(event, {
+    const written = await handler(DESKTOP_IPC_CHANNELS.noteDocSyncUpdate)(event, {
       meta,
       commandId: "command-upload-1",
       noteId: NOTE_ID,
-      blocks: [{ type: "paragraph", content: "改过的正文" }],
+      update: makeUpdate("a"),
     });
     expect(written).toMatchObject({ ok: true, data: { via: "uploaded", revision: 11 } });
-    expect(syncViaGateway).toHaveBeenCalledWith(NOTE_ID, [{ type: "paragraph", content: "改过的正文" }], undefined, meta.requestId);
+    expect(syncViaGateway).toHaveBeenCalledWith(NOTE_ID, expect.any(String), meta.requestId);
   });
 
   it("只读成员也建连（他要看到别人的改动），但写入不走那条流", async () => {
@@ -274,15 +298,15 @@ describe("笔记协同的 IPC 通道", () => {
     await onEvent({ noteId: NOTE_ID, type: "status", status: "authenticated", authorizedScope: "readonly" });
 
     // 只读答复之后，写入仍然照走 HTTP：那条路上的 403 才是真判据，本机不自证清白。
-    const written = await handler(DESKTOP_IPC_CHANNELS.noteDocSyncBlocks)(event, {
+    const written = await handler(DESKTOP_IPC_CHANNELS.noteDocSyncUpdate)(event, {
       meta,
       commandId: "command-readonly-write",
       noteId: NOTE_ID,
-      blocks: [{ type: "paragraph", content: "成员想改的正文" }],
+      update: makeUpdate("m"),
     });
     expect(written).toMatchObject({ ok: true, data: { via: "uploaded" } });
     expect(syncViaGateway).toHaveBeenCalledTimes(1);
-    expect(streamHandle.applyBlocks).not.toHaveBeenCalled();
+    expect(streamHandle.applyLocal).not.toHaveBeenCalled();
     expect(uploadNoteDocUpdate).not.toHaveBeenCalled();
     // 只读不影响在场广播：他也得出现在别人那一排头像里。
     await handler(DESKTOP_IPC_CHANNELS.noteDocPresence)(event, { meta, noteId: NOTE_ID, state: JSON.stringify({ name: "小琳" }) });
@@ -305,14 +329,14 @@ describe("笔记协同的 IPC 通道", () => {
     const onEvent = watchNoteDocument.mock.calls[0][1] as (e: unknown) => void | Promise<void>;
     await onEvent({ noteId: NOTE_ID, type: "status", status: "authenticated", authorizedScope: "read-write" });
 
-    const written = await handler(DESKTOP_IPC_CHANNELS.noteDocSyncBlocks)(event, {
+    const written = await handler(DESKTOP_IPC_CHANNELS.noteDocSyncUpdate)(event, {
       meta,
       commandId: "command-stream-1",
       noteId: NOTE_ID,
-      blocks: [{ type: "paragraph", content: "改过的正文" }],
+      update: makeUpdate("a"),
     });
     expect(written).toMatchObject({ ok: true, data: { via: "stream", revision: null } });
-    expect(streamHandle.applyBlocks).toHaveBeenCalledWith([{ type: "paragraph", content: "改过的正文" }], undefined);
+    expect(streamHandle.applyLocal).toHaveBeenCalledWith(expect.any(String));
     expect(uploadNoteDocUpdate).not.toHaveBeenCalled();
   });
 
@@ -328,22 +352,24 @@ describe("笔记协同的 IPC 通道", () => {
     await settle();
     expect(watchNoteDocument).toHaveBeenCalledTimes(1);
 
-    const written = await handler(DESKTOP_IPC_CHANNELS.noteDocSyncBlocks)(event, {
+    const written = await handler(DESKTOP_IPC_CHANNELS.noteDocSyncUpdate)(event, {
       meta,
       commandId: "command-no-scope-yet",
       noteId: NOTE_ID,
-      blocks: [{ type: "paragraph", content: "改过的正文" }],
+      update: makeUpdate("a"),
     });
     expect(written).toMatchObject({ ok: true, data: { via: "uploaded" } });
-    expect(streamHandle.applyBlocks).not.toHaveBeenCalled();
+    expect(streamHandle.applyLocal).not.toHaveBeenCalled();
     expect(syncViaGateway).toHaveBeenCalledTimes(1);
   });
 
   it("编辑起点是视图（blocks + 标题），编码不出主进程", async () => {
     const { event, getNoteDocState } = await setup({ workspaceType: "collaborative", role: "owner" });
     const state = await handler(DESKTOP_IPC_CHANNELS.noteDocState)(event, { meta, noteId: NOTE_ID });
-    expect(state).toMatchObject({ ok: true, data: { blocks: [{ ordinal: 0, type: "paragraph", content: "正文" }], title: "标题", revision: 3 } });
-    expect(JSON.stringify(state)).not.toContain("state-as-base64");
+    expect(state).toMatchObject({ ok: true, data: { revision: 3 } });
+    // 起点现在**就是**那份编码：渲染进程要拿它建自己的文档，不给就等于让界面自己拼一棵树。
+    expect(String(JSON.stringify(state))).toContain("update");
+
     expect(getNoteDocState).toHaveBeenCalledWith(NOTE_ID, meta.requestId);
   });
 
@@ -420,19 +446,19 @@ describe("笔记协同的 IPC 通道", () => {
     expect(watchNoteDocument).toHaveBeenCalledTimes(2);
   });
 
-  it("超限的提交不进 gateway：空块数组与超块数都在入口被拒", async () => {
+  it("超限的提交不进 gateway：空增量与超上限的增量都在入口被拒", async () => {
     const { event, uploadNoteDocUpdate } = await setup({ workspaceType: "personal", role: "owner" });
-    const empty = await handler(DESKTOP_IPC_CHANNELS.noteDocSyncBlocks)(event, {
+    const empty = await handler(DESKTOP_IPC_CHANNELS.noteDocSyncUpdate)(event, {
       meta,
       commandId: "command-empty",
       noteId: NOTE_ID,
-      blocks: [],
+      update: "",
     });
-    const oversized = await handler(DESKTOP_IPC_CHANNELS.noteDocSyncBlocks)(event, {
+    const oversized = await handler(DESKTOP_IPC_CHANNELS.noteDocSyncUpdate)(event, {
       meta,
       commandId: "command-oversize",
       noteId: NOTE_ID,
-      blocks: Array.from({ length: 2_500 }, () => ({ type: "paragraph", content: "x" })),
+      update: "A".repeat(4 * 1024 * 1024 + 8),
     });
     expect(oversized.ok).toBe(false);
     expect(uploadNoteDocUpdate).not.toHaveBeenCalled();
@@ -463,7 +489,7 @@ describe("笔记协同的 IPC 通道", () => {
     const store = new MemoryNoteDocCacheStore();
     const { event, noteDocCache } = await setup({ workspaceType: "personal", role: "owner", noteDocCache: store });
     const opened = await handler(DESKTOP_IPC_CHANNELS.noteDocState)(event, { meta, noteId: NOTE_ID });
-    expect(JSON.stringify(requireData(opened).blocks)).toContain("正文");
+    expect(decodedBody(requireData(opened).update as string)).toContain("正文");
 
     const stored = await store.get(cacheKey);
     expect(stored?.docState).toBeTruthy();
@@ -488,11 +514,11 @@ describe("笔记协同的 IPC 通道", () => {
   it("写一次就把本机那份重写一遍：queued 的那些不留在内存里过夜", async () => {
     const store = new MemoryNoteDocCacheStore();
     const { event } = await setup({ workspaceType: "personal", role: "owner", noteDocCache: store });
-    await handler(DESKTOP_IPC_CHANNELS.noteDocSyncBlocks)(event, {
+    await handler(DESKTOP_IPC_CHANNELS.noteDocSyncUpdate)(event, {
       meta,
       commandId: "command-sync-persist",
       noteId: NOTE_ID,
-      blocks: [{ type: "paragraph", content: "断网期间改的那一段" }],
+      update: makeUpdate("offline"),
     });
     expect(await store.get(cacheKey)).not.toBeNull();
   });

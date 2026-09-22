@@ -284,7 +284,12 @@ export function NotebookSurface() {
   const syncedNoteRef = useRef<string | null>(null);
   const saveRef = useRef<() => void>(() => {});
   const [mode, setMode] = useState<"read" | "edit">("read");
-  const [draft, setDraft] = useState({ title: "", content: "" });
+  /**
+   * `title` 是**本机改过、还没写进文档**的那一份，`null` = 这一屏没改过标题，
+   * 于是标题框画文档 `meta` 里的那一份（别人改名会跟着动）。正文不在这里存副本，
+   * 只有编辑器 `onChange` 交出来的那一份（图片上传回填要用）。
+   */
+  const [draft, setDraft] = useState<{ title: string | null; content: string }>({ title: null, content: "" });
   const [saving, setSaving] = useState(false);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "committed" | "error">("idle");
   const [receipt, setReceipt] = useState<{
@@ -311,25 +316,13 @@ export function NotebookSurface() {
   const [versionsFailure, setVersionsFailure] = useState<string | null>(null);
   const [restoringVersionId, setRestoringVersionId] = useState<string | null>(null);
   /**
-   * The draft lives in a ref as well as in state: the autosave needs the current
-   * text outside a render, and the unmount flush has to close over the latest
-   * draft without a render-phase read.
+   * 与 `draft` 同一份内容的 ref：图片上传回填要在渲染之外读到当前正文，
+   * 卸载时那一次保存也要闭包到最新一份，而不能在渲染阶段读 ref。
    */
-  const draftRef = useRef({ title: "", content: "" });
-  /**
-   * 「上一次这台机器交出去（或刚接到）的那一份」——判断"作者手上有没有待提交的改动"
-   * 只能跟它比。
-   *
-   * 原先是拿草稿跟**那次 HTTP 读回来的正文**比，而那一份会过期：协同帧是改动一进活
-   * 文档就发的，作者的自动保存却要过本机 debounce 才进 API（实窗量到 3.5 秒）。于是
-   * 两个人同开一篇时，第二个人的页面既看不到对方那段、标签还写着「已同步」，而他随手
-   * 敲一个字就会把对方那句按块删掉（2026-09-22 两个真窗口实测：服务端里对方那段没了）。
-   * 比"我交出去的那一份"是本地事实，不会被一次抢跑的回读改变。
-   */
-  const syncedDraftRef = useRef<{ title: string; content: string } | null>(null);
+  const draftRef = useRef<{ title: string | null; content: string }>({ title: null, content: "" });
 
   /** The one way the draft changes, so state and ref cannot drift apart. */
-  const applyDraft = useCallback((next: { title: string; content: string }) => {
+  const applyDraft = useCallback((next: { title: string | null; content: string }) => {
     draftRef.current = next;
     setDraft(next);
   }, []);
@@ -435,10 +428,8 @@ export function NotebookSurface() {
   // Every block type — including images, which the editor writes as one
   // markdown line — has a text form now, so editability is a pure permission.
   const editable = Boolean(note?.permissions.canEdit);
-  // A draft that has not been seeded for this note yet is not a local edit. The
-  // first paint after a note arrives carried an empty draft, so the page flashed
-  // 草稿/有未提交编辑 and disabled the generation entry for one frame before the
-  // sync effect ran.
+  // 第一篇笔记刚读回来的那一帧还没有模式、回执这些"跟着这一篇重置"的状态，
+  // 编辑页要等它过完再挂（早挂一帧就是白挂一份马上被换掉的编辑器）。
   const draftSeeded = Boolean(note && syncedNoteRef.current === note.noteId);
   // Dirty is a statement about **this machine's own keystrokes**: the draft differs
   // from the last thing it submitted (or was seeded with). It used to compare the
@@ -447,15 +438,10 @@ export function NotebookSurface() {
   // its next autosave deleted the peer's sentence (measured 2026-09-22, two windows).
   // Whitespace the block model cannot represent still must not keep the page dirty
   // forever, so both sides compare through the same markdown the seeding produced.
-  const pendingLocalEdit = Boolean(
-    draftSeeded && syncedDraftRef.current
-    && (draft.title !== syncedDraftRef.current.title || draft.content !== syncedDraftRef.current.content),
-  );
-  const dirty = pendingLocalEdit;
-  // 别人（同机另一个窗口、另一台机器、另一个人）改了这一篇。阅读态直接画这一帧，
-  // 并同时叫醒一次回读去取版本/权限那半边（为什么帧比回读新：见 use-note-doc-live-view
-  // 里那段 3.5 秒的实测）。编辑态不接这一帧——作者手上有还没交出去的字时，替换与否
-  // 仍由既有那条回读效应判，界面不另开一条写编辑器的路。
+  // 别人（同机另一个窗口、另一台机器、另一个人）改了这一篇：正文由 yjs 合进这份文档，
+  // 阅读态与编辑态画的是**同一份**文档，不必再按模式二选一（那是批次 C 之前
+  // "编辑态不接远端帧"那条分支存在的唯一理由）。仍然叫醒一次回读，取的是版本号、
+  // 权限、来源片段那半边（为什么帧比回读新：见 use-note-doc-live-view 里 3.5 秒的实测）。
   const noteDocLive = useNoteDocLiveView(
     note?.noteId ?? null,
     spaceIdentity !== null && !spaceIdentity.isPersonal,
@@ -463,10 +449,22 @@ export function NotebookSurface() {
       void reload({ silent: true });
     },
     presenceName,
+    epochRef,
   );
-  const liveRead = mode === "read" ? noteDocLive.remoteView : null;
-  const readSourceBlocks = liveRead?.blocks ?? note?.currentVersion.blocks ?? [];
-  const readTitle = liveRead?.title.trim() || note?.title || "";
+  // 标题只有一个事实源：文档 `meta` 里那一份（起点还没到时退回这次回读的那一份）。
+  // 界面上只留"本机改过、还没写进文档"的那一段，所以别人的改名会跟着上屏，
+  // 而我正在改的那一段不会被盖掉——两件事共用同一条判据 `draft.title !== null`。
+  const docTitle = noteDocLive.title.trim() || note?.title || "";
+  const titleValue = draft.title ?? docTitle;
+  // "有没有待提交"问文档，不问界面上的文本拷贝：拷贝落后于文档时两种判断都会算错，
+  // 实测过的最坏结局就是拿落后那份去覆盖。标题这一半得单独判——它在文档里是一份
+  // LWW 文本，没有"攒着没发的增量"可看。
+  const titleEdited = draft.title !== null && draft.title !== docTitle;
+  const dirty = noteDocLive.dirty || titleEdited;
+  // 正文也只有一个来源了：这一份文档。它既含别人写进来的，也含本机还没交出去的，
+  // 所以不必在"帧"和"回读"之间二选一（那两个来源并存正是上一次覆盖的根）。
+  const readSourceBlocks = noteDocLive.blocks.length ? noteDocLive.blocks : (note?.currentVersion.blocks ?? []);
+  const readTitle = titleValue;
   const mark = useMemo(
     () => conceptMark(readSourceBlocks, objective?.content.conceptLabel),
     [readSourceBlocks, objective],
@@ -514,29 +512,25 @@ export function NotebookSurface() {
       setShowAllBlocks(false);
       noteGallery.close();
     }
-    if (pendingLocalEdit) return;
-    // 作者这台机器没有待提交的字，就把"目前知道的最新一份"接进来：优先那一帧（它比
-    // 回读新），没有帧就用读回来的那份。不接的话这一屏是一份已经过期的正文，而他随手
-    // 敲一个字就会把别人刚写的那句按块删掉——2026-09-22 两个真窗口实测到的丢字。
-    const incomingTitle = noteDocLive.remoteView?.title.trim() || note.title;
-    const incomingBlocks = noteDocLive.remoteView?.blocks ?? note.currentVersion.blocks;
-    const content = blocksToMarkdown(incomingBlocks);
-    applyDraft({ title: incomingTitle, content });
-    syncedDraftRef.current = { title: incomingTitle, content };
-    // 编辑器只在正文确实与这一版不同时才被整体替换。每次自动保存之后的回读都会
-    // 走到这里，而那时的正文本来就一致——整体替换会把作者刚敲下的撤销栈一起抹掉。
-    const current = editorRef.current?.getMarkdown() ?? null;
-    if (current === null || !blocksMatchMarkdown(current, incomingBlocks)) {
-      editorRef.current?.setMarkdown(content, firstLoadForNote);
-    }
-  }, [note, editable, activeNoteRef?.mode, applyDraft, pendingLocalEdit, noteDocLive.remoteView]);
+    // 这里过去有一整套"作者这台机器没有待提交的字，就把最新一份接进草稿，必要时整体
+    // 替换编辑器"的逻辑，还有一个只在阅读态成立的 `pendingLocalEdit` 判据。它存在的
+    // 唯一理由是界面持有一份文本拷贝——不接帧会看到过期正文，接了又会抹掉作者正在写的
+    // 字与撤销栈，所以只能按模式二选一（那是批次 C 之前那条"编辑态不接远端帧"的分支）。
+    // 现在编辑器写的就是那份共享文档，别人写的字由 yjs 合进来、编辑器自己重画：
+    // 两个毛病一起消失，这个分支也就没有存在的理由了。
+  }, [note, editable, activeNoteRef?.mode, applyDraft]);
+
+
+  // 这两个引用按 noteId / doc 建（`useCallback`），每个 noteId 内不变。把它们单独取出来
+  // 再进 `save` 的依赖，是为了不让 `save` 每次渲染都换身份——那会把自动保存的 debounce
+  // 一帧一帧地重置掉，永远等不到触发。
+  const { setLocalTitle, flush } = noteDocLive;
 
   const save = useCallback(async (reason: "auto" | "manual") => {
     const api = desktopApi();
     const current = data?.note ?? null;
     if (!api || !current || !current.permissions.canSave || saving || !dirty) return;
-    const nextTitle = draft.title;
-    const nextContent = draft.content;
+    const nextTitle = titleValue;
     setSaving(true);
     setSaveState("saving");
     setSaveFailure(null);
@@ -546,16 +540,13 @@ export function NotebookSurface() {
       // 没有版本可回去。现在交的是"我改了哪些块"，合并由 CRDT 负责——内容这条路上
       // 不再存在"覆盖"这个动作。（谁先「提交并确认」仍然会先推进版本指针，后一次
       // 确认拿旧令牌会被 409 挡下来，那是版本历史的顺序问题，与正文覆盖是两回事。）
-      const submitted = await api.note.doc.syncBlocks({
-        meta: createRequestMeta(epochRef.current),
-        commandId: createCommandId("note-doc"),
-        noteId: current.noteId,
-        ...(editable ? { blocks: markdownToBlocks(nextContent) } : {}),
-        // 屏幕上写的是什么就定成什么（与改造前一致：手动提交的标题按 manual 记）。
-        title: { title: nextTitle, titleSource: "manual" as const },
-      });
-      if (submitted.workspaceEpoch) epochRef.current = submitted.workspaceEpoch;
-      const written = unwrapGatewayResult(submitted);
+      // 标题先写进文档的 `meta`，然后正文与它一起作为**一条 yjs 增量**交出去。
+      // 原来这里是两个通道（blocks + title），于是"改了标题没改正文"和"正文删空了"
+      // 必须靠 `blocks` 缺省与否来区分——那种表达一旦写反就是清空整篇。
+      setLocalTitle(nextTitle, "manual");
+      const flushed = await flush();
+      // flush 给了 null 就是"本机没有攒下任何增量"：那一次什么都没写，报成提交过就是在骗回执。
+      const written = { via: flushed ?? "unchanged" as const, savedAt: new Date().toISOString() };
       if (reason === "manual") {
         // 「提交并确认」多走一步：把文档此刻定成一个可回去的版本。它不再带正文。
         const response = await api.note.save({
@@ -574,9 +565,9 @@ export function NotebookSurface() {
         setReceipt({ savedAt: written.savedAt, isAutosave: true, via: written.via });
       }
       setSaveState("committed");
-      // 交出去的就是这一份了：同步点跟着走，之后别人再怎么动，这一屏都不该被算成
-      // "我有待提交的改动"（那个判断曾经把过期当成干净，于是下一次提交删了别人的字）。
-      syncedDraftRef.current = { title: nextTitle, content: nextContent };
+      // 交出去的就是这一份了：本机的标题覆盖值到此作废，之后屏幕上的标题又跟着文档走
+      // （别人改名会上屏）。没交出去（`unchanged`/失败）时留着，否则那一次改名就凭空没了。
+      if (written.via !== "unchanged") applyDraft({ ...draftRef.current, title: null });
       await reload();
     } catch (error) {
       setSaveState("error");
@@ -584,7 +575,7 @@ export function NotebookSurface() {
     } finally {
       setSaving(false);
     }
-  }, [data, dirty, draft, editable, reload, saving]);
+  }, [applyDraft, data, dirty, flush, reload, saving, setLocalTitle, titleValue]);
 
   // The writer's generation settings are a session choice, like the library's view.
   useEffect(() => {
@@ -1382,7 +1373,7 @@ export function NotebookSurface() {
         <label className="sr-only" htmlFor="notebook-surface-title">笔记标题</label>
         <input
           id="notebook-surface-title"
-          value={draft.title}
+          value={titleValue}
           maxLength={200}
           disabled={!note.permissions.canEdit}
           placeholder="未命名笔记"
@@ -1403,14 +1394,15 @@ export function NotebookSurface() {
       </h2>
       <label className="sr-only" htmlFor="notebook-surface-body">笔记正文</label>
       <div id="notebook-surface-body" data-surface-initial-focus={mode === "edit" ? "true" : undefined}>
-        <NoteMarkdownEditor
+        {noteDocLive.fragment ? <NoteMarkdownEditor
           key={note.noteId}
           ref={editorRef}
+          fragment={noteDocLive.fragment}
           initialMarkdown={draft.content}
           onChange={applyContent}
           disabled={!editable}
           onImagePaste={imageUploads.queueFile}
-        />
+        /> : null}
       </div>
       <NoteImageUploads
         uploads={imageUploads.uploads}

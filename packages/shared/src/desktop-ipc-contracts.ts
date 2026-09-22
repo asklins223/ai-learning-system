@@ -104,10 +104,12 @@ import {
   companionAccountStateV1Schema,
   companionOverviewSchema,
   companionAnswerModePreferenceV1Schema,
+  companionVoicePreferenceV1Schema,
   onboardingTransitionResponseSchema,
   type CompanionAccountPatch,
   type OnboardingTransitionRequest,
 } from "./companion-shell-contracts.ts";
+import { type TtsEngineV1 } from "./tts-voice-catalog.ts";
 import {
   companionInvitationSchema,
   companionJourneyBootstrapSchema,
@@ -218,6 +220,10 @@ export const DESKTOP_IPC_CHANNELS = {
   // 任务 14：作答模态偏好（跨设备账号级）。
   companionAnswerModeGet: "ailearn.v1.companion.answerMode.get",
   companionAnswerModePatch: "ailearn.v1.companion.answerMode.patch",
+  // 设置 → 语音与伴星：引擎/音色偏好，以及"点一下听这一身"。
+  companionVoicePreferenceGet: "ailearn.v1.companion.voicePreference.get",
+  companionVoicePreferencePatch: "ailearn.v1.companion.voicePreference.patch",
+  companionVoicePreview: "ailearn.v1.companion.voicePreview.synthesize",
   capabilitiesGet: "ailearn.v1.capabilities.get",
   windowGetState: "ailearn.v1.window.getState",
   windowSetTitlebarTheme: "ailearn.v1.window.setTitlebarTheme",
@@ -313,11 +319,15 @@ export const DESKTOP_IPC_CHANNELS = {
   noteSave: "ailearn.v1.note.save",
   // 批次 4.3：笔记协同。渲染进程不能直连 WS（sandbox + CSP + onBeforeRequest 三层
   // 硬拦截），所以下行是一条订阅事件、上行是一次性通道。
-  // 只有 `noteDocSyncBlocks` 一个写入口，界面交的都是 blocks：有长连接就并进那份文档
-  // （provider 自己送增量），没有就主进程取一次起点、就地差分、按 HTTP 上送。走了哪条
-  // 由 `via` 如实回报；"能不能写"不在这里判，那判据只在服务端一处。
+  // 只有一个写入口 `noteDocSyncUpdate`，界面交的是 **yjs 增量**（批次 C2：编辑器直接写
+  // 那份共享文档，界面不再交 blocks——交 blocks 就必须先持有一份文本拷贝，而它一旦落后于
+  // 文档，差分就会把对端刚写进来的字算成"我删掉了"，那是实测过的真丢内容）。
+  // 有长连接就并进主进程那份影子文档由 provider 送出，没有就按 HTTP 上送；走了哪条由
+  // `via` 如实回报。"能不能写"不在这里判，那判据只在服务端一处。
   noteDocState: "ailearn.v1.note.doc.state",
-  noteDocSyncBlocks: "ailearn.v1.note.doc.syncBlocks",
+  noteDocSyncUpdate: "ailearn.v1.note.doc.syncUpdate",
+  // 从笔记列表改名：那里没有打开的文档，所以由主进程把标题写进它那一份再上行。
+  noteDocSyncTitle: "ailearn.v1.note.doc.syncTitle",
   noteDocPresence: "ailearn.v1.note.doc.presence",
   noteSetShare: "ailearn.v1.note.set-share",
   noteCardGenerationStart: "ailearn.v1.note.cardGeneration.start",
@@ -1358,6 +1368,8 @@ export type CompanionChatStreamEventV1 = z.infer<typeof companionChatStreamEvent
  * 上限与主进程 `note-doc-transport.ts` 用的是同一个常量，两边不能各写一个数。
  */
 export const NOTE_DOC_BLOCKS_MAX_JSON_CHARS = 4 * 1024 * 1024;
+/** 一条 yjs 增量过 IPC 的上限（base64 字符数）。超它不是截断而是明说"这一帧太大"。 */
+export const NOTE_DOC_UPDATE_MAX_CHARS = 4 * 1024 * 1024;
 /** 单篇笔记的块数上限：超它不是"编辑不了"而是形状不对，宁可直接拒。 */
 export const NOTE_DOC_BLOCKS_MAX_COUNT = 2_000;
 
@@ -1375,10 +1387,12 @@ export const noteDocProjectBlockV1Schema = noteDocSubmittedBlockV1Schema.extend(
 
 export const noteDocStreamEventV1Schema = z.discriminatedUnion("type", [
   z.strictObject({
-    type: z.literal("blocks"),
-    blocks: z.array(noteDocProjectBlockV1Schema).max(NOTE_DOC_BLOCKS_MAX_COUNT),
-    title: z.string().max(200),
-    titleSource: z.string().max(16),
+    // 下行是一条 yjs 增量，不是投影结果：界面那一侧持有同一份文档，收到就 apply，
+    // 编辑器自己重画。旧形状下这里发的是 blocks，界面因此要再拼一份"我看到的正文"，
+    // 那份拷贝就是这次要消灭的东西。标题也走这条（它在文档的 `meta` 里），
+    // 不再有"只改标题"的第二个通道。
+    type: z.literal("update"),
+    update: z.string().max(NOTE_DOC_UPDATE_MAX_CHARS),
   }),
   z.strictObject({
     type: z.literal("status"),
@@ -1419,10 +1433,15 @@ export const noteDocServerStateV1Schema = z.strictObject({
 export type NoteDocServerStateV1 = z.infer<typeof noteDocServerStateV1Schema>;
 
 /** 编辑起点：主进程把编码解成视图再交给界面（界面不碰 yjs 编码）。 */
+/**
+ * 编辑起点：主进程把服务端那份编码原样交给界面，界面用它建自己的文档。
+ *
+ * 这里**不再**有 blocks 与标题：那三样都在编码里（正文是 fragment、标题是 `meta`），
+ * 再各投一份就出现"同一句正文有两个来源"——投影与文档一旦不同源，界面显示的就不是
+ * 会被写回去的那份，这类错位这一批已经清掉两处了。
+ */
 export const noteDocStateResultV1Schema = z.strictObject({
-  blocks: z.array(noteDocProjectBlockV1Schema).max(NOTE_DOC_BLOCKS_MAX_COUNT),
-  title: z.string().max(200),
-  titleSource: z.string().max(16),
+  update: z.string().max(NOTE_DOC_UPDATE_MAX_CHARS),
   revision: nonNegativeIntSchema,
   /** true = 这篇建得比 0244 早，服务端给的是从行里补齐后重新编码的一份。 */
   backfilled: z.boolean(),
@@ -1991,6 +2010,21 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
       get(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof companionAnswerModePreferenceV1Schema>>>;
       patch(input: { meta: RequestMetaV1; preference: "voice" | "silent" | "text" | "any" }): Promise<GatewayResultV1<z.infer<typeof companionAnswerModePreferenceV1Schema>>>;
     };
+    /**
+     * 设置 → 语音与伴星：她这次用哪个引擎、哪一身（账号级跨设备）。
+     * 正文语音不由请求体指定音色，所以渲染进程只读这一个来源。
+     */
+    readonly voicePreference: {
+      get(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof companionVoicePreferenceV1Schema>>>;
+      patch(input: { meta: RequestMetaV1; engine: TtsEngineV1; voice: string }): Promise<GatewayResultV1<z.infer<typeof companionVoicePreferenceV1Schema>>>;
+    };
+    /**
+     * 试听一条音色：服务端用固定的一句话合成，回执是 mp3 的 base64。
+     * 与正文朗读共用 companionVoiceSpeakResultV1 的形状（都是 audio/mpeg 原始字节）。
+     */
+    readonly voicePreview: {
+      synthesize(input: { meta: RequestMetaV1; engine: TtsEngineV1; voice: string }): Promise<GatewayResultV1<z.infer<typeof companionVoiceSpeakResultV1Schema>>>;
+    };
   };
   readonly note: {
     list(input: { meta: RequestMetaV1; cursor?: string; limit?: number; trashed?: boolean }): Promise<GatewayResultV1<z.infer<typeof desktopNoteListPageSchema>>>;
@@ -1999,23 +2033,33 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
     restore(input: { meta: RequestMetaV1; noteId: Uuid }): Promise<GatewayResultV1<DesktopNoteMutationResult>>;
     get(input: { meta: RequestMetaV1; noteId: Uuid }): Promise<GatewayResultV1<z.infer<typeof noteDetailV1Schema>>>;
     /**
-     * 协同正文（批次 4.3/4.4）。渲染进程不直连 WS，也不碰 yjs 编码：`state` 取编辑起点
-     * （已经是视图），`syncBlocks` 是唯一写入口（有长连接就并进那份文档，没有就走
-     * HTTP，`via` 如实回报），实时下行走 `subscriptions.subscribe({kind:"noteDoc", noteId})`
-     * 的 `blocks` 帧。
+     * 协同正文（批次 4.3/4.4 建立，C2 之后两侧交的都是 yjs 增量）。渲染进程不直连 WS
+     * ——那层硬拦截还在——但它**持有文档**：`state` 给的是那份编码本身，界面据此建自己的
+     * Y.Doc 并让编辑器直接写它；`syncUpdate` 是唯一写入口（有长连接就并进影子文档由
+     * provider 送出，没有就走 HTTP，`via` 如实回报）；实时下行是同一份额编码的
+     * `update` 帧，走 `subscriptions.subscribe({kind:"noteDoc", noteId})`。
      */
     readonly doc: {
       state(input: { meta: RequestMetaV1; noteId: Uuid }): Promise<GatewayResultV1<NoteDocStateResultV1>>;
-      syncBlocks(input: {
+      /**
+       * 界面交上来的是本机文档产生的 yjs 增量（base64）。
+       *
+       * 空增量不该发：`via: "unchanged"` 那条判据因此在主进程，而不是让界面自己猜
+       * "这次算不算改了"。
+       */
+      syncUpdate(input: {
         meta: RequestMetaV1;
         commandId: string;
         noteId: Uuid;
-        /**
-         * 缺省 = 这次只改标题，正文一个字都不动；空数组才是"把正文删光"。
-         * 两者必须是两种表达，否则改名会清空笔记——那正是这一批要消灭的那类静默销毁。
-         */
-        blocks?: z.infer<typeof noteDocSubmittedBlockV1Schema>[];
-        title?: { title: string; titleSource: "auto" | "manual" };
+        update: string;
+      }): Promise<GatewayResultV1<z.infer<typeof noteDocWriteResultV1Schema>>>;
+      /** 只改标题（列表里的重命名）。正文一个字都不动——它不在这条通道上。 */
+      syncTitle(input: {
+        meta: RequestMetaV1;
+        commandId: string;
+        noteId: Uuid;
+        title: string;
+        titleSource: "auto" | "manual";
       }): Promise<GatewayResultV1<z.infer<typeof noteDocWriteResultV1Schema>>>;
       presence(input: {
         meta: RequestMetaV1;

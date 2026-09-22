@@ -112,7 +112,13 @@ function stubGateway(options: {
       // 改名现在走文档增量的标题那一半（`blocks` 缺省 = 正文不动），不再是 `note.save`。
       doc: {
         state: vi.fn(async () => ({ ok: true as const, workspaceEpoch: 1, data: { blocks: [], title: "", titleSource: "auto", revision: 0, backfilled: false } })),
-        syncBlocks: vi.fn(async () => {
+        // 改名现在是 `syncTitle`（标题写进文档的 meta），计数仍记在 saveCalls 上：
+        // 这条用例量的是"重命名之后列表留在原页"，与走哪个通道无关。
+        syncTitle: vi.fn(async () => {
+          state.saveCalls += 1;
+          return { ok: true as const, workspaceEpoch: 1, data: { via: "uploaded", revision: 4, savedAt: new Date().toISOString() } };
+        }),
+        syncUpdate: vi.fn(async () => {
           state.saveCalls += 1;
           return { ok: true as const, workspaceEpoch: 1, data: { via: "uploaded" as const, revision: 1, savedAt: new Date().toISOString() } };
         }),

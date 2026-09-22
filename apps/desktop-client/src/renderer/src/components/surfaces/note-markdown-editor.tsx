@@ -21,13 +21,23 @@ import {
 } from "@milkdown/kit/preset/commonmark";
 import { gfm } from "@milkdown/kit/preset/gfm";
 import { listener, listenerCtx } from "@milkdown/kit/plugin/listener";
-import { history } from "@milkdown/kit/plugin/history";
 import { clipboard } from "@milkdown/kit/plugin/clipboard";
 import { $prose, callCommand, getMarkdown, insert, replaceAll } from "@milkdown/kit/utils";
 import { keymap } from "@milkdown/kit/prose/keymap";
 import { Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import { Decoration, DecorationSet } from "@milkdown/kit/prose/view";
 import { Milkdown, MilkdownProvider, useEditor, useInstance } from "@milkdown/react";
+import * as Y from "yjs";
+import { yUndoPlugin, ySyncPlugin } from "y-prosemirror";
+import {
+  paragraphSchema,
+  headingSchema,
+  codeBlockSchema,
+  blockquoteSchema,
+  bulletListSchema,
+  orderedListSchema,
+  imageSchema,
+} from "@milkdown/kit/preset/commonmark";
 import { sourceImageObjectKeyFromUrl } from "@ailearn/shared/source-image-contracts";
 import { loadSourceImageBlobUrl } from "./source-image";
 import { LightboxViewer } from "./image-viewer";
@@ -72,7 +82,25 @@ export type NoteMarkdownEditorHandle = {
   readonly insertHr: () => void;
 };
 
+/**
+ * 编辑器要带的那两个属性：证据链住在节点属性上。
+ *
+ * 不声明的话 `updateYFragment` 会把 fragment 里"我的节点上没有的键"**删掉**
+ * （`for (const key in yDomAttrs) if (!(key in pAttrs)) removeAttribute(key)`），
+ * 于是别人在编辑器里敲一个字，这一块的来源引用就没了。扩属性的姿势只有
+ * preset 自己的 `extendSchema`：在 `.config()` 里改 `nodesCtx` 是空操作
+ * （那时 preset 还没把节点推进去），实测过。
+ */
+const NOTE_DOC_ATTRS = { sourceRef: { default: null }, imageAssetId: { default: null } };
+const withNoteDocAttrs = (schemaObject: { extendSchema: (handler: never) => unknown }) =>
+  schemaObject.extendSchema(((factory: (ctx: never) => object) => (ctx: never) => {
+    const definition = factory(ctx) as { attrs?: Record<string, unknown> };
+    return { ...definition, attrs: { ...definition.attrs, ...NOTE_DOC_ATTRS } };
+  }) as never);
+
 type Props = {
+  /** 正文的共享文档片段。编辑器直接写它，不再持有一份文本拷贝。 */
+  readonly fragment: Y.XmlFragment;
   readonly initialMarkdown: string;
   readonly onChange: (markdown: string) => void;
   readonly disabled?: boolean;
@@ -267,7 +295,7 @@ function placeholderPlugin() {
   }));
 }
 
-function MilkdownBody({ initialMarkdown, onChange, disabled, onImagePaste }: Props) {
+function MilkdownBody({ fragment, initialMarkdown, onChange, disabled, onImagePaste }: Props) {
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
   const disabledRef = useRef(disabled);
@@ -301,8 +329,23 @@ function MilkdownBody({ initialMarkdown, onChange, disabled, onImagePaste }: Pro
     })
     .use(commonmark)
     .use(gfm)
+    // 块属性要在那七个节点类型上都声明，否则编辑器一次写入就把它们删掉。
+    .use(withNoteDocAttrs(paragraphSchema) as never)
+    .use(withNoteDocAttrs(headingSchema) as never)
+    .use(withNoteDocAttrs(codeBlockSchema) as never)
+    .use(withNoteDocAttrs(blockquoteSchema) as never)
+    .use(withNoteDocAttrs(bulletListSchema) as never)
+    .use(withNoteDocAttrs(orderedListSchema) as never)
+    .use(withNoteDocAttrs(imageSchema) as never)
+    // 正文与这份文档之间由 ySyncPlugin 双向同步：编辑器打字就是文档的操作，
+    // 界面不再经手"整篇正文"。
+    .use($prose(() => ySyncPlugin(fragment)))
+    // 撤销交给 `yUndoPlugin`：Milkdown 的 `history` 只记这一台机器的事务，
+    // 绑上共享文档之后它会撤销到别人刚写的那几个字上。
+    .use($prose(() => yUndoPlugin()))
+    // `listener` 必须在 `clipboard` 之前回到链里：`onChange` 那一路要靠它，
+    // 而我重写这条链时把它和 `history` 一起删了（`history` 是故意删的，它不是）。
     .use(listener)
-    .use(history)
     .use(clipboard)
     .use(imageUploadPlugin(onImagePasteRef))
     .use(imageNodeViewPlugin(onImageZoomRef))
@@ -409,6 +452,7 @@ function MilkdownControls({
  * 这类外部替换由调用方经 ref 的 `setMarkdown` 完成，而不是靠改 props。
  */
 export function NoteMarkdownEditor({
+  fragment,
   initialMarkdown,
   onChange,
   disabled,
@@ -420,6 +464,7 @@ export function NoteMarkdownEditor({
   return (
     <MilkdownProvider>
       <MilkdownBody
+        fragment={fragment}
         initialMarkdown={initialMarkdown}
         onChange={onChange}
         disabled={disabled}

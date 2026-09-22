@@ -6,6 +6,7 @@ import {
   setNoteTitle,
   snapshotOf,
   syncNoteBlocksForEditor,
+  writeNoteBlocks,
 } from "./note-doc-fragment";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -2020,19 +2021,44 @@ describe("DesktopGateway · 笔记正文的离线提交（批次 4.4）", () => 
     return { base, gateway, uploaded, docStateReads: () => docStateReads, goOffline: () => { offline = true; }, goOnline: () => { offline = false; } };
   }
 
-  const blocksWith = (second: string) => [
-    { type: "heading", content: "标题" },
-    { type: "paragraph", content: second },
-  ];
+/**
+ * 本机改了正文：从起点开一份文档、整篇换成"标题 + 这一句"，交回**这一次产生的增量**。
+ *
+ * 界面交上来的从来不是整篇 blocks 了（那是 C2 之前那条路：主进程替界面差分，界面持有
+ * 一份落后就可能覆盖对端的字），所以这批用例都得自己造出真实的本机增量。
+ */
+  /**
+   * 本机连着改正文：每次都从**当前那份状态**出发产下一条增量，而不是每次都从起点出发。
+   *
+   * 这件事不是实现细节。三条"各自从同一起点整篇重写"的增量合起来是三段文字接在一起
+   * （CRDT 不认识"整篇替换"，它只合并操作），而真实编辑器不会那样干——界面上第二次
+   * 打字时文档里已经并进了第一次的结果。所以这里按运行状态链下去，与渲染层做的事一致。
+   * 按起点字符串分组就够：每次 `harness()` 产出的起点都带着自己的 client id，互不相同。
+   */
+  const liveDocs = new Map<string, ReturnType<typeof emptyNoteDoc>>();
+  const editTo = (base: string, second: string): string => {
+    let doc = liveDocs.get(base);
+    if (!doc) {
+      doc = emptyNoteDoc();
+      Y.applyUpdate(doc, Buffer.from(base, "base64"));
+      liveDocs.set(base, doc);
+    }
+    const before = Y.encodeStateVector(doc);
+    writeNoteBlocks(doc, [
+      { type: "heading", content: "标题" },
+      { type: "paragraph", content: second },
+    ]);
+    return Buffer.from(Y.encodeStateAsUpdate(doc, before)).toString("base64");
+  };
 
   it("没网时如实报 queued：不假装服务端收到了", async () => {
-    const { gateway, uploaded, goOffline } = harness();
+    const { base, gateway, uploaded, goOffline } = harness();
     await gateway.connect();
     // 打开这篇时取过起点（离线编辑的前提），之后断网才只是"送不出去"。
     await gateway.getNoteDocState(NOTE_ID);
     goOffline();
 
-    await expect(gateway.syncNoteDocBlocks(NOTE_ID, blocksWith("第一段（离线改的）"), undefined)).resolves.toMatchObject({
+    await expect(gateway.syncNoteDocUpdate(NOTE_ID, editTo(base, "第一段（离线改的）"))).resolves.toMatchObject({
       via: "queued",
     });
     expect(uploaded).toEqual([]);
@@ -2043,38 +2069,38 @@ describe("DesktopGateway · 笔记正文的离线提交（批次 4.4）", () => 
     await gateway.connect();
     await gateway.getNoteDocState(NOTE_ID);
     goOffline();
-    await gateway.syncNoteDocBlocks(NOTE_ID, blocksWith("甲加的这句"), undefined);
-    await gateway.syncNoteDocBlocks(NOTE_ID, blocksWith("甲加的这句，还有乙补的半句"), undefined);
+    await gateway.syncNoteDocUpdate(NOTE_ID, editTo(base, "甲加的这句"));
+    await gateway.syncNoteDocUpdate(NOTE_ID, editTo(base, "甲加的这句，还有乙补的半句"));
     expect(uploaded).toEqual([]);
 
     goOnline();
-    const receipt = await gateway.syncNoteDocBlocks(NOTE_ID, blocksWith("甲加的这句，还有乙补的半句，加上丙的"), undefined);
+    const receipt = await gateway.syncNoteDocUpdate(NOTE_ID, editTo(base, "甲加的这句，还有乙补的半句，加上丙的"));
     expect(receipt.via).toBe("uploaded");
     expect(uploaded).toHaveLength(1);
     expect(contentsAfter(base, uploaded[0]!)).toEqual(["标题", "甲加的这句，还有乙补的半句，加上丙的"]);
   });
 
   it("非网络类失败不进队列——重发一百次也是同一个 403", async () => {
-    const { gateway, uploaded, docStateReads } = harness({ failStatus: 403 });
+    const { base, gateway, uploaded, docStateReads } = harness({ failStatus: 403 });
     await gateway.connect();
-    await expect(gateway.syncNoteDocBlocks(NOTE_ID, blocksWith("不该被攒起来的一句"), undefined))
+    await expect(gateway.syncNoteDocUpdate(NOTE_ID, editTo(base, "不该被攒起来的一句")))
       .rejects.toMatchObject({ code: "forbidden" });
     expect(uploaded).toEqual([]);
 
     // 队列是空的：下一次提交只带这一次的增量，不会把上次被拒的那条偷偷再塞进去。
     const fresh = harness();
     await fresh.gateway.connect();
-    await fresh.gateway.syncNoteDocBlocks(NOTE_ID, blocksWith("换一篇的增量"), undefined);
+    await fresh.gateway.syncNoteDocUpdate(NOTE_ID, editTo(fresh.base, "换一篇的增量"));
     expect(fresh.uploaded).toHaveLength(1);
     expect(docStateReads()).toBe(1);
   });
 
   it("切空间作废本机文档与队列：另一个空间的正文不能差分到这篇上", async () => {
-    const { gateway, uploaded, goOffline } = harness();
+    const { base, gateway, uploaded, goOffline } = harness();
     await gateway.connect();
     await gateway.getNoteDocState(NOTE_ID);
     goOffline();
-    await gateway.syncNoteDocBlocks(NOTE_ID, blocksWith("上一个空间的这句"), undefined);
+    await gateway.syncNoteDocUpdate(NOTE_ID, editTo(base, "上一个空间的这句"));
     expect(uploaded).toEqual([]);
 
     gateway.dropNoteDocLocalSessions();
@@ -2083,7 +2109,7 @@ describe("DesktopGateway · 笔记正文的离线提交（批次 4.4）", () => 
     const next = harness();
     await next.gateway.connect();
     await next.gateway.getNoteDocState(NOTE_ID);
-    const receipt = await next.gateway.syncNoteDocBlocks(NOTE_ID, blocksWith("这个空间的这句"), undefined);
+    const receipt = await next.gateway.syncNoteDocUpdate(NOTE_ID, editTo(next.base, "这个空间的这句"));
     expect(receipt.via).toBe("uploaded");
     expect(next.uploaded).toHaveLength(1);
     expect(contentsAfter(next.base, next.uploaded[0]!)).toEqual(["标题", "这个空间的这句"]);
@@ -2109,8 +2135,8 @@ describe("DesktopGateway · 笔记正文的离线提交（批次 4.4）", () => 
       noteDocTransport: () => {
         transportCalls += 1;
         return {
-          applyBlocks: () => null,
-          view: () => ({ blocks: [], title: "", titleSource: "auto" }),
+          applyLocal: () => null,
+          applyTitle: () => null,
           seed: () => undefined,
           setPresence: () => undefined,
           close: () => undefined,
@@ -2139,10 +2165,11 @@ describe("DesktopGateway · 笔记正文的离线提交（批次 4.4）", () => 
     handle?.stop();
   });
 
-  it("只改标题的提交不动正文", async () => {
+  it("只改标题不动正文：标题写进文档的 meta，正文一个字不变", async () => {
     const { base, gateway, uploaded } = harness();
     await gateway.connect();
-    const receipt = await gateway.syncNoteDocBlocks(NOTE_ID, null, { title: "改了名", titleSource: "manual" });
+    await gateway.getNoteDocState(NOTE_ID);
+    const receipt = await gateway.syncNoteDocTitle(NOTE_ID, "改了名", "manual");
     expect(receipt.via).toBe("uploaded");
     expect(contentsAfter(base, uploaded[0]!)).toEqual(["标题", "第一段"]);
   });
@@ -2162,7 +2189,7 @@ describe("DesktopGateway · 笔记正文的离线提交（批次 4.4）", () => 
     const reopened = harness({ base: first.base });
     await reopened.gateway.connect();
     reopened.gateway.restoreNoteDocLocal(NOTE_ID, saved!);
-    await reopened.gateway.syncNoteDocBlocks(NOTE_ID, blocksWith("第一段，重启后又改了"), undefined);
+    await reopened.gateway.syncNoteDocUpdate(NOTE_ID, editTo(first.base, "第一段，重启后又改了"));
 
     expect(reopened.uploaded).toHaveLength(1);
     expect(contentsAfter(reopened.base, reopened.uploaded[0]!)).toEqual([
@@ -2197,7 +2224,7 @@ describe("DesktopGateway · 笔记正文的离线提交（批次 4.4）", () => 
 
     // 旧副本没进来时，这一次写的增量并回服务端起点上仍是"标题 + 这一句"；
     // 进了的话会多出一段旧正文，或被差分掉一段——两种都不是这个结果。
-    await gateway.syncNoteDocBlocks(NOTE_ID, blocksWith("第一段，之后改的"), undefined);
+    await gateway.syncNoteDocUpdate(NOTE_ID, editTo(base, "第一段，之后改的"));
     expect(contentsAfter(base, uploaded[0]!)).toEqual(["标题", "第一段，之后改的"]);
   });
 
@@ -2206,7 +2233,7 @@ describe("DesktopGateway · 笔记正文的离线提交（批次 4.4）", () => 
     await gateway.connect();
     await gateway.getNoteDocState(NOTE_ID);
     goOffline();
-    await gateway.syncNoteDocBlocks(NOTE_ID, blocksWith("断网期间改的那一段"), undefined);
+    await gateway.syncNoteDocUpdate(NOTE_ID, editTo(base, "断网期间改的那一段"));
     const saved = gateway.noteDocLocalSnapshot(NOTE_ID)!;
     expect(saved.pending).toHaveLength(1);
 
