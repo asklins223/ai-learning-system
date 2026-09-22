@@ -1,9 +1,6 @@
 import type { MotionMode } from "../../app/room-machine";
 import { LIGHTHOUSE_HOME_SCENE_PROFILE } from "./home-scene-profile";
 
-export const HOME_SCENE_VARIANT = import.meta.env.VITE_HOME_SCENE_VARIANT === "v2" ? "v2" : "v1";
-export const HOME_V2_ENABLED = HOME_SCENE_VARIANT === "v2";
-
 export type HomeV2Zone = "wide" | "desk" | "shelf" | "window" | "rest";
 
 export type HomeV2CameraPreset = {

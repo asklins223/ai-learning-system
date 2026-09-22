@@ -19,7 +19,6 @@ import {
 } from "../../app/desktop-client";
 import { resolveSceneMotionMode } from "../../scene/scene-motion";
 import { useCompanionHomeProjection } from "../../app/companion-home-projection";
-import { HOME_V2_ENABLED } from "../home-v2/home-v2";
 import { HUD_PAGES } from "../hud/hud-pages";
 import { HOME_V2_CAMERA_FRAME_EVENT } from "../home-v2/home-v2-camera";
 import { useHomeV2 } from "../home-v2/HomeV2Experience";
@@ -29,7 +28,6 @@ import {
   COMPANION_HOME_ANCHORS,
   clampCompanionAnchorToPolygon,
   companionCueAllowed,
-  companionPositionForNormalizedFootAnchor,
   companionPositionForProjectedFootAnchor,
   companionPointerHasPrimaryContact,
   companionSafeInset,
@@ -376,7 +374,6 @@ export function CompanionPresence() {
   }, [companionFocusUntilTaskEnd, surface, setCompanionFocusUntilTaskEnd]);
 
   useEffect(() => {
-    if (!HOME_V2_ENABLED) return;
     window.dispatchEvent(new CustomEvent(HOME_V2_COMPANION_DRAG_EVENT, {
       detail: { active: dragging },
     }));
@@ -397,7 +394,7 @@ export function CompanionPresence() {
     readonly thoughtId: string | null;
     readonly origin: "thought" | "reminder" | "system";
   } | null => {
-    if (!HOME_V2_ENABLED || companionProjection.loading || companionProjection.failure) return null;
+    if (companionProjection.loading || companionProjection.failure) return null;
     const proactive = companionProjection.projection?.proactiveCue;
     if (!proactive) return null;
     return {
@@ -440,7 +437,7 @@ export function CompanionPresence() {
   const revealedCueRef = useRef<{ readonly cueKey: string; readonly inboxSequence: number } | null>(null);
 
   const projectCompanionIntoCamera = useCallback(() => {
-    if (!HOME_V2_ENABLED || !homeMode || dragRef.current) return;
+    if (!homeMode || dragRef.current) return;
     const root = rootRef.current;
     const anchor = anchorRef.current;
     const visual = visualRef.current;
@@ -553,10 +550,9 @@ export function CompanionPresence() {
       const next = { x: actualX + correction.x, y: actualY + correction.y };
       gsap.killTweensOf(anchor, "x,y");
       gsap.set(anchor, { x: next.x, y: next.y, force3D: true });
-      // V2's viewport correction is projection-only. Saving this correction as
-      // a room coordinate is the old magnetic-snap bug: each camera crop would
-      // slowly rewrite the user's placement. Legacy scenes retain their offset.
-      if (!HOME_V2_ENABLED || !homeMode) setCompanionPosition(next);
+      // 书房里的视口修正**只走投影**：把它写回房间坐标就是当年那个磁吸 bug——
+      // 每裁一次相机，用户放的位置就被悄悄改一次。（v1 场景那条 setCompanionPosition
+      // 的分叉随首页一起删了。）
     }
   }, [homeMode, setCompanionPosition]);
 
@@ -598,7 +594,7 @@ export function CompanionPresence() {
   }, [touchKind]);
 
   useEffect(() => {
-    if (!HOME_V2_ENABLED || presencePaused || companionSilenced || homeV2IntroVisible || !prioritizedCue) return;
+    if (presencePaused || companionSilenced || homeV2IntroVisible || !prioritizedCue) return;
     if (shownCueRef.current === prioritizedCue.key) return;
     if (prioritizedCue.priority === "ordinary") {
       let lastAt = 0;
@@ -682,7 +678,7 @@ export function CompanionPresence() {
       frame = window.requestAnimationFrame(projectCompanionIntoCamera);
     };
 
-    if (HOME_V2_ENABLED && homeMode) {
+    if (homeMode) {
       if (!anchorInitializedRef.current) {
         worldAnchorRef.current = { ...targetWorldAnchor };
         anchorInitializedRef.current = true;
@@ -731,28 +727,6 @@ export function CompanionPresence() {
       if (rootRect.width <= 0 || rootRect.height <= 0) return;
       lastPlacementContextRef.current = "surface";
       seatTravelRef.current?.kill();
-      seatTravelRef.current = null;
-      // Legacy (v1) home: a hand-placed user anchor wins over the zone seat.
-      if (homeMode && !HOME_V2_ENABLED
-        && companionPlacementOwner === "user"
-        && companionUserAnchor) {
-        const pos = companionPositionForNormalizedFootAnchor(
-          companionUserAnchor,
-          { width: rootRect.width, height: rootRect.height },
-          { width: anchor.offsetWidth, height: anchor.offsetHeight },
-        );
-        gsap.set(anchor, {
-          left: 0,
-          top: 0,
-          right: "auto",
-          bottom: "auto",
-          x: pos.x,
-          y: pos.y,
-          force3D: true,
-        });
-        clampVisibleCompanion();
-        return;
-      }
       // The approved page registry is the source of the seat: reading pages put
       // Mao on the left so the paper owns the right, working pages the reverse.
       // Every surface publishes its own hudPage, so the registry alone decides
@@ -893,7 +867,7 @@ export function CompanionPresence() {
   }, [clampVisibleCompanion, companionPolicy.seat, companionPosition.x, companionPosition.y, homeMode, hudPage, projectCompanionIntoCamera, surface, targetWorldAnchor]);
 
   useGSAP(() => {
-    if (!HOME_V2_ENABLED || !homeMode) return;
+    if (!homeMode) return;
     const root = rootRef.current;
     const pose = characterMotionRef.current;
     if (!root || !pose || dragRef.current) return;
@@ -1028,7 +1002,7 @@ export function CompanionPresence() {
   useGSAP(() => {
     const visual = visualRef.current;
     if (!visual) return;
-    if (HOME_V2_ENABLED && homeMode) {
+    if (homeMode) {
       projectCompanionIntoCamera();
       return;
     }
@@ -1240,7 +1214,7 @@ export function CompanionPresence() {
     // 固定触摸音频并把随后真正负责打开业务入口的 click 吞掉，结果角色看起来
     // 永远只是个播放器。这里只记录触摸部位给 Live2D 表情，click 继续进入统一
     // 的 engaged 状态机；真实拖拽仍由上面的 shouldCommit 分支独占。
-    if (HOME_V2_ENABLED && homeMode) {
+    if (homeMode) {
       const targetBounds = event.currentTarget.getBoundingClientRect();
       const kind = companionTouchKindAt(event.clientY, targetBounds.top, targetBounds.height);
       setTouchKind(kind);
@@ -1451,16 +1425,16 @@ export function CompanionPresence() {
       data-companion-unavailable={companionUnavailable || undefined}
       data-live2d-available={LIVE2D_RUNTIME_ALLOWED}
       data-surface={sceneKey}
-      data-home-zone={HOME_V2_ENABLED && homeMode ? companionHomeZone : undefined}
-      data-placement-owner={HOME_V2_ENABLED && homeMode ? companionPlacementOwner : undefined}
-      data-user-anchor={HOME_V2_ENABLED && homeMode && companionUserAnchor
+      data-home-zone={homeMode ? companionHomeZone : undefined}
+      data-placement-owner={homeMode ? companionPlacementOwner : undefined}
+      data-user-anchor={homeMode && companionUserAnchor
         ? `${companionUserAnchor.x},${companionUserAnchor.y}`
         : undefined}
-      data-world-anchor={HOME_V2_ENABLED && homeMode
+      data-world-anchor={homeMode
         ? `${targetWorldAnchor.x},${targetWorldAnchor.y}`
         : undefined}
-      data-projection-state={HOME_V2_ENABLED && homeMode ? (dragging ? "dragging" : "tracking") : undefined}
-      data-context-zone={HOME_V2_ENABLED && homeMode ? homeV2Zone : undefined}
+      data-projection-state={homeMode ? (dragging ? "dragging" : "tracking") : undefined}
+      data-context-zone={homeMode ? homeV2Zone : undefined}
       data-touch-kind={touchKind ?? undefined}
       data-formal-silent={assessmentMode || undefined}
       data-policy-mode={companionPolicy.mode}
@@ -1555,7 +1529,6 @@ export function CompanionPresence() {
               {assessmentMode ? "需要提示？" : `${windowLive2DModelDescriptor(companionModelId).displayName} · 伴星`}
             </span>
           ) : null}
-          {!HOME_V2_ENABLED && !engaged ? <span className="companion-invite-label" aria-hidden="true">我在这里</span> : null}
           {/* 「被叫醒的中介帧」（方案 §5 第 4 项）：她"转过头来"的那一下。纯装饰，
               交互台自己会播报状态，所以这里不对读屏发第二遍。 */}
           {awakening ? <span className="companion-wake-bubble" aria-hidden="true">嗯？</span> : null}
@@ -1595,7 +1568,7 @@ export function CompanionPresence() {
           />
         ) : null}
         {/* 主动提示气泡与回复气泡共用头顶通道，同样不能放进裁切画布。 */}
-        {HOME_V2_ENABLED && companionPolicy.proactive === "allow" && visibleHomeCue && !hudOccupied && !engaged ? (
+        {companionPolicy.proactive === "allow" && visibleHomeCue && !hudOccupied && !engaged ? (
           homeCueThoughtId ? (
             <button
               type="button"

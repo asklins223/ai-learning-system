@@ -58,7 +58,6 @@ import {
   readDirectoryRailMode,
   type DirectoryRailMode,
 } from "../DirectoryRail";
-import { HOME_V2_ENABLED } from "../home-v2/home-v2";
 import { useHomeV2 } from "../home-v2/HomeV2Experience";
 import { HudPage } from "../hud/HudPage";
 import { HudPicker, HudSegmented, HudSlider, HudSwitch } from "../hud/HudControls";
@@ -335,7 +334,6 @@ export function SettingsSurface() {
   const settingsAttention = useRoomStore((state) => state.settingsAttention);
   const setSettingsAttention = useRoomStore((state) => state.setSettingsAttention);
   const setHudPage = useRoomStore((state) => state.setHudPage);
-  const openOnboarding = useRoomStore((state) => state.openOnboarding);
   const closeSurface = useRoomStore((state) => state.closeSurface);
   const invoke = useRoomStore((state) => state.invoke);
   const { replayIntro } = useHomeV2();
@@ -1650,8 +1648,9 @@ export function SettingsSurface() {
                 type="button"
                 onClick={() => {
                   closeSurface();
-                  if (HOME_V2_ENABLED) replayIntro();
-                  else openOnboarding();
+                  // 重播引导只有一条路：v2 首页的入场序列。以前这里分叉过，v1 走
+                  // openOnboarding()——那个模态随 v1 首页一起删了。
+                  replayIntro();
                 }}
               >
                 <CircleHelp size={13} aria-hidden="true" />

@@ -3,7 +3,6 @@ import type { SessionContextV1, WorkspaceSummaryV1 } from "@ailearn/shared/deskt
 import { createRequestMeta, gatewayErrorMessage, unwrapGatewayResult } from "../../app/desktop-client";
 import { useRoomStore } from "../../app/room-store";
 import { mediaAssetUrl, useLearningRoomManifest } from "../../media/learning-room-manifest";
-import { HOME_V2_ENABLED } from "../home-v2/home-v2";
 import { CompanionPresence } from "../companion/CompanionPresence";
 import { DirectoryRail } from "../DirectoryRail";
 import { HudRoomControl } from "./HudRoomControl";
@@ -215,10 +214,10 @@ export function HudFirstSpaceScene({
   // The mockup puts 04A on `bg-home`, so the plate is the home room's own
   // poster — the same pair `RoomStage` paints behind the live home page.
   const dayPlate = manifest
-    ? mediaAssetUrl(manifest, (HOME_V2_ENABLED ? manifest.homeV2Posters : manifest.posters).day.path)
+    ? mediaAssetUrl(manifest, manifest.homeV2Posters.day.path)
     : null;
   const nightPlate = manifest
-    ? mediaAssetUrl(manifest, (HOME_V2_ENABLED ? manifest.homeV2Posters : manifest.posters).night.path)
+    ? mediaAssetUrl(manifest, manifest.homeV2Posters.night.path)
     : null;
 
   return (

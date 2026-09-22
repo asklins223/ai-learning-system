@@ -1,8 +1,6 @@
 import { useEffect } from "react";
-import { ActionRail } from "./components/ActionRail";
 import { HudRoomControl } from "./components/hud/HudRoomControl";
 import { RoomStage } from "./components/RoomStage";
-import { SceneStatus } from "./components/SceneStatus";
 import { TaskSurface } from "./components/TaskSurface";
 import { SourceIntakeHost } from "./components/SourceIntake";
 import { RunRecoveryNotice } from "./components/RunRecoveryNotice";
@@ -16,7 +14,6 @@ import { resolveSceneMotionMode } from "./scene/scene-motion";
 import { HomeProjectionProvider, useHomeProjection } from "./app/home-projection";
 import { homePresentation } from "./app/home-presentation";
 import { HomeV2Provider } from "./components/home-v2/HomeV2Experience";
-import { HOME_SCENE_VARIANT, HOME_V2_ENABLED } from "./components/home-v2/home-v2";
 import type { HomeFeatureId } from "./components/home-v2/home-feature-registry";
 import { CompanionHomeProjectionProvider } from "./app/companion-home-projection";
 import { HomeCapabilityProjectionProvider } from "./app/home-capability-projection";
@@ -104,54 +101,17 @@ export function RoomExperience() {
         if (surface) invoke("home");
         return;
       }
-      if (HOME_V2_ENABLED) {
-        const featureId = homeV2ShortcutFeature(event);
-        if (!featureId) return;
-        event.preventDefault();
-        window.dispatchEvent(new CustomEvent("ailearn:home-v2-run-feature", { detail: { featureId } }));
-        return;
-      }
-      const enabledRoutes = window.ailearn?.contract.enabledRoutes ?? [];
-      const showUnavailable = (title: string, detail: string) => window.dispatchEvent(new CustomEvent("ailearn:home-unavailable", { detail: { title, detail } }));
-      if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-        event.preventDefault();
-        if (surface) invoke("continue");
-        else if (!home.blockingLoading) {
-          if (home.retry) reload();
-          else if (home.primaryIntent === "open-notebook" && home.note) {
-            if (enabledRoutes.includes("note.detail")) {
-              setActiveNoteRef({ noteId: home.note.noteId, noteVersionId: home.note.noteVersionId });
-              invoke("open-notebook");
-            } else {
-              showUnavailable("研究册尚未开放", "当前桌面合同还没有签发可用的研究册路由。");
-            }
-          } else if (home.primaryIntent === "open-objective") {
-            const objectiveId = projection?.primaryFocus.state === "data"
-              ? projection.primaryFocus.data.objective.objectiveId
-              : null;
-            if (objectiveId) {
-              setActiveObjectiveId(objectiveId);
-              invoke("open-objective");
-            } else {
-              invoke("open-objectives");
-            }
-          } else if (home.primaryIntent) invoke(home.primaryIntent);
-        }
-      } else if (!event.altKey && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
-        event.preventDefault();
-        invoke("search");
-      } else if (!event.metaKey && !event.ctrlKey && !event.altKey && event.key.toLowerCase() === "r") {
-        event.preventDefault();
-        if (surface || enabledRoutes.includes("review.queue")) invoke("review");
-        else showUnavailable("复习台尚未开放", "入口已经保留，当前桌面合同还没有签发可用路由。");
-      } else if (!event.metaKey && !event.ctrlKey && !event.altKey && event.key.toLowerCase() === "g") {
-        event.preventDefault();
-        invoke("graph");
-      }
+      // 首页快捷键只有一条路：把按键翻成首页上的功能 id，交给 v2 首页去跑。
+      // （旧 v1 那套"按 primaryIntent 分支 + 合同没签发路由就说入口已保留"的写法
+      // 跟着 v1 首页一起删掉了；它的 9 个 tile 与这套快捷键是同一个入口的两份实现。）
+      const featureId = homeV2ShortcutFeature(event);
+      if (!featureId) return;
+      event.preventDefault();
+      window.dispatchEvent(new CustomEvent("ailearn:home-v2-run-feature", { detail: { featureId } }));
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [invoke, onboardingOpen, projection, surface, home.blockingLoading, home.retry, home.primaryIntent, home.note, reload, setActiveNoteRef, setActiveObjectiveId]);
+  }, [invoke, onboardingOpen]);
 
   const room = (
     <>
@@ -176,15 +136,13 @@ export function RoomExperience() {
         : null}
       <main id="main-content" inert={onboardingOpen || undefined}>
         <h1 className="sr-only">理解书房</h1>
-        {HOME_V2_ENABLED ? null : <ActionRail />}
         <TaskSurface />
-        {HOME_V2_ENABLED ? null : <SceneStatus />}
         <SourceIntakeHost />
       </main>
     </>
   );
 
-  return HOME_V2_ENABLED ? <HomeV2Provider>{room}</HomeV2Provider> : room;
+  return <HomeV2Provider>{room}</HomeV2Provider>;
 }
 
 export function App() {
@@ -239,8 +197,8 @@ export function App() {
       data-onboarding-open={onboardingOpen}
       data-view-preset={viewPreset}
       data-scene-phase={scenePhase}
-      data-scene-renderer={HOME_V2_ENABLED ? "poster-live2d" : "dom-2.5d"}
-      data-home-scene-variant={HOME_SCENE_VARIANT}
+      data-scene-renderer="poster-live2d"
+      data-home-scene-variant="v2"
       data-motion-mode={motionMode}
       data-window-state={windowState}
     >
@@ -263,13 +221,9 @@ export function App() {
             onWorkspaceBoundaryReset={resetWorkspaceScope}
           >
             <HomeProjectionProvider>
-              {HOME_V2_ENABLED
-                ? (
-                    <HomeCapabilityProjectionProvider>
-                      <CompanionHomeProjectionProvider><RoomExperience /></CompanionHomeProjectionProvider>
-                    </HomeCapabilityProjectionProvider>
-                  )
-                : <RoomExperience />}
+              <HomeCapabilityProjectionProvider>
+                <CompanionHomeProjectionProvider><RoomExperience /></CompanionHomeProjectionProvider>
+              </HomeCapabilityProjectionProvider>
             </HomeProjectionProvider>
           </DesktopAccessGate>
         </CompanionChatProvider>
