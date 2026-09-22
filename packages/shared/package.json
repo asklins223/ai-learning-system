@@ -236,6 +236,11 @@
       "import": "./src/activity-surface-contracts.ts",
       "default": "./src/activity-surface-contracts.ts"
     },
+    "./stats-overview-contracts": {
+      "types": "./src/stats-overview-contracts.ts",
+      "import": "./src/stats-overview-contracts.ts",
+      "default": "./src/stats-overview-contracts.ts"
+    },
     "./desktop-surface-contracts": {
       "types": "./src/desktop-surface-contracts.ts",
       "import": "./src/desktop-surface-contracts.ts",
@@ -305,6 +310,11 @@
       "types": "./src/note-share-contracts.ts",
       "import": "./src/note-share-contracts.ts",
       "default": "./src/note-share-contracts.ts"
+    },
+    "./note-visibility": {
+      "types": "./src/note-visibility.ts",
+      "import": "./src/note-visibility.ts",
+      "default": "./src/note-visibility.ts"
     },
     "./note-doc-conformance": {
       "types": "./src/note-doc-conformance.ts",

@@ -19,6 +19,9 @@ const roomProfile = {
   // 装备只决定完成/交接后的短暂反馈；稳定画面不会持续渲染粒子。
   unlockedEffectIds: ["effect.page-ribbon" as const],
   equippedEffectId: "effect.page-ribbon" as const,
+  // 空间级主动开关（0266）：合同里是**必填**（`z.boolean()`），夹具漏了它就会
+  // 在 `parse` 处报 invalid_type——其余各处的夹具（api/desktop）都已带上这一项。
+  proactiveMuted: false,
   updatedAt: "2026-09-09T10:00:00.000Z",
 };
 

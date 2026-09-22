@@ -149,6 +149,8 @@ import {
 import { objectiveListPageV3Schema, learningObjectiveSurfaceV3Schema } from "./learning-objective-surface-contracts.ts";
 import { understandingTopologySnapshotV3Schema } from "./understanding-topology-v3-contracts.ts";
 import { todayActivityV1Schema } from "./activity-surface-contracts.ts";
+// 跨空间统计合同（每空间一行 + 合计）：服务端路由、网关、渲染层共用同一份形状。
+import { allWorkspacesStatsOverviewSchema } from "./stats-overview-contracts.ts";
 import type {
   DesktopCardGenerationActivationSelectionV1,
   DesktopCandidateReviewRequestV2,
@@ -223,7 +225,6 @@ export const DESKTOP_IPC_CHANNELS = {
   // 设置 → 语音与伴星：引擎/音色偏好，以及"点一下听这一身"。
   companionVoicePreferenceGet: "ailearn.v1.companion.voicePreference.get",
   companionVoicePreferencePatch: "ailearn.v1.companion.voicePreference.patch",
-  companionVoicePreview: "ailearn.v1.companion.voicePreview.synthesize",
   capabilitiesGet: "ailearn.v1.capabilities.get",
   windowGetState: "ailearn.v1.window.getState",
   windowSetTitlebarTheme: "ailearn.v1.window.setTitlebarTheme",
@@ -326,6 +327,12 @@ export const DESKTOP_IPC_CHANNELS = {
   // `via` 如实回报。"能不能写"不在这里判，那判据只在服务端一处。
   noteDocState: "ailearn.v1.note.doc.state",
   noteDocSyncUpdate: "ailearn.v1.note.doc.syncUpdate",
+  // 本机草稿：界面手里还没交给主进程的那几个增量，落盘用（刷新/崩溃不丢字）。
+  // 键由主进程按 (subjectId, workspaceId, noteId) 拼——界面只报 noteId，另一个空间
+  // 因此读不到这一格（跨空间的正文缝合正是批次 1 立那条键要防的事）。
+  noteDocDraftSave: "ailearn.v1.note.doc.draft.save",
+  noteDocDraftGet: "ailearn.v1.note.doc.draft.get",
+  noteDocDraftClear: "ailearn.v1.note.doc.draft.clear",
   // 从笔记列表改名：那里没有打开的文档，所以由主进程把标题写进它那一份再上行。
   noteDocSyncTitle: "ailearn.v1.note.doc.syncTitle",
   noteDocPresence: "ailearn.v1.note.doc.presence",
@@ -343,6 +350,9 @@ export const DESKTOP_IPC_CHANNELS = {
   noteCardGenerationClose: "ailearn.v1.note.cardGeneration.close",
   reviewGetQueue: "ailearn.v1.review.getQueue",
   activityGetToday: "ailearn.v1.activity.getToday",
+  // 跨空间统计（页 14 的「全部空间」栏）：与 activityGetToday 同在 room.home 面，
+  // 但读的是"我"而不是"当前空间"。
+  statsGetOverviewAll: "ailearn.v1.stats.getOverviewAll",
   reviewDefer: "ailearn.v1.review.defer",
   learningRunGet: "ailearn.v1.learningRun.get",
   learningRunStart: "ailearn.v1.learningRun.start",
@@ -1485,6 +1495,31 @@ export const noteDocPresenceResultV1Schema = z.strictObject({
 });
 export type NoteDocPresenceResultV1 = z.infer<typeof noteDocPresenceResultV1Schema>;
 
+/**
+ * 本机草稿：界面自己那份文档里**还没交给主进程**的一条增量（合并过的，不是整份正文）。
+ *
+ * 存的为什么必须是增量而不是正文文本：恢复时文本要覆盖，而覆盖会抹掉对端在这期间写进
+ * 文档的字；增量走的是 CRDT 合并，别人的部分一个字不动。所以这一格与 `syncUpdate`
+ * 交上去的是同一种东西，只是走的是"先留在本机"这条路。
+ */
+export const noteDocDraftV1Schema = z.strictObject({
+  update: z.string().max(NOTE_DOC_UPDATE_MAX_CHARS),
+  /** 写这一份的时刻（本机钟）。界面用它说"这是什么时候的草稿"，不参与判据。 */
+  savedAt: isoTimestampSchema,
+});
+export type NoteDocDraftV1 = z.infer<typeof noteDocDraftV1Schema>;
+
+/** 落草稿的回执：`saved: false` = 本机还没有这一篇的文档（草稿不凭空建条目）。 */
+export const noteDocDraftSaveResultV1Schema = z.strictObject({ saved: z.boolean() });
+export type NoteDocDraftSaveResultV1 = z.infer<typeof noteDocDraftSaveResultV1Schema>;
+
+/** 读草稿：`null` = 这一格是空的（也包括"这一篇不属于当前空间"）。 */
+export const noteDocDraftGetResultV1Schema = z.strictObject({ draft: noteDocDraftV1Schema.nullable() });
+export type NoteDocDraftGetResultV1 = z.infer<typeof noteDocDraftGetResultV1Schema>;
+
+export const noteDocDraftClearResultV1Schema = z.strictObject({ cleared: z.boolean() });
+export type NoteDocDraftClearResultV1 = z.infer<typeof noteDocDraftClearResultV1Schema>;
+
 /** Renderer-safe bridge state. Broker-owned ids and hydrated entity data stay in main. */
 export const companionBridgeStateV1Schema = z.strictObject({
   version: z.literal(1),
@@ -1790,6 +1825,16 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
       to?: string;
     }): Promise<GatewayResultV1<z.infer<typeof todayActivityV1Schema>>>;
   };
+  /**
+   * 「全部空间」统计：当前账号在每个活跃空间里的同一份数字 + 合计。
+   *
+   * 为什么需要它：`stats.overview`（HTTP `/stats/overview`）只算**当前空间**，
+   * 而界面上那些数字读起来像"我的"——切走一个空间，个人进度就看不见了。
+   * 这条按账号扇出，是唯一一条不随"当前空间"变化的读数。
+   */
+  readonly stats: {
+    getOverviewAll(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof allWorkspacesStatsOverviewSchema>>>;
+  };
   readonly source: {
     list(input: { meta: RequestMetaV1; cursor?: string; limit?: number; status?: string }): Promise<GatewayResultV1<z.infer<typeof desktopSourceListPageSchema>>>;
     create(input: { meta: RequestMetaV1; request: DesktopSourceCreateRequest }): Promise<GatewayResultV1<z.infer<typeof desktopSourceDetailSchema>>>;
@@ -2018,13 +2063,6 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
       get(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof companionVoicePreferenceV1Schema>>>;
       patch(input: { meta: RequestMetaV1; engine: TtsEngineV1; voice: string }): Promise<GatewayResultV1<z.infer<typeof companionVoicePreferenceV1Schema>>>;
     };
-    /**
-     * 试听一条音色：服务端用固定的一句话合成，回执是 mp3 的 base64。
-     * 与正文朗读共用 companionVoiceSpeakResultV1 的形状（都是 audio/mpeg 原始字节）。
-     */
-    readonly voicePreview: {
-      synthesize(input: { meta: RequestMetaV1; engine: TtsEngineV1; voice: string }): Promise<GatewayResultV1<z.infer<typeof companionVoiceSpeakResultV1Schema>>>;
-    };
   };
   readonly note: {
     list(input: { meta: RequestMetaV1; cursor?: string; limit?: number; trashed?: boolean }): Promise<GatewayResultV1<z.infer<typeof desktopNoteListPageSchema>>>;
@@ -2066,6 +2104,25 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
         noteId: Uuid;
         state: string;
       }): Promise<GatewayResultV1<z.infer<typeof noteDocPresenceResultV1Schema>>>;
+      /**
+       * 本机草稿（刷新/崩溃不丢字）。三条都只碰本机那份缓存，**不碰 CRDT 流程**：
+       * `draftSave` 把界面还没交出去的那条增量留在盘上，`draftGet` 在重挂载时取回来，
+       * `draftClear` 在确认交出去之后清掉。键由主进程按 (subjectId, workspaceId, noteId)
+       * 拼，界面报的 noteId 单独构不成键——另一个空间里读不到这一格。
+       */
+      draftSave(input: {
+        meta: RequestMetaV1;
+        noteId: Uuid;
+        update: string;
+      }): Promise<GatewayResultV1<z.infer<typeof noteDocDraftSaveResultV1Schema>>>;
+      draftGet(input: {
+        meta: RequestMetaV1;
+        noteId: Uuid;
+      }): Promise<GatewayResultV1<z.infer<typeof noteDocDraftGetResultV1Schema>>>;
+      draftClear(input: {
+        meta: RequestMetaV1;
+        noteId: Uuid;
+      }): Promise<GatewayResultV1<z.infer<typeof noteDocDraftClearResultV1Schema>>>;
     };
     /**
      * 「共享给空间」/「取消共享」（批次 4.5）。判据是**作者**而不是空间角色，

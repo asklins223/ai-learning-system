@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  boolean,
   check,
   integer,
   jsonb,
@@ -38,6 +39,14 @@ export const companionRoomProfiles = pgTable(
       .notNull()
       .default(sql`'{}'::text[]`),
     equippedEffectId: text("equipped_effect_id").$type<CompanionEffectIdV1 | null>(),
+    /**
+     * 这个空间里伴星能不能主动开口（0266）。
+     *
+     * 账号级 `global_enabled` / quiet hours 之外的空间级开关：一个人白天在班级空间、
+     * 晚上在个人空间，主动触达按 (ws,user) 各自产生，没有这一层就只能"全开或全关"。
+     * 默认 false（不静音）——既有行为不变，静音必须是用户显式动作。
+     */
+    proactiveMuted: boolean("proactive_muted").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },

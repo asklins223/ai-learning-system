@@ -140,7 +140,6 @@ export type CompanionJourneyActionRequestV2 = {
 export type CompanionJourneyBootstrapV2 = {
   invitation: CompanionInvitationV2;
   journey: CompanionJourneyV2 | null;
-  resumableJourney: CompanionJourneyV2 | null;
 };
 
 // ─── zod schemas ─────────────────────────────────────────────────────────
@@ -288,7 +287,6 @@ export const companionJourneyBootstrapSchema = z
   .object({
     invitation: companionInvitationSchema,
     journey: companionJourneySchema.nullable(),
-    resumableJourney: companionJourneySchema.nullable(),
   })
   .strict();
 

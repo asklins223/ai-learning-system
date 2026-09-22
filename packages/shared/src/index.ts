@@ -44,6 +44,9 @@ export * from "./companion-memory-desktop-contracts.ts";
 export * from "./companion-voice-contracts.ts";
 export * from "./note-projection-contracts.ts";
 export * from "./note-save-contracts.ts";
+// 2026：首页统计的跨空间合同（每空间一行 + 合计）。`GET /stats/overview` 的
+// 每空间形状与 `GET /stats/overview/all` 的包装形状都只在这里定义一次。
+export * from "./stats-overview-contracts.ts";
 export * from "./card-generation-desktop-contracts.ts";
 export * from "./quality-evidence-contracts.ts";
 export * from "./capability-bundle.ts";

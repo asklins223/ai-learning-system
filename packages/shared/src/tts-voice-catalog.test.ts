@@ -8,6 +8,7 @@ import {
   DEFAULT_TTS_VOICE,
   EDGE_TTS_VOICE_OPTIONS,
   QWEN_TTS_VOICE_OPTIONS,
+  TTS_PREVIEW_ASSET_DIR,
   TTS_PREVIEW_TEXT,
   defaultTtsVoiceFor,
   findTtsVoiceOption,
@@ -55,6 +56,17 @@ test("默认值取自列表第一条，不设第二个来源", () => {
     assert.ok(findTtsVoiceOption(engine, defaultTtsVoiceFor(engine)));
   }
   assert.equal(findTtsVoiceOption("qwen", "nope"), null);
+});
+
+test("每条音色都带本地录音路径，且落在同一个资产目录里", () => {
+  // 试听不再现合成：路径缺一条，界面上就是一条点了没声的行。
+  for (const option of [...QWEN_TTS_VOICE_OPTIONS, ...EDGE_TTS_VOICE_OPTIONS]) {
+    assert.ok(option.previewAsset.startsWith(`${TTS_PREVIEW_ASSET_DIR}/`), option.voice);
+    assert.ok(option.previewAsset.endsWith(".mp3"), option.voice);
+    assert.equal(option.previewAsset, `${TTS_PREVIEW_ASSET_DIR}/${option.voice}.mp3`, option.voice);
+  }
+  const assets = [...QWEN_TTS_VOICE_OPTIONS, ...EDGE_TTS_VOICE_OPTIONS].map((o) => o.previewAsset);
+  assert.equal(new Set(assets).size, assets.length, "两条音色共用一段录音");
 });
 
 test("试听句非空、单句、在朗读长度上限内", () => {

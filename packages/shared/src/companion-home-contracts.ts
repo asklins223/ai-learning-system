@@ -59,6 +59,13 @@ export const companionRoomProfileV1Schema = z.strictObject({
   equippedDecorBySlot: companionEquippedDecorBySlotV1Schema,
   unlockedEffectIds: uniqueEnumArray(companionEffectIdV1Schema, COMPANION_EFFECT_IDS.length),
   equippedEffectId: companionEffectIdV1Schema.nullable(),
+  /**
+   * 这个空间里伴星能不能主动开口（0266）。
+   *
+   * 账号级总开关与静默时段之外的空间级开关：主动触达按 (ws,user) 各自产生，
+   * 一个人在两三个空间里就会同时收到几份"她想跟你说话"，而账号级只能全开或全关。
+   */
+  proactiveMuted: z.boolean(),
   updatedAt: isoTimestampSchema,
 }).superRefine((value, context) => {
   const seen = new Set<CompanionDecorIdV1>();
@@ -103,6 +110,8 @@ export const companionRoomProfilePatchV1Schema = z.strictObject({
   revision: z.number().int().positive(),
   equippedDecorBySlot: companionEquippedDecorBySlotV1Schema.partial().optional(),
   equippedEffectId: companionEffectIdV1Schema.nullable().optional(),
+  /** 静音这个空间 / 取消静音。与装饰同一把 revision 锁。 */
+  proactiveMuted: z.boolean().optional(),
 }).refine(
   (value) => value.equippedEffectId !== undefined
     || (value.equippedDecorBySlot !== undefined && Object.keys(value.equippedDecorBySlot).length > 0),

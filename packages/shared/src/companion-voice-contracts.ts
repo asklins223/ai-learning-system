@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { isTtsVoiceAllowed, ttsEngineV1Schema } from "./tts-voice-catalog.ts";
 
 /**
  * Companion M2 语音朗读合同（`companion.voice.speak`）。
@@ -144,28 +143,3 @@ export const companionVoiceTranscribeResultV1Schema = z.strictObject({
 });
 export type CompanionVoiceTranscribeResultV1 = z.infer<typeof companionVoiceTranscribeResultV1Schema>;
 
-// ─── 音色试听（设置 → 语音与伴星：点一下听这段声音）────────────────────────
-
-/**
- * 试听只提交「引擎 + 音色」，**不提交文本**：文本固定取目录里的 `TTS_PREVIEW_TEXT`。
- *
- * 两件事靠这一笔钉住：一是这条路由是对外合成，给自由文本等于给任意内容开一条
- * 计费通道；二是用户在列表里听到的必须就是那一句，否则"试听过了"和"实际会说"
- * 是两回事。
- */
-export const companionVoicePreviewRequestV1Schema = z
-  .strictObject({
-    version: z.literal(1),
-    engine: ttsEngineV1Schema,
-    voice: z.string().min(1).max(120),
-  })
-  .superRefine((value, ctx) => {
-    if (!isTtsVoiceAllowed(value.engine, value.voice)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["voice"],
-        message: `voice ${value.voice} 不在引擎 ${value.engine} 的音色目录内`,
-      });
-    }
-  });
-export type CompanionVoicePreviewRequestV1 = z.infer<typeof companionVoicePreviewRequestV1Schema>;

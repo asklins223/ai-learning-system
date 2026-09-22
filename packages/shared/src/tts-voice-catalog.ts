@@ -14,6 +14,9 @@
 
 import { z } from "zod";
 
+/** 试听录音所在目录（相对渲染进程根，与 live2d 用同一套引用姿势）。 */
+export const TTS_PREVIEW_ASSET_DIR = "assets/companion/voice-preview-v1";
+
 /** 两条引擎取值；界面选项与服务端校验都从这一行派生。 */
 export const TTS_ENGINE_VALUES = ["qwen", "edge"] as const;
 export type TtsEngineV1 = (typeof TTS_ENGINE_VALUES)[number];
@@ -30,6 +33,14 @@ export interface TtsVoiceOptionV1 {
   name: string;
   /** 一行补充说明（官方声线特质，或试听语种）；空串表示官方没给。 */
   note: string;
+  /**
+   * 试听音频：渲染进程本地资产，不在用户点下去的时候现合成。
+   *
+   * 每段试听都是一次真金白银的上游调用，而"挑声音"这件事天然要把同一句话听好几遍，
+   * 所以这里直接发同一句的录音。它按当前 config 的 model + voice + instruction 生成
+   * （见目录里的 PROVENANCE.md）：这三样任何一个改了，这批录音就过期，要重新生成。
+   */
+  previewAsset: string;
 }
 
 /** 千问可选音色。第一条是默认值，改这一条要同步改 config `tts.qwen.voice`。 */
@@ -39,30 +50,21 @@ export const QWEN_TTS_VOICE_OPTIONS: readonly TtsVoiceOptionV1[] = [
     voice: "longhua_v3.1",
     name: "龙华",
     note: "元气甜美女 · 社交陪伴",
+    previewAsset: `${TTS_PREVIEW_ASSET_DIR}/longhua_v3.1.mp3`,
   },
   {
     engine: "qwen",
     voice: "longanlingxi_v3.1",
     name: "龙安灵希",
     note: "可爱甜美音 · 社交陪伴",
-  },
-  {
-    engine: "qwen",
-    voice: "longanlingxin_v3.1",
-    name: "龙安灵心",
-    note: "可说方言与外语，官方试听：陕西话、云南话、上海话、法语、意大利语",
-  },
-  {
-    engine: "qwen",
-    voice: "longanfengyue_v3.1",
-    name: "龙安风悦",
-    note: "可说方言与外语，官方试听：东北话、越南语、日语",
+    previewAsset: `${TTS_PREVIEW_ASSET_DIR}/longanlingxi_v3.1.mp3`,
   },
   {
     engine: "qwen",
     voice: "longanhuan_v3.1",
     name: "龙安欢",
     note: "可说方言与外语，官方试听：重庆话、宁波话、韩语、印尼语",
+    previewAsset: `${TTS_PREVIEW_ASSET_DIR}/longanhuan_v3.1.mp3`,
   },
 ] as const;
 
@@ -73,6 +75,7 @@ export const EDGE_TTS_VOICE_OPTIONS: readonly TtsVoiceOptionV1[] = [
     voice: "zh-CN-XiaoxiaoNeural",
     name: "晓晓",
     note: "",
+    previewAsset: `${TTS_PREVIEW_ASSET_DIR}/zh-CN-XiaoxiaoNeural.mp3`,
   },
 ] as const;
 

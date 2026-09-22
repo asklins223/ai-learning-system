@@ -1,4 +1,5 @@
-import { pgTable, uuid, text, timestamp, index, uniqueIndex, jsonb, integer } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { pgTable, uuid, text, timestamp, index, uniqueIndex, jsonb, integer, check } from "drizzle-orm/pg-core";
 
 export const users = pgTable(
   "users",
@@ -31,9 +32,37 @@ export const workspaces = pgTable(
     // AI 同意与数据外发政策曾在这四列上（N-011），0237 迁到 user_ai_settings：
     // 同意管的是"我的内容能不能送出去"，授权范围只能是本人。
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    // 空间边界令牌（0261）：成员变动 / AI 同意或外发政策改变 / 空间改名时由触发器 +1。
+    // 会话解码与会话签发都读它，客户端拿旧值请求会被判 stale_workspace。
+    workspaceEpoch: integer("workspace_epoch").notNull().default(1),
   },
   (t) => ({
     ownerIdx: index("workspaces_owner_idx").on(t.ownerId),
+  }),
+);
+
+/**
+ * 高危动作的审计留痕（0263）。
+ *
+ * 与 `ai_audit_log`（AI 外发内容类别）和 `companion_audit`（伴星页面动作）都不是
+ * 一回事：这里记的是"谁在什么时候导出了整个空间 / 物理删掉了哪篇笔记"。
+ * 写入必须与动作同事务（见 `apps/api/src/modules/audit/service.ts`）。
+ */
+export const workspaceAuditLog = pgTable(
+  "workspace_audit_log",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    actorUserId: uuid("actor_user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    action: text("action").notNull(),
+    targetKind: text("target_kind").notNull(),
+    targetId: uuid("target_id"),
+    detail: jsonb("detail").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    workspaceCreatedIdx: index("workspace_audit_log_workspace_created_idx").on(t.workspaceId, t.createdAt),
+    actionCreatedIdx: index("workspace_audit_log_action_created_idx").on(t.action, t.createdAt),
   }),
 );
 
@@ -76,6 +105,9 @@ export const workspaceMembers = pgTable(
   },
   (t) => ({
     pk: uniqueIndex("workspace_members_pk").on(t.workspaceId, t.userId),
+    // 0259：角色只有 owner / member 两种（PRODUCT.md:67）。此前是 free-text，
+    // 数据库对"把别人写成 owner"一句话都不说——dev 库里真的出现过这种夹具行。
+    roleCheck: check("workspace_members_role_check", sql`${t.role} IN ('owner', 'member')`),
   }),
 );
 
