@@ -119,6 +119,8 @@ tokens.txt
 **/tmp-*.py
 # 客观题流程的本地截图/状态目录
 apps/desktop-client/.objflow-caps/
+# B4 落地实测的过程截图目录（单张 1–4.3MB），与 cardgen-verify/graph-verify 同类
+apps/desktop-client/scripts/b4-landing-live/
 # 过程截图（Snipaste 等）不进仓库；设计参考图请放 docs/design/（整目录已忽略）
 **/Snipaste_*.png
 
