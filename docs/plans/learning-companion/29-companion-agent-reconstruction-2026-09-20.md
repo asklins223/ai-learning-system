@@ -4401,3 +4401,156 @@ seq=2 时才红，实测频率约 1/3 的运行），所以它的证据是日志
    这一档的样本量从来不足以支撑任何"退化/进步"的结论，这也是它不能当 KPI 的第二条理由。
 
 没花模型调用，也没有往她的历史里加脚本轮。
+
+---
+
+## 14. 收口批（2026-09-22 傍晚）：把"剩下的那几条"逐条关掉或写明为什么关不掉
+
+§13 之后还挂着五条能自己动手的（§9.13 的预算、§12 C5 的音频终态、§9.60 的日记图、
+§9.63 的设置页说明、§8.5 没有常设读数），这一批逐条处置。**读 §8.1 那张状态表时以本节为准**——
+它是 09-21 的快照，其中有几条在本节被推进或改写。
+
+### 14.1 三套预算收一（§4.9 第 6 项 / §9.13 遗留项 2）
+
+以前是**三个数字各写一份、靠人记得同时改**：`LEASE_TIMEOUT_MS = 120s`（queue.ts）、
+`companion_agent: 110_000`（字面量，必须等于 `租约 - 10s`）、`AGENT_PERSISTENCE_MARGIN_MS = 15_000`
+（runtime 里另写一份）。改一处忘一处的症状不是报错，是**用户什么都收不到**（delta 与终态
+事务没时间落库）。
+
+现在整条链在一处派生：
+
+```
+lease (120s)  ──►  handler abort (lease - 10s)  ──►  loop deadline (abort - 15s)
+        LEASE_TIMEOUT_MS      resolveCompanionAgentBudget()        .loopDeadlineMs
+```
+
+- `DEFAULT_TIMEOUTS.companion_agent` 从字面量改成 `MAX_ALLOWED_TIMEOUT_MS`（由租约派生）；
+- 新增 `resolveCompanionAgentBudget()`：走**函数**不走常量，因为 handler 超时可以被
+  `WORKER_TIMEOUT_COMPANION_AGENT_MS` 覆盖，而 abort 用的是解析后的值——循环若用静态常量
+  算 deadline，env 一改就与真正的 abort 错位；
+- runtime 删掉自己那份 `AGENT_PERSISTENCE_MARGIN_MS` 与 `resolveHandlerTimeout` 调用，
+  只问 `loopDeadlineMs`；不再有"两份数字手工协调"。
+- 合同预算 `COMPANION_AGENT_DEADLINE_MS`（120s）**不动**：它是**跨尝试累加**的 run 预算，
+  与这条"单次尝试"的链不是同一个轴。两者的大小关系由测试钉住（`合同 ≥ handler abort`，
+  否则新 attempt 里合同更早绑住，超时会被误记成 `AGENT_BUDGET_EXCEEDED`）。
+
+**验证**：worker `765/765` 全绿（含扩展后的预算阶梯用例：新增三条断言钉"派生本身"，
+以及一条"env 覆盖 handler 时 loop deadline 必须跟着动"）。变异检查：把
+`loopDeadlineMs` 换成常量 `95_000` → 新用例红，恢复后 9/9 绿。
+
+### 14.2 音频"取段成功却没有 playback 行"必须带明确 reason（§12 C5 留批）
+
+§12.10 修掉的是**已知的那条出口**（`await host.play()` 无上限）。但那条不变量当时靠
+"每条 return 前记得报一次"维持，而 `runQueuedSpeech` 的**外层 catch** 没有报——循环里
+任何一处意外抛错，已经到手的字节就只剩服务端一条 `synth ok` 行，"给了音频没响"与
+"客户端根本没在线"又变得一样。
+
+改法是把"当前在飞的段"存成 `inFlight`，`reportAbandoned()` 统一收口（缺省收当前段），
+外层 catch 也调它。出口只剩一个，漏报不再依赖记性。
+
+**验证**：`companion-voice-playback.test.ts` 27/27 绿。新增用例用一个"在 speaking 阶段抛错的
+订阅者"复现那条出口（`emit` 是同步调用监听器），断言第 1 段（在飞）+ 第 2、3 段（预取深度 2、
+字节已到手）**各自都有终态、且都是 dropped、一条 played 都没有**。变异检查：删掉外层 catch
+里那次 `reportAbandoned()` → 用例红在 `waitUntil 超时`（一条上报都没有）。
+
+**报表口径也一起改了**（原来只报全时段，那 4 段全是历史）：
+
+```
+音频已交付却零上报 = 4 段（全时段） / 0 段（切分点后 09-22 12:40 本机）
+```
+
+切分点 = §12.10 那次修复上线时刻。全时段那 4 段的构成查清楚了：1 段落在播放上报能力对
+本机生效之前（结构上不可能有结局行），3 段是 03:59 那次音频钟停住（`328b1acf` ord 17/18/19）。
+**诚实边界**：外层 catch 这条出口没有实机数据（要复现得让循环里真的抛一次意外异常），
+它的证据是单元级的；桌面端这一版没有重建，所以本批的改动还没在真机上跑过。
+
+### 14.3 日记卡里的图：真机量到了（§9.60 那条"没做完的"）
+
+§9.46 量到的是**对话抽屉**里的 image 块（298×217、`naturalWidth > 0`），日记卡里那张一直
+没在活界面上看过。而库里现在**一条带图块的日记都没有**（09-18 那行重生成后只剩 text），
+所以等真实数据等不到。
+
+按本仓已有做法开**独立实例**（`--user-data-dir=/tmp/cc-verify-udd --remote-debugging-port=9413`，
+`--no-sandbox`，用户自己那个窗口没动），插一行**带探针标记**的 09-17 日记（`facts ? 'probe'`），
+量完即删：
+
+```
+日期胶囊 9 月 17 日 · figure.companion-record__image 存在
+img 359×240   naturalWidth=1536 naturalHeight=1024   complete=true
+figcaption 《探针》· 第 1 张
+日记条目 overflow overX=0 overY=0    figure overflow overX=0
+探针行删除后 remaining_probe = 0
+```
+
+图**真的解码出了像素**，`> * { min-width: 0 }` 那道推理（§9.60 末）由此变成实测：grid 里
+没有横向溢出。探针脚本留在树外（`tmp-verify-diary-image.mjs`）。
+
+### 14.4 设置页「主动介入」说明：真机量到了（§9.63 那条"没在活窗口截图"）
+
+同一个独立实例，走真人入口（HUD「更多功能」→「伴星设置」）：
+
+```
+行标签 主动介入
+  安静  title=她主动开口的最小间隔：约 3 小时一次。…
+  适中  title=…约 1 小时 30 分一次。…        aria-pressed=true
+  活跃  title=…约 30 分钟一次。…
+行下说明 = 当前档位那一句（aria-describedby → #companion-intervention-description）
+```
+
+三档文案与 `PROACTIVE_CADENCE_MS`（3h / 90min / 30min）逐项对上，且说明里那句
+"说话长短在「人格」页的活跃度里调"确实在页面上——§9.63 要区分的两个同名旋钮，用户在
+界面上读得到差别了。
+
+### 14.5 §8.5 系统视野答对率：从"手工量过一次"变成常设读数
+
+§8.5 的判据是"答案与库内真值逐项可比对"，但**只有能从历史重算的那一项**才比得了：
+`learning_metric_events` 是只增的事件流，所以"今天/本周学了多久"可以锚在提问那一刻重算；
+活跃卡片数与笔记数是**当前状态**，没有历史切片——拿今天的卡片数去判昨天的答句就是造假证据，
+所以它们不进这条读数（这条限制写在脚本注释里）。
+
+报表新增一段（零模型调用、零污染）：
+
+```
+【系统视野问答】方案 §8.5
+  学习时长答对率（§8.5 里唯一能从历史重算的一项）= 63.6%（全时段 7/11 项，容差 ±3 分钟）
+    切分点后（09-21 08:25 本机，§9.24 修复上线）= 100.0%（6/6 项）
+    ✗ 09-21 00:19:50 问「我这周总共学了多久？…」→ 真值 本周=60 分钟，她报 [23]
+```
+
+它第一次跑就把 §9.24 那 4 条错答（"本周 23 分钟"，真值 60）原样抓了出来——那正是这条读数
+要盯的东西。口径是**下界**：她一句话里带别的分钟数时可能撞上真值，所以"报错就一定错，
+报对不排除蒙对"；容差 ±3 分钟是因为服务端自己就 `Math.round(seconds/60)`。
+问句判据与 worker 的预取判据同形（`VISION_TIME_QUESTION`），两处各写一份、都留了
+"改一处必须改另一处"的注释。
+
+### 14.6 仍然不由我收口的，以及为什么
+
+| 项 | 为什么现在关不掉 |
+|---|---|
+| §8.8 一票否决差 30 轮（现 70/100） | 要**真人**轮次。灌脚本轮正是 §9.68 那次污染事故（复读脚本措辞）的成因，D5 已裁定不灌 |
+| §8.4「有文字无音频」100 轮抽样 | 同上，需要应用在线的长窗口 |
+| D2 的 4s 阈值效果 | 要下一个窗口的 `deadline` 行；报表那行已就位，基线是"等到超时 2" |
+| §9.15 那条"正在思考"卡死 | 需要一次新现场；涉事会话已被删，无法复现 |
+| `wake` 改限时轮询（§12.10） | **有意不做**：只泄漏一个 pending promise，无用户可见后果、无可断言行为 |
+| before/after 回查（§9.69/§9.70） | 已降级为兜底：主修（攒住 + 两条 steer 额度 + 判据补名词）实测 3/3 生效 |
+| D5 那三件（不灌轮 / 不删探针历史 / 不动并行会话文件） | 都是**裁定**不是遗留：删历史不可逆、要删得先备份并单独问；并行会话的文件有归属 |
+| dev 库测试残留（§9.23：软删记忆、catchphrase、那条待兑现提醒） | 删除不可逆，等你一句话 |
+
+### 14.7 本批的测试账与一处不属于本批的红灯
+
+- worker：`765/765` 全绿；`tsc` 里 3 条错全在 `apps/api/src/db/client.ts`（`sessionToken`），
+  是另一条会话正在改的表结构，不在本批文件里。
+- 桌面端：`companion-voice-playback` 27/27，它下游的四个消费点
+  （`companion-reveal-driver` / `companion-bubble-reveal` / `home-v2` / `companion-chat-session`）
+  共 50 条全过。全量套件 `1324 passed / 10 failed`——**10 条失败没有一条在本批的依赖链上**：
+  三个失败文件的**源码正在工作树里被另一条会话改着**（`hud-pages.ts`、
+  `WorkspaceLibrarySurface.tsx`、`settings-surface.tsx`），第四个
+  `objective-flow-css-guard.test.ts` 是客观题流程那套 CSS 守卫（`.objflow-caps/` 也在别人手上）。
+- `apps/desktop-client` 的 `tsc` 另有 **4 个错，同样不在本批文件里**：
+  `CardGenerationSurface.live-candidates.test.tsx`（`node:crypto` 进不了 renderer 工程 +
+  对象字面量里两个同名 `planRevisionId`）与 `notebook-presence.test.tsx`（`NoteDocPeer`
+  少 `block`）。这两处**已经提交进 HEAD**（不再是"别人的在途改动"），但改它们要猜另一条
+  线的夹具意图（尤其那个同名键：到底哪个值是有意的），所以按 D5 的边界只报告、不代改。
+- 一处上游保证记在这里，免得下次有人重新怀疑它：`reportSegmentOutcome` 在宿主侧
+  （`HomeV2AudioController.tsx:434`）**不 await、不 unwrap、不抛**，异常全咽掉——
+  所以本批把 `reportAbandoned()` 放进 catch 出口不会反过来把朗读打死。

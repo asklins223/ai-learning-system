@@ -23,7 +23,12 @@ const DEFAULT_TIMEOUTS: Record<string, number> = {
   // URL fetch + text segmentation, no AI call.
   parse_source: 60_000,
   // Companion Agent：bounded model/tool loop + 确定性落库。
-  companion_agent: 110_000,
+  //
+  // 这里**不写数字**（方案 29 §4.9 第 6 项：三套预算收一）。以前它是字面量 110_000，
+  // 必须由人记得和 `LEASE_TIMEOUT_MS - LEASE_SAFETY_MARGIN_MS` 保持一致；租约一改，
+  // 症状不是报错而是 reaper 抢在 abort 前把 job 收回、run 停在 running。
+  // 现在整条链由 resolveCompanionAgentBudget() 派生，见该函数。
+  companion_agent: MAX_ALLOWED_TIMEOUT_MS,
   // 2026-09-15 审计（设计 P1-13）：此前只覆盖 parse_source + companion_agent，
   // 其余 4 种 job 落到 GLOBAL_DEFAULT_MS(90s)。HEAD 的同名映射覆盖了它那个时代的
   // **全部** job 类型——job 类型换代后映射没跟上，属覆盖率回归。补齐现在的 6 种。
@@ -115,6 +120,49 @@ function clamp(ms: number): number {
   return Math.min(ms, MAX_ALLOWED_TIMEOUT_MS);
 }
 
+/**
+ * 伴星 agent 的**唯一预算链**（方案 29 §4.9 第 6 项）。
+ *
+ * ```
+ *   lease (120s)                    job 租约：reaper 按它回收，最外层硬边界
+ *     └─ handler abort (lease-10s)  runWithAbortTimeout 强制执行
+ *          └─ loop deadline         agent 循环自己的 deadline = abort - 持久化余量
+ * ```
+ *
+ * 三者的关系以前是**三个数字靠人手工协调**：`companion_agent: 110_000` 与
+ * `AGENT_PERSISTENCE_MARGIN_MS` 分别写在两个文件里，改一个忘一个的症状是
+ * "用户什么都收不到"（delta 与终态事务没时间落库），而不是一条报错。
+ *
+ * 合同侧 `COMPANION_AGENT_DEADLINE_MS` 是**跨尝试累加**的 run 预算（确认后续跑），
+ * 与这条"单次尝试"的链不是同一个轴：它必须 ≥ handler abort，否则新 attempt 里
+ * 它会更早绑住，把超时误记成 `AGENT_BUDGET_EXCEEDED`（那条不变量由
+ * `__tests__/handler-timeout-config.test.ts` 的预算阶梯用例钉住）。
+ *
+ * 走函数而不是常量：handler 超时可以被 `WORKER_TIMEOUT_COMPANION_AGENT_MS`
+ * 覆盖，而 abort 用的是**解析后**的值——循环若用静态常量算 deadline，env 一改
+ * 就会和真正的 abort 错位。
+ */
+export const COMPANION_AGENT_PERSISTENCE_MARGIN_MS = 15_000;
+
+export interface CompanionAgentBudget {
+  /** 最外层：job 租约。 */
+  readonly leaseMs: number;
+  /** runWithAbortTimeout 强制的 handler 上限。 */
+  readonly handlerAbortMs: number;
+  /** agent 循环自己的 deadline（handler 起点 + 这个数）。 */
+  readonly loopDeadlineMs: number;
+}
+
+export function resolveCompanionAgentBudget(jobType = "companion_agent"): CompanionAgentBudget {
+  const handlerAbortMs = resolveHandlerTimeout(jobType);
+  return {
+    leaseMs: LEASE_TIMEOUT_MS,
+    handlerAbortMs,
+    // 持久化余量给 delta 回放 / TTS 段 / 终态事务，确保它们发生在 abort 之前。
+    loopDeadlineMs: Math.max(1, handlerAbortMs - COMPANION_AGENT_PERSISTENCE_MARGIN_MS),
+  };
+}
+
 /** Exposed for logging / diagnostics. */
 export const RESOLVED_TIMEOUT_INFO = {
   leaseTimeoutMs: LEASE_TIMEOUT_MS,
@@ -123,4 +171,5 @@ export const RESOLVED_TIMEOUT_INFO = {
   globalDefaultMs: GLOBAL_DEFAULT_MS,
   defaultProviderTimeoutMs: DEFAULT_PROVIDER_TIMEOUT_MS,
   providerSafetyMarginMs: PROVIDER_SAFETY_MARGIN_MS,
+  companionAgentPersistenceMarginMs: COMPANION_AGENT_PERSISTENCE_MARGIN_MS,
 };

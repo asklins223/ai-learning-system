@@ -11,6 +11,7 @@ import {
 const ENV_KEYS = [
   "WORKER_MODEL_TIMEOUT_MS",
   "WORKER_TIMEOUT_PARSE_SOURCE_MS",
+  "WORKER_TIMEOUT_COMPANION_AGENT_MS",
   "WORKER_PROVIDER_TIMEOUT_MS",
 ];
 
@@ -72,22 +73,29 @@ test("provider budget leaves time for persistence", () => {
 });
 
 /**
- * 伴星回合的预算阶梯（方案 29 §4.7/§9.6）。
+ * 伴星回合的预算阶梯（方案 29 §4.7/§9.6/§4.9 第 6 项）。
  *
  * 这四层数字以前靠手工同时修改来保持协调：lease(120s) > handler(110s) >
  * run 预算(handler - 持久化余量) > 单次工具 / 单次 provider 调用。任何一层被单独
  * 抬高，症状都不是报错而是**用户什么都收不到**——例如工具预算超过 run 预算时，
  * 那一轮必然被 handler 抢杀（delta 与终态事务没时间落库）。
  * 读图那次改动（45s 单工具预算）就是在这条阶梯上加的，所以钉它的那只手也钉在这里。
+ *
+ * 2026-09-22 收口：前三层不再各写一份数字，全部由 `resolveCompanionAgentBudget()`
+ * 从租约派生。这条用例除了钉大小关系，还钉**派生本身**——把任一层改回字面量、
+ * 或让 env 覆盖只动 handler 不动 loop deadline，都会在这里红。
  */
 test("伴星预算阶梯：lease > handler > run > 单次工具/单次 provider", async () => {
   const { LEASE_TIMEOUT_MS } = await import("../queue.ts");
   const { COMPANION_AGENT_DEADLINE_MS, COMPANION_AGENT_TOOL_TIMEOUT_MS } = await import("@ailearn/shared");
-  const { AGENT_PERSISTENCE_MARGIN_MS, READ_IMAGE_TOOL_TIMEOUT_MS } =
-    await import("../handlers/companion-agent-runtime.ts");
+  const { READ_IMAGE_TOOL_TIMEOUT_MS } = await import("../handlers/companion-agent-runtime.ts");
+  const {
+    COMPANION_AGENT_PERSISTENCE_MARGIN_MS,
+    resolveCompanionAgentBudget,
+  } = await import("../lib/handler-timeout-config.ts");
 
   const handler = resolveHandlerTimeout("companion_agent");
-  const runBudget = handler - AGENT_PERSISTENCE_MARGIN_MS;
+  const runBudget = handler - COMPANION_AGENT_PERSISTENCE_MARGIN_MS;
 
   assert.ok(handler < LEASE_TIMEOUT_MS, "handler 必须先到期；否则 reaper 抢在 abort 前把 job 收回，run 停在 running");
   assert.ok(
@@ -106,4 +114,38 @@ test("伴星预算阶梯：lease > handler > run > 单次工具/单次 provider"
     runBudget - READ_IMAGE_TOOL_TIMEOUT_MS >= COMPANION_AGENT_TOOL_TIMEOUT_MS * 2,
     "读完一张图之后，至少要还剩两次查库工具的时间，否则这一步之后什么都做不了",
   );
+
+  // 派生链本身：三层是 lease 的函数，不是三个各自维护的数字。
+  const budget = resolveCompanionAgentBudget();
+  assert.equal(budget.leaseMs, LEASE_TIMEOUT_MS);
+  assert.equal(budget.handlerAbortMs, handler);
+  assert.equal(budget.loopDeadlineMs, handler - COMPANION_AGENT_PERSISTENCE_MARGIN_MS);
+  assert.ok(
+    budget.loopDeadlineMs < budget.handlerAbortMs,
+    "loop deadline 必须先于 handler abort：否则循环跑到一半被 abort 掐死，delta 与终态事务没有落库时间",
+  );
+  assert.equal(
+    RESOLVED_TIMEOUT_INFO.defaultTimeouts.companion_agent,
+    RESOLVED_TIMEOUT_INFO.maxAllowedTimeoutMs,
+    "companion_agent 的默认值必须由租约派生（= 租约 - 安全余量），不能再写成字面量",
+  );
+});
+
+test("预算链跟着 env 覆盖一起动：handler 被覆盖时 loop deadline 不能停在旧值", async () => {
+  const {
+    COMPANION_AGENT_PERSISTENCE_MARGIN_MS,
+    resolveCompanionAgentBudget,
+  } = await import("../lib/handler-timeout-config.ts");
+
+  const before = resolveCompanionAgentBudget();
+  process.env.WORKER_TIMEOUT_COMPANION_AGENT_MS = "60000";
+  try {
+    const after = resolveCompanionAgentBudget();
+    assert.equal(after.handlerAbortMs, 60_000);
+    assert.equal(after.loopDeadlineMs, 60_000 - COMPANION_AGENT_PERSISTENCE_MARGIN_MS);
+    assert.notEqual(after.loopDeadlineMs, before.loopDeadlineMs);
+    assert.equal(after.leaseMs, before.leaseMs, "租约是外层边界，不该被 handler 覆盖改动");
+  } finally {
+    delete process.env.WORKER_TIMEOUT_COMPANION_AGENT_MS;
+  }
 });

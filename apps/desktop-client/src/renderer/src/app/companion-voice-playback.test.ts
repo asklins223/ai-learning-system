@@ -658,4 +658,24 @@ describe("逐段播放结局上报", () => {
 
     expect(host.reports.filter((report) => report.reason === "played")).toEqual([]);
   });
+
+  // 方案 29 §12 C5 的判据：「取段成功但没有 playback 行的段，必须有一个明确的
+  // reason 上报」。它以前靠"每条 return 前记得报一次"维持，于是**外层 catch**
+  // 那条出口漏了——循环里任何一处意外抛错都会让已到手的字节只剩服务端的 synth ok 行。
+  // 这里用一个"在 speaking 阶段抛错的订阅者"复现那条出口（emit 是同步调用监听器）。
+  it("意外异常也必须给已到手的段一个终态，不能只留服务端 synth ok 行", async () => {
+    const host = new FakeHost();
+    setCompanionVoiceHost(host);
+    subscribeCompanionSpeech((progress) => {
+      if (progress.phase === "speaking") throw new Error("emit 抛错（模拟循环里的意外异常）");
+    });
+    strictSessionWithRef(host, 3);
+
+    await waitUntil(() => host.reports.length > 0);
+
+    // 第 1 段（在飞）+ 第 2、3 段（预取深度 2、字节已到手）都要有结局；
+    // played 一条都不该有——play() 根本没走完。
+    expect(host.reports.map((report) => report.reason)).toEqual(["dropped", "dropped", "dropped"]);
+    expect(host.reports.map((report) => report.ordinal).sort()).toEqual([1, 2, 3]);
+  });
 });

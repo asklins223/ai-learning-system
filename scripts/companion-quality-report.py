@@ -104,6 +104,14 @@ VETO_GATE_MIN_SAMPLE = 100
 # 全库第一条 playback 行 09:26 UTC）。早于这一行的段不可能有上报，不能算静音。
 PLAYBACK_REPORTING_SINCE = "2026-09-21 06:10:00+00"
 
+# "字节到手却零上报"已知成因的修复上线时刻：2026-09-22 12:40（本机）= 04:40 UTC。
+# 那一刻上线的是 `runQueuedSpeech` 的播放封顶（`await host.play()` 不再无上限）
+# + dropped 只报字节真的到手的段 + 三条裸 return 补上报（方案 29 §12.10）。
+# 再往后 2026-09-22 下午又补了外层 catch 那条出口（单测覆盖，见
+# companion-voice-playback.test.ts「意外异常也必须给已到手的段一个终态」）。
+# 切分点之前剩下的段是历史，不是现状；只报全时段会让一个修好的病天天显示成故障。
+AUDIO_SILENT_FIX_SINCE = "2026-09-22 04:40:00+00"
+
 # 「把话头递回去」不一定带问号。2026-09-22 分类"未推进"样本时抓到的一类：
 # 用户说「等一下，先别念了」，她答「嗯，停在这儿了。你说。」——这是邀请，
 # 但上面那串问句标记一个都不命中，于是被计成"没推进"。
@@ -121,6 +129,23 @@ ADVANCE_INVITATION_TEST = re.compile(
 # 因为同意书夹具是**几天里反复跑出来的**，时间上不挤在一起。
 DEV_REAL_ACCOUNT_EMAILS = ("owner@ailearn.local",)
 
+# 系统视野类问句（方案 §8.5）：只收**学习时长**这一种。
+#
+# 形状与 worker 的预取判据同源（`companion-here-and-now.ts` 的
+# VISION_LEARNING_QUESTION），但这里是 Python 侧的一份拷贝——SQL 里的 `~` 用的是
+# POSIX 正则，两边的元字符集不同，没法共享同一个字面量。改一处必须改另一处，
+# 漏改的后果是**样本静默变少**（不是报错），所以两处都写了这条注释。
+VISION_TIME_QUESTION = (
+    "(今天|今日|这周|本周|这个星期)[^。！？]{0,12}(学|复习|读)[^。！？]{0,6}"
+    "(多久|多长时间|多少|几分钟|几小时)"
+)
+
+# "学习时长答错"这个已知成因（§9.24：她的编造被抽取器写进记忆，于是上下文里"出现过"
+# 就成了合法出处）的修复切分点。界取在实测的两次之间：最后一条错答 09-21 00:19:50Z
+# （"本周 23 分钟"，真值 60），第一条正确答案 00:25:37Z。全时段那个数永远一起打，
+# 切分点只是把"已经修掉的病"与"现状"分开，不替换、不隐藏。
+VISION_TRUTH_FIX_SINCE = "2026-09-21 00:25:00+00"
+
 
 def scripted_run_ids() -> set[str]:
     try:
@@ -137,6 +162,87 @@ def scripted_exclusion(column: str, ids: set[str]) -> str:
         return ""
     listed = ",".join(f"'{value}'" for value in sorted(ids))
     return f" AND coalesce({column}::text, '') <> ALL(ARRAY[{listed}]::text[])"
+
+
+def minutes_mentioned(text: str) -> list[int]:
+    """她答句里报出的"分钟"数（"X 小时"按 60 折算）。"""
+    values = [int(match.group(1)) for match in re.finditer(r"(\d+)\s*分钟", text)]
+    for match in re.finditer(r"(\d+(?:\.\d+)?)\s*(?:个)?\s*小时", text):
+        values.append(int(round(float(match.group(1)) * 60)))
+    return values
+
+
+def summarize_vision_answers(
+    samples: list[dict],
+    tolerance_minutes: int = 3,
+    split_at: str | None = None,
+) -> dict:
+    """把"学习时长"问句的答句与**锚在提问那一刻重算的真值**逐项比。
+
+    口径写清楚，免得下一眼看错这个数：
+
+    * 分母是"**可比对的项**"，不是"问句条数"——一条问句可能同时问今天和本周（两项），
+      也可能她一个数字都没报（那种进 `answers_without_number`，不进分母）。
+    * 容差 ±N 分钟：服务端自己就 `Math.round(seconds/60)`，她再口语化一次（"大概一小时"）
+      还会再取整；把取整差当成说谎，这条读数第二天就没人信了。
+    * 判"匹配"是"她报的数字里**有一个**落在真值附近"。她一句话里带别的分钟数
+      （"还剩 12 分钟"）时可能撞上，所以这条读数是**下界**——它报错就一定错，
+      它报对不排除蒙对。宁可是下界，也不要一个会自己反噬的精确率。
+    * `split_at` 之后单独再算一遍。切分点是**已知成因的修复上线时刻**（§9.24：
+      数字的合法出处只剩本轮重算的那几块 + 统计量不进记忆），之前那几条错答是
+      已经修掉的那个病；全时段那个数永远一起打出来，不做替换。
+    """
+    def evaluate(rows_: list[dict]) -> tuple[int, int, list[dict], int]:
+        expected = 0
+        matched = 0
+        without_number = 0
+        mismatches: list[dict] = []
+        for row in rows_:
+            answer = (row.get("answer") or "").strip()
+            question = (row.get("question") or "").strip()
+            mentions = minutes_mentioned(answer)
+            if not mentions:
+                without_number += 1
+                continue
+            truths: list[tuple[str, int]] = []
+            if re.search(r"今天|今日", question):
+                truths.append(("今日", int(round(float(row.get("today_seconds") or 0) / 60))))
+            if re.search(r"这周|本周|这个星期", question):
+                truths.append(("本周", int(round(float(row.get("week_seconds") or 0) / 60))))
+            for label, truth in truths:
+                expected += 1
+                if any(abs(value - truth) <= tolerance_minutes for value in mentions):
+                    matched += 1
+                else:
+                    mismatches.append({
+                        "asked_at": str(row.get("asked_at"))[:19],
+                        "label": label,
+                        "truth": truth,
+                        "said": mentions[:3],
+                        "question": question[:40],
+                    })
+        return expected, matched, mismatches, without_number
+
+    compared, matched, mismatches, without_number = evaluate(samples)
+    since_fix = None
+    if split_at:
+        later = [row for row in samples if str(row.get("asked_at"))[:19] >= split_at[:19]]
+        later_compared, later_matched, _, _ = evaluate(later)
+        since_fix = {
+            "compared": later_compared,
+            "matched": later_matched,
+            "accuracy": (round(later_matched / later_compared, 3) if later_compared else None),
+        }
+    return {
+        "turns": len(samples),
+        "answers_without_number": without_number,
+        "compared": compared,
+        "matched": matched,
+        "accuracy": (round(matched / compared, 3) if compared else None),
+        "tolerance_minutes": tolerance_minutes,
+        "mismatches": mismatches[:3],
+        "since_fix": since_fix,
+    }
 
 
 def collect(since: str | None) -> dict:
@@ -499,6 +605,23 @@ def collect(since: str | None) -> dict:
             WHERE p.stage = 'playback' AND p.run_id = s.run_id AND p.segment_id = s.segment_id
           );
     """))
+    # 同一个数再按"已知成因修好没有"切一刀。
+    #
+    # 为什么必须切：剩下那 4 段全是历史——1 段落在播放上报能力对本机生效之前，3 段是
+    # 09-22 03:59 那次音频钟停住（§12.10 已把 `await host.play()` 封顶 + dropped 只报
+    # 已到手的段 + 三条裸 return 补上报）。只报全时段，就等于让一个已经修好的病每天
+    # 在报表上显示成现状——这正是 §12.11/§12.12 对失败率做过的事。
+    silent_after_ok_since_fix = int(scalar(f"""
+        SELECT count(*)
+        FROM companion_tts_outcomes s
+        WHERE s.stage = 'synth' AND s.outcome = 'ok'
+          {since_clause(since, 's.created_at')}
+          AND s.created_at > TIMESTAMPTZ '{AUDIO_SILENT_FIX_SINCE}'
+          AND NOT EXISTS (
+            SELECT 1 FROM companion_tts_outcomes p
+            WHERE p.stage = 'playback' AND p.run_id = s.run_id AND p.segment_id = s.segment_id
+          );
+    """))
 
     tts_requested = int(scalar(f"""
         SELECT count(*) FROM companion_stream_events e
@@ -572,6 +695,56 @@ def collect(since: str | None) -> dict:
             SELECT count(*) FROM jobs WHERE type='companion_thought' AND status='dead';
         """) or 0),
     }
+
+    # ─── 系统视野问答：学习时长答对率（方案 §8.5）────────────────────────────
+    #
+    # §8.5 的判据是"答案与库内真值逐项可比对"，但**只有能从历史重算的那几项**才比得了：
+    # `learning_metric_events` 是只增的事件流，所以"今天/本周学了多久"可以锚在提问那一刻
+    # 重算（`occurred_at <= 提问时刻`）。活跃卡片数与笔记数是**当前状态**，没有历史切片——
+    # 拿今天的卡片数去判昨天的答句，是在制造假证据，所以它们不进这条读数。
+    #
+    # 问句判据与 worker 侧**同一个形状**（companion-here-and-now.ts 的
+    # VISION_LEARNING_QUESTION）：两边各写一份正则，一边改了另一边就会静默漏样本。
+    vision_turns = rows(f"""
+        WITH msgs AS (
+          SELECT m.workspace_id, m.user_id, m.conversation_id, m.seq, m.created_at, m.role,
+                 (SELECT string_agg(b->>'text', ' ')
+                    FROM jsonb_array_elements(m.blocks) b WHERE b->>'type' = 'text') AS text
+          FROM companion_messages m
+          WHERE m.blocks IS NOT NULL AND jsonb_typeof(m.blocks) = 'array'
+            {since_clause(since, 'm.created_at')}
+        ),
+        asked AS (
+          SELECT * FROM msgs WHERE role = 'user' AND text ~ '{VISION_TIME_QUESTION}'
+        )
+        SELECT a.created_at AS asked_at, a.text AS question, a.user_id, a.workspace_id,
+               (SELECT string_agg(b->>'text', ' ')
+                  FROM companion_messages r, jsonb_array_elements(r.blocks) b
+                 WHERE r.conversation_id = a.conversation_id AND r.seq > a.seq
+                   AND r.role = 'assistant' AND jsonb_typeof(r.blocks) = 'array'
+                   AND b->>'type' = 'text'
+                 GROUP BY r.seq ORDER BY r.seq LIMIT 1) AS answer,
+               tz.zone AS tz,
+               (SELECT coalesce(sum(e.active_seconds_used), 0) FROM learning_metric_events e
+                 WHERE e.workspace_id = a.workspace_id AND e.user_id = a.user_id
+                   AND e.occurred_at <= a.created_at
+                   AND e.occurred_at >= date_trunc('day', a.created_at AT TIME ZONE tz.zone) AT TIME ZONE tz.zone
+               ) AS today_seconds,
+               (SELECT coalesce(sum(e.active_seconds_used), 0) FROM learning_metric_events e
+                 WHERE e.workspace_id = a.workspace_id AND e.user_id = a.user_id
+                   AND e.occurred_at <= a.created_at
+                   AND e.occurred_at > a.created_at - interval '7 days'
+               ) AS week_seconds
+        FROM asked a
+        LEFT JOIN LATERAL (
+          SELECT coalesce(
+            (SELECT s.quiet_hours->>'timezone' FROM user_companion_account_state s
+              WHERE s.user_id = a.user_id LIMIT 1),
+            'Asia/Shanghai') AS zone
+        ) tz ON true
+        ORDER BY a.created_at DESC;
+    """)
+    vision = summarize_vision_answers(vision_turns, split_at=VISION_TRUTH_FIX_SINCE)
 
     # 富输出块的**供给量**（方案 29 §4.8 / §9.48）。这一行存在的理由很具体：
     # `card` 块在库里恒 0 行持续了六周，而报表上没有任何一处会因为它为 0 而说话——
@@ -747,6 +920,7 @@ def collect(since: str | None) -> dict:
                     ],
                     # 音频字节已经交出去、客户端却一句没回的段数（"没响"最难看的一类）。
                     "bytes_delivered_but_silent": silent_after_ok,
+                    "bytes_delivered_but_silent_since_fix": silent_after_ok_since_fix,
                 },
             },
         },
@@ -756,6 +930,7 @@ def collect(since: str | None) -> dict:
             "delta_events": int(num(ttft[0]["n"])) if ttft else 0,
         },
         "proactive": proactive,
+        "vision": vision,
     }
 
 
@@ -932,8 +1107,31 @@ def render(metrics: dict) -> None:
                   "不计进上面的播出率，但它们就是「给了音频没响」的那类证据。")
         for r in playback["by_reason"]:
             print(f"    {r['reason']:<14} n={r['n']:<4} p50={r['p50_ms']}ms p90={r['p90_ms']}ms")
-    print(f"  音频已交付却零上报 = {playback['bytes_delivered_but_silent']} 段"
-          "   ← 不为 0 就是「给了音频但根本没响」，与「慢」「引擎失败」是三种不同的病")
+    print(f"  音频已交付却零上报 = {playback['bytes_delivered_but_silent']} 段（全时段）"
+          f" / {playback['bytes_delivered_but_silent_since_fix']} 段（切分点后 09-22 12:40 本机）"
+          "   ← 不为 0 就是「给了音频但根本没响」，与「慢」「引擎失败」是三种不同的病；"
+          "看现状读**切分点后**那一半")
+
+    # 系统视野（方案 §8.5）。这条以前只在某一次真机批次里手工逐项比对过，
+    # 所以"≥95%"在报表上没有落脚点；现在它是每次跑报表都会重算的读数。
+    vision = metrics["vision"]
+    print("\n【系统视野问答】方案 §8.5")
+    if vision["compared"] == 0:
+        print(f"  学习时长答对率 = 无可比对项（窗口内问句 {vision['turns']} 条，"
+              f"其中 {vision['answers_without_number']} 条她没报数字）"
+              "   ← 这一档要等真机问句攒出来，不是没修好")
+    else:
+        print(f"  学习时长答对率（§8.5 里唯一能从历史重算的一项）= {vision['accuracy']:.1%}（全时段 "
+              f"{vision['matched']}/{vision['compared']} 项，容差 ±{vision['tolerance_minutes']} 分钟）"
+              f"   问句 {vision['turns']} 条 / 没报数字 {vision['answers_without_number']} 条")
+        if vision.get("since_fix") and vision["since_fix"]["compared"]:
+            fixed = vision["since_fix"]
+            print(f"    切分点后（09-21 08:25 本机，§9.24 修复上线）= {fixed['accuracy']:.1%}"
+                  f"（{fixed['matched']}/{fixed['compared']} 项）"
+                  "   ← 现状读这一条；全时段那半留着那 4 条修好之前的错答")
+        for item in vision["mismatches"]:
+            print(f"    ✗ {item['asked_at']} 问「{item['question']}」"
+                  f"→ 真值 {item['label']}={item['truth']} 分钟，她报 {item['said']}")
 
     print("\n【时延 / 主动性】方案 #8 #9")
     print(f"  首字 p50={ttft['p50']}ms p90={ttft['p90']}ms")

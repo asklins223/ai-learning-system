@@ -349,6 +349,15 @@ async function runQueuedSpeech(args: {
    */
   const prefetched: PrefetchedSegment[] = [];
   /**
+   * 字节已经到手、还没写终态的那一段（方案 29 §12 C5 的判据：
+   * 「取段成功但没有 playback 行的段，必须有一个明确的 reason 上报」）。
+   *
+   * 这条不变量不能靠"每条 return 前都记得报一次"来维持——那正是它以前漏的原因：
+   * 外层 catch 那条出口就没报。改成把"当前在飞的段"存下来，`reportAbandoned()`
+   * 统一收口，所有出口只调它。
+   */
+  let inFlight: { segment: CompanionQueuedSpeechSegment; startedAtMs: number } | null = null;
+  /**
    * 一段的结局要回到服务端才算得清"没声音"是谁的锅（0247）。
    * 只有带 ref 的段可报——本地文本路径没有 run/segment 身份，没有可归因的对象。
    */
@@ -425,7 +434,10 @@ async function runQueuedSpeech(args: {
    * 能力上线时刻切窗口把它们分开，见方案 29 §12 C4）。
    */
   const reportAbandoned = (current?: { segment: CompanionQueuedSpeechSegment; startedAtMs: number }): void => {
-    if (current) report(current.segment, "dropped", current.startedAtMs);
+    // 缺省收口"当前在飞的那一段"：调用点不必自己记住它，出口也就漏不掉。
+    const active = current ?? inFlight ?? undefined;
+    inFlight = null;
+    if (active) report(active.segment, "dropped", active.startedAtMs);
     for (const entry of prefetched) {
       if (!entry.delivered) continue;
       const segment = queue.segments.find((item) => item.key === entry.key);
@@ -482,6 +494,8 @@ async function runQueuedSpeech(args: {
         reportAbandoned({ segment, startedAtMs: pending.startedAtMs });
         return;
       }
+      // 字节到手了：从这里开始，无论走哪条出口都必须有终态。
+      inFlight = { segment, startedAtMs: pending.startedAtMs };
 
       emit({
         planId: args.planId,
@@ -525,7 +539,7 @@ async function runQueuedSpeech(args: {
       if (stalled || args.runGeneration !== generation) {
         // play() 被 stop() 提前 resolve、或根本没走完时"到底听没听见"是不知道的，
         // 所以这里报 dropped 而不是 played：played 继续只由正常路径写。
-        reportAbandoned({ segment, startedAtMs: pending.startedAtMs });
+        reportAbandoned();
         if (stalled) {
           // 卡住的那一轮要把界面和 `activePlanId` 一起放开，否则她永远"在说话"，
           // 主动提示音会一直给这条不存在的朗读让路（见 isCompanionSpeechActive）。
@@ -537,6 +551,7 @@ async function runQueuedSpeech(args: {
       playedCount += 1;
       // 走到这里才算"播成了"：`play()` 被打断时同样 resolve，所以必须排在上面那道
       // generation 检查之后——否则"用户三秒后打断"会被记成一次成功播放。
+      inFlight = null;
       report(segment, "played", pending.startedAtMs);
     }
     activePlanId = null;
@@ -568,6 +583,10 @@ async function runQueuedSpeech(args: {
       reportAbandoned();
       return;
     }
+    // 意外异常（不是段级截止）同样不能把已经到手的字节留在没有结局的状态里：
+    // 这条出口以前只 emit 失败，于是服务端只剩 synth ok 行，"给了音频却没响"
+    // 与"客户端根本没在线"又变得一样（§12 C5）。
+    reportAbandoned();
     activePlanId = null;
     emit({
       planId: args.planId,

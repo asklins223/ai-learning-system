@@ -44,7 +44,10 @@ import {
 } from "./companion-memory-vector.ts";
 import { logger } from "../lib/logger.ts";
 import { runWithAbortBudget } from "../lib/handler-timeout.ts";
-import { resolveHandlerTimeout, resolveProviderCallTimeout } from "../lib/handler-timeout-config.ts";
+import {
+  resolveCompanionAgentBudget,
+  resolveProviderCallTimeout,
+} from "../lib/handler-timeout-config.ts";
 import { CompanionAgentBudgetExceededError } from "../lib/non-retryable-errors.ts";
 import { ProviderRequestError } from "../lib/provider-request-error.ts";
 import type { AIProvider } from "../lib/ai-provider.ts";
@@ -80,18 +83,6 @@ export class CompanionToolBlockedError extends CompanionToolError {
 
 /** 非白名单异常的对外统一摘要：绝不外传驱动/供应商原文。 */
 const TOOL_FAILURE_SAFE_SUMMARY = "工具执行失败，请稍后再试";
-
-/**
- * Agent loop 结束到 run 终态提交之间的持久化余量。
- *
- * delta 批量回放（每批 50ms 节流）+ TTS 段下发 + 终态事务 + 关系更新都必须在
- * handler abort 前完成；run 预算因此取 handler 超时 - 本余量。
- *
- * 导出仅为可测：这条"lease > handler > run > 单次工具"的阶梯历史上靠手工改数值
- * 维持协调，一处改动没跟上就是静默失效（run 被 handler 抢杀、用户什么都没收到）。
- * 现在由 `__tests__/handler-timeout-config.test.ts` 把它钉成断言。
- */
-export const AGENT_PERSISTENCE_MARGIN_MS = 15_000;
 
 /**
  * 终答步攒够这么多字符才开始下发（见 `runStreamingAgentStep.holdUntilChars`）。
@@ -226,7 +217,8 @@ const AGENT_LOOP_GRACE_STEPS = 2;
  * 一刀切到 `deadlineAt` 会把宽限变成**更贵的失败**：宽限回合要两次 provider 调用
  * （跑工具 + 收尾作答），实机单次伴星调用 1.5–4s，剩下的时间不够时宁可直接用
  * 她已经说出的那句话交付，也不要跑到一半被预算拦停。`deadlineAt` 本身已经扣掉
- * 了 AGENT_PERSISTENCE_MARGIN_MS，所以这里不必再为终态事务留量。
+ * 了持久化余量（`resolveCompanionAgentBudget().loopDeadlineMs`），所以这里不必
+ * 再为终态事务留量。
  */
 const AGENT_LOOP_GRACE_MIN_REMAINING_MS = 20_000;
 
@@ -2520,15 +2512,15 @@ export async function runCompanionAgentLoop(args: {
   // 预算有两个来源，必须取更紧的那个：
   // 1) 合同预算 COMPANION_AGENT_DEADLINE_MS（整个 run，跨确认续跑累加）——已耗尽
   //    则直接终结，不再开新尝试；
-  // 2) handler 超时预算（companion_agent 默认 110s，被 clamp 在 120s lease 之内）——
-  //    它由 runWithAbortTimeout 强制执行，**先于** lease 到期。若只看合同预算，
-  //    loop 自己的 deadline 永远不会先触发（120s > 110s），超时被误记为
-  //    PROVIDER_UNAVAILABLE，两套预算还要靠手工改数值保持协调。
-  // 预留持久化余量给 delta 回放 / TTS 段 / 终态事务，确保它们发生在 abort 之前。
+  // 2) 本次尝试的 loop deadline（方案 29 §4.9 第 6 项：三套预算收一）——
+  //    由 `resolveCompanionAgentBudget()` 从租约派生：lease → handler abort → loop
+  //    deadline（abort - 持久化余量）。abort 由 runWithAbortTimeout 强制执行，
+  //    **先于** lease 到期；若只看合同预算，loop 自己的 deadline 永远不会先触发
+  //    （120s > 110s），超时会被误记为 PROVIDER_UNAVAILABLE。
+  //    三个数字不再各写一份：改租约时整条链跟着动，越界由预算阶梯测试拦下。
   const handlerStartedAtMs = args.handlerStartedAtMs ?? attemptStartedAt;
-  const handlerDeadlineAt = handlerStartedAtMs
-    + resolveHandlerTimeout("companion_agent")
-    - AGENT_PERSISTENCE_MARGIN_MS;
+  const agentBudget = resolveCompanionAgentBudget();
+  const handlerDeadlineAt = handlerStartedAtMs + agentBudget.loopDeadlineMs;
   const contractDeadlineAt = attemptStartedAt + COMPANION_AGENT_DEADLINE_MS - meta.elapsedMs;
   const deadlineAt = Math.min(handlerDeadlineAt, contractDeadlineAt);
   if (deadlineAt <= attemptStartedAt) {
