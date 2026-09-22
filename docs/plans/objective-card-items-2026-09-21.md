@@ -2062,3 +2062,46 @@ worker 套件 758/758、worker `tsc --noEmit` 全绿（含我这份新测试文�
 其中 live-progress 那 8 条是 §39 B3 点名的回归（含"重投不新增候选、不新增事件、不动终态"）。
 `check-a1-landed.sh` 现状：③=0（旧守卫已消失），②=0（逐候选的按目标 `ON CONFLICT` 还没有）
 ——**B1 完成，B2（逐候选提交 + 重放复用已提交候选）还没开始**，而 B2 才是"第 1 张就能看见"。
+
+## 60. A1 · B2：候选逐张落盘真的发生了，重放不再叫作者 —— 顺手挖出"作者必须搬出大事务"这条硬约束
+
+新集测 `card-generation-v2-per-candidate-commit-postgres.integration.ts`（2 条，零 AI 调用）。
+先记它在**改之前**的红：B1 那一版上跑第一条，报的是
+`5 张候选的 authored 事件只出自 1 个事务 1 !== 5` —— 这条断言不是为新代码补写的，
+它先把旧事实钉住了。
+
+**改了什么**
+1. `commitAuthoredCandidateV2`：一张候选一个短事务，行 + 它的 `card_candidate.authored`
+   事件同生同死（分开写就会出现"行在事件没有"的崩溃窗口）；冲突目标是 0253 那条五列索引，
+   `ON CONFLICT DO NOTHING RETURNING` 把"到底是不是我插的"回给调用方。
+2. 重放**先读库再决定叫不叫作者**：`loadCommittedFirstRevisions`（只认 revision=1）里有这张
+   卡，就直接用库里那条身份，作者一次都不叫。
+3. `insertAuthoredCandidatesBatched` 加了 `skipExisting` 选项，列清单与取值抽成
+   `AUTHORED_CANDIDATE_COLUMNS` + `authoredCandidateValues` 共用——主管线逐张写与
+   replan 批量写必须同一份列（M8 当年合并两条路径就是这个理由）。
+4. 事件序号是 `MAX+1`：并发逐张提交会在 `(workspace_id, run_id, event_seq)` 上互撞
+   （实测报的就是这条），所以提交前按 run 取一把 `pg_advisory_xact_lock(hashtext(run_id))`；
+   另留一层"撞了就重开整个短事务"的兜底（Postgres 里语句报错后事务已进入中止态，
+   原地重跑不了，只能重开）。
+
+**一处不是我推测、是被逼出来的结构事实**：作者阶段**不能**待在阶段二的大事务里。
+候选表对 run 行有外键，插子表要拿父行的 FOR KEY SHARE，而 `loadV2RunInputs` 的
+`SELECT … FOR UPDATE` 与它互斥——同一条管道自己等自己，Postgres 判死锁、整条 job 失败、
+库里一张候选都没有。于是 `runV2AuthoringPhase` 拆成三段：读输入（短事务，读完放锁）→
+作者 + 逐张提交（不在任何事务里）→ 评审与终态（重新锁 run）。这正好也是
+`pollV2Outbox` 那条 H4 注释里"仍未实施的长期正解：把 LLM 调用移出事务"的前半段。
+
+**`authored_reused` 这条事件被收紧过一次，教训记下来**：第一版我在"插入撞了唯一索引"
+的分支里也发它，于是 `M-B`（把复用分支 `if (stored)` 改成 `if (stored && false)`）跑出来
+**照样全绿**——作者明明被叫了、钱照样付，库里看不出来。收紧成"只有在叫作者之前就发现
+库里有"才发、冲突回退只 `logger.warn` 之后，M-B 才红在
+`复用没有留下可审计的事件 0 !== 5`。审计事件的定义必须钉在"它要证明的那件事"上，
+不能钉在"库里出现了同一行"这种同形事实上。
+
+验证：worker `tsc --noEmit` 全绿、单元 763/763；五份 V2 集测 2+4+3+3+8 = **20/20**
+（含 live-progress 的"重投不新增候选、不新增 authored 事件、不动终态"与 B1 那 4 条）。
+
+**一条与本轮无关的旧债（报，不动）**：`card-generation-v2-c-cases` / `-e2e-subset` /
+`-redaction-quota` 三份集测的夹具还在 `INSERT INTO workspaces (… ai_consent_version …)`，
+而该列早在 0237 就被 `DROP COLUMN` 掉了 → 三条文件全部在夹具阶段就 42703 挂死，
+最后改动是 `258144d5`。改法是删掉那三列，我没动（不是本批范围，且要先确认它们是别人的在途活）。

@@ -1498,6 +1498,30 @@ async function runV2PlanPhase(
 }
 
 /**
+ * 读回这一版计划**已经落库的首稿候选**（A1·B2 的复用来源）。
+ *
+ * 单独一条只读事务：作者阶段不在任何大事务里，所以这里也不能"顺手借用"外层 tx——
+ * 借了就等于把逐张提交重新放回持锁期间（见 `runV2AuthoringPhase` 的说明）。
+ * 只认 revision=1：更高的 revision 属于有界修复/重生成，永远要重走门禁，
+ * 不能被当成"这一遍已经交过稿"。
+ */
+async function loadCommittedFirstRevisions(
+  workspaceId: string,
+  runId: string,
+  planVersion: number,
+): Promise<Array<Record<string, unknown>>> {
+  return withWorkerWorkspaceTransaction(
+    { workspaceId, userId: null },
+    async (tx) => (await tx.execute(sql`
+      SELECT * FROM public.card_generation_candidates_v2
+      WHERE workspace_id = ${workspaceId} AND run_id = ${runId}
+        AND plan_version = ${planVersion} AND revision = 1
+    `)) as unknown as Array<Record<string, unknown>>,
+    { isolated: true },
+  );
+}
+
+/**
  * 阶段二：作者 + 双 Critic + deck gate + 终态（自己的事务）。
  *
  * 入口用 `loadV2RunInputs`（与 regenerate/replan/recheck 同一个加载器）：它 FOR UPDATE
@@ -1512,8 +1536,18 @@ async function runV2AuthoringPhase(
   const { workspaceId, runId } = job;
   const useLLM = process.env.CARD_GENERATION_V2_LLM === "true";
 
-  await withWorkerWorkspaceTransaction({ workspaceId, userId: null }, async (tx) => {
-    const ctx = await loadV2RunInputs(tx, workspaceId, runId);
+  // 读输入用的是**自己的短事务**，读完就把锁放掉（A1 · B2）。
+  //
+  // 为什么不能让作者待在阶段二的大事务里：候选表对 run 行有外键，插子表要拿父行的
+  // FOR KEY SHARE，而 `loadV2RunInputs` 的 `SELECT … FOR UPDATE` 与它互斥——
+  // 逐张提交若发生在外层持锁期间，就是同一条管道自己等自己（实测：Postgres 判死锁，
+  // 整条 job 失败，库里一张候选都没有）。拆成"读 → 逐张提交 → 评审"三段之后，
+  // 只有评审段重新锁 run。
+  const ctx = await withWorkerWorkspaceTransaction(
+    { workspaceId, userId: null },
+    async (tx) => await loadV2RunInputs(tx, workspaceId, runId),
+  );
+  {
     // 加载器把 run 行读成开放记录（它同时服务 regenerate/replan/recheck 三种口径），
     // 本阶段只用到哈希闭包这两列。
     const run = ctx.run as { input_snapshot_hash: string; semantic_spec_hash: string };
@@ -1530,18 +1564,31 @@ async function runV2AuthoringPhase(
       ? await buildProvidersForRun({ workspaceId, job, semanticSpec, governanceContext })
       : null;
 
-    // 8+12. 按候选**流水线**执行 author → grounding（极限延迟改造）。
+    // 8+12. 按候选**流水线**执行 author → 逐张落盘 → grounding（A1·B2 + 极限延迟改造）。
     //
     // 此前是两段独立的并发波：等**全部** author 完成 → 再发起 grounding 波，
     // 墙钟 = max(author_i) + max(grounding_i)——每个波的**最慢**一次调用被各付一次。
-    // 现在每个候选自己串成一条链（author_i → precheck → grounding_i），候选之间
+    // 现在每个候选自己串成一条链（author_i → 提交_i → precheck → grounding_i），候选之间
     // 并发：墙钟 = max(author_i + grounding_i) ≤ max(author_i) + max(grounding_i)。
-    // 调用次数、输入数据、候选顺序完全不变；单次延迟方差越大（实测 p50 7s / p90 12s /
-    // max 37s）收益越明显。
     //
-    // 注意：本阶段**只做 provider 调用与纯计算，不碰 tx**——所有落库、事件、
-    // 顺序判定仍由下面的串行收尾阶段按计划顺序完成（事务内语句顺序与改造前一致）。
+    // A1·B2 改的是"什么时候进库"：候选一出作者的手就**单独提交**（`commitAuthoredCandidateV2`），
+    // 于是第 1 张写完另一条连接就看得见，崩溃也不再赔掉整批作者调用；重放时同目标已有行的
+    // 那张**不再调作者**，直接用库里那条（§39 事实 2：身份必须沿用已提交那一版）。
+    // 其余不变：调用次数、候选顺序、落库语句顺序都与改造前一致。
     throwIfPipelineAborted(signal);
+    // 这一版计划已经落库的候选（重放/并发的复用来源）。只认 revision=1：那是作者首稿，
+    // 更高的 revision 属于有界修复/重生成，永远要重走门禁，不能被当成"已交过的稿"。
+    const committedRows = await loadCommittedFirstRevisions(workspaceId, runId, plan.planVersion);
+    const committedByObjective = new Map(committedRows.map((row) => [
+      String(row.plan_objective_local_id),
+      candidateRowToObject(row, runId),
+    ]));
+    /**
+     * 这一遍**没有叫作者**的那几张（`authored_reused` 事件的定义就是这个：跳过作者）。
+     * 注意不要把"插入了才发现库里已有"也算进来——那种情况作者已经被叫过、钱已经付了，
+     * 记成复用就是把审计写假（只在上面 `stored` 分支里 push）。
+     */
+    const reusedCandidates: LearningCardCandidateRevisionV2[] = [];
     const authoringProvider: AuthoringProvider = providers
       ? providers.author
       : new DeterministicAuthoringProvider();
@@ -1615,8 +1662,7 @@ async function runV2AuthoringPhase(
         },
       );
     };
-    /** 提示与候选并行收集：候选对象参与审计哈希，提示不参与（迁移 0234）。 */
-    const authoredHints = new Map<string, CardHintPairV2>();
+    /** 提示与候选一起在同一次提交里落库（`commitAuthoredCandidateV2`），不进 revision 哈希（迁移 0234）。 */
     // 0249：计划已冻结、作者还没开工 → 先把分母写出去，界面这一刻起就有"共 N 张"。
     await writeCardGenerationLiveProgress(job, {
       plannedCards: planObjectives.length, authored: 0, gatePassed: 0, gateFailed: 0,
@@ -1626,15 +1672,37 @@ async function runV2AuthoringPhase(
       V2_STAGE_CONCURRENCY,
       async (planObj, index): Promise<CandidateGroundingOutcome> => {
         throwIfPipelineAborted(signal);
-        const authoredCandidate = await authorCandidateForObjective(authorInput, planObj);
-        const candidate = authoredCandidate.candidate;
-        authoredHints.set(candidate.candidateRevisionId, authoredCandidate.hints);
-        // M2：evidenceSetHash 闭包断言（与改造前一致：不一致即闭包断裂，fail-closed）。
-        if (candidate.evidenceSetHash !== sealed.evidenceSetHash) {
-          throw new CardGenerationProviderErrorLike(
-            false,
-            `candidate evidence set hash closure mismatch: candidate=${candidate.evidenceSetHash} sealed=${sealed.evidenceSetHash}`,
-          );
+        const stored = committedByObjective.get(planObj.objectiveLocalId);
+        let candidate: LearningCardCandidateRevisionV2;
+        if (stored) {
+          // 重放：这一版的这张卡已经在库里了 → **作者一次都不叫**（那是最贵的一段付费）。
+          candidate = stored;
+          reusedCandidates.push(stored);
+          logger.info({
+            runId, candidateId: stored.candidateId, planObjectiveLocalId: planObj.objectiveLocalId,
+          }, "[v2-pipeline] candidate reused from the committed row (author not called)");
+        } else {
+          const authoredCandidate = await authorCandidateForObjective(authorInput, planObj);
+          const fresh = authoredCandidate.candidate;
+          // M2：evidenceSetHash 闭包断言（与改造前一致：不一致即闭包断裂，fail-closed）。
+          if (fresh.evidenceSetHash !== sealed.evidenceSetHash) {
+            throw new CardGenerationProviderErrorLike(
+              false,
+              `candidate evidence set hash closure mismatch: candidate=${fresh.evidenceSetHash} sealed=${sealed.evidenceSetHash}`,
+            );
+          }
+          const committed = await commitAuthoredCandidateV2({
+            workspaceId, runId, candidate: fresh, hints: authoredCandidate.hints,
+          });
+          candidate = committed.candidate;
+          if (!committed.insertedByUs) {
+            // 库里已有同目标的行（租约被抢之后才会走到这里）：身份必须用库里那条，
+            // 但这不是复用——作者已经被叫过、钱已经付了，所以**不发** authored_reused。
+            logger.warn({
+              runId, candidateId: candidate.candidateId,
+              planObjectiveLocalId: planObj.objectiveLocalId,
+            }, "[v2-pipeline] authored candidate collided with an already committed row; using the stored identity");
+          }
         }
         // precheck 在 author 之后、grounding 之前算（纯计算）——这样"最后一个 author
         // 完成"时，全部候选的 soft 信号都已就绪，投机 pedagogy 的输入才与正常路径等价。
@@ -1644,8 +1712,7 @@ async function runV2AuthoringPhase(
         }
         authoredByIndex[index] = candidate;
         authoredCount += 1;
-        // 0249：每写完一张 tick 一格。这一行在 mapWithConcurrency 的循环体里，
-        // 所以 N 张卡就有 N 次毫秒级短事务——而候选仍然要等整批提交才可见。
+        // 0249：每写完一张 tick 一格（候选行本身此刻已经单独提交过了）。
         await writeCardGenerationLiveProgress(job, {
           plannedCards: planObjectives.length, authored: authoredCount, gatePassed: 0, gateFailed: 0,
         });
@@ -1682,12 +1749,68 @@ async function runV2AuthoringPhase(
       usage: providers?.usageTotals(),
     }, "[v2-pipeline] author completed");
 
-    // 10. Persist candidates（计划顺序；PipelinedAuthoring 已在上面完成闭包断言）。
-    // 批量 INSERT + 批量 authored 事件（M8：主管线与 replan 共用同一 helper，
-    // 避免两条路径的写放大/事件语义再次漂移）。
-    await insertAuthoredCandidatesBatched(tx, workspaceId, runId, candidates, authoredHints);
+  await reviewAndFinalizeV2Candidates({
+    job,
+    signal,
+    workspaceId,
+    runId,
+    plan,
+    sealed,
+    sourceContent,
+    existingObjectives,
+    providers,
+    semanticRequest: semanticSpec.semanticRequest,
+    candidates,
+    precomputedGrounding,
+    precomputedPedagogy,
+    reusedCandidates,
+    inputSnapshotHash: run.input_snapshot_hash,
+  });
+  }
+}
 
-    // 11. Update run status to checking
+/**
+ * 阶段二的后半段：复用审计 + 双 Critic + deck gate + 终态（重新锁 run 的一个事务）。
+ *
+ * 候选行在这之前**已经逐张提交**（A1·B2），所以这一段只做两件事：把"哪几张是复用的"
+ * 记进事件流，以及对已提交的行下门禁结论。
+ *
+ * 为什么"跳过作者"要留事件：库里"这一遍直接用了已提交的那条"与"这一遍又写了一次
+ * 却被五列唯一索引挡下"是完全同形的（行数、身份都看不出差别）。没有这条事件，
+ * "重放不再付费"就只能靠读代码相信，出事时也查不到是哪一遍。
+ */
+async function reviewAndFinalizeV2Candidates(input: {
+  job: PendingOutboxJob;
+  signal: AbortSignal | undefined;
+  workspaceId: string;
+  runId: string;
+  plan: NonNullable<Awaited<ReturnType<typeof loadV2RunInputs>>["plan"]>;
+  sealed: Awaited<ReturnType<typeof loadSealedEvidence>>;
+  sourceContent: string;
+  existingObjectives: ExistingObjectiveRef[];
+  providers: Awaited<ReturnType<typeof buildProvidersForRun>> | null;
+  semanticRequest: unknown;
+  candidates: LearningCardCandidateRevisionV2[];
+  precomputedGrounding: Map<string, CandidateGroundingOutcome>;
+  precomputedPedagogy: SpeculativePedagogy | null;
+  reusedCandidates: LearningCardCandidateRevisionV2[];
+  inputSnapshotHash: string;
+}): Promise<void> {
+  const { job, workspaceId, runId } = input;
+  await withWorkerWorkspaceTransaction({ workspaceId, userId: null }, async (tx) => {
+    // 重新按当前版本读回 run / 证据闭包：这段的一切判定都要站在**已提交**的数据上，
+    // 而不是作者阶段那份内存快照（§39 B3）。
+    const ctx = await loadV2RunInputs(tx, workspaceId, runId);
+    if (input.reusedCandidates.length > 0) {
+      await insertEventsBatched(tx, workspaceId, runId, input.reusedCandidates.map((candidate) => ({
+        eventType: "card_candidate.authored_reused",
+        payload: {
+          candidateId: candidate.candidateId,
+          candidateRevisionId: candidate.candidateRevisionId,
+        },
+      })));
+    }
+
     await tx.execute(sql`
       UPDATE public.card_generation_runs_v2
       SET status = 'checking', error_code = NULL, error_message = NULL, updated_at = now()
@@ -1698,29 +1821,29 @@ async function runV2AuthoringPhase(
     await critiqueAndFinalizeCandidates(tx, {
       runId,
       workspaceId,
-      run: run as unknown as { input_snapshot_hash: string; semantic_spec_hash: string },
-      plan,
-      candidates,
-      sealed,
-      sourceContent,
-      existingObjectives,
-      providers,
-      signal,
+      run: ctx.run as unknown as { input_snapshot_hash: string; semantic_spec_hash: string },
+      plan: ctx.plan ?? input.plan,
+      candidates: input.candidates,
+      sealed: ctx.sealed,
+      sourceContent: ctx.sourceContent,
+      existingObjectives: ctx.existingObjectives,
+      providers: input.providers,
+      signal: input.signal,
       // 按候选流水线预计算的 grounding 结果：跳过本函数内部的 provider 波，
       // 直接进入串行收尾（写入顺序/事件/判定完全不变）。
-      precomputedGrounding,
+      precomputedGrounding: input.precomputedGrounding,
       // 与 grounding 波并发算出的投机 pedagogy（集合未变则直接复用，省一个阶段）。
-      precomputedPedagogy,
+      precomputedPedagogy: input.precomputedPedagogy,
       // M4：用户 generation 请求（semanticRequest），透传给 Pedagogy Critic。
-      generationRequest: semanticSpec.semanticRequest,
+      generationRequest: input.semanticRequest,
     });
     await fenceV2OutboxLease(tx, job);
     // M5：本次 job 执行的 LLM 用量汇总（成本审计；此前 result.usage 被整体丢弃，
     // 系统无法回答"一个 run 实际花了多少 token"）。
-    if (providers) {
+    if (input.providers) {
       logger.info({
         runId,
-        usage: providers.usageTotals(),
+        usage: input.providers.usageTotals(),
       }, "[v2-pipeline] job LLM usage summary");
     }
   });
@@ -3416,22 +3539,27 @@ const EMPTY_HINTS: CardHintPairV2 = { level1: "", level2: "" };
  * 逐候选 insertEvent（每候选 2 次 SQL，事件插入还各带一次 MAX 往返）。两条路径
  * 合并到本 helper，杜绝再次漂移。
  */
-export async function insertAuthoredCandidatesBatched(
-  tx: WorkerTransaction,
+/**
+ * 候选行的列清单与取值（A1·B2 抽出来共用）。
+ *
+ * 抽出来的理由不是省事：批量落地的 replan 与逐候选落地的主管线**必须**写同一份列，
+ * 否则"哪条路径少写一列"又会变成一次考古（M8 当年合并两条路径就是这个原因）。
+ */
+const AUTHORED_CANDIDATE_COLUMNS = sql`(
+  id, workspace_id, run_id, candidate_id, candidate_revision_id, revision,
+  plan_revision_id, plan_version, plan_hash, card_content_epoch,
+  plan_objective_local_id, recommendation, derived_from,
+  objective_draft, presentation_draft, hints, evidence_set_hash,
+  candidate_revision_hash, quality_state, review_decision, publish_state
+)`;
+
+function authoredCandidateValues(
+  candidate: LearningCardCandidateRevisionV2,
   workspaceId: string,
   runId: string,
-  candidates: LearningCardCandidateRevisionV2[],
   hintsByCandidateRevisionId: Map<string, CardHintPairV2>,
-): Promise<void> {
-  if (candidates.length === 0) return;
-  await tx.execute(sql`
-    INSERT INTO public.card_generation_candidates_v2
-      (id, workspace_id, run_id, candidate_id, candidate_revision_id, revision,
-       plan_revision_id, plan_version, plan_hash, card_content_epoch,
-       plan_objective_local_id, recommendation, derived_from,
-       objective_draft, presentation_draft, hints, evidence_set_hash,
-       candidate_revision_hash, quality_state, review_decision, publish_state)
-    VALUES ${sql.join(candidates.map((candidate) => sql`(
+) {
+  return sql`(
       ${randomUUID()}, ${workspaceId}, ${runId},
       ${candidate.candidateId}, ${candidate.candidateRevisionId}, ${candidate.revision},
       ${candidate.planRevisionId}, ${candidate.planVersion}, ${candidate.planHash},
@@ -3444,15 +3572,128 @@ export async function insertAuthoredCandidatesBatched(
       ${candidate.evidenceSetHash},
       ${candidate.candidateRevisionHash},
       'authored', 'undecided', 'unpublished'
-    )`), sql`, `)}
-  `);
-  await insertEventsBatched(tx, workspaceId, runId, candidates.map((candidate) => ({
+    )`;
+}
+
+export async function insertAuthoredCandidatesBatched(
+  tx: WorkerTransaction,
+  workspaceId: string,
+  runId: string,
+  candidates: LearningCardCandidateRevisionV2[],
+  hintsByCandidateRevisionId: Map<string, CardHintPairV2>,
+  options: { skipExisting?: boolean } = {},
+): Promise<string[]> {
+  if (candidates.length === 0) return [];
+  // A1·B2：`skipExisting` 时同目标的已提交行**跳过而不是报错**，并且只给真的插进去
+  // 的那些发事件——主管线逐候选提交与重放复用都靠这个返回值判断"这张是我写的吗"。
+  const inserted = options.skipExisting
+    ? (await tx.execute(sql`
+        INSERT INTO public.card_generation_candidates_v2
+          ${AUTHORED_CANDIDATE_COLUMNS}
+        VALUES ${sql.join(candidates.map((candidate) => authoredCandidateValues(candidate, workspaceId, runId, hintsByCandidateRevisionId)), sql`, `)}
+        ON CONFLICT (workspace_id, run_id, plan_version, plan_objective_local_id, revision)
+        DO NOTHING
+        RETURNING candidate_revision_id
+      `)) as Array<{ candidate_revision_id: string }>
+    : (await tx.execute(sql`
+        INSERT INTO public.card_generation_candidates_v2
+          ${AUTHORED_CANDIDATE_COLUMNS}
+        VALUES ${sql.join(candidates.map((candidate) => authoredCandidateValues(candidate, workspaceId, runId, hintsByCandidateRevisionId)), sql`, `)}
+        RETURNING candidate_revision_id
+      `)) as Array<{ candidate_revision_id: string }>;
+  const insertedIds = new Set(inserted.map((row) => String(row.candidate_revision_id)));
+  const authored = candidates.filter((candidate) => insertedIds.has(candidate.candidateRevisionId));
+  await insertEventsBatched(tx, workspaceId, runId, authored.map((candidate) => ({
     eventType: "card_candidate.authored",
     payload: {
       candidateId: candidate.candidateId,
       candidateRevisionId: candidate.candidateRevisionId,
     },
   })));
+  return [...insertedIds];
+}
+
+/**
+ * 逐候选提交（A1 · B2）：一张候选一个短事务，行与它的 `authored` 事件同生同死。
+ *
+ * 为什么事件要跟在同一个事务里：分开写就会出现"行在、事件没有"的崩溃窗口，而事件是
+ * 审核页与审计回答"这张卡是哪一遍产出的"的凭证。
+ *
+ * 为什么要重试：`event_seq` 由 `MAX+1` 分配，`(workspace_id, run_id, event_seq)` 是唯一
+ * 索引——两张候选各自的短事务并发写同一 run 的事件会撞（23505）。撞了只能**重开整个
+ * 短事务**（Postgres 里语句一旦报错，当前事务已进入中止状态，原地重跑不了），
+ * 重开之后重新分配 seq。候选行本身不会重复插（冲突目标是 0253 那条五列索引，DO NOTHING）。
+ *
+ * 返回 true = 这一行是本次写进去的；false = 库里已有同目标行（并发/重放），
+ * 调用方必须改用它，不能带着自己新造的身份继续跑。
+ */
+async function commitAuthoredCandidateV2(input: {
+  workspaceId: string;
+  runId: string;
+  candidate: LearningCardCandidateRevisionV2;
+  hints: CardHintPairV2 | undefined;
+}): Promise<{ candidate: LearningCardCandidateRevisionV2; insertedByUs: boolean }> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await withWorkerWorkspaceTransaction(
+        { workspaceId: input.workspaceId, userId: null },
+        async (tx) => {
+          // 事件序号是 MAX+1 分配的：并发逐张提交会在 (workspace_id, run_id, event_seq)
+          // 这条唯一索引上互相撞。先按 run 取一把事务级 advisory 锁，把"取号 + 写入"
+          // 串起来——只在逐张提交这条新路径上加，评审段仍是单事务，不与之重叠。
+          await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${input.runId}))`);
+          const ids = await insertAuthoredCandidatesBatched(
+            tx, input.workspaceId, input.runId, [input.candidate],
+            new Map([[input.candidate.candidateRevisionId, input.hints ?? EMPTY_HINTS]]),
+            { skipExisting: true },
+          );
+          if (ids.length > 0) {
+            return { candidate: input.candidate, insertedByUs: true };
+          }
+          // 同目标已有行：把**库里那条**读回来继续跑。带着自己新造的身份往下走会让
+          // 后面的门禁 UPDATE 打在一条不存在的 revision 上（静默 0 行）。
+          const rows = (await tx.execute(sql`
+            SELECT * FROM public.card_generation_candidates_v2
+            WHERE workspace_id = ${input.workspaceId} AND run_id = ${input.runId}
+              AND plan_version = ${input.candidate.planVersion}
+              AND plan_objective_local_id = ${input.candidate.planObjectiveLocalId}
+              AND revision = ${input.candidate.revision}
+            LIMIT 1
+          `)) as unknown as Array<Record<string, unknown>>;
+          if (rows.length === 0) {
+            throw new CardGenerationProviderErrorLike(
+              false,
+              `candidate row vanished between conflict and read: ${input.candidate.planObjectiveLocalId}`,
+            );
+          }
+          return { candidate: candidateRowToObject(rows[0], input.runId), insertedByUs: false };
+        },
+        { isolated: true },
+      );
+    } catch (error) {
+      if (isUniqueEventSeqCollision(error) && attempt < 4) {
+        await new Promise((resolve) => setTimeout(resolve, 5 * (attempt + 1)));
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+/** 只认这一种唯一冲突（事件序号被并发抢走），别的约束违反照常往上抛。 */
+function isUniqueEventSeqCollision(error: unknown): boolean {
+  // drizzle 会把驱动层报错再包一层（`Failed query: …`），真正的 code 只出现在
+  // cause 链上，而且不止一层——所以这里整条链走一遍，而不是只看第一层。
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const part = current as { code?: unknown; cause?: unknown; message?: unknown };
+    if (part.code === "23505" || part.code === "40P01") return true;
+    if (/cge_v2_ws_run_seq_idx|deadlock detected/.test(String(part.message ?? ""))) return true;
+    current = part.cause;
+  }
+  return false;
 }
 
 // ─── Providers 构造（惰性，减小 worker 重边）─────────────────────────────
