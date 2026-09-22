@@ -379,6 +379,15 @@ export const TRUNCATED_REPLY_MIN_CHARS: Record<string, number> = {
   active: 6,
 };
 
+/**
+ * 回放窗口：每轮作为原生多轮喂回去的最近几条。
+ *
+ * 导出是因为**摘要器必须让开这一段**（`companion-summarizer` 取的正是它之外的
+ * 那一段）：两边各写一个 20，改一边就静默重叠，摘要会退化成"把上文再念一遍"，
+ * 那时连"她到底有没有用摘要"都无法判断（方案 29 §12.1）。
+ */
+export const REPLAY_WINDOW_MESSAGES = 20;
+
 export function looksTruncatedReply(text: string, minChars = TRUNCATED_REPLY_MIN_CHARS.active): boolean {
   const trimmed = text.trim();
   if (trimmed.length === 0) return true;
@@ -758,7 +767,7 @@ export function buildCompanionPersonaMessages(input: {
    */
   const HISTORY_ASSISTANT_MIN_CHARS = 4;
   const boundedRecent = (() => {
-    const recent = input.recentMessages.slice(-20);
+    const recent = input.recentMessages.slice(-REPLAY_WINDOW_MESSAGES);
     const out: { role: "user" | "assistant"; text: string }[] = [];
     let used = 0;
     /**

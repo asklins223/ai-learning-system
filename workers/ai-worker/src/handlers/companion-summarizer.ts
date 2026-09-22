@@ -24,6 +24,7 @@ import { runWithAbortBudget } from "../lib/handler-timeout.ts";
 import { resolveProviderCallTimeout } from "../lib/handler-timeout-config.ts";
 import { companionSummaryTotal } from "../lib/metrics.ts";
 import { parseMemoryExtractJson } from "./companion-memory-extractor.ts";
+import { REPLAY_WINDOW_MESSAGES } from "./companion-dialogue-content.ts";
 import type { JobPayload } from "./index.ts";
 
 export const conversationSummaryOutputSchema = z.object({
@@ -166,12 +167,21 @@ export async function runCompanionSummarizer(job: JobPayload): Promise<void> {
   );
 
   const conversationText = await withJobTransaction(job, async (tx) => {
-    // 取**最近** 200 条（原来写的是 `seq ASC`：一条 524 消息的连续会话，每一次摘要
-    // 都在复述最开头那 200 条，而且 `buildSummarizerMessages` 又按 12 000 字从头切——
-    // 两次都往回看，于是"会话摘要"永远停在几周前的第一段对话上）。
+    // 取**回放窗口之外**那一段的最近 200 条（原来是 `seq ASC`：524 条的会话每次
+    // 都摘要最开头那 200 条，而且 `buildSummarizerMessages` 又按 12 000 字从头切，
+    // 两次都往回看）。
+    //
+    // 为什么要显式让开最后 20 条：对话链路本来就把最近 20 条当原生多轮喂回去
+    // （`recentMessages.slice(-20)`）。摘要若覆盖同一段，它就不携带任何新信息——
+    // 实测因此完全无法判断"她是看了摘要还是复述上文"（方案 29 §12.1）。
+    // 让开之后，摘要说的一定是回放里不存在的内容，接入才有意义，也才可归因。
     const rows = await tx.execute<{ role: string; blocks: unknown }>(sql`
       SELECT role, blocks FROM companion_messages
       WHERE conversation_id = ${conversationId}
+        AND seq <= (
+          SELECT max(seq) - ${REPLAY_WINDOW_MESSAGES} FROM companion_messages
+          WHERE conversation_id = ${conversationId}
+        )
       ORDER BY seq DESC LIMIT 200
     `);
     return formatSummarizerTranscript(rows);
