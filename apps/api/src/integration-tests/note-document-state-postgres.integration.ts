@@ -21,16 +21,16 @@ import { applyNoteDocUpdate, loadNoteDoc, persistNoteDoc, resolveNoteDocFlushTar
 import { importMarkdownNotes, prepareMarkdownImport } from "../modules/import/markdown-import-service.ts";
 import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
 import {
-  projectNoteBlocks,
+  editFragmentBlockText,
+  projectFragmentBlocks,
   readNoteTitle,
-  restoreNoteBlocksFrom,
+  restoreFragmentBlocksFrom,
   snapshotOf,
-  writeNoteBlocks,
+  writeFragmentBlocks,
   docFromSnapshot,
-  syncNoteBlocksForEditor,
   setNoteTitle,
   type NoteDocBlock,
-} from "../modules/note/doc.ts";
+} from "../modules/note/doc-fragment.ts";
 
 const databaseUrl = process.env.DATABASE_URL_API ?? process.env.DATABASE_URL;
 if (!databaseUrl) {
@@ -163,7 +163,7 @@ test("补齐无损：0244 之前建的笔记仍能从行里读出原文（迁移
   );
   assert.equal(backfilled, true, "没有快照时必须从关系表补齐（新建笔记也一样，先删快照模拟历史数据）");
   assert.deepEqual(
-    projectNoteBlocks(doc).map(({ ordinal: _o, ...block }) => block),
+    projectFragmentBlocks(doc).map(({ ordinal: _o, ...block }) => block),
     original.map((block) => ({ ...block })),
     "补齐丢块或改序，就等于在第一次读时悄悄改了用户的笔记",
   );
@@ -179,7 +179,7 @@ test("写一次即成为事实源：快照落盘、投影回 note_blocks、revis
 
   await withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
     await applyNoteDocUpdate(tx, { workspaceId, noteId, userId }, versionId, (doc) => {
-      writeNoteBlocks(doc, next);
+      writeFragmentBlocks(doc, next);
     });
   });
 
@@ -192,7 +192,7 @@ test("写一次即成为事实源：快照落盘、投影回 note_blocks、revis
   // 连接读，读到的是旧值（未提交），会假报"revision 没递增"。
   await withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
     await applyNoteDocUpdate(tx, { workspaceId, noteId, userId }, versionId, (doc) => {
-      writeNoteBlocks(doc, [...next, { type: "paragraph", content: `又加一段 ${tag}` }]);
+      writeFragmentBlocks(doc, [...next, { type: "paragraph", content: `又加一段 ${tag}` }]);
     });
   });
   const second = await sql`SELECT revision FROM note_document_states WHERE note_id = ${noteId}`;
@@ -207,7 +207,7 @@ test("写一次即成为事实源：快照落盘、投影回 note_blocks、revis
     loadNoteDoc(tx, { workspaceId, noteId, userId }),
   );
   assert.equal(reloaded.backfilled, false, "已有快照却仍从关系表补齐=两套事实源");
-  assert.equal(projectNoteBlocks(reloaded.doc).length, next.length + 1);
+  assert.equal(projectFragmentBlocks(reloaded.doc).length, next.length + 1);
   reloaded.doc.destroy();
 });
 
@@ -228,13 +228,13 @@ test("增量落盘之后：行、版本快照、标题与更新时间必须一�
   const before = await noteRow();
 
   await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
-    flushNoteDocLikeCollaboration(tx, (doc) => syncNoteBlocksForEditor(doc, submitted)),
+    flushNoteDocLikeCollaboration(tx, (doc) => editFragmentBlockText(doc, 0, submitted[0]!.content)),
   );
 
   const { doc, backfilled } = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
     loadNoteDoc(tx, { workspaceId, noteId, userId }),
   );
-  const fromDoc = projectNoteBlocks(doc).map((block) => block.content);
+  const fromDoc = projectFragmentBlocks(doc).map((block) => block.content);
   doc.destroy();
   assert.equal(backfilled, false, "已有快照却仍从关系表补齐=两套事实源");
   assert.deepEqual(fromDoc, submitted.map((block) => block.content), "文档没跟上这次提交（两套正文）");
@@ -270,25 +270,13 @@ test("两个人各自改一块：两次增量都留下，块数不涨", async ()
     loadNoteDoc(tx, { workspaceId, noteId, userId }),
   );
   const base = snapshotOf(baseDoc);
-  const blockCount = projectNoteBlocks(baseDoc).length;
+  const blockCount = projectFragmentBlocks(baseDoc).length;
   baseDoc.destroy();
 
   const aText = `甲窗口这句 ${tag}`;
   const bText = `乙窗口这句 ${tag}`;
-  const first = diffFrom(base, (doc) => {
-    const blocks = projectNoteBlocks(doc);
-    syncNoteBlocksForEditor(doc, blocks.map((block, index) => ({
-      type: block.type,
-      content: index === 0 ? aText : block.content,
-    })));
-  });
-  const second = diffFrom(base, (doc) => {
-    const blocks = projectNoteBlocks(doc);
-    syncNoteBlocksForEditor(doc, blocks.map((block, index) => ({
-      type: block.type,
-      content: index === 1 ? bText : block.content,
-    })));
-  });
+  const first = diffFrom(base, (doc) => editFragmentBlockText(doc, 0, aText));
+  const second = diffFrom(base, (doc) => editFragmentBlockText(doc, 1, bText));
   assert.ok(first.byteLength > 0 && second.byteLength > 0, "分叉没产生增量，这条用例什么都没测");
 
   for (const update of [first, second]) {
@@ -336,13 +324,13 @@ test("恢复历史版本走同一入口：内容回到旧版且投影与文档�
 
   await withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
     await applyNoteDocUpdate(tx, { workspaceId, noteId, userId }, versionId, (doc) => {
-      writeNoteBlocks(doc, [{ type: "paragraph", content: `改得面目全非 ${tag}` }]);
+      writeFragmentBlocks(doc, [{ type: "paragraph", content: `改得面目全非 ${tag}` }]);
     });
   });
 
   await withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
     await applyNoteDocUpdate(tx, { workspaceId, noteId, userId }, versionId, (doc) => {
-      restoreNoteBlocksFrom(doc, oldSnapshot);
+      restoreFragmentBlocksFrom(doc, oldSnapshot);
     });
   });
 
@@ -363,7 +351,7 @@ test("加载器按空间收窄：陌生作用域读不到别人的正文", async
   const own = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
     loadNoteDoc(tx, { workspaceId, noteId, userId }),
   );
-  const ownCount = projectNoteBlocks(own.doc).length;
+  const ownCount = projectFragmentBlocks(own.doc).length;
   own.doc.destroy();
   assert.ok(ownCount >= 5, `正向对照失败：owner 作用域只读到 ${ownCount} 块`);
 
@@ -443,7 +431,7 @@ test("批量 Markdown 导入：每个新建笔记都有快照，且投影与解�
     const { doc } = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
       loadNoteDoc(tx, { workspaceId, noteId: item.note.id, userId }),
     );
-    const projected = projectNoteBlocks(doc);
+    const projected = projectFragmentBlocks(doc);
     doc.destroy();
 
     // 先确认不是"两边都空所以相等"这种假绿：这两篇每篇都该有多块。
@@ -495,7 +483,7 @@ test("恢复历史版本后，文档快照与新的当前版本一致", async ()
   const { doc } = await withWorkspaceTransaction({ workspaceId, userId }, (tx) =>
     loadNoteDoc(tx, { workspaceId, noteId, userId }),
   );
-  const contents = projectNoteBlocks(doc).map((block) => block.content);
+  const contents = projectFragmentBlocks(doc).map((block) => block.content);
   doc.destroy();
   assert.deepEqual(contents, [historyContent], "指针切到旧版了，文档还是恢复前的正文（两套事实源）");
 });
@@ -523,22 +511,20 @@ test('「提交并确认」从文档抄快照：两人都改过的内容都在�
     loadNoteDoc(tx, { workspaceId, noteId, userId }),
   );
   const base = snapshotOf(baseDoc);
-  const baseCount0 = projectNoteBlocks(baseDoc).length;
+  const baseCount0 = projectFragmentBlocks(baseDoc).length;
   baseDoc.destroy();
   // 两个分叉故意做**不同形状**的动作：甲就地改第一块，乙在末尾加一块。
   // 只测"各改一块"的话，前面几条用例里的恢复会把块数改掉，索引就不存在了
   // （这条一开始就是这么假失败的）。
   const editInPlace = (text: string): Uint8Array => diffFrom(base, (doc) => {
-    const blocks = projectNoteBlocks(doc);
-    syncNoteBlocksForEditor(doc, blocks.map((block, position) => ({
-      type: block.type,
-      content: position === 0 ? text : block.content,
-    })));
+    editFragmentBlockText(doc, 0, text);
   });
   const editAppend = (text: string): Uint8Array => diffFrom(base, (doc) => {
-    const blocks = projectNoteBlocks(doc);
-    syncNoteBlocksForEditor(doc, [
-      ...blocks.map((block) => ({ type: block.type, content: block.content })),
+    writeFragmentBlocks(doc, [
+      ...projectFragmentBlocks(doc).map(({ ordinal: _ordinal, ...block }) => ({
+        type: block.type,
+        content: block.content,
+      })),
       { type: "paragraph", content: text },
     ]);
   });

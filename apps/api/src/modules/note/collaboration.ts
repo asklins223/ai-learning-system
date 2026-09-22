@@ -14,7 +14,7 @@ import {
   persistNoteDoc,
   resolveNoteDocFlushTarget,
 } from "./document-state.ts";
-import { snapshotOf } from "./doc.ts";
+import { snapshotOf } from "./doc-fragment.ts";
 import { visibleNotesCondition } from "./visibility.ts";
 
 /**

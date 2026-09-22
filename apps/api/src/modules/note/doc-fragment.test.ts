@@ -32,7 +32,9 @@ const BLOCKS: NoteDocBlockSpec[] = [
   { type: "code", content: "line one\nline two" },
   { type: "list", content: "- 甲\n- 乙" },
   { type: "quote", content: "引用一句" },
-  { type: "image", content: "/api/uploads/abc.png" },
+  // 图片行的 content **整行就是 Markdown**（库里 32/32 都是 `![说明](地址)`，不是光地址）：
+  // 读侧的 `IMAGE_LINE` 按这个式子解析，写成裸地址等于让阅读页画不出图。
+  { type: "image", content: "![示意图](/api/uploads/abc.png)" },
 ];
 
 const REF = { sourceId: "11111111-1111-4111-8111-111111111111", segmentId: "seg-2" };

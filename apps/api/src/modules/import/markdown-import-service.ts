@@ -15,7 +15,7 @@ import { visibleNotesCondition } from "../note/visibility.ts";
 import { computeContentHash } from "../note/content-hash.ts";
 import { applyNoteDocUpdate } from "../note/document-state.ts";
 import { ensureImageAssetsForBlocks } from "../note/service.ts";
-import { writeNoteBlocks } from "../note/doc.ts";
+import { writeFragmentBlocks } from "../note/doc-fragment.ts";
 import { preRegisterImageAssetsForImport } from "../../lib/image-asset.ts";
 import { markdownToBlocks, extractTitleFromBlocks, type ParsedBlock } from "@ailearn/shared/markdown-parser";
 import { extractObjectKeyFromMarkdownImage } from "../../lib/markdown-image.ts";
@@ -220,7 +220,7 @@ async function importItems(
             { workspaceId, noteId: note.id, userId },
             version.id,
             (doc) => {
-              writeNoteBlocks(
+              writeFragmentBlocks(
                 doc,
                 blocksWithAssets.map((b) => ({
                   type: b.type,

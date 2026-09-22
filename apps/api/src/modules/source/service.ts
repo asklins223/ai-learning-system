@@ -8,7 +8,7 @@ import {
 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { visibleNotesCondition } from "../note/visibility.ts";
 import { applyNoteDocUpdate } from "../note/document-state.ts";
-import { writeNoteBlocks } from "../note/doc.ts";
+import { writeFragmentBlocks } from "../note/doc-fragment.ts";
 import { computeContentHash } from "../note/content-hash.ts";
 import { ensureImageAssetsForBlocks } from "../note/service.ts";
 import { jobs } from "@ailearn/shared/db-schema/job";
@@ -573,7 +573,7 @@ export async function createNoteFromSource(
     // 第一个丢的就是证据链回指。
     const blocksWithAssets = await ensureImageAssetsForBlocks(tx, workspaceId, blocks, userId, note.id);
     await applyNoteDocUpdate(tx, { workspaceId, noteId: note.id, userId }, version.id, (doc) => {
-      writeNoteBlocks(
+      writeFragmentBlocks(
         doc,
         blocksWithAssets.map((b, idx) => ({
           type: b.type,

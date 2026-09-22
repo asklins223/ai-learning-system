@@ -1,7 +1,7 @@
 import { and, asc, desc, eq, inArray, isNull, isNotNull, or, sql } from "drizzle-orm";
 import { applyNoteDocUpdate, loadNoteDoc, persistNoteDoc } from "./document-state.ts";
 import { visibleNotesCondition, type NoteShareScope } from "./visibility.ts";
-import { deriveNoteTitle, projectNoteBlocks, setNoteTitle, writeNoteBlocks, type NoteDocBlock } from "./doc.ts";
+import { deriveNoteTitle, projectFragmentBlocks, setNoteTitle, writeFragmentBlocks, type NoteDocBlock } from "./doc-fragment.ts";
 import { type ApiTransaction } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks, noteImageAssets } from "@ailearn/shared/db-schema/note";
 import { searchDocuments } from "@ailearn/shared/db-schema/search";
@@ -318,7 +318,7 @@ async function createNoteTx(
       tx,
       { workspaceId, noteId: row.id, userId },
       version.id,
-      (noteDoc) => writeNoteBlocks(noteDoc, initialBlocks),
+      (noteDoc) => writeFragmentBlocks(noteDoc, initialBlocks),
       initialBlocks,
     );
   }
@@ -586,7 +586,7 @@ export async function checkpointNote(
   const { doc } = await loadNoteDoc(tx, scope);
   try {
     if (requestedTitle !== null) setNoteTitle(doc, requestedTitle, "manual");
-    const projected = projectNoteBlocks(doc);
+    const projected = projectFragmentBlocks(doc);
     const plain = projected.map(({ ordinal: _ordinal, ...block }) => block);
     const contentJson = { blocks: plain.map((block) => ({ type: block.type, content: block.content })) };
     const contentHash = computeContentHash(contentJson);
@@ -1146,7 +1146,7 @@ export async function restoreNoteVersion(
       tx,
       { workspaceId, noteId, userId },
       versionId,
-      (noteDoc) => writeNoteBlocks(noteDoc, restoredDocBlocks),
+      (noteDoc) => writeFragmentBlocks(noteDoc, restoredDocBlocks),
       restoredDocBlocks,
     );
 

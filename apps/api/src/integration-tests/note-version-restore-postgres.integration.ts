@@ -31,8 +31,8 @@ import {
   restoreNoteVersion,
 } from "../modules/note/service.ts";
 import {
-  editBlockContent,
-} from "../modules/note/doc.ts";
+  editFragmentBlockText,
+} from "../modules/note/doc-fragment.ts";
 import {
   loadNoteDoc,
   persistNoteDoc,
@@ -446,7 +446,7 @@ test("被 seal 的当前版本：落盘另起一版，不动被引用的那一�
       `;
 
       const target = await flushLikeCollaboration(workspaceId, userId, noteId, (doc) => {
-        editBlockContent(doc, 0, "落在被 seal 之后的一次编辑");
+        editFragmentBlockText(doc, 0, "落在被 seal 之后的一次编辑");
       });
 
       assert.notEqual(target, v2Id, "当前版本被 seal 过时落盘口必须另起一版");
@@ -482,7 +482,7 @@ test("就地改一个已有块：改行、不建版、不动版本快照", async
 
     try {
       const target = await flushLikeCollaboration(workspaceId, userId, noteId, (doc) => {
-        editBlockContent(doc, 0, "autosaved edit");
+        editFragmentBlockText(doc, 0, "autosaved edit");
       });
       assert.equal(target, v2Id, "改一个已有块不该建新版本");
 

@@ -24,7 +24,7 @@ import { HocuspocusProvider } from "@hocuspocus/provider";
 import { closeDatabase, withWorkspaceTransaction } from "../db/client.ts";
 import { createNote } from "../modules/note/service.ts";
 import { documentNameForNote, closeNoteCollaboration, collaborationLoad } from "../modules/note/collaboration.ts";
-import { docFromSnapshot, editBlockContent, projectNoteBlocks } from "../modules/note/doc.ts";
+import { docFromSnapshot, editFragmentBlockText, projectFragmentBlocks } from "../modules/note/doc-fragment.ts";
 
 const CONN = process.env.DATABASE_URL_API ?? process.env.DATABASE_URL;
 if (!CONN) {
@@ -114,7 +114,7 @@ async function storedBlocks(): Promise<string[]> {
   const rows = await sql`SELECT state FROM note_document_states WHERE note_id = ${noteId}`;
   if (!rows.length) return [];
   const doc = docFromSnapshot(rows[0].state as Uint8Array);
-  const contents = projectNoteBlocks(doc).map((block) => block.content);
+  const contents = projectFragmentBlocks(doc).map((block) => block.content);
   doc.destroy();
   return contents;
 }
@@ -127,7 +127,7 @@ async function projectedRows(): Promise<string[]> {
 }
 
 function docContents(doc: Y.Doc): string[] {
-  return projectNoteBlocks(doc).map((block) => block.content);
+  return projectFragmentBlocks(doc).map((block) => block.content);
 }
 
 /** 以库里那份快照为起点的"本机文档"——真客户端离线时拿到的就是这个。 */
@@ -343,10 +343,11 @@ test("owner 连上即拿到库里的正文；一篇笔记只有一份服务端�
 test("owner 的编辑：落 note_document_states、投影成 note_blocks，块数不变", async () => {
   const revisionBefore = await sql`SELECT revision FROM note_document_states WHERE note_id = ${noteId}`;
   const { doc, synced } = connect(ownerToken);
-  // 必须先同步再改：在还空着的本地文档上写，等于提交整篇，正是 4.0 实测会复制块的形状。
+  // 必须先同步再改：空着的本地文档里连节点都没有，就地改一块会直接抛 `笔记没有第 N 块`
+  // （换到 fragment 形状之后这条从"静默复制块"变成了"当场拒绝"，更要先同步）。
   await synced;
   const edited = `${paraA}（owner 改过）`;
-  editBlockContent(doc, 1, edited);
+  editFragmentBlockText(doc, 1, edited);
 
   await waitFor(async () => (await storedBlocks())[1] === edited, "文档快照写入编辑");
   await waitFor(async () => (await projectedRows())[1] === edited, "note_blocks 投影跟上编辑");
@@ -356,7 +357,11 @@ test("owner 的编辑：落 note_document_states、投影成 note_blocks，块�
     Number(revisionAfter[0].revision) > Number(revisionBefore[0]?.revision ?? 0),
     `revision 必须递增（${revisionBefore[0]?.revision} → ${revisionAfter[0]?.revision}）`,
   );
-  assert.equal((await projectedRows()).length, 3, "块数变了：整篇写入被用在了交互编辑上（4.0 实测会复制块）");
+  assert.equal(
+    (await projectedRows()).length,
+    3,
+    "块数变了：有人在交互编辑那一次里把块换成新节点（换节点身份才是复制块的那件事，就地改文本动不了块数）",
+  );
   destroyProviders();
   await waitFor(() => collaborationLoad().documents === 0, "文档卸载");
 });
@@ -375,7 +380,7 @@ test("只读成员：知道自己只读、上送不落库，但仍能实时看�
   assert.equal(member.provider.authorizedScope, "readonly");
 
   const phantom = `${paraB}（成员偷偷改的）`;
-  editBlockContent(member.doc, 2, phantom);
+  editFragmentBlockText(member.doc, 2, phantom);
 
   // 超过 debounce 的一整轮：既够更新被广播给 owner，也够它落库。两处都没有，
   // 才说明"只读"挡的是写入本身，而不只是界面。
@@ -385,7 +390,7 @@ test("只读成员：知道自己只读、上送不落库，但仍能实时看�
   assert.ok(!(await projectedRows()).includes(phantom), "只读成员的更新进了 note_blocks");
 
   const fromOwner = `${paraA}（owner 后来的编辑）`;
-  editBlockContent(owner.doc, 1, fromOwner);
+  editFragmentBlockText(owner.doc, 1, fromOwner);
   await waitFor(() => docContents(member.doc).includes(fromOwner), "只读成员收到 owner 的编辑");
   await waitFor(async () => (await projectedRows()).includes(fromOwner), "owner 的编辑落库");
   // 落的是整份快照，所以这一步同时证明那条被拒的更新从来没进过服务端文档；
@@ -404,7 +409,7 @@ test("HTTP 上送增量：一条 WS 都没建也能写（personal 与离线队�
 
   const local = await storedDoc();
   const httpEdit = `${paraA}（HTTP 改的）`;
-  editBlockContent(local, 1, httpEdit);
+  editFragmentBlockText(local, 1, httpEdit);
   const response = await uploadUpdate(ownerToken, await incrementalUpdate(local));
   assert.equal(response.statusCode, 200, `上送必须成功，实际 ${response.statusCode}: ${response.body}`);
   assert.ok(Number(response.json().revision) > 0, "响应没带 revision，客户端队列无法确认");
@@ -425,7 +430,7 @@ test("同一条增量重放两次是幂等的：revision 不动、内容不变",
   // 离线队列会按序重发，服务端必须把重复的 update 当成没发生。
   const local = await storedDoc();
   const replay = `${paraB}（重放用）`;
-  editBlockContent(local, 2, replay);
+  editFragmentBlockText(local, 2, replay);
   const update = await incrementalUpdate(local);
   const response = await uploadUpdate(ownerToken, update);
   assert.equal(response.statusCode, 200);
@@ -448,12 +453,12 @@ test("HTTP 增量与 WS 活文档合并：两边都看到对方，且不复制�
   const { doc, provider, synced } = connect(ownerToken);
   await synced;
   const wsEdit = `${paraA}（WS 改的）`;
-  editBlockContent(doc, 1, wsEdit);
+  editFragmentBlockText(doc, 1, wsEdit);
   await waitFor(() => provider.unsyncedChanges === 0, "服务端确认收到 WS 编辑");
 
   const local = await storedDoc();
   const httpEdit = `${paraB}（HTTP 改的）`;
-  editBlockContent(local, 2, httpEdit);
+  editFragmentBlockText(local, 2, httpEdit);
   const response = await uploadUpdate(ownerToken, await incrementalUpdate(local));
   assert.equal(response.statusCode, 200, `实际 ${response.statusCode}: ${response.body}`);
 
@@ -470,7 +475,7 @@ test("HTTP 增量与 WS 活文档合并：两边都看到对方，且不复制�
 test("member 走 HTTP 上送同样被拒：403，库里没有它的内容", async () => {
   const local = await storedDoc();
   const denied = `${paraB}（成员想经 HTTP 改的）`;
-  editBlockContent(local, 2, denied);
+  editFragmentBlockText(local, 2, denied);
   const response = await uploadUpdate(memberToken, await incrementalUpdate(local));
   assert.equal(response.statusCode, 403, `只读判据必须同一条，实际 ${response.statusCode}: ${response.body}`);
   assert.ok(!(await storedBlocks()).includes(denied), "HTTP 口把只读拦在了门外但内容进了库");
@@ -483,7 +488,7 @@ test("同一个人从自己另一个空间上送：404，且库里一个字都�
   // token 在**它自己的空间**里确实是 owner，所以 404 只能来自按空间收窄的那次查找。
   const local = await storedDoc();
   const foreign = `${paraA}（从别的空间上送）`;
-  editBlockContent(local, 1, foreign);
+  editFragmentBlockText(local, 1, foreign);
   const before = await storedBlocks();
 
   const response = await uploadUpdate(ownerOtherToken, await incrementalUpdate(local));
@@ -520,7 +525,7 @@ test("编辑起点必须来自 doc-state：从行重建会复制块", async () =
   assert.deepEqual(docContents(local), await projectedRows(), "doc-state 与投影不一致（两套事实源）");
 
   const seeded = `${paraA}（从 doc-state 起步改的）`;
-  editBlockContent(local, 1, seeded);
+  editFragmentBlockText(local, 1, seeded);
   const upload = await uploadUpdate(ownerToken, await incrementalUpdate(local));
   assert.equal(upload.statusCode, 200, `实际 ${upload.statusCode}: ${upload.body}`);
   await waitFor(async () => (await projectedRows()).includes(seeded), "编辑落库");
@@ -542,7 +547,7 @@ test("关停：debounce 窗口里的最后一次编辑必须落盘", async () =>
   const { doc, provider, synced } = connect(ownerToken);
   await synced;
   const last = `${paraB}（关停前的最后一次编辑）`;
-  editBlockContent(doc, 2, last);
+  editFragmentBlockText(doc, 2, last);
   // 等服务端确认收到（`SyncStatus(true)`），否则这条用例测的是"消息还没到就被关了"，
   // 那是运气不是 flush。
   await waitFor(() => provider.unsyncedChanges === 0, "服务端确认收到更新");

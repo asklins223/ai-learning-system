@@ -7,15 +7,15 @@ import { upsertSearchDocument } from "./search-projection.ts";
 import {
   deriveNoteTitle,
   docFromSnapshot,
-  emptyNoteDoc,
-  projectNoteBlocks,
+  emptyFragmentNoteDoc,
+  projectFragmentBlocks,
   readNoteTitle,
   setNoteTitle,
   snapshotOf,
-  writeNoteBlocks,
+  writeFragmentBlocks,
   type NoteDocBlock,
   type ProjectedNoteBlock,
-} from "./doc.ts";
+} from "./doc-fragment.ts";
 
 /**
  * `note_document_states` 的读写与投影（批次 4.1）。
@@ -23,10 +23,11 @@ import {
  * 一注一篇一文档：Y.Doc 是正文的**事实源**，`note_blocks` 是它在某个版本上的投影。
  * 文档挂在 note 上而不是挂在 version 上，因为版本是历史刻度，协同发生在"当前"。
  *
- * 一条硬约束（4.0 实测决定，见 `doc.ts` 文件头）：**只有"确实拥有整篇"的路径能走
- * 这里的整篇写入**——导入、来源转笔记、版本创建、恢复历史版本。交互自动保存不能
- * 用整篇写入（并发下块数会增殖），它要等 4.3 客户端改成上送增量之后再接进来；
- * 在那之前自动保存仍走原路，本模块只负责让事实源先统一。
+ * 一条硬约束（批次 C 换了形状之后仍然成立）：**整篇写入只留给"确实拥有整篇"的路径**——
+ * 导入、来源转笔记、版本创建、恢复历史版本。交互编辑不再走这里：编辑器直接写那份共享
+ * 文档（字符级合并），落盘口只负责把文档投影回关系表。旧形状下"自动保存提交整篇"
+ * 会增殖块，那条实测记录搬到了 `doc-fragment.ts` 文件头；新形状下整篇写入虽然不增殖，
+ * 它仍然是"以我这一版为准"的语义，用它做交互编辑就会把对端落在改动中段里的字删掉。
  */
 
 export type NoteDocScope = { workspaceId: string; noteId: string };
@@ -34,7 +35,7 @@ export type NoteDocScope = { workspaceId: string; noteId: string };
 /** 带查看者的作用域：读正文的入口必须是它，否则"仅自己可见"在取快照这一层就漏了。 */
 export type NoteDocReadScope = NoteDocScope & { userId: string };
 
-type NoteDoc = ReturnType<typeof emptyNoteDoc>;
+type NoteDoc = ReturnType<typeof emptyFragmentNoteDoc>;
 
 /**
  * 读正文文档。没有快照时从当前版本的 note_blocks 反向补齐（这就是迁移接缝）。
@@ -42,6 +43,12 @@ type NoteDoc = ReturnType<typeof emptyNoteDoc>;
  * 判据在**这里**而不是只放在路由上：有快照的那条分支原本一个 `notes` 行都不读，
  * 于是"这篇是不是你的"完全取决于调用方有没有先查过——协同落盘口 `onStoreDocument`
  * 就是那样一个调用方。把判据放到加载处，任何一条按 noteId 取正文的路径都过同一道门。
+ *
+ * 换形状这一步带来一条一次性事实，写在这里而不是藏在迁移脚本里：批次 C 之前落库的
+ * `state` 是 `Y.Array<Y.Map>` 那套编码，用 fragment 内核解它会投影出 **0 块**（实测），
+ * 而下一次落盘就把那 0 行写回 `note_blocks`——静默清空正文。所以库里已有的
+ * `note_document_states` 行必须清掉，让下面这条补齐路从 `note_blocks` 的行重建。
+ * 本项目未上线、没有真实用户数据，这是开发库重建的一次成本，不是要写兼容分支的理由。
  */
 export async function loadNoteDoc(
   tx: ApiTransaction,
@@ -81,9 +88,11 @@ export async function loadNoteDoc(
       })
     : [];
 
-  const doc = emptyNoteDoc();
+  const doc = emptyFragmentNoteDoc();
   setNoteTitle(doc, note?.title ?? "", note?.titleSource ?? "auto");
-  writeNoteBlocks(
+  // 零行的笔记会写出一块空段落，而不是零块：schema 的 `doc: block+` 不接受零子节点的
+  // doc，编辑端要的是"光标的落点"。`doc-fragment.test.ts` 钉住了同一件事。
+  writeFragmentBlocks(
     doc,
     rows.map((row) => ({
       type: row.type,
@@ -146,7 +155,7 @@ export async function persistNoteDoc(
   versionId: string,
 ): Promise<{ blocks: ProjectedNoteBlock[]; versionId: string }> {
   const { workspaceId, noteId } = scope;
-  const projected = projectNoteBlocks(doc);
+  const projected = projectFragmentBlocks(doc);
   const plain = projected.map(({ ordinal: _ordinal, ...block }) => block);
 
   await saveNoteDoc(tx, { workspaceId, noteId }, doc);
@@ -205,7 +214,7 @@ export async function resolveNoteDocFlushTarget(
   if (current && !current.sealedAt) return current.id;
 
   const snapshot = versionSnapshotOf(
-    projectNoteBlocks(doc).map(({ ordinal: _ordinal, ...block }) => block),
+    projectFragmentBlocks(doc).map(({ ordinal: _ordinal, ...block }) => block),
   );
   return insertVersionFromSnapshot(tx, workspaceId, noteId, userId, snapshot);
 }
@@ -259,8 +268,8 @@ async function insertVersionFromSnapshot(
 /**
  * 服务端唯一的正文写入口：加载文档 → 一次事务内改 → 交给 `persistNoteDoc` 落盘并投影。
  *
- * `mutate` 拿到活的 Y.Doc：整篇替换用 `writeNoteBlocks`，恢复版本用
- * `restoreNoteBlocksFrom`。除这里之外不该再有第二条改正文的路。
+ * `mutate` 拿到活的 Y.Doc：整篇替换用 `writeFragmentBlocks`，恢复版本用
+ * `restoreFragmentBlocksFrom`。除这里之外不该再有第二条改正文的路。
  */
 export async function applyNoteDocUpdate(
   tx: ApiTransaction,
@@ -273,8 +282,8 @@ export async function applyNoteDocUpdate(
    */
   preload?: NoteDocBlock[],
 ): Promise<{ blocks: NoteDocBlock[]; doc: NoteDoc }> {
-  const doc = preload ? emptyNoteDoc() : (await loadNoteDoc(tx, scope)).doc;
-  if (preload) writeNoteBlocks(doc, preload);
+  const doc = preload ? emptyFragmentNoteDoc() : (await loadNoteDoc(tx, scope)).doc;
+  if (preload) writeFragmentBlocks(doc, preload);
   doc.transact(() => mutate(doc));
   const { blocks } = await persistNoteDoc(tx, scope, doc, versionId);
   return {

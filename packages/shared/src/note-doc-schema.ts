@@ -2,10 +2,10 @@
  * 笔记正文的 ProseMirror schema 定义与块形状转换（CRDT 批次 B）。
  *
  * **这里只放纯数据与纯函数**：不 import `yjs`，也不 import `prosemirror-model`。
- * 原因是踩过的坑（见 `apps/api/src/modules/note/doc.ts` 文件头）：本仓没有 workspace
- * 根，`apps/api` 与 `apps/desktop-client` 各有自己的 `node_modules`，把带 yjs 的模块
- * 挪进 shared 会让一个进程里出现两份 yjs，`instanceof Y.Text` 静默为假，症状是
- * "块都在、正文全空"。所以共享的是**规格**，`new Schema(spec)` 由各进程自己做一次。
+ * 原因是踩过的坑（写在新内核 `apps/api/src/modules/note/doc-fragment.ts` 文件头）：
+ * 本仓没有 workspace 根，`apps/api` 与 `apps/desktop-client` 各有自己的 `node_modules`，
+ * 把带 yjs 的模块挪进 shared 会让一个进程里出现两份 yjs，`instanceof` 跨份静默判假，
+ * 症状是"块都在、正文全空"。所以共享的是**规格**，`new Schema(spec)` 由各进程自己做一次。
  *
  * 为什么必须有这一份规格：正文换成 `Y.XmlFragment` 之后，fragment 里存的是节点类型名
  * 与属性（批次 A 实测：`prosemirrorJSONToYXmlFragment` 的第一个参数就是 schema）。
