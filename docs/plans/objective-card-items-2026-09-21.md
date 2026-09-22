@@ -1757,3 +1757,31 @@ worker 侧传 `candidate.objective.practiceItem` 的 `options.length`，api 侧
 变成整批缺额，事件与头部都会持续报一个本来不该存在的缺口。
 改动只在 `allocatePracticeForms` 那一行 `const quota = ...`，加上结算与界面的既有链路，
 不需要动合同、不需要迁移。
+
+## 50. 真跑抓到我自己那个读路径算错了数（同一批次两个来源不一致）
+
+清理完库位后跑的第一批真模型生成（run `4938cf7f`，5 张计划 → 4 通过 1 没过，`review_ready`）：
+
+| 目标 | 点名 | 实际交付 | 门禁 |
+|---|---|---|---|
+| obj-atom-1 | true_false | true_false | passed |
+| obj-atom-2 | single_choice | single_choice，**4 个选项** | passed |
+| obj-atom-3 | ordering | ordering（3 项） | **failed** |
+| obj-atom-5 | —（未点名） | ordering | passed |
+| obj-atom-6 | —（未点名） | 无 | passed |
+
+先说好的两条：**v27 的宽度要求被模型照做了**（点名的选择题交出 4 个选项，而清理前库里的 8 道选择题里有 3 道只有 2 个选项）；`n=5` 走 ⌈5/2⌉=3 点名，短批豁免没有误伤。缺额事件也真的落库了（`card_generation.practice_quota_short`）。
+
+**问题**：同一个批次，两个来源给出的配额结论不一样——
+
+- 管道内结算（事件）：`{requiredCount: 3, metCount: 1}`，把 obj-atom-2 与 obj-atom-3 都记成 `nothing_delivered`；
+- 审核页头部（我这条读路径，`summarizePlanPracticeQuotaV2`）：`{requiredCount: 3, metCount: 3}`。
+
+读路径这边至少有一处明确是错的：它按"最新 revision 的候选行"算，**不看门禁状态**，于是 obj-atom-3 那张 `failed` 的 ordering 也被算成"兑现了点名"。这违反这条规则的本意（点名要的是**能用的**练习件）。
+
+事件那边则相反地可疑：obj-atom-2 的选择题既交付了又过了门禁，却被记成 `nothing_delivered` —— 说明结算拿到的 `survivors` 里**没有这张**（很可能是 deck gate/去重那一路先把它筛掉了，之后才结算），也就是结算时机与"哪些候选算这批的产物"这两件事在管道内的顺序需要核实。
+
+**下一批要做的事（按顺序，别急着改文案）**：
+1. 读路径只数 `qualityState === 'passed'` 的最新 revision —— 一处过滤，改完这条头部与卡面上"随卡练习是什么"才自洽（卡面本来就写着那张没过）。
+2. 读 `critiqueAndFinalizeCandidates` 里结算相对于 deck gate / 去重的位置，确认 `metCount` 应该以哪个集合为准；**两者必须引用同一个集合**，否则这个数永远有两个答案（这正是我这一整晚在反对的那类错，这次是我自己造的）。
+3. 定完之后把这条批次的两个数再各读一次，要求逐字段相等；把这个等式写成一条测试（事件与读路径同源）。
