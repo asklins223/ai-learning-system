@@ -11,7 +11,7 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import { createNoteDocState } from "./note-doc-state";
-import { emptyNoteDoc, setNoteTitle, snapshotOf, writeNoteBlocks } from "./note-doc-fragment";
+import { emptyNoteDoc, setNoteTitle, snapshotOf, writeNoteBlocks } from "./test-support/note-doc-test-doc";
 
 const BLOCKS = [
   { type: "heading", content: "标题" },

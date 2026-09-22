@@ -7,7 +7,7 @@ import {
   snapshotOf,
   syncNoteBlocksForEditor,
   writeNoteBlocks,
-} from "./note-doc-fragment";
+} from "./test-support/note-doc-test-doc";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DESKTOP_API_SERVICE_ID,

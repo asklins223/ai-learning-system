@@ -9,7 +9,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { emptyNoteDoc, projectNoteBlocks, writeNoteBlocks } from "./note-doc-fragment";
+import { emptyNoteDoc, projectNoteBlocks, writeNoteBlocks } from "./test-support/note-doc-test-doc";
 import {
   DESKTOP_IPC_CHANNELS,
   DESKTOP_IPC_CONTRACT_VERSION,
