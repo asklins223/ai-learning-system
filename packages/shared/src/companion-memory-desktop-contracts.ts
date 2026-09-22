@@ -195,6 +195,25 @@ export const companionDailySummaryV1Schema = z.strictObject({
 });
 export type CompanionDailySummaryV1 = z.infer<typeof companionDailySummaryV1Schema>;
 
+export const companionDailyMonthValueV1Schema = z.string().regex(/^\d{4}-\d{2}$/);
+
+/**
+ * 一个月里「她写过哪几天」——月历要打的标记。
+ *
+ * 只回**有记录的那些天**，不为空日补位：整月最多 31 条，空位由渲染端按月份自己
+ * 排。`status` 只有 generated / failed 两种，因为表里就只有这两种行；
+ * 「没写过」不是失败，是一种缺席，由日历上**没有标记**表达。
+ */
+export const companionDailyMonthV1Schema = z.strictObject({
+  version: z.literal(1),
+  month: companionDailyMonthValueV1Schema,
+  days: z.array(z.strictObject({
+    date: companionDailyDateV1Schema,
+    status: z.enum(["generated", "failed"]),
+  })).max(31),
+});
+export type CompanionDailyMonthV1 = z.infer<typeof companionDailyMonthV1Schema>;
+
 // ─── 人格档案（§2.1/§12.2 pet-profile-routes.ts）────────────────────────
 
 export const companionPersonaActivenessV1Schema = z.enum(["quiet", "moderate", "active"]);

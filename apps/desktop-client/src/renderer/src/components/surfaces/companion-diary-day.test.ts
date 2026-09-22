@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  DIARY_STRIP_DAYS,
   diaryDayLabel,
-  diaryDayStrip,
   isIsoDate,
   shiftIsoDate,
   toIsoDate,
@@ -55,14 +53,6 @@ describe("companion diary day arithmetic", () => {
     expect(diaryDayLabel("2026-09-10", today)).toBe("9 月 10 日");
     // 1 September must not read as "9 月 1 日" with a leading zero.
     expect(diaryDayLabel("2026-09-01", today)).toBe("9 月 1 日");
-  });
-
-  it("builds a newest-first strip ending on the anchor", () => {
-    const strip = diaryDayStrip("2026-09-16");
-    expect(strip).toHaveLength(DIARY_STRIP_DAYS);
-    expect(strip[0]).toBe("2026-09-16");
-    expect(strip[1]).toBe("2026-09-15");
-    expect(strip[6]).toBe("2026-09-10");
   });
 
   it("rejects anything that is not a real calendar day", () => {

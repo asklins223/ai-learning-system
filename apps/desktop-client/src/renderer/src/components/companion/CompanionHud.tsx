@@ -71,6 +71,7 @@ import {
   COMPANION_AGENT_PERMISSION_OPTIONS,
   COMPANION_INTERVENTION_OPTIONS,
   COMPANION_PRESENCE_OPTIONS,
+  companionInterventionHint,
   quietHoursPatch,
   quietHoursWithBoundary,
 } from "./companion-account-presence";
@@ -1613,13 +1614,14 @@ function CompanionQuickSettings({ settings }: { readonly settings: CompanionHudS
             </div>
             <div className="companion-hud__setting-row">
               <span className="companion-hud__setting-label">主动介入</span>
-              <div className="companion-hud__choice" aria-label="主动介入强度">
+              <div className="companion-hud__choice" aria-label="主动介入强度" aria-describedby="companion-intervention-description">
                 {COMPANION_INTERVENTION_OPTIONS.map(([value, label]) => (
                   <button
                     key={value}
                     type="button"
                     aria-pressed={account.interventionLevel === value}
                     disabled={settings.accountSaving}
+                    title={companionInterventionHint(value)}
                     onClick={() => settings.onPatchAccount({ interventionLevel: value })}
                   >
                     {label}
@@ -1627,6 +1629,11 @@ function CompanionQuickSettings({ settings }: { readonly settings: CompanionHudS
                 ))}
               </div>
             </div>
+            {/* 人格页有个同名的三档「活跃度」（管说话长短）。两件事必须在这儿分开说，
+                否则用户只会以为同一个设置出现在两个地方、还各写了一个中间档的名字。 */}
+            <p id="companion-intervention-description" className="companion-hud__permission-note">
+              {companionInterventionHint(account.interventionLevel ?? "moderate")}
+            </p>
             <div className="companion-hud__setting-row">
               <span className="companion-hud__setting-label">助理权限</span>
               <div className="companion-hud__choice" aria-label="助理权限档位" aria-describedby="companion-permission-description">

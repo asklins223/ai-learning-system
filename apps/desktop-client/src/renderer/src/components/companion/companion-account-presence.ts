@@ -2,6 +2,7 @@ import type {
   CompanionAccountPatch,
   CompanionAccountStateV1,
 } from "@ailearn/shared/companion-shell-contracts";
+import { PROACTIVE_CADENCE_MS } from "@ailearn/shared/companion-proactive-policy";
 
 /**
  * 账号级 presence 的纯函数层（2026-09-16 裁决 3）。
@@ -22,6 +23,30 @@ export const COMPANION_INTERVENTION_OPTIONS = [
   ["moderate", "适中"],
   ["active", "活跃"],
 ] as const;
+
+export type CompanionInterventionLevel = (typeof COMPANION_INTERVENTION_OPTIONS)[number][0];
+
+/**
+ * 「主动介入」这一档的人话说明。
+ *
+ * 为什么需要：人格页有个「活跃度」（安静/适度/活跃），这里有个「主动介入」
+ * （安静/适中/活跃）——**三档同名，管的却不是一回事**（前者是说话长短，后者是
+ * 多久主动开口一次），用户看界面分不出来。§9.61 把后者从"一天几条"改成"最小间隔"
+ * 之后，这个差别更要写明白。
+ *
+ * 数字**从 `PROACTIVE_CADENCE_MS` 现算**，不在界面里重写一遍小时数——那正是
+ * 这次删掉的那种病：同一个"安静一点"在两条链路上得到两个答案。
+ */
+export function companionInterventionHint(level: CompanionInterventionLevel): string {
+  const minutes = Math.round(PROACTIVE_CADENCE_MS[level] / 60_000);
+  const span = minutes % 60 === 0
+    ? `${minutes / 60} 小时`
+    : minutes > 60
+      ? `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`
+      : `${minutes} 分钟`;
+  return `她主动开口的最小间隔：约 ${span}一次。`
+    + "说话长短在「人格」页的活跃度里调；到点的提醒不受这一档限制。";
+}
 
 /**
  * 助理权限档位（2026-09-19 权限分级对齐原设计）。

@@ -4,10 +4,12 @@ import {
   COMPANION_PRESENCE_OPTIONS,
   DEFAULT_QUIET_HOURS,
   companionAccountDisabled,
+  companionInterventionHint,
   quietHoursPatch,
   quietHoursWithBoundary,
 } from "./companion-account-presence";
 import { companionAccountStateV1Schema } from "@ailearn/shared/companion-shell-contracts";
+import { PROACTIVE_CADENCE_MS } from "@ailearn/shared/companion-proactive-policy";
 
 const accountState = (overrides: { globalEnabled?: boolean } = {}) => companionAccountStateV1Schema.parse({
   revision: 4,
@@ -49,5 +51,36 @@ describe("账号级 presence 选项（2026-09-16 裁决 3）", () => {
     expect(companionAccountDisabled(null)).toBe(false);
     expect(companionAccountDisabled(accountState())).toBe(false);
     expect(companionAccountDisabled(accountState({ globalEnabled: false }))).toBe(true);
+  });
+});
+
+/**
+ * 「主动介入」和人格页的「活跃度」是三档同名的两个设置（安静/适中·适度/活跃），
+ * 用户看界面分不出它们管的不是一回事——而 §9.61 刚把前者的语义从"一天几条"
+ * 改成"最小间隔"。所以这一档必须自己把话说清，且**数字从服务端那份映射里取**：
+ * 界面里重写一遍小时数，就是第五次出现"同一个安静一点得到两个答案"。
+ */
+describe("「主动介入」的说明文案", () => {
+  it("三档各说各的间隔", () => {
+    expect(companionInterventionHint("quiet")).toContain("3 小时");
+    expect(companionInterventionHint("moderate")).toContain("1 小时 30 分");
+    expect(companionInterventionHint("active")).toContain("30 分钟");
+  });
+
+  it("说清这是「主动开口的间隔」，并交代两个边界", () => {
+    const hint = companionInterventionHint("moderate");
+    // ① 与人格页的「活跃度」（说话长短）区分开；② 到点提醒不受这一档管。
+    expect(hint).toContain("人格");
+    expect(hint).toContain("提醒");
+  });
+
+  it("文案里的数字与 PROACTIVE_CADENCE_MS 一致（改了映射，文案跟着走）", () => {
+    for (const [level] of COMPANION_INTERVENTION_OPTIONS) {
+      const rendered = companionInterventionHint(level).match(/约(.+?)一次/)?.[1]?.trim();
+      expect(rendered, `第 ${level} 档没渲染出间隔`).toBeTruthy();
+      const hours = Number(rendered?.match(/(\d+) 小时/)?.[1] ?? 0);
+      const minutes = Number(rendered?.match(/(\d+) 分/)?.[1] ?? 0);
+      expect(hours * 60 + minutes).toBe(PROACTIVE_CADENCE_MS[level] / 60_000);
+    }
   });
 });

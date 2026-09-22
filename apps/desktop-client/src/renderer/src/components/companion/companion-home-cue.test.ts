@@ -62,8 +62,11 @@ describe("主动气泡的显示闸", () => {
   });
 
   it("读不到上次时间（隐私模式/第一次）不能判成「刚说过」", () => {
+    // 读不到时按 0 处理，所以 `now` 必须是真实墙钟毫秒：拿 1000 当 now，
+    // "0 + 去抖"就已经超过了它，这条测试会在错误的数量级上假装通过。
+    const now = 1_790_000_000_000;
     expect(companionCueAllowed({
-      origin: "thought", priority: "ordinary", lastOrdinaryCueAt: Number.NaN, now: 1_000,
+      origin: "thought", priority: "ordinary", lastOrdinaryCueAt: Number.NaN, now,
     })).toBe(true);
   });
 

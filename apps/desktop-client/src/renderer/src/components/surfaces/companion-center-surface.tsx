@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { AlertTriangle, Archive, ChevronLeft, ChevronRight, CircleDot, Database, Download, ExternalLink, Map as MapIcon, MessageCircle, Pencil, Pin, RefreshCw, Search, Sparkles, Trash2, X } from "lucide-react";
+import { AlertTriangle, Archive, CalendarDays, ChevronDown, ChevronLeft, ChevronRight, Database, Download, ExternalLink, Map as MapIcon, MessageCircle, Pencil, Pin, RefreshCw, Search, Sparkles, Trash2, X } from "lucide-react";
 import type { GatewayResultV1 } from "@ailearn/shared/desktop-ipc-contracts";
 import type { CompanionActivityDeliveryV1, CompanionActivityTimelineV1, CompanionDailyFailureReasonV1, CompanionDailySummaryV1, CompanionExportKindV1, CompanionHistoryItemV1, CompanionMemoryItemV1, CompanionMemoryKindV1, CompanionMemoryStarMapV2, CompanionPersonaProfileV1, CompanionPersonaPresetV1, CompanionPersonaV1 } from "@ailearn/shared/companion-memory-desktop-contracts";
 import type { CompanionJourneyAction, CompanionJourneyBootstrap } from "@ailearn/shared/companion-journey-contracts";
@@ -10,12 +10,12 @@ import { useCompanionChat } from "../../app/companion-chat-session";
 import { useRoomStore } from "../../app/room-store";
 import { HudPage } from "../hud/HudPage";
 import { useHudPage } from "../hud/use-hud-page";
-import { CompanionQuoteBlock, CompanionRecordImage } from "../companion/CompanionChatRecord";
+import { CompanionQuoteBlock, CompanionRecordImage, MonthCalendar } from "../companion/CompanionChatRecord";
 import { CompanionSelect, type CompanionSelectOption } from "./companion-select";
-import { diaryDayLabel, diaryDayStrip, shiftIsoDate, todayIsoDate } from "./companion-diary-day";
+import { diaryDayLabel, shiftIsoDate, todayIsoDate } from "./companion-diary-day";
 import { buildCompanionMemoryUniverse, routeForMemoryEntityTarget } from "./companion-memory-universe";
 import { UnderstandingUniverse, type UnderstandingUniverseHandle } from "./understanding-universe";
-import type { UnderstandingGraph } from "./understanding-universe-data";
+import type { GraphNode, UnderstandingGraph } from "./understanding-universe-data";
 import { formatDate, formatRelative, useSurfaceProjection } from "./surface-data";
 import "./understanding-universe.css";
 
@@ -151,6 +151,9 @@ function useChromeInsets(
   centerRef: { readonly current: HTMLElement | null },
   benchRef: { readonly current: HTMLElement | null },
   hudRef: { readonly current: HTMLElement | null },
+  /** 星图浮层只在记忆页签渲染，effect 必须跟着它一起重跑，否则切进来时
+      量的还是上一次的 fallback。 */
+  activeTab: TabId,
 ): { top: number; bottom: number; left: number; right: number } {
   const [insets, setInsets] = useState<{ top: number; bottom: number; left: number; right: number }>(COMPANION_UNIVERSE_INSETS);
   useEffect(() => {
@@ -177,7 +180,7 @@ function useChromeInsets(
     if (hudRef.current) observer.observe(hudRef.current);
     measure();
     return () => observer.disconnect();
-  }, [centerRef, benchRef, hudRef]);
+  }, [centerRef, benchRef, hudRef, activeTab]);
   return insets;
 }
 
@@ -188,6 +191,70 @@ function memoryState(item: CompanionMemoryItemV1) {
   if (item.archived) return "archived";
   if (item.candidate) return "candidate";
   return item.pinned ? "pinned" : "active";
+}
+
+/**
+ * 气泡里的段落节奏（B4，评审 §6 从 B3 接的那一条）。
+ *
+ * 服务端把整条回复作为一个字符串送回来，里面带着模型自己写的 `\n\n\n`；气泡是
+ * `white-space: pre-wrap`，于是每个换行都排成一行，一段话中间出现三行高的空档
+ * （实测那条 h=225、单个 `<p>`、6 个换行）。这里只按「两个及以上连续换行」切段，
+ * 段与段之间的节奏交回 CSS；**段内的单个换行是作者自己的换行，原样留着**，
+ * 不吞内容。
+ */
+function paragraphLines(text: string): string[] {
+  const parts = text.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
+  return parts.length ? parts : [text];
+}
+
+/**
+ * 星图右栏索引的分组（B4，评审 P13）。
+ *
+ * 48 条节点原来是一个平铺列表：没有时间维度、没有类型，连「关联内容已不存在」
+ * 这句错误文案也被当作一条正常记录排在第二位。分组顺序固定，空组不出现；
+ * 实体与其可见性由 metadata 决定，不看 label 文本。
+ */
+const INDEX_GROUPS = [
+  ["today", "今天"],
+  ["week", "本周"],
+  ["earlier", "更早"],
+  ["entity", "学习实体"],
+  ["orphaned", "关联已失效"],
+] as const;
+
+type IndexGroupId = (typeof INDEX_GROUPS)[number][0];
+
+function indexGroupIdOf(node: GraphNode, todayStart: number, weekStart: number): IndexGroupId {  if (node.metadata.visualRole !== "memory") {
+    return node.metadata.orphaned === true ? "orphaned" : "entity";
+  }
+  const updatedAt = typeof node.metadata.updatedAt === "string" ? Date.parse(node.metadata.updatedAt) : Number.NaN;
+  if (Number.isNaN(updatedAt)) return "earlier";
+  if (updatedAt >= todayStart) return "today";
+  return updatedAt >= weekStart ? "week" : "earlier";
+}
+
+/** 索引行前缀：记忆节点带上类型名，实体节点已经分组、不再重复标型。 */
+function indexKindPrefix(node: GraphNode) {
+  const kind = node.metadata.memoryKind;
+  return node.metadata.visualRole === "memory" && typeof kind === "string" && kind in MEMORY_KIND_LABEL
+    ? MEMORY_KIND_LABEL[kind as CompanionMemoryKindV1]
+    : null;
+}
+
+function groupIndexNodes(nodes: readonly GraphNode[]): ReadonlyArray<{ readonly id: IndexGroupId; readonly title: string; readonly nodes: readonly GraphNode[] }> {
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const weekStart = todayStart.getTime() - 6 * 86_400_000;
+  const buckets = new Map<IndexGroupId, GraphNode[]>();
+  for (const node of nodes) {
+    const group = indexGroupIdOf(node, todayStart.getTime(), weekStart);
+    const list = buckets.get(group);
+    if (list) list.push(node); else buckets.set(group, [node]);
+  }
+  return INDEX_GROUPS.flatMap(([id, title]) => {
+    const group = buckets.get(id);
+    return group?.length ? [{ id, title, nodes: group }] : [];
+  });
 }
 
 function SectionState({ message, detail, onRetry }: { readonly message: string; readonly detail?: string; readonly onRetry?: () => void }) {
@@ -246,7 +313,7 @@ export function CompanionCenterSurface() {
   const centerRef = useRef<HTMLDivElement | null>(null);
   const benchRef = useRef<HTMLElement | null>(null);
   const hudRef = useRef<HTMLElement | null>(null);
-  const universeInsets = useChromeInsets(centerRef, benchRef, hudRef);
+  const universeInsets = useChromeInsets(centerRef, benchRef, hudRef, tab);
   const indexRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const deliveryPresentationAttempts = useRef(new Set<string>());
@@ -271,6 +338,14 @@ export function CompanionCenterSurface() {
       ? readSection(window.ailearn.companion.daily.get({ meta: createRequestMeta(workspaceEpoch), date: diaryDate ?? undefined }))
       : null
   ), [diaryDate, tab]);
+  // 月历上「她写过哪几天」的标记：跟着日历当前显示的那一月走。
+  // 日历没打开过就没有 diaryMonth，这时不发请求——折叠态不需要这份数据。
+  const [diaryMonth, setDiaryMonth] = useState<string | null>(null);
+  const diaryMarks = useSurfaceProjection(async ({ workspaceEpoch }) => (
+    tab === "diary" && diaryMonth
+      ? readSection(window.ailearn.companion.daily.month({ meta: createRequestMeta(workspaceEpoch), month: diaryMonth }))
+      : null
+  ), [diaryMonth, tab]);
   useEffect(() => {
     const refreshActivity = () => void projection.reload();
     window.addEventListener("ailearn:companion-activity-changed", refreshActivity);
@@ -385,6 +460,10 @@ export function CompanionCenterSurface() {
     }
     return { nodes: universe.graph.nodes.filter((node) => allowed.has(node.id)), edges };
   }, [entityFilter, memoryKind, memoryQuery, pinFilter, universe.graph]);
+  const railGroups = useMemo(() => groupIndexNodes(visibleGraph.nodes), [visibleGraph.nodes]);
+  // 键盘走位与滚动定位都按「屏幕上实际的先后」来，所以索引取自分组摊平后的顺序。
+  const indexedNodes = useMemo(() => railGroups.flatMap((group) => [...group.nodes]), [railGroups]);
+  const selectedIndexByNode = useMemo(() => new Map(indexedNodes.map((node, index) => [node.id, index])), [indexedNodes]);
   const selectedNode = useMemo(() => universe.graph.nodes.find((node) => node.id === selectedNodeId) ?? null, [selectedNodeId, universe.graph.nodes]);
   const focusMemory = focusMemoryId ? memoryById.get(focusMemoryId) ?? null : null;
 
@@ -615,7 +694,7 @@ export function CompanionCenterSurface() {
     event.preventDefault(); const next = (index + step + jump + TABS.length) % TABS.length; setTab(TABS[next][0]); tabRefs.current[next]?.focus();
   };
   const onIndexKeyDown = (event: ReactKeyboardEvent, index: number) => {
-    const count = visibleGraph.nodes.length;
+    const count = indexedNodes.length;
     if (count === 0) return;
     const nextIndex = event.key === "Home"
       ? 0
@@ -628,7 +707,7 @@ export function CompanionCenterSurface() {
             : null;
     if (nextIndex === null) return;
     event.preventDefault();
-    const nextNode = visibleGraph.nodes[nextIndex];
+    const nextNode = indexedNodes[nextIndex];
     if (nextNode) selectNode(nextNode.id);
     indexRefs.current[nextIndex]?.focus();
   };
@@ -652,17 +731,31 @@ export function CompanionCenterSurface() {
         <button type="button" className="companion-icon-button" onClick={refresh} disabled={projection.loading} aria-label={projection.loading ? "正在刷新伴星中心" : "刷新伴星中心"}><RefreshCw size={16} /></button>
       </header>
       <div className="companion-tabs" role="tablist" aria-label="伴星中心分区">{TABS.map(([id, label], index) => <button key={id} id={`companion-tab-${id}`} aria-controls={`companion-panel-${id}`} ref={(element) => { tabRefs.current[index] = element; }} type="button" role="tab" aria-selected={tab === id} tabIndex={tab === id ? 0 : -1} className={tab === id ? "is-active" : undefined} onClick={() => setTab(id)} onKeyDown={(event) => onTabKeyDown(event, index)}>{label}</button>)}</div>
-      <div className="companion-tab-panel" id={`companion-panel-${tab}`} role="tabpanel" aria-labelledby={`companion-tab-${tab}`} aria-busy={projection.loading || memoryBusy !== null || historySearching || historyLoadingMore || personaBusy !== null || activityBusy}>
-        {tab === "memory" ? <MemoryPanel section={data.memories} items={memories} focus={focusMemory} query={memoryListQuery} kind={memoryListKind} pinFilter={memoryListPinFilter} busy={memoryBusy} error={memoryError} notice={memoryNotice} confirmDelete={confirmDeleteId === focusMemory?.memoryItemId} createOpen={createOpen} createContent={createContent} createKind={createKind} correctionOpen={correctionOpen} correctionContent={correctionContent} onQuery={setMemoryListQuery} onKind={setMemoryListKind} onPinFilter={setMemoryListPinFilter} onFocus={(id) => { setFocusMemoryId(id); setSelectedNodeId(universe.memoryNodeIds.get(id) ?? null); }} onAction={(action) => void runMemoryAction(action)} onConfirmDelete={(value) => setConfirmDeleteId(value ? focusMemory?.memoryItemId ?? null : null)} onCreateOpen={setCreateOpen} onCreateContent={setCreateContent} onCreateKind={setCreateKind} onCreate={() => void createMemory()} onSummarize={() => void summarizeRecent()} onCorrectionOpen={setCorrectionOpen} onCorrectionContent={setCorrectionContent} onCorrect={() => void correctMemory()} onRetry={refresh} /> : null}
-        {tab === "dialogue" ? <DialoguePanel section={data.history} items={historyItems} cursor={historyCursor} query={historySearch} searching={historySearching} loadingMore={historyLoadingMore} error={historyError} onQuery={setHistorySearch} onSearch={() => void searchHistory()} onLoadMore={() => void loadMoreHistory()} onContinue={() => chat.setMode("conversation")} onRetry={refresh} /> : null}
-        {tab === "activity" ? <ActivityPanel section={data.journey} learningContextSection={data.learningContext} deliverySection={data.activity} deliveries={activityItems} busy={activityBusy} error={activityError} onStart={startJourney} onAction={(action) => void runJourneyAction(action)} onResumeLearning={openLearningRun} onOpenObjective={openLearningObjective} onPresent={(item) => void presentDelivery(item)} onDelivery={(item, transition) => void actOnDelivery(item, transition)} onRetry={refresh} /> : null}
-        {tab === "diary" ? <DiaryPanel section={diary.data} loading={diary.loading} failure={diary.failure} date={diaryDate} onDate={setDiaryDate} onMemory={(id) => { setTab("memory"); setFocusMemoryId(id); }} onRetry={() => void diary.reload()} /> : null}
-        {tab === "persona" ? <PersonaPanel section={data.persona} persona={persona} busy={personaBusy} error={personaError} notice={personaNotice} onPreset={(preset) => void runPersona("preset", () => window.ailearn.companion.persona.patch({ meta: createRequestMeta(projection.epochRef.current), request: companionPersonaPatchFromPreset(preset, persona?.profile?.revision) }))} onActiveness={(activeness) => { if (!persona?.profile) return; void runPersona("activeness", () => window.ailearn.companion.persona.patch({ meta: createRequestMeta(projection.epochRef.current), request: companionPersonaPatchFromProfile(persona.profile!, { activeness }) })); }} onBoundary={(key) => { if (!persona?.profile) return; const profile = persona.profile; void runPersona("boundary", () => window.ailearn.companion.persona.patch({ meta: createRequestMeta(projection.epochRef.current), request: companionPersonaPatchFromProfile(profile, { boundaries: { ...profile.boundaries, [key]: profile.boundaries[key] !== true } }) })); }} onReset={() => void runPersona("reset", () => window.ailearn.companion.persona.reset({ meta: createRequestMeta(projection.epochRef.current) }))} onRetry={refresh} /> : null}
-        {tab === "data" ? <DataPanel busy={personaBusy} error={personaError} notice={dataNotice} dangerConfirm={dangerConfirm} conflictItems={conflictItems} onDangerConfirm={setDangerConfirm} onConflicts={() => void loadConflicts()} onResolveConflict={(keepId, removeId) => void resolveConflict(keepId, removeId)} onRebuild={() => void runPersona("rebuild", () => window.ailearn.companion.memory.rebuildEmbeddings({ meta: createRequestMeta(projection.epochRef.current) }))} onExport={(kind) => void exportCompanionData(kind)} onDanger={(kind) => void runDanger(kind)} diagnostics={{ mapVersion: starMap?.version ?? null, memoryCount: memories.length, historyCount: historyItems.length }} /> : null}
+      <div className="companion-bench-panel">
+        {tab === "memory" ? <div className="companion-tab-panel" id="companion-panel-memory" role="tabpanel" aria-labelledby="companion-tab-memory" aria-busy={projection.loading || memoryBusy !== null || historySearching || historyLoadingMore || personaBusy !== null || activityBusy}>
+          <MemoryPanel section={data.memories} items={memories} focus={focusMemory} query={memoryListQuery} kind={memoryListKind} pinFilter={memoryListPinFilter} busy={memoryBusy} error={memoryError} notice={memoryNotice} confirmDelete={confirmDeleteId === focusMemory?.memoryItemId} createOpen={createOpen} createContent={createContent} createKind={createKind} correctionOpen={correctionOpen} correctionContent={correctionContent} onQuery={setMemoryListQuery} onKind={setMemoryListKind} onPinFilter={setMemoryListPinFilter} onFocus={(id) => { setFocusMemoryId(id); setSelectedNodeId(universe.memoryNodeIds.get(id) ?? null); }} onAction={(action) => void runMemoryAction(action)} onConfirmDelete={(value) => setConfirmDeleteId(value ? focusMemory?.memoryItemId ?? null : null)} onCreateOpen={setCreateOpen} onCreateContent={setCreateContent} onCreateKind={setCreateKind} onCreate={() => void createMemory()} onSummarize={() => void summarizeRecent()} onCorrectionOpen={setCorrectionOpen} onCorrectionContent={setCorrectionContent} onCorrect={() => void correctMemory()} onRetry={refresh} />
+        </div> : <CompanionAtAGlance companionName={companionName} persona={persona} pendingDeliveries={activityItems.filter(isPendingDelivery).length} memoryCount={memories.length} historyCount={historyItems.length} diary={diary.data} onGo={setTab} />}
       </div>
     </aside>
 
-    <header className="companion-map-hud" ref={hudRef} aria-label="记忆关联星图">
+    {/* B1（评审 §2 P1/P2）：工作台不再随页签改宽，页签内容搬进右区。星图浮层**留在原地**
+        （仍绝对定位在 .companion-center 上）——useChromeInsets 量的就是它与中心盒的相对
+        位置，搬走它等于把 43 个节点重排一遍。非记忆页签它整个不渲染，不再靠
+        `visibility: hidden` 占着布局。 */}
+    {tab !== "memory" ? <section className="companion-stage">
+      <div className="companion-tab-panel" id={`companion-panel-${tab}`} role="tabpanel" aria-labelledby={`companion-tab-${tab}`} aria-busy={projection.loading || memoryBusy !== null || historySearching || historyLoadingMore || personaBusy !== null || activityBusy}>
+        {tab === "dialogue" ? <DialoguePanel section={data.history} items={historyItems} cursor={historyCursor} query={historySearch} searching={historySearching} loadingMore={historyLoadingMore} error={historyError} onQuery={setHistorySearch} onSearch={() => void searchHistory()} onLoadMore={() => void loadMoreHistory()} onContinue={() => chat.setMode("conversation")} onRetry={refresh} /> : null}
+        {tab === "activity" ? <ActivityPanel section={data.journey} learningContextSection={data.learningContext} deliverySection={data.activity} deliveries={activityItems} busy={activityBusy} error={activityError} onStart={startJourney} onAction={(action) => void runJourneyAction(action)} onResumeLearning={openLearningRun} onOpenObjective={openLearningObjective} onPresent={(item) => void presentDelivery(item)} onDelivery={(item, transition) => void actOnDelivery(item, transition)} onRetry={refresh} /> : null}
+        {tab === "diary" ? <DiaryPanel section={diary.data} loading={diary.loading} failure={diary.failure} date={diaryDate} onDate={setDiaryDate} onMemory={(id) => { setTab("memory"); setFocusMemoryId(id); }} onRetry={() => void diary.reload()} marks={diaryMarks.data?.ok ? new Map(diaryMarks.data.value.days.map((day) => [day.date, day.status])) : null} marksFailure={diaryMarks.data && !diaryMarks.data.ok ? diaryMarks.data.message : null} onMarksMonth={setDiaryMonth} /> : null}
+        {tab === "persona" ? <PersonaPanel section={data.persona} persona={persona} busy={personaBusy} error={personaError} notice={personaNotice} onPreset={(preset) => void runPersona("preset", () => window.ailearn.companion.persona.patch({ meta: createRequestMeta(projection.epochRef.current), request: companionPersonaPatchFromPreset(preset, persona?.profile?.revision) }))} onActiveness={(activeness) => { if (!persona?.profile) return; void runPersona("activeness", () => window.ailearn.companion.persona.patch({ meta: createRequestMeta(projection.epochRef.current), request: companionPersonaPatchFromProfile(persona.profile!, { activeness }) })); }} onBoundary={(key) => { if (!persona?.profile) return; const profile = persona.profile; void runPersona("boundary", () => window.ailearn.companion.persona.patch({ meta: createRequestMeta(projection.epochRef.current), request: companionPersonaPatchFromProfile(profile, { boundaries: { ...profile.boundaries, [key]: profile.boundaries[key] !== true } }) })); }} onReset={() => void runPersona("reset", () => window.ailearn.companion.persona.reset({ meta: createRequestMeta(projection.epochRef.current) }))} onRetry={refresh} /> : null}
+        {tab === "data" ? <DataPanel busy={personaBusy} error={personaError} notice={dataNotice} dangerConfirm={dangerConfirm} conflictItems={conflictItems} onDangerConfirm={setDangerConfirm} onConflicts={() => void loadConflicts()} onResolveConflict={(keepId, removeId) => void resolveConflict(keepId, removeId)} onRebuild={() => void runPersona("rebuild", () => window.ailearn.companion.memory.rebuildEmbeddings({ meta: createRequestMeta(projection.epochRef.current) }))} onExport={(kind) => void exportCompanionData(kind)} onDanger={(kind) => void runDanger(kind)} diagnostics={{ mapVersion: starMap?.version ?? null, memoryCount: memories.length, historyCount: historyItems.length }} /> : null}
+      </div>
+    </section> : null}
+
+    {/* 星图 chrome 只在记忆页签渲染：非记忆页签它以前是 visibility:hidden，
+        4 个元素仍带矩形常驻（含 236×470 的右栏，内容高 2118px），白占右区 300px。 */}
+    {tab === "memory" ? <>
+      <header className="companion-map-hud" ref={hudRef} aria-label="记忆关联星图">
       <div className="companion-map-headline">
         <h2>记忆关联星图</h2>
         <span>{visibleGraph.nodes.length} 个节点 · {visibleGraph.edges.length} 条关系</span>
@@ -702,8 +795,9 @@ export function CompanionCenterSurface() {
     </div>
 
     <div className="companion-map-legend" aria-label="星图图例"><span className="is-memory"><i />记忆</span><span className="is-pinned"><i />固定记忆</span><span className="is-entity"><i />学习实体</span><span className="is-orphan"><i />失效关联</span></div>
-    <div className="companion-map-index" role="listbox" aria-label="星图等价节点索引">{visibleGraph.nodes.map((node, index) => <button key={node.id} ref={(element) => { indexRefs.current[index] = element; }} type="button" role="option" aria-selected={node.id === selectedNodeId} tabIndex={node.id === selectedNodeId || selectedNodeId === null && index === 0 ? 0 : -1} onClick={() => { selectNode(node.id); universeRef.current?.focusNode(node.id); }} onKeyDown={(event) => onIndexKeyDown(event, index)}><CircleDot size={12} /><span>{node.label}</span></button>)}</div>
+    <div className="companion-map-index" role="listbox" aria-label="星图等价节点索引">{railGroups.map((group) => <div key={group.id} role="group" aria-labelledby={`companion-index-${group.id}`}><h4 id={`companion-index-${group.id}`}>{group.title}<span>{group.nodes.length}</span></h4>{group.nodes.map((node) => { const index = selectedIndexByNode.get(node.id) ?? 0; return <button key={node.id} ref={(element) => { indexRefs.current[index] = element; }} type="button" role="option" data-role={node.metadata.visualRole === "memory" ? "memory" : "entity"} data-state={node.state ?? undefined} aria-selected={node.id === selectedNodeId} tabIndex={node.id === selectedNodeId || selectedNodeId === null && index === 0 ? 0 : -1} onClick={() => { selectNode(node.id); universeRef.current?.focusNode(node.id); }} onKeyDown={(event) => onIndexKeyDown(event, index)}><i aria-hidden="true" /><span>{indexKindPrefix(node) ? <em>{indexKindPrefix(node)} · </em> : null}{node.label}</span></button>; })}</div>)}</div>
     {selectedNode?.metadata.visualRole === "entity" ? <article className="companion-map-selection"><div><strong>{selectedNode.label}</strong><span>{ENTITY_LABEL[String(selectedNode.metadata.entityType)] ?? "学习实体"}{selectedNode.metadata.orphaned ? " · 原实体已失效" : " · 可导航"}</span></div>{universe.targetsByNode.get(selectedNode.id) ? <button type="button" onClick={navigateEntity}>打开内容<ExternalLink size={13} /></button> : <span>该关联只保留断开原因，不能导航。</span>}</article> : null}
+    </> : null}
   </div></HudPage>;
 }
 
@@ -728,7 +822,7 @@ function MemoryPanel(props: MemoryPanelProps) {
   }, [props.correctionOpen, props.createOpen]);
   if (!props.section.ok) return <SectionState message="记忆列表当前不可用" detail={props.section.message} onRetry={props.onRetry} />;
   const visible = props.items.filter((item) => (props.kind === "all" || item.kind === props.kind) && (props.pinFilter === "all" || props.pinFilter === "pinned" && item.pinned || props.pinFilter === "candidate" && item.candidate) && (!props.query.trim() || item.content.toLowerCase().includes(props.query.trim().toLowerCase())));
-  return <div ref={panelRef} className="companion-panel-stack"><div className="companion-panel-heading"><div><h3>伴星记忆</h3><p>候选需要你确认；固定、归档与删除都作用于真实记录。</p></div><div className="companion-heading-actions"><button type="button" disabled={props.busy !== null} onClick={props.onSummarize}>{props.busy === "summarize" ? "整理中…" : "整理近期对话"}</button><button type="button" onClick={() => props.onCreateOpen(!props.createOpen)}>{props.createOpen ? "取消" : "手动添加"}</button></div></div>
+  return <div ref={panelRef} className="companion-panel-stack"><div className="companion-panel-heading"><h3>伴星记忆</h3><p>候选需要你确认；固定、归档与删除都作用于真实记录。</p><div className="companion-heading-actions"><button type="button" disabled={props.busy !== null} onClick={props.onSummarize}>{props.busy === "summarize" ? "整理中…" : "整理近期对话"}</button><button type="button" onClick={() => props.onCreateOpen(!props.createOpen)}>{props.createOpen ? "取消" : "手动添加"}</button></div></div>
     {props.createOpen ? <div className="companion-inline-form"><CompanionSelect paper ariaLabel="新记忆类型" value={props.createKind} options={MEMORY_KIND_OPTIONS} onChange={props.onCreateKind} /><textarea value={props.createContent} maxLength={200} onChange={(event) => props.onCreateContent(event.target.value)} placeholder="写下希望伴星长期记住的事实" aria-label="新记忆内容" /><button type="button" className="primary" disabled={!props.createContent.trim() || props.busy !== null} onClick={props.onCreate}>{props.busy === "create" ? "正在保存…" : "保存记忆"}</button></div> : null}
     <label className="companion-search"><Search size={14} aria-hidden="true" /><input value={props.query} onChange={(event) => props.onQuery(event.target.value)} placeholder="筛选记忆列表" aria-label="筛选记忆列表" />{props.query ? <button type="button" className="companion-search__clear" onClick={() => props.onQuery("")} aria-label="清空记忆列表搜索"><X size={13} /></button> : null}</label>
     <div className="companion-filter-group" role="group" aria-label="记忆列表筛选"><span>列表</span><CompanionSelect paper ariaLabel="筛选记忆列表类型" value={props.kind} options={MEMORY_LIST_KIND_OPTIONS} onChange={props.onKind} /><CompanionSelect paper ariaLabel="筛选记忆列表状态" value={props.pinFilter} options={MEMORY_PIN_OPTIONS} onChange={props.onPinFilter} /></div>
@@ -736,15 +830,52 @@ function MemoryPanel(props: MemoryPanelProps) {
     {props.notice ? <p className="companion-notice" role="status">{props.notice}</p> : null}
   {(() => {
     const detailCard = props.focus ? (<article className="companion-memory-detail"><div className="companion-memory-detail__meta"><span>{MEMORY_KIND_LABEL[props.focus.kind]}</span><span>{MEMORY_STATE_LABEL[memoryState(props.focus)]}</span><span>重要度 {Math.round(props.focus.importance * 100)}%</span></div>{props.correctionOpen ? <div className="companion-inline-form"><textarea value={props.correctionContent} maxLength={200} onChange={(event) => props.onCorrectionContent(event.target.value)} aria-label="纠正后的记忆内容" /><div className="companion-action-row"><button type="button" className="primary" disabled={!props.correctionContent.trim() || props.correctionContent.trim() === props.focus.content || props.busy !== null} onClick={props.onCorrect}>{props.busy === "correct" ? "正在纠正…" : "保存为待确认记忆"}</button><button type="button" onClick={() => props.onCorrectionOpen(false)}>取消</button></div></div> : <strong>{props.focus.content}</strong>}<small>更新于 {formatRelative(props.focus.updatedAt)}</small><div className="companion-action-row">{props.focus.candidate ? <button type="button" className="primary" disabled={props.busy !== null} onClick={() => props.onAction("confirm")}>确认写入</button> : null}{!props.focus.candidate && !props.focus.archived ? <button type="button" disabled={props.busy !== null} onClick={() => props.onAction(props.focus!.pinned ? "unpin" : "pin")}><Pin size={13} />{props.focus.pinned ? "取消固定" : "固定"}</button> : null}{!props.correctionOpen && !props.focus.archived ? <button type="button" disabled={props.busy !== null} onClick={() => props.onCorrectionOpen(true)}><Pencil size={13} />纠正</button> : null}{!props.focus.candidate ? <button type="button" disabled={props.busy !== null} onClick={() => props.onAction(props.focus!.archived ? "restore" : "archive")}><Archive size={13} />{props.focus.archived ? "恢复" : "归档"}</button> : null}{props.focus.candidate ? <button type="button" disabled={props.busy !== null} onClick={() => props.onAction("dismiss")}>暂不采用</button> : null}<MemoryDeleteAction active={props.confirmDelete} busy={props.busy !== null} onOpen={() => props.onConfirmDelete(true)} onCancel={() => props.onConfirmDelete(false)} onConfirm={() => props.onAction("remove")} /></div></article>) : null;
-  return <div className="companion-record-list">{visible.length === 0 ? <div className="companion-empty-with-action"><SectionState message="没有符合条件的记忆" detail="清空筛选或手动添加一条记忆。" /><button type="button" onClick={() => { props.onQuery(""); props.onKind("all"); props.onPinFilter("all"); }}>清除筛选</button></div> : visible.map((item) => <Fragment key={item.memoryItemId}><button type="button" aria-pressed={props.focus?.memoryItemId === item.memoryItemId} className={props.focus?.memoryItemId === item.memoryItemId ? "is-selected" : undefined} onClick={() => props.onFocus(item.memoryItemId)}><span><b>{MEMORY_KIND_LABEL[item.kind]}</b><i>{MEMORY_STATE_LABEL[memoryState(item)]}</i></span><strong>{item.content}</strong><small>{formatDate(item.updatedAt)}</small></button>{props.focus?.memoryItemId === item.memoryItemId ? detailCard : null}</Fragment>)}</div>
+  return <div className="companion-record-list">{visible.length === 0 ? <div className="companion-empty-with-action"><SectionState message="没有符合条件的记忆" detail="清空筛选或手动添加一条记忆。" /><button type="button" onClick={() => { props.onQuery(""); props.onKind("all"); props.onPinFilter("all"); }}>清除筛选</button></div> : visible.map((item) => <Fragment key={item.memoryItemId}><button type="button" aria-pressed={props.focus?.memoryItemId === item.memoryItemId} className={[props.focus?.memoryItemId === item.memoryItemId ? "is-selected" : null, item.archived ? "is-archived" : null].filter(Boolean).join(" ") || undefined} onClick={() => props.onFocus(item.memoryItemId)}><strong>{item.content}</strong><span><i className={`is-${memoryState(item)}`} aria-hidden="true" /><em>{MEMORY_KIND_LABEL[item.kind]}</em>· {MEMORY_STATE_LABEL[memoryState(item)]} · {formatRelative(item.updatedAt)}</span></button>{props.focus?.memoryItemId === item.memoryItemId ? detailCard : null}</Fragment>)}</div>;
   })()}
+  </div>;
+}
+
+const ACTIVENESS_GLANCE: Record<CompanionPersonaProfileV1["activeness"], string> = { quiet: "安静", moderate: "适度", active: "活跃" };
+
+/**
+ * 左栏在非记忆页签显示的内容。
+ *
+ * B1 之前这些事实散在「人格」「动态」「日记」各自的面板里，切页签时左栏整块换掉、
+ * 宽度还从 372 弹到 1044（评审 P1）。左栏恒定之后，这里回答「她是谁、她现在什么
+ * 状态」，右区才是工作区。每行都是可点的跳转，不是一屏只读表格。
+ */
+function CompanionAtAGlance(props: {
+  readonly companionName: string;
+  readonly persona: CompanionPersonaV1 | null;
+  readonly pendingDeliveries: number;
+  readonly memoryCount: number;
+  readonly historyCount: number;
+  readonly diary: Section<CompanionDailySummaryV1> | null;
+  readonly onGo: (tab: TabId) => void;
+}) {
+  const profile = props.persona?.profile ?? null;
+  const presetName = profile?.presetId
+    ? props.persona?.presets.find((preset) => preset.presetId === profile.presetId)?.name ?? "未选择预设"
+    : "未选择预设";
+  const latest = props.diary?.ok ? props.diary.value : null;
+  const rows: ReadonlyArray<{ readonly label: string; readonly value: string; readonly tab: TabId }> = [
+    { label: "人格预设", value: presetName, tab: "persona" },
+    { label: "活跃度", value: profile ? ACTIVENESS_GLANCE[profile.activeness] : "读取中", tab: "persona" },
+    { label: "待处理动态", value: `${props.pendingDeliveries} 条`, tab: "activity" },
+    { label: "记住的事", value: `${props.memoryCount} 条`, tab: "memory" },
+    { label: "对话记录", value: `${props.historyCount} 条`, tab: "dialogue" },
+    { label: "最近一篇日记", value: latest?.date ? formatDate(latest.date) : "还没有", tab: "diary" },
+  ];
+  return <div className="companion-glance">
+    <div className="companion-glance-head"><h3>伴星此刻</h3><p>{props.companionName} 现在的设置与状态，点一行到对应分区。</p></div>
+    <div className="companion-glance-list">{rows.map((row) => <button key={row.label} type="button" onClick={() => props.onGo(row.tab)}><span>{row.label}</span><b>{row.value}</b></button>)}</div>
   </div>;
 }
 
 type DialoguePanelProps = { section: Section<{ version: 1; items: CompanionHistoryItemV1[]; nextCursor: string | null }>; items: CompanionHistoryItemV1[]; cursor: string | null; query: string; searching: boolean; loadingMore: boolean; error: string | null; onQuery: (value: string) => void; onSearch: () => void; onLoadMore: () => void; onContinue: () => void; onRetry: () => void };
 function DialoguePanel(props: DialoguePanelProps) {
   if (!props.section.ok) return <SectionState message="连续对话当前不可用" detail={props.section.message} onRetry={props.onRetry} />;
-  return <div className="companion-panel-stack"><div className="companion-panel-heading"><div><h3>连续对话</h3><p>按全局时间排列；内部数据分段不会显示在这里。</p></div><button type="button" className="primary" onClick={props.onContinue}><MessageCircle size={14} />继续交流</button></div><form className="companion-search" onSubmit={(event) => { event.preventDefault(); props.onSearch(); }}><Search size={14} aria-hidden="true" /><input value={props.query} onChange={(event) => props.onQuery(event.target.value)} placeholder="搜索全部对话正文" aria-label="搜索全部对话正文" /><button type="submit" disabled={props.searching}>{props.searching ? "搜索中" : "搜索"}</button></form><p className="companion-result-status" aria-live="polite">{props.searching ? "正在搜索对话" : props.query.trim() ? `找到 ${props.items.length} 条对话` : ""}</p>{props.error ? <p className="companion-error" role="alert">{props.error}</p> : null}{props.cursor ? <button type="button" className="companion-load-more" disabled={props.loadingMore} onClick={props.onLoadMore}>{props.loadingMore ? "正在读取更早记录…" : "加载更早记录"}</button> : null}<div className="companion-thread">{props.items.length === 0 ? <SectionState message="还没有对话记录" detail="开始交流后，消息会连续出现在这里。" /> : props.items.map((item) => <article key={item.messageId} tabIndex={-1} className={`is-${item.role}`} id={`companion-message-${item.messageId}`}><span><b>{item.role === "user" ? "你" : item.role === "assistant" ? "伴星" : "系统"}</b><time>{formatRelative(item.createdAt)}</time></span><p>{messageText(item) || "这条记录不含可展示正文。"}</p>{item.kind === "cancelled" ? <small>这是一条被你停止的未完成回复。</small> : null}</article>)}</div></div>;
+  return <div className="companion-panel-stack"><div className="companion-panel-heading"><h3>连续对话</h3><p>按全局时间排列；内部数据分段不会显示在这里。</p><button type="button" className="primary" onClick={props.onContinue}><MessageCircle size={14} />继续交流</button></div><form className="companion-search" onSubmit={(event) => { event.preventDefault(); props.onSearch(); }}><Search size={14} aria-hidden="true" /><input value={props.query} onChange={(event) => props.onQuery(event.target.value)} placeholder="搜索全部对话正文" aria-label="搜索全部对话正文" /><button type="submit" disabled={props.searching}>{props.searching ? "搜索中" : "搜索"}</button></form><p className="companion-result-status" aria-live="polite">{props.searching ? "正在搜索对话" : props.query.trim() ? `找到 ${props.items.length} 条对话` : ""}</p>{props.error ? <p className="companion-error" role="alert">{props.error}</p> : null}{props.cursor ? <button type="button" className="companion-load-more" disabled={props.loadingMore} onClick={props.onLoadMore}>{props.loadingMore ? "正在读取更早记录…" : "加载更早记录"}</button> : null}<div className="companion-thread">{props.items.length === 0 ? <SectionState message="还没有对话记录" detail="开始交流后，消息会连续出现在这里。" /> : props.items.map((item) => <article key={item.messageId} tabIndex={-1} className={`is-${item.role}`} id={`companion-message-${item.messageId}`}><span><b>{item.role === "user" ? "你" : item.role === "assistant" ? "伴星" : "系统"}</b><time>{formatRelative(item.createdAt)}</time></span>{paragraphLines(messageText(item) || "这条记录不含可展示正文。").map((paragraph, index) => <p key={index}>{paragraph}</p>)}{item.kind === "cancelled" ? <small>这是一条被你停止的未完成回复。</small> : null}</article>)}</div></div>;
 }
 
 type ActivityPanelProps = {
@@ -837,7 +968,7 @@ function ActivityDeliveryCard({ item, busy, onPresent, onDelivery }: {
         onPresent(item);
         observer.disconnect();
       }
-    }, { root: element.closest(".companion-tab-panel"), threshold: 0.6 });
+    }, { root: element.closest(".companion-tab-panel, .companion-stage"), threshold: 0.6 });
     observer.observe(element);
     return () => observer.disconnect();
   }, [item, onPresent]);
@@ -845,15 +976,57 @@ function ActivityDeliveryCard({ item, busy, onPresent, onDelivery }: {
   return <article ref={ref} className={`companion-delivery-card is-${item.state}${item.expired ? " is-expired" : ""}`}><div><strong>{item.label}</strong><small>{formatRelative(item.createdAt)} · {item.expired ? "已失效" : item.state === "acted" ? "已处理" : item.state === "dismissed" ? "已忽略" : "待处理"}</small></div>{!item.expired && DELIVERY_PENDING_STATES.includes(item.state) ? <div className="companion-action-row"><button type="button" className="primary" disabled={busy} onClick={() => onDelivery(item, "acted")}>{item.target.kind === "none" ? "知道了" : "查看"}</button><button type="button" disabled={busy} onClick={() => onDelivery(item, "dismissed")}>忽略</button></div> : null}</article>;
 }
 
-function DiaryPanel(props: { section: Section<CompanionDailySummaryV1> | null; loading: boolean; failure: string | null; date: string | null; onDate: (value: string | null) => void; onMemory: (id: string) => void; onRetry: () => void }) {
+function DiaryPanel(props: {
+  section: Section<CompanionDailySummaryV1> | null;
+  loading: boolean;
+  failure: string | null;
+  date: string | null;
+  onDate: (value: string | null) => void;
+  onMemory: (id: string) => void;
+  onRetry: () => void;
+  marks: ReadonlyMap<string, "generated" | "failed"> | null;
+  marksFailure: string | null;
+  onMarksMonth: (month: string) => void;
+}) {
+  const [calendarOpen, setCalendarOpen] = useState(false);
+  const navRef = useRef<HTMLDivElement>(null);
+  // 折叠面板的收起条件：点外面、Escape。选中一天后由 onPick 自己关。
+  useEffect(() => {
+    if (!calendarOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!navRef.current?.contains(event.target as Node)) setCalendarOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      // 必须声明这次按键被吃掉了：App 的全局 Escape（window 上，冒泡比 document 晚）
+      // 看到 defaultPrevented 才会放手，否则关日历的同时把人弹出伴星中心。
+      event.preventDefault();
+      event.stopPropagation();
+      setCalendarOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => { document.removeEventListener("pointerdown", onPointerDown); document.removeEventListener("keydown", onKeyDown); };
+  }, [calendarOpen]);
   if (props.loading && !props.section) return <SectionState message="正在读取日记" />;
   if (!props.section) return <SectionState message="日记当前不可用" detail={props.failure ?? undefined} onRetry={props.onRetry} />;
   if (!props.section.ok) return <SectionState message="日记当前不可用" detail={props.section.message} onRetry={props.onRetry} />;
-  const daily = props.section.value; const anchor = props.date ?? daily.date ?? todayIsoDate();
+  const daily = props.section.value; const anchor = props.date ?? daily.date ?? todayIsoDate(); const today = todayIsoDate();
   return <div className="companion-panel-stack">
     <div className="companion-panel-heading"><div><h3>日记</h3><p>她自己写的，不是统计。</p></div></div>
-    <div className="companion-date-nav"><button type="button" onClick={() => props.onDate(shiftIsoDate(anchor, -1))}><ChevronLeft size={15} />前一天</button><strong>{diaryDayLabel(anchor)}</strong><button type="button" disabled={anchor >= todayIsoDate()} onClick={() => props.onDate(shiftIsoDate(anchor, 1))}>后一天<ChevronRight size={15} /></button></div>
-    <div className="companion-day-strip">{diaryDayStrip(anchor, 5).map((day) => <button key={day} type="button" aria-pressed={day === anchor} className={day === anchor ? "is-active" : undefined} onClick={() => props.onDate(day)}>{day.slice(5)}</button>)}</div>
+    {/* 日期筛选与聊天记录共用那张月历（2026-09-22 用户指定）：平时收成一颗日期胶囊，
+        点开才是月历；前一天 / 后一天留在页面上，翻页不必经过日历。
+        原来这里是五个 `09-17` 这样的裸字符串横排，既读不出「这是哪天」，也只能回看五天。 */}
+    <div className="companion-date-nav" ref={navRef}>
+      <button type="button" onClick={() => props.onDate(shiftIsoDate(anchor, -1))}><ChevronLeft size={15} />前一天</button>
+      <div className="companion-date-pick">
+        <button type="button" className="companion-date-pick__trigger" data-active={calendarOpen || undefined} aria-expanded={calendarOpen} aria-controls="companion-diary-calendar" aria-label={`选择日记日期，当前 ${diaryDayLabel(anchor)}`} onClick={() => setCalendarOpen((value) => !value)}>
+          <CalendarDays size={14} aria-hidden="true" /><span>{diaryDayLabel(anchor)}</span><ChevronDown size={13} aria-hidden="true" />
+        </button>
+        {calendarOpen ? <MonthCalendar key={anchor} panelId="companion-diary-calendar" selected={anchor} maxDay={today} marks={props.marks} onMonthChange={props.onMarksMonth} onPick={(day) => { props.onDate(day); setCalendarOpen(false); }} footer={props.marksFailure ? <p className="companion-diary-marks-failed">这个月她写过哪几天，这次没读出来；下面的点先别当准。</p> : null} /> : null}
+      </div>
+      <button type="button" disabled={anchor >= today} onClick={() => props.onDate(shiftIsoDate(anchor, 1))}>后一天<ChevronRight size={15} /></button>
+    </div>
     {daily.status === "generated"
       ? <article className="companion-diary-entry">
           {/* 按她给的顺序排：图跟在说到它的那段后面，不是全堆在末尾。

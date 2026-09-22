@@ -206,7 +206,8 @@ const desktopApi: AILearnDesktopApiM2 = {
       summarizeRecent: (input) => invoke(DESKTOP_IPC_CHANNELS.companionMemorySummarizeRecent, input)
     },
     daily: {
-      get: (input) => invoke(DESKTOP_IPC_CHANNELS.companionDailyGet, input)
+      get: (input) => invoke(DESKTOP_IPC_CHANNELS.companionDailyGet, input),
+      month: (input) => invoke(DESKTOP_IPC_CHANNELS.companionDailyMonth, input)
     },
     persona: {
       get: (input) => invoke(DESKTOP_IPC_CHANNELS.companionPersonaGet, input),

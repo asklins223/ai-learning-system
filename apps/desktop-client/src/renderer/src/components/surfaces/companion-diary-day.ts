@@ -52,14 +52,3 @@ export function diaryDayLabel(value: string, today: string = todayIsoDate()): st
   if (!month || !day) return value;
   return `${Number(month)} 月 ${Number(day)} 日`;
 }
-
-/**
- * How far back the day strip reaches. A week is what the strip can hold before
- * the labels stop being readable at the compact viewport.
- */
-export const DIARY_STRIP_DAYS = 7;
-
-/** Newest first, ending at `anchor` (inclusive). */
-export function diaryDayStrip(anchor: string, days: number = DIARY_STRIP_DAYS): readonly string[] {
-  return Array.from({ length: days }, (_, index) => shiftIsoDate(anchor, -index));
-}

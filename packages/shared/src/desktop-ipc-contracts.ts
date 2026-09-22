@@ -71,6 +71,7 @@ import {
 // 读取之外只开放记忆裁决（确认/忽略/固定/归档），没有对话发送通道。
 import {
   companionDailySummaryV1Schema,
+  companionDailyMonthV1Schema,
   companionActivityDeliveryV1Schema,
   companionActivityTimelineV1Schema,
   companionAuditDeleteResultV1Schema,
@@ -251,6 +252,7 @@ export const DESKTOP_IPC_CHANNELS = {
   companionMemoryClear: "ailearn.v1.companion.memory.clear",
   companionMemorySummarizeRecent: "ailearn.v1.companion.memory.summarizeRecent",
   companionDailyGet: "ailearn.v1.companion.daily.get",
+  companionDailyMonth: "ailearn.v1.companion.daily.month",
   companionPersonaGet: "ailearn.v1.companion.persona.get",
   companionPersonaPatch: "ailearn.v1.companion.persona.patch",
   companionPersonaReset: "ailearn.v1.companion.persona.reset",
@@ -1938,6 +1940,8 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
     };
     readonly daily: {
       get(input: { meta: RequestMetaV1; date?: string }): Promise<GatewayResultV1<z.infer<typeof companionDailySummaryV1Schema>>>;
+      /** 月历标记用：某个月里她写过（或试过）哪几天。 */
+      month(input: { meta: RequestMetaV1; month: string }): Promise<GatewayResultV1<z.infer<typeof companionDailyMonthV1Schema>>>;
     };
     readonly persona: {
       get(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof companionPersonaV1Schema>>>;

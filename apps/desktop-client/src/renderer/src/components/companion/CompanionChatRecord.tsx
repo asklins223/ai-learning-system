@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { CalendarDays, ChevronLeft, ChevronRight, CornerDownRight } from "lucide-react";
 import type { CompanionContentBlockV1, CompanionMessageV1 } from "@ailearn/shared/companion-conversation-contracts";
 import type { CompanionChatSession } from "../../app/companion-chat-session";
@@ -272,18 +272,36 @@ export function CompanionChatRecordArticle({
 
 // ─── 自绘月历（不用原生 date 控件） ───────────────────────────────────────
 
+/**
+ * 自绘月历。两个宿主：聊天记录（`pool` = 消息，只有聊过的日子可选，格子上标条数）
+ * 与伴星中心的日记筛选（`marks` = 她写过哪几天，来自 /companion/daily/month）。
+ * 日记侧不靠消息数收可选范围——没写过的那一天点开就是「这一天还没有日记」，
+ * 那是一个诚实的答案，不是错误。
+ */
 export function MonthCalendar({
-  pool,
+  pool = null,
+  marks = null,
+  maxDay = null,
+  panelId = "companion-record-calendar",
   selected,
   onPick,
+  onMonthChange,
+  footer = null,
 }: {
-  readonly pool: readonly CompanionMessageV1[];
+  readonly pool?: readonly CompanionMessageV1[] | null;
+  readonly marks?: ReadonlyMap<string, "generated" | "failed"> | null;
+  readonly maxDay?: string | null;
+  readonly panelId?: string;
   readonly selected: string | null;
   onPick: (dayKey: string) => void;
+  /** 宿主靠它去取当前这一月的标记；不传就是不需要。 */
+  onMonthChange?: (monthKey: string) => void;
+  /** 面板底部的一行宿主说明（比如「这个月的标记没读出来」）。 */
+  readonly footer?: ReactNode;
 }) {
   const counts = useMemo(() => {
     const map = new Map<string, number>();
-    for (const message of pool) {
+    for (const message of pool ?? []) {
       const key = messageDayKey(message.createdAt);
       if (key) map.set(key, (map.get(key) ?? 0) + 1);
     }
@@ -298,6 +316,14 @@ export function MonthCalendar({
     setYear(next.getFullYear());
     setMonth(next.getMonth());
   };
+  const monthKey = `${year}-${String(month + 1).padStart(2, "0")}`;
+  // 宿主多半传的是行内箭头函数；挂在 ref 上才不会把「回调身份变了」当成「换月了」，
+  // 否则每次父组件重渲染都会多打一次月度请求。
+  const notifyMonth = useRef(onMonthChange);
+  notifyMonth.current = onMonthChange;
+  useEffect(() => {
+    notifyMonth.current?.(monthKey);
+  }, [monthKey]);
   const first = new Date(year, month, 1);
   const firstWeekday = first.getDay();
   const daysInMonth = new Date(year, month + 1, 0).getDate();
@@ -308,7 +334,7 @@ export function MonthCalendar({
   ];
 
   return (
-    <div id="companion-record-calendar" className="companion-record__calendar" role="group" aria-label="选择日期">
+    <div id={panelId} className="companion-record__calendar" role="group" aria-label="选择日期">
       <div className="companion-record__calendar-head">
         <button type="button" onClick={() => shift(-1)} aria-label="上个月"><ChevronLeft size={14} /></button>
         <strong>{year}年{month + 1}月</strong>
@@ -320,21 +346,27 @@ export function MonthCalendar({
           if (day == null) return <span key={`empty-${index}`} />;
           const key = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
           const count = counts.get(key) ?? 0;
+          // 没有计数数据时不能反过来把每一天都判成空——日记侧只按「这一天还没发生」收。
+          const disabled = (maxDay != null && key > maxDay) || (pool ? count === 0 : false);
+          const mark = marks?.get(key) ?? null;
           return (
             <button
               key={key}
               type="button"
-              disabled={count === 0}
+              disabled={disabled}
               data-selected={selected === key || undefined}
               data-today={key === todayKey || undefined}
+              aria-label={mark ? `${day} 日${mark === "generated" ? "，她写过" : "，她没写成"}` : undefined}
               onClick={() => onPick(key)}
             >
               {day}
               {count > 0 ? <i>{count > 9 ? "9+" : count}</i> : null}
+              {mark ? <span className="companion-record__calendar-mark" data-status={mark} aria-hidden="true" /> : null}
             </button>
           );
         })}
       </div>
+      {footer}
     </div>
   );
 }

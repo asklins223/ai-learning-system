@@ -5,7 +5,7 @@ import type { CompanionMessageV1 } from "@ailearn/shared/companion-conversation-
 import type { CompanionChatSession } from "../../app/companion-chat-session";
 import { useSourceImage } from "../surfaces/source-image";
 import { hasForeignModal } from "./companion-modal-ownership";
-import { CompanionChatRecordArticle } from "./CompanionChatRecord";
+import { CompanionChatRecordArticle, MonthCalendar } from "./CompanionChatRecord";
 
 // 站内图字节通道整模块换掉：这三态是渲染分支的契约，不该靠真 fetch 去凑。
 vi.mock("../surfaces/source-image", () => ({ useSourceImage: vi.fn() }));
@@ -332,5 +332,48 @@ describe("CompanionChatRecordArticle 的图片放大", () => {
     const lightbox = document.querySelector(".image-lightbox")!;
     expect(lightbox.getAttribute("data-companion-owned")).toBe("true");
     expect(hasForeignModal(document)).toBe(false);
+  });
+});
+
+/**
+ * 月历本身的两条合同。伴星中心的日记筛选要复用这张面板（2026-09-22 用户指定
+ * 「换成历史纪录那里的那种日期面板」），而日记侧**没有**「哪几天有内容」的数据
+ * ——daily.get 一次只给一天。所以这里钉住：不给 pool 时只按 maxDay 决定可选性。
+ */
+describe("MonthCalendar 的可选范围", () => {
+  afterEach(cleanup);
+
+  /** 格子按「日子是它自己的那一段文字」来找，不受角标数字（`10` + `2`）干扰。 */
+  const dayButton = (day: number) => [...document.querySelectorAll<HTMLButtonElement>(".companion-record__calendar-grid button")]
+    .find((button) => button.firstChild?.textContent === String(day));
+
+  const renderCalendar = (props: Parameters<typeof MonthCalendar>[0]) =>
+    render(<MonthCalendar {...props} />);
+
+  it("不给 pool 时，只把 maxDay 之后的日子禁掉", () => {
+    renderCalendar({ selected: "2026-09-10", maxDay: "2026-09-15", onPick: () => undefined });
+    expect(dayButton(10)?.disabled).toBe(false);
+    expect(dayButton(15)?.disabled).toBe(false);
+    expect(dayButton(16)?.disabled).toBe(true);
+    expect(dayButton(30)?.disabled).toBe(true);
+    // 没有计数数据就不许编出角标——那会是「今天有 0 篇」这种假话。
+    expect(document.querySelector(".companion-record__calendar-grid button i")).toBeNull();
+  });
+
+  it("给 pool 时仍然只放开有记录的日子，并把条数标出来", () => {
+    renderCalendar({
+      pool: [
+        message({ createdAt: "2026-09-10T00:00:00.000Z" }),
+        message({ createdAt: "2026-09-10T01:00:00.000Z" }),
+        message({ createdAt: "2026-09-12T00:00:00.000Z" }),
+      ],
+      selected: "2026-09-10",
+      onPick: () => undefined,
+    });
+    expect(dayButton(10)?.disabled).toBe(false);
+    expect(dayButton(11)?.disabled).toBe(true);
+    expect(dayButton(10)?.querySelector("i")?.textContent).toBe("2");
+    expect(dayButton(12)?.querySelector("i")?.textContent).toBe("1");
+    expect(dayButton(10)?.getAttribute("data-selected")).toBe("true");
   });
 });

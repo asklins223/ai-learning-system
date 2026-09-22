@@ -205,6 +205,7 @@ import {
 } from "@ailearn/shared/companion-bridge-contracts";
 import {
   companionDailySummaryV1Schema,
+  companionDailyMonthV1Schema,
   companionActivityDeliveryV1Schema,
   companionActivityTimelineV1Schema,
   companionAuditDeleteResultV1Schema,
@@ -222,6 +223,7 @@ import {
   companionPersonaResetV1Schema,
   companionPersonaV1Schema,
   type CompanionDailySummaryV1,
+  type CompanionDailyMonthV1,
   type CompanionActivityDeliveryV1,
   type CompanionActivityTimelineV1,
   type CompanionActivityAckRequestV1,
@@ -2697,8 +2699,22 @@ export class DesktopGateway {
     return parsed.data;
   }
 
-  async getCompanionPersona(requestId?: string): Promise<CompanionPersonaV1> {
+  /** 月历标记：某个月里她写过（或试过）哪几天。只读，不触发生成。 */
+  async getCompanionDailyMonth(month: string, requestId?: string): Promise<CompanionDailyMonthV1> {
     await this.ensureConnected(requestId);
+    const result = await this.request(
+      `/companion/daily/month?month=${encodeURIComponent(month)}`,
+      { method: "GET" },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = companionDailyMonthV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
+  async getCompanionPersona(requestId?: string): Promise<CompanionPersonaV1> {    await this.ensureConnected(requestId);
     const result = await this.request(
       "/companion/pet-profile",
       { method: "GET" },

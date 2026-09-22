@@ -191,7 +191,9 @@ import {
 } from "@ailearn/shared/note-image-upload-contracts";
 import {
   companionDailyDateV1Schema,
+  companionDailyMonthValueV1Schema,
   companionDailySummaryV1Schema,
+  companionDailyMonthV1Schema,
   companionActivityAckRequestV1Schema,
   companionActivityDeliveryV1Schema,
   companionActivityTimelineV1Schema,
@@ -406,6 +408,10 @@ const companionMemoryResolveConflictInputSchema = z.strictObject({ ...m1InputBas
 const companionDailyGetInputSchema = z.strictObject({
   ...m1InputBase,
   date: companionDailyDateV1Schema.optional(),
+});
+const companionDailyMonthInputSchema = z.strictObject({
+  ...m1InputBase,
+  month: companionDailyMonthValueV1Schema,
 });
 const companionHistoryListInputSchema = z.strictObject({
   ...m1InputBase,
@@ -2231,6 +2237,12 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     assertEpoch(input.meta, activeWorkspaceEpoch);
     return gateway.getCompanionDailySummary(input.date, input.meta.requestId);
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionDailySummaryV1Schema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.companionDailyMonth, companionDailyMonthInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "room.home");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.getCompanionDailyMonth(input.month, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionDailyMonthV1Schema);
 
   installHandler(DESKTOP_IPC_CHANNELS.companionPersonaGet, runtimeInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "room.home");
