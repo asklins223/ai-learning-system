@@ -104,6 +104,15 @@ VETO_GATE_MIN_SAMPLE = 100
 # 全库第一条 playback 行 09:26 UTC）。早于这一行的段不可能有上报，不能算静音。
 PLAYBACK_REPORTING_SINCE = "2026-09-21 06:10:00+00"
 
+# 开发库里的"真人账号"。这条是**开发栈的约定**而不是产品规则：这套 dev 栈上只有
+# 一个人在用，其余账号都是集成测试现造的（`test-*` / `t-*` / `agent-*`，每个都自带
+# 一个没签 AI 同意书的工作区，用来断言 fail-closed）。
+# 为什么必须分开：全库 55 条 failed 里 **28 条来自这些夹具账号**（它们 40 条 run
+# 里失败 28 条 = 70%，同码跨 13 个工作区），混在一起报出来的"失败率 10.6%"
+# 把产品在线的 5.6% 抬了一倍。判据用邮箱而不是"跨工作区+挤在几分钟"那条启发式，
+# 因为同意书夹具是**几天里反复跑出来的**，时间上不挤在一起。
+DEV_REAL_ACCOUNT_EMAILS = ("owner@ailearn.local",)
+
 
 def scripted_run_ids() -> set[str]:
     try:
@@ -167,6 +176,15 @@ def collect(since: str | None) -> dict:
         SELECT status, count(*) n
         FROM companion_turn_runs
         WHERE status IN ('cancelled','superseded') {where} GROUP BY 1;
+    """)
+
+    # 失败率按账号类别拆开（理由见 DEV_REAL_ACCOUNT_EMAILS 上方那段）。
+    real_list = ",".join(f"'{email}'" for email in DEV_REAL_ACCOUNT_EMAILS)
+    failure_split = rows(f"""
+        SELECT CASE WHEN r.user_id IN (SELECT id FROM users WHERE email IN ({real_list}))
+                    THEN 'real' ELSE 'fixture' END acct,
+               count(*) runs, count(*) FILTER (WHERE r.status = 'failed') failed
+        FROM companion_turn_runs r WHERE true {where} GROUP BY 1;
     """)
 
     # 正文长度分布：按用户输入长短分桶——「闲聊该短」是人格第 19 行的既定主张，
@@ -580,6 +598,8 @@ def collect(since: str | None) -> dict:
                 if sum(int(m["n"]) for m in modes if m["k"] != "(unset)") else 0),
             "unset_permission_rows": sum(int(m["n"]) for m in modes if m["k"] == "(unset)"),
             "interrupted": {i["status"]: int(i["n"]) for i in interrupts},
+            "failure_split": {s["acct"]: {"runs": int(s["runs"]), "failed": int(s["failed"])}
+                              for s in failure_split},
             "failure_ratio": round(sum(by_status.get(k, 0) for k in ("failed",)) / run_total, 3) if run_total else 0,
             "failure_codes": {f["k"]: int(f["n"]) for f in failures},
             # 每条错误码带上"像不像测试夹具"：跨多个工作区、挤在两三分钟内 = 夹具签名。
@@ -735,6 +755,15 @@ def render(metrics: dict) -> None:
     print(f"  用户打断 = {runs['interrupted'].get('cancelled', 0)} 取消"
           f" + {runs['interrupted'].get('superseded', 0)} 被新一轮取代"
           "   ← 不是失败，所以不进上面的分母；它自己是一条有用的形态读数")
+    split = runs["failure_split"]
+    for acct, label in (("real", "真人账号"), ("fixture", "夹具账号")):
+        stat = split.get(acct)
+        if not stat or stat["runs"] == 0:
+            continue
+        print(f"    {label} {stat['failed']}/{stat['runs']}"
+              f" = {stat['failed'] / stat['runs']:.1%}"
+              + ("   ← 产品在线的失败率看这一条" if acct == "real" else
+                 "   ← 集成测试现造的没签同意书的工作区，不该混进上面那条"))
     for code, detail in runs["failure_detail"].items():
         if detail["fixture_shaped"]:
             print(f"  ⚠ {code} 这 {detail['n']} 条来自 {detail['workspaces']} 个工作区、"
