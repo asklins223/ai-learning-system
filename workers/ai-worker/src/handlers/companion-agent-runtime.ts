@@ -50,7 +50,8 @@ import { ProviderRequestError } from "../lib/provider-request-error.ts";
 import type { AIProvider } from "../lib/ai-provider.ts";
 import type { CompanionDialogueHandlerContext, ReadContext } from "./companion-dialogue-store.ts";
 import { insertStreamEvent } from "./companion-dialogue-store.ts";
-import { parsePageContext, looksTruncatedReply, looksLikeUnfulfilledActionNarration, looksLikeActionRequest, unverifiedNumericClaims, claimsLookupThatNeverRan, claimsNothingDueAgainstFacts, keepRecomputedBlocks, stripProviderControlTokens, TRUNCATED_REPLY_MIN_CHARS } from "./companion-dialogue-content.ts";
+import { parsePageContext, looksTruncatedReply, looksLikeUnfulfilledActionNarration, looksLikeActionRequest, unverifiedNumericClaims, claimsLookupThatNeverRan, claimsNothingDueAgainstFacts, keepRecomputedBlocks, stripProviderControlTokens, TRUNCATED_REPLY_MIN_CHARS,
+  noteSearchTerms } from "./companion-dialogue-content.ts";
 import { proposedLearningActionPayloadV1Schema } from "@ailearn/shared";
 import type { ProviderReasoningHandle } from "@ailearn/shared";
 
@@ -129,23 +130,6 @@ export function stepHoldChars(input: { userAskedForAction: boolean }): number {
  */
 export function actionSteerBudget(input: { userAskedForAction: boolean }): number {
   return input.userAskedForAction ? 2 : 1;
-}
-
-/**
- * 笔记检索词的切分（纯函数，方案 29 §12.3）。
- *
- * 空白分词 + 去掉 LIKE 的通配符（`%`/`_` 留在词里等于让模型自己拼通配查询）。
- * 上限 6 个词：再多就是模型在把整段话塞进检索词，AND 的命中率会掉到 0，
- * 而"搜不到"在她嘴里是一句结论，不是"我搜得太多"。
- */
-export const NOTE_SEARCH_MAX_TERMS = 6;
-
-export function noteSearchTerms(query: string): string[] {
-  return query
-    .split(/\s+/)
-    .map((term) => term.replace(/[%_]/g, "").trim())
-    .filter((term) => term.length > 0)
-    .slice(0, NOTE_SEARCH_MAX_TERMS);
 }
 
 /**

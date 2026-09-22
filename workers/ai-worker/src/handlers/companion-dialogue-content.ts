@@ -388,6 +388,24 @@ export const TRUNCATED_REPLY_MIN_CHARS: Record<string, number> = {
  */
 export const REPLAY_WINDOW_MESSAGES = 20;
 
+/**
+ * 笔记检索词的切分（纯函数，方案 29 §12.3）。
+ *
+ * 空白分词 + 去掉 LIKE 的通配符（`%`/`_` 留在词里等于让模型自己拼通配查询）。
+ * 上限 6 个词：再多就是模型在把整段话塞进检索词，AND 的命中率会掉到 0，
+ * 而"搜不到"在她嘴里是一句结论，不是"我搜得太多"。
+ */
+export const NOTE_SEARCH_MAX_TERMS = 6;
+
+export function noteSearchTerms(query: string): string[] {
+  return query
+    .split(/\s+/)
+    .map((term) => term.replace(/[%_]/g, "").trim())
+    .filter((term) => term.length > 0)
+    .slice(0, NOTE_SEARCH_MAX_TERMS);
+}
+
+
 export function looksTruncatedReply(text: string, minChars = TRUNCATED_REPLY_MIN_CHARS.active): boolean {
   const trimmed = text.trim();
   if (trimmed.length === 0) return true;

@@ -19,8 +19,6 @@ import {
   boundedToolCallIdentity,
   actionSteerBudget,
   joinVisibleSegmentsDeduped,
-  NOTE_SEARCH_MAX_TERMS,
-  noteSearchTerms,
   partitionPersonaPatch,
   planStepSteer,
   stepHoldChars,
@@ -29,6 +27,7 @@ import {
   safeArgumentsHash,
   taskQueueToolResult,
 } from "./companion-agent-runtime.ts";
+import { NOTE_SEARCH_MAX_TERMS, noteSearchTerms } from "./companion-dialogue-content.ts";
 import { CompanionStreamStoppedError } from "./companion-dialogue-stream.ts";
 import type { AIProvider } from "../lib/ai-provider.ts";
 

@@ -20,7 +20,7 @@
 import { sql } from "drizzle-orm";
 import type { WorkerTransaction } from "../db.ts";
 import { normalizeWorkspaceAIPolicy } from "../lib/governance.ts";
-import { parsePageContext } from "./companion-dialogue-content.ts";
+import { noteSearchTerms, parsePageContext } from "./companion-dialogue-content.ts";
 
 const FALLBACK_TIMEZONE = "Asia/Shanghai";
 
@@ -374,7 +374,16 @@ export async function loadHereAndNow(
 
   // 用户点名的那篇笔记。`ILIKE '%标题%'` 而不是 `ILIKE '标题'`——不带百分号的
   // ILIKE 是全等比较（记忆检索的 keyword 降级路径踩过同一个坑）。
+  //
+  // 但**整串子串**仍然会假阴性：人写《欧姆定律 生成验收》中间一个空格，库里那篇
+  // 叫《欧姆定律生成验收》就匹配不上（实机 2026-09-22 检索工具踩过同一处，见 §12.3）。
+  // 这里的后果比工具更重：这一行决定她开口时手上有没有这篇，匹配不上她就理直气壮地
+  // 说"库里没有这篇"——那是最坏的一种错（可证伪的假阴性）。所以按空格切成词，逐词都要命中。
   const noteRefTitle = scope.userText ? extractNoteTitleReference(scope.userText) : null;
+  const noteRefTerms = noteRefTitle ? noteSearchTerms(noteRefTitle) : [];
+  const noteRefTitleMatch = noteRefTerms.length === 0
+    ? sql`n.title = ${noteRefTitle ?? ""}`
+    : sql`${sql.join(noteRefTerms.map((term) => sql`n.title ILIKE ${`%${term}%`}`), sql` AND `)}`;
   const noteRefRows = noteRefTitle
     ? await tx.execute<{ id: string; title: string; age_minutes: string; image_count: string }>(sql`
         SELECT n.id, n.title,
@@ -386,7 +395,7 @@ export async function loadHereAndNow(
                    AND a.status = 'ready' AND a.deleted_at IS NULL) AS image_count
         FROM notes n
         WHERE n.workspace_id = ${scope.workspaceId} AND n.deleted_at IS NULL
-          AND (n.title = ${noteRefTitle} OR n.title ILIKE ${`%${noteRefTitle}%`})
+          AND ${noteRefTitleMatch}
         ORDER BY (n.title = ${noteRefTitle}) DESC, n.updated_at DESC
         LIMIT 1
       `)
