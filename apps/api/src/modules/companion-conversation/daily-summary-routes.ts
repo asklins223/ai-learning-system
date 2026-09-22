@@ -10,7 +10,7 @@
 
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
 import { requireSession } from "../identity/middleware.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
 import { companionDailySummaries } from "@ailearn/shared/db-schema/companion-memory";
@@ -21,6 +21,19 @@ function isDailySummaryEnabled(): boolean {
 }
 
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+const monthSchema = z.string().regex(/^\d{4}-\d{2}$/);
+
+/**
+ * 月历标记要的那个月的第一天/最后一天。
+ *
+ * 自己拼日期而不是 `date BETWEEN month || '-01' AND month || '-31'`：
+ * 2 月没有 31 日，字符串区间会把别的月份漏进来或漏出去。
+ */
+function monthRange(month: string): { readonly from: string; readonly to: string } {
+  const [year, number] = month.split("-").map(Number);
+  const last = new Date(year, number, 0).getDate();
+  return { from: `${month}-01`, to: `${month}-${String(last).padStart(2, "0")}` };
+}
 
 export async function dailySummaryRoutes(app: FastifyInstance) {
   app.addHook("onRequest", async (_req, reply) => {
@@ -101,6 +114,46 @@ export async function dailySummaryRoutes(app: FastifyInstance) {
         failureReason: result.failureReason,
         blocks,
         memory,
+      });
+    },
+  );
+
+  /**
+   * 月历标记：这个月里她写过（或试过）哪几天。
+   *
+   * 表上没有 (workspace, user, date) 的唯一约束，重跑一天可以留下两行，所以这里
+   * 按天聚合：**只要有一天写成过，那一天就是写过**，否则算她试过没写成。
+   * 没写的日子根本不出现在结果里——「缺席」不是这里的一种状态。
+   */
+  app.get<{ Querystring: Record<string, string | undefined> }>(
+    "/companion/daily/month",
+    { preHandler: [requireSession] },
+    async (req, reply) => {
+      const parsed = monthSchema.safeParse(req.query?.month);
+      if (!parsed.success) {
+        throw app.httpErrors.badRequest("month 非法，应为 YYYY-MM");
+      }
+      const { from, to } = monthRange(parsed.data);
+      const scope = { workspaceId: req.session.workspaceId, userId: req.session.userId };
+      const rows = await withWorkspaceTransaction(scope, async (tx) => tx
+        .select({
+          date: companionDailySummaries.date,
+          written: sql<boolean>`bool_or(${companionDailySummaries.status} = 'generated')`,
+        })
+        .from(companionDailySummaries)
+        .where(and(
+          eq(companionDailySummaries.workspaceId, scope.workspaceId),
+          eq(companionDailySummaries.userId, scope.userId),
+          gte(companionDailySummaries.date, from),
+          lte(companionDailySummaries.date, to),
+        ))
+        .groupBy(companionDailySummaries.date)
+        .orderBy(companionDailySummaries.date));
+
+      return reply.header("Cache-Control", "no-store").send({
+        version: 1,
+        month: parsed.data,
+        days: rows.map((row) => ({ date: row.date, status: row.written ? "generated" as const : "failed" as const })),
       });
     },
   );

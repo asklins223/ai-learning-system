@@ -24,6 +24,7 @@ import { assertJobLease, lockJobLease, withJobTransaction } from "../lib/job-lea
 import { runWithAbortBudget } from "../lib/handler-timeout.ts";
 import { resolveProviderCallTimeout } from "../lib/handler-timeout-config.ts";
 import { MemoryExtractOutputError } from "../lib/non-retryable-errors.ts";
+import { withoutQuotedNames } from "./companion-dialogue-content.ts";
 import type { JobPayload } from "./index.ts";
 
 /**
@@ -58,7 +59,10 @@ const VOLATILE_STAT_WINDOW_TEST = /(本周|这周|今天|今日|截至|这一阵
 const STATISTIC_QUANTITY_TEST = /\d+(?:\.\d+)?\s*(分钟|小时|张|篇|项|题|次|条|%)/;
 
 export function isVolatileStatisticMemory(content: string): boolean {
-  return VOLATILE_STAT_WINDOW_TEST.test(content) && STATISTIC_QUANTITY_TEST.test(content);
+  // 名字里的数量词不算统计（「背 3 条法律」是一张真卡的标题也可能长这样）：
+  // 误判的代价是这条记忆**根本没写进去**，比误放难发现得多。
+  const outsideNames = withoutQuotedNames(content);
+  return VOLATILE_STAT_WINDOW_TEST.test(outsideNames) && STATISTIC_QUANTITY_TEST.test(outsideNames);
 }
 
 const memoryExtractCandidateSchema = z.object({

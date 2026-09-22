@@ -70,6 +70,147 @@ export interface HereAndNowSnapshot {
   noteReference: { title: string; found: boolean; noteId: string | null; ageLabel: string | null; imageCount: number } | null;
   /** 图片外发政策是否开着（决定"有图但看不了"这句话怎么说）。 */
   imagesReadable: boolean;
+  /**
+   * 学习统计真值——**只在用户这一轮问到学习数据时**才非空。
+   *
+   * 实机 2026-09-22 场景 B/N：她先说"今天 50 分钟啦，本周累计 107 分钟"（那是昨天
+   * 说过的数，今天已经跨日），再调工具查出 33/154，然后在**同一条消息里**改口。
+   * 事后闸救不了：话是流式说出口的。所以和图数、笔记存在性同一个解法——
+   * 服务端在她开口之前把真值算好放进她的感知里。
+   *
+   * 没问就是 null：把统计常驻注入正是 §9.60 撤掉的东西，不能从这里绕回来。
+   */
+  learningStats: LearningStatsFacts | null;
+  /**
+   * 当前生效的行为边界——**只在用户这一轮要改边界时**才非空。
+   * 理由同 `learningStats`：她得先知道现在是什么状态，才谈得上"帮你改掉了"。
+   */
+  boundaryFacts: BoundaryFacts | null;
+}
+
+/** 学习统计的一份真值。取数与摘要都只有这一处，工具与环境块共用。 */
+export interface LearningStatsFacts {
+  readonly todayMinutes: number;
+  readonly weekMinutes: number;
+  readonly dueReviews: number;
+  readonly dueNext24Hours: number;
+  readonly activeCards: number;
+  readonly noteCount: number;
+}
+
+/** 工具返回给模型的 safeSummary 与环境块那一行共用同一句措辞（两处各写迟早会分叉）。 */
+export function summarizeLearningStats(facts: LearningStatsFacts): string {
+  return `今日 ${facts.todayMinutes} 分钟，本周 ${facts.weekMinutes} 分钟，到期复习 ${facts.dueReviews} 项`;
+}
+
+/**
+ * 用户这句话在要学习数据吗。
+ *
+ * **判得保守是设计的一部分**：漏了的代价只是她自己再调一次工具（今天就是这样，
+ * 多花一步而已）；误判的代价是把"没问也报数"重新请回来——那是 §9.60 刚赶出去的缺陷，
+ * 而且这次是系统自己递上去的数字，她不可能不说。
+ */
+const LEARNING_STATS_ASK_PATTERNS = [
+  // "我今天一共学了多久" / "这周总共学了多长时间"
+  "(今天|今日|这周|本周|这个星期|最近|这一阵)[^。！？]{0,12}(学|复习|读)[^。！？]{0,6}(多久|多长时间|多少|几分钟|几小时)",
+  // "有多少张活跃卡片、多少篇笔记" / "多少个东西到期该复习"
+  "(多少|几个|几张|几篇|还剩)[^。！？]{0,6}(分钟|小时|张|篇|项|条|题)",
+  "多少[^。！？]{0,4}(到期|复习)",
+  // "最近的学习进度怎么样"
+  "(学习|进度|统计)[^。！？]{0,4}(情况|数据|怎么样|如何)",
+];
+const LEARNING_STATS_ASK_TEST = new RegExp(LEARNING_STATS_ASK_PATTERNS.join("|"));
+
+export function asksForLearningStats(text: string | undefined): boolean {
+  return typeof text === "string" && LEARNING_STATS_ASK_TEST.test(text);
+}
+
+/**
+ * 用户这一轮要改她的行为边界吗（催不催学习、玩趣、语音情绪标签、口头禅）。
+ *
+ * 为什么要在这里预取当前状态：实机 2026-09-22 场景 T，用户说「以后别主动催我复习」，
+ * 她回"嗯，这条早就设好了喵"——而库里 `allowNudgeLearning` 还是 true。
+ * 她不是故意骗人，是**不知道自己现在是什么状态**，于是把"应下来"当成了"已经改好"。
+ * 同 §9.30/§9.67：服务端一行 SELECT 就知道的事，不该留给模型猜。
+ */
+const BOUNDARY_CHANGE_PATTERNS = [
+  "别催|不要催|不准催|别提醒|不要提醒",
+  "以后[^。！？]{0,8}(别|不要|不准)",
+  "口头禅",
+  "(玩趣|语气|情绪标签|语音标签)[^。！？]{0,6}(关掉|关闭|开|去掉|别)",
+  "(关掉|改成|设为|设置成)[^。！？]{0,8}(玩趣|催|提醒|标签)",
+];
+const BOUNDARY_CHANGE_TEST = new RegExp(BOUNDARY_CHANGE_PATTERNS.join("|"));
+
+export function asksForBoundaryChange(text: string | undefined): boolean {
+  return typeof text === "string" && BOUNDARY_CHANGE_TEST.test(text);
+}
+
+/** 当前生效的行为边界（只有用户这一轮要改时才取）。 */
+export interface BoundaryFacts {
+  readonly allowNudgeLearning: boolean;
+  readonly allowPlayful: boolean;
+  readonly allowVoiceTags: boolean;
+}
+
+interface LearningStatsRow extends Record<string, unknown> {
+  today_seconds: string;
+  week_seconds: string;
+  due_reviews: string;
+  due_next_24h: string;
+  active_cards: string;
+  note_count: string;
+}
+
+/**
+ * 学习统计的唯一取数（`companion_get_learning_stats` 与环境块共用）。
+ *
+ * 以前这段 SQL 只长在工具那侧，环境块想要同一份数就得再抄一遍——而"两处各写一份
+ * 同一个口径"正是这一串修复一直在拆的东西（日额度写过四份、静默时段写过两份）。
+ * 周口径是**滚动 7 天**，不是自然周：改了这里，工具答话和环境块会一起变，
+ * 这也正是共用一份的意义。
+ */
+export async function readLearningStats(
+  tx: WorkerTransaction,
+  scope: { workspaceId: string; userId: string },
+): Promise<LearningStatsFacts> {
+  const rows = await tx.execute<LearningStatsRow>(sql`
+    SELECT
+      (SELECT coalesce(sum(active_seconds_used), 0) FROM learning_metric_events
+        WHERE workspace_id = ${scope.workspaceId} AND user_id = ${scope.userId}
+          AND occurred_at >= date_trunc('day', now() AT TIME ZONE ${tzSubquery(scope.userId)}) AT TIME ZONE ${tzSubquery(scope.userId)}
+      ) AS today_seconds,
+      (SELECT coalesce(sum(active_seconds_used), 0) FROM learning_metric_events
+        WHERE workspace_id = ${scope.workspaceId} AND user_id = ${scope.userId}
+          AND occurred_at > now() - interval '7 days'
+      ) AS week_seconds,
+      (SELECT count(*) FROM review_schedules
+        WHERE workspace_id = ${scope.workspaceId} AND user_id = ${scope.userId}
+          AND status = 'pending' AND next_review_at <= now()
+          AND (user_deferred_until IS NULL OR user_deferred_until <= now())
+      ) AS due_reviews,
+      (SELECT count(*) FROM review_schedules
+        WHERE workspace_id = ${scope.workspaceId} AND user_id = ${scope.userId}
+          AND status = 'pending'
+          AND coalesce(user_deferred_until, next_review_at) > now()
+          AND coalesce(user_deferred_until, next_review_at) <= now() + interval '24 hours'
+      ) AS due_next_24h,
+      (SELECT count(*) FROM learning_cards_v2
+        WHERE workspace_id = ${scope.workspaceId} AND lifecycle = 'active'
+      ) AS active_cards,
+      (SELECT count(*) FROM notes
+        WHERE workspace_id = ${scope.workspaceId} AND deleted_at IS NULL
+      ) AS note_count
+  `);
+  const row = (Array.isArray(rows) ? rows : [])[0] ?? null;
+  return {
+    todayMinutes: Math.round(Number(row?.today_seconds ?? 0) / 60),
+    weekMinutes: Math.round(Number(row?.week_seconds ?? 0) / 60),
+    dueReviews: Number(row?.due_reviews ?? 0),
+    dueNext24Hours: Number(row?.due_next_24h ?? 0),
+    activeCards: Number(row?.active_cards ?? 0),
+    noteCount: Number(row?.note_count ?? 0),
+  };
 }
 
 const ACTIVE_RUN_PHASES = ["preparing", "active", "assessing", "checkpoint", "committing", "paused"];
@@ -163,8 +304,9 @@ export async function loadHereAndNow(
 
   const petRows = await tx.execute<{
     name: string; activeness: string; interaction_count: number; last_active_at: Date | null;
+    boundaries: Record<string, unknown> | null;
   }>(sql`
-    SELECT name, activeness, interaction_count, last_active_at
+    SELECT name, activeness, interaction_count, last_active_at, boundaries
     FROM pet_profiles WHERE workspace_id = ${scope.workspaceId} AND user_id = ${scope.userId}
     LIMIT 1
   `);
@@ -272,6 +414,22 @@ export async function loadHereAndNow(
     policyRows[0]?.data_policy as Parameters<typeof normalizeWorkspaceAIPolicy>[0],
   ).sendImageContent === true;
 
+  // 用户这一轮问到学习数据，就在她开口之前把真值算好（见 HereAndNowSnapshot.learningStats）。
+  // 没问到就一次查询都不发——这条支路的开销必须是"问了才付"。
+  const learningStats = asksForLearningStats(scope.userText)
+    ? await readLearningStats(tx, scope)
+    : null;
+  // 边界缺省按"允许"读，与念头管线（`boundaries.allowNudgeLearning !== false`）同一口径：
+  // 两处的默认值不一样时，"她以为关着/其实开着"这类分裂又会回来。
+  const profileBoundaries = (petRow?.boundaries ?? {}) as Record<string, unknown>;
+  const boundaryFacts = asksForBoundaryChange(scope.userText)
+    ? {
+      allowNudgeLearning: profileBoundaries.allowNudgeLearning !== false,
+      allowPlayful: profileBoundaries.allowPlayful !== false,
+      allowVoiceTags: profileBoundaries.allowVoiceTags !== false,
+    }
+    : null;
+
   return {
     localTime: clock?.local_time ?? "",
     weekday: weekdayLabel(clock?.weekday ?? 1),
@@ -309,6 +467,8 @@ export async function loadHereAndNow(
         : { title: noteRefTitle, found: false, noteId: null, ageLabel: null, imageCount: 0 })
       : null,
     imagesReadable,
+    learningStats,
+    boundaryFacts,
     nextReminder: reminderRows[0]
       ? { text: reminderRows[0].text, fireAtLocal: reminderRows[0].fire_at_local }
       : null,
@@ -419,6 +579,22 @@ export function renderHereAndNow(snapshot: HereAndNowSnapshot): string | null {
   // "到期列表是空的"那句假阴性（§9.41），撤了等于把闸拆掉。
   if (snapshot.dueReviews > 0) {
     lines.push(`到期待复习 ${snapshot.dueReviews} 项`);
+  }
+  if (snapshot.learningStats) {
+    const stats = snapshot.learningStats;
+    // 这一行是 §9.66 缺陷① 的解法：她以前先念历史里的旧数、再调工具、再在同一条
+    // 消息里改口。真值必须在**她说之前**就在场，历史里的同类数字要被明确降级。
+    lines.push(`用户这一轮问的是学习数据，以下是刚查出来的真值：今日 ${stats.todayMinutes} 分钟，`
+      + `本周 ${stats.weekMinutes} 分钟，到期复习 ${stats.dueReviews} 项，`
+      + `24 小时内到期 ${stats.dueNext24Hours} 项，活跃卡片 ${stats.activeCards} 张，笔记 ${stats.noteCount} 篇。`
+      + "只用这一行的数字；历史对话里出现过的同类数字是更早的时刻，可能已经变了。");
+  }
+  if (snapshot.boundaryFacts) {
+    const b = snapshot.boundaryFacts;
+    const on = (value: boolean) => (value ? "开着" : "关着");
+    lines.push(`用户这一轮要改的是行为边界，当前生效的状态：催复习=${on(b.allowNudgeLearning)}，`
+      + `玩趣=${on(b.allowPlayful)}，语音情绪标签=${on(b.allowVoiceTags)}。`
+      + "这些开关只有调用 companion_set_boundary 才会变；光答\"记下了\"什么都没变。");
   }
   if (snapshot.recentNotes.length > 0) {
     const listed = snapshot.recentNotes.map((note) => `《${truncate(note.title, 20)}》(${note.ageLabel})`).join("、");

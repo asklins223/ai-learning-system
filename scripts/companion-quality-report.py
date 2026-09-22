@@ -93,6 +93,17 @@ def since_clause(since: str | None, column: str) -> str:
 # 有一半是测量者造的。脚本每跑一轮把 run id 追加进这个文件，报表据此剔除。
 SCRIPTED_RUNS_FILE = ".impeccable/companion/scripted-runs.txt"
 
+# 一票否决的取样切分点（UTC）。这一条不是"最近 N 天"这种方便写法，而是**改变输出形态
+# 的那一批修复上线的时刻**：无条件攒住 12 字 + 坍缩修复梯子（方案 29 §9.69 及当天 11:00
+# 的那次改动）。用它之前的轮次算退化率，量的是已经修掉的那个病。
+# 下一批改变输出形态的修复上线时，改这一行，不要新增第二个窗口。
+VETO_SAMPLE_SINCE = "2026-09-21 11:00:00+00"
+VETO_GATE_MIN_SAMPLE = 100
+
+# 客户端"播放完了/等到超时"上报能力的上线时刻（本机 09-21 14:10 提交，
+# 全库第一条 playback 行 09:26 UTC）。早于这一行的段不可能有上报，不能算静音。
+PLAYBACK_REPORTING_SINCE = "2026-09-21 06:10:00+00"
+
 
 def scripted_run_ids() -> set[str]:
     try:
@@ -253,11 +264,21 @@ def collect(since: str | None) -> dict:
     # 这一档该看的不是"有没有候选"，而是"有没有人来看"——所以量的是最久等了几天。
     mem_candidates = int(scalar("""
         SELECT count(*) FROM assistant_memory_items
-        WHERE candidate = true AND deleted_at IS NULL;
+        WHERE candidate = true AND deleted_at IS NULL AND archived_at IS NULL;
     """) or 0)
     mem_candidate_oldest_days = int(scalar("""
         SELECT floor(coalesce(extract(epoch FROM (now() - min(created_at))), 0) / 86400)
-        FROM assistant_memory_items WHERE candidate = true AND deleted_at IS NULL;
+        FROM assistant_memory_items
+        WHERE candidate = true AND deleted_at IS NULL AND archived_at IS NULL;
+    """) or 0)
+    # 0256 的冷静期到点了没有：等得够久、又不带"当前时间窗统计量"的候选，
+    # 会被每日维护自动落库。这个数不为 0 就说明"还要人来看"这条默认还压着东西。
+    mem_candidates_ripe = int(scalar("""
+        SELECT count(*) FROM assistant_memory_items
+        WHERE candidate = true AND deleted_at IS NULL AND archived_at IS NULL
+          AND created_at < now() - interval '3 days'
+          AND NOT (content ~ '(本周|这周|今天|今日|截至|这一阵)'
+                   AND content ~ '\\d+(\\.\\d+)?\\s*(分钟|小时|张|篇|项|题|次|条|%)');
     """) or 0)
     extract_jobs = rows("""
         SELECT status k, count(*) n FROM jobs WHERE type='companion_memory_extract'
@@ -322,6 +343,30 @@ def collect(since: str | None) -> dict:
           {since_clause(since, 'r.started_at')};
     """)
 
+    # §8.8 的门写着"真机 ≥100 轮"，而这个数**永远攒不满**：真人不在机器上就没有轮次，
+    # 于是它实际上是把"我没用"读成了"没修好"。脚本轮对这一条是合法样本——它测的是
+    # "管线在压力下还会不会吐三字的答句"，而脚本轮恰好专挑「哈哈」这种最短输入。
+    # （真正必须剔除脚本轮的只有**措辞一致性**那两类：开场重复率与闲聊推进率——
+    # 脚本输入固定，混进去会造出假的重复率。那两条照旧剔。）
+    # 所以这里按"修复切分点之后"给一个能攒够的窗口，并把样本构成摊开写清楚。
+    deg_gate = rows(f"""
+        WITH replies AS (
+          SELECT coalesce(m.blocks->0->>'text', '') AS t,
+                 -- 登记在册的脚本轮 = 脚本；没登记但确实是脚本跑的，算真人（宁可高估真人）
+                 (r.id::text = ANY(ARRAY[{",".join(f"'{v}'" for v in sorted(scripted)) or "''"}]::text[]))
+                   AS scripted
+          FROM companion_turn_runs r
+          JOIN companion_messages m ON m.id = r.assistant_message_id
+          WHERE r.status = 'succeeded' AND r.started_at > TIMESTAMPTZ '{VETO_SAMPLE_SINCE}'
+        )
+        SELECT count(*) n,
+               count(*) FILTER (WHERE scripted) n_scripted,
+               count(*) FILTER (WHERE NOT scripted) n_human,
+               count(*) FILTER (WHERE length(t) < 6) lt6,
+               count(*) FILTER (WHERE t ~ '[。！？!?…～~]$') well_ended
+        FROM replies;
+    """)
+
     # §8.8 的形状刻意是"数字组成的 dict"而不是 list[dict]：`--compare` 的 flat()
     # 只递归 dict、只收数值，塞列表进去这一项就永远进不了基线对照——而这正是它
     # 最该被对照的时候（修复有没有把比率拉下来）。没有样本的模型不进字典。
@@ -339,6 +384,18 @@ def collect(since: str | None) -> dict:
     veto_recent_lt6 = round(num(deg_recent[0]["lt6"]) / veto_recent_n, 3) if veto_recent_n else None
     veto_recent_ended = (round(num(deg_recent[0]["well_ended"]) / veto_recent_n, 3)
                          if veto_recent_n else None)
+
+    gate_row = deg_gate[0] if deg_gate else {}
+    gate_n = int(num(gate_row.get("n")))
+    gate = {
+        "since": VETO_SAMPLE_SINCE,
+        "n": gate_n,
+        "n_scripted": int(num(gate_row.get("n_scripted"))),
+        "n_human": int(num(gate_row.get("n_human"))),
+        "short_of_sample": max(0, VETO_GATE_MIN_SAMPLE - gate_n),
+        "lt6_pct": round(num(gate_row.get("lt6")) / gate_n, 3) if gate_n else None,
+        "ended_pct": round(num(gate_row.get("well_ended")) / gate_n, 3) if gate_n else None,
+    }
 
     # 0246 起才有的数：**逐段合成结果**。上面的 voice 只能证明"服务端下发了几段"，
     # 这一段才回答"这些段到底出没出声"——失败是引擎挂了还是回合被取消，也分得开。
@@ -391,6 +448,10 @@ def collect(since: str | None) -> dict:
         FROM companion_tts_outcomes s
         WHERE s.stage = 'synth' AND s.outcome = 'ok'
           {since_clause(since, 's.created_at')}
+          -- 播放上报是 09-21 14:10（本机）才上线的能力，全库第一条 playback 行在 09:26 UTC。
+          -- 不设这道界会把"那时结构上不可能有上报"的段算成"给了音频没响"——实测那样
+          -- 多算出 1 段，正好是这个数的一半。
+          AND s.created_at > TIMESTAMPTZ '{PLAYBACK_REPORTING_SINCE}'
           AND NOT EXISTS (
             SELECT 1 FROM companion_tts_outcomes p
             WHERE p.stage = 'playback' AND p.run_id = s.run_id AND p.segment_id = s.segment_id
@@ -415,23 +476,40 @@ def collect(since: str | None) -> dict:
     # 「主动投递」以前数的是 `companion_proactive_deliveries`——那张表**没有任何 INSERT**
     # （只有一个清理路径的 UPDATE、导出读、TTL 删），所以它恒 0，我拿着那个 0 说过
     # "主动投递 = 0"。真实的主动投递走 `assistant_deliveries`
-    # （`payload_ref->>'systemEventId'` 以 `thought:` / `reminder:` 开头）。
-    pro_thoughts = rows("""
-        SELECT coalesce(d.state,'-') state, count(*) n
+    # （`payload_ref->>'systemEventId'` 以 `thought:` / `reminder:` / `run.completed:` 开头）。
+    #
+    # 两类分开数（方案 29 §9.61）：`thought:` 是她**自己想开口**（受按偏好的间隔管），
+    # `reminder:` / `run.completed:` 是**用户先要过或正在等的**（不进频率）。
+    # 混在一个数里就看不出"她话太少"还是"闹钟没响"——那是两个完全不同的故障。
+    pro_rows = rows("""
+        SELECT split_part(d.payload_ref->>'systemEventId', ':', 1) AS kind,
+               coalesce(d.state, '-') AS state, count(*) AS n
         FROM assistant_deliveries d
-        WHERE d.payload_ref->>'systemEventId' LIKE 'thought:%'
-        GROUP BY 1;
+        WHERE d.payload_ref->>'systemEventId' LIKE '%:%'
+        GROUP BY 1, 2;
     """)
-    pro_by_state = {r["state"]: int(r["n"]) for r in pro_thoughts}
+
+    def pro_stats(kinds: tuple[str, ...]) -> dict[str, int]:
+        by_state = {r["state"]: int(r["n"]) for r in pro_rows if r["kind"] in kinds}
+        return {
+            "total": sum(by_state.values()),
+            # 与 worker 的节奏判定同一口径：displayed（露过）/ acted（点过）/ dismissed（划走）。
+            # 只数 displayed 会把点过的那条从分子里丢掉，两处口径一旦不同名就会互相打脸。
+            "seen": sum(by_state.get(state, 0) for state in ("displayed", "acted", "dismissed")),
+            "queued": by_state.get("queued", 0),
+        }
+
+    routine = pro_stats(("thought",))
+    triggered = pro_stats(("reminder", "run.completed"))
     proactive = {
         # 念头气泡：已送达 = 进过展示通道；queued 是"写好了但还没被人看见"。
-        "thought_deliveries": sum(pro_by_state.values()),
-        "thought_displayed": sum(
-            # 与 worker 日预算同一口径：displayed（露过）/ acted（点过）/ dismissed（划走）。
-            # 只数 displayed 会把点过的那条从分子里丢掉，两处口径一旦不同名就会互相打脸。
-            pro_by_state.get(state, 0) for state in ("displayed", "acted", "dismissed")
-        ),
-        "thought_queued": pro_by_state.get("queued", 0),
+        "thought_deliveries": routine["total"],
+        "thought_displayed": routine["seen"],
+        "thought_queued": routine["queued"],
+        # 触发式：用户约好的提醒 + 他正在等的学习完成回执。
+        "triggered_deliveries": triggered["total"],
+        "triggered_displayed": triggered["seen"],
+        "triggered_queued": triggered["queued"],
         # 候选为什么没变成气泡：状态分布就是抑制的账（§8.3 要的就是这一眼）。
         "thought_status": {
             r["status"]: int(r["n"]) for r in rows(
@@ -520,6 +598,7 @@ def collect(since: str | None) -> dict:
                 "recent_n": veto_recent_n,
                 "recent_lt6_pct": veto_recent_lt6,
                 "recent_ended_pct": veto_recent_ended,
+                "gate": gate,
             },
         },
         "memory": {
@@ -529,6 +608,7 @@ def collect(since: str | None) -> dict:
             "live_rows": mem_live,
             "candidate_rows": mem_candidates,
             "candidate_oldest_days": mem_candidate_oldest_days,
+            "candidate_ripe_for_cooling_off": mem_candidates_ripe,
             "extract_jobs": {j["k"]: int(j["n"]) for j in extract_jobs},
         },
         "voice": {
@@ -674,11 +754,26 @@ def render(metrics: dict) -> None:
     else:
         print("  一票否决·近6小时：窗口内没有成功轮次（应用没开 + 没跑脚本轮）")
 
+    # 这一行才是 §8.8 那条门的正式读数：切分点之后、样本构成摊开、够不够 100 轮直说。
+    gate = veto["gate"]
+    if gate["n"]:
+        print(f"  一票否决·切分点后 {gate['since'][:16]}  n={gate['n']}"
+              f"（真人 {gate['n_human']} / 脚本 {gate['n_scripted']}）"
+              f" 不足6字={gate['lt6_pct']:.1%} {'✓' if gate['lt6_pct'] < 0.10 else '✗'}"
+              f"  句末标点={gate['ended_pct']:.1%} {'✓' if gate['ended_pct'] > 0.85 else '✗'}")
+        if gate["short_of_sample"]:
+            print(f"  ⚠ 距 §8.8 要求的 {VETO_GATE_MIN_SAMPLE} 轮还差 {gate['short_of_sample']} 轮"
+                  f"——这一条是样本量不足，不是没修好；脚本轮算在这一条里（理由见 SQL 上方注释）。")
+    else:
+        print(f"  一票否决·切分点后 {gate['since'][:16]}：窗口内零轮次")
+
     print("\n【记忆】方案 RC3：读侧命中 / 写侧产出")
     print(f"  检索命中轮占比 = {mem['retrieval_hit_ratio']:.1%}")
     print(f"  抽取写入行数 = {mem['written_by_extraction']}   ← 0 即写路径全断")
     print(f"  活行 = {mem['live_rows']}  待过目（候选，设计上不自动写活）= {mem['candidate_rows']}"
-          f"，最久已等 {mem['candidate_oldest_days']} 天  抽取 job = {mem['extract_jobs']}")
+          f"，最久已等 {mem['candidate_oldest_days']} 天"
+          f"（其中满 3 天会被 0256 自动落库的 = {mem['candidate_ripe_for_cooling_off']}）"
+          f"  抽取 job = {mem['extract_jobs']}")
 
     print("\n【语音】方案 #4")
     print(f"  成功轮 = {voice['succeeded_runs']}  有正文却零语音段 = {voice['runs_with_text_but_zero_segments']}"
@@ -722,12 +817,16 @@ def render(metrics: dict) -> None:
     # 我拿 0 当过结论。现在打的是真链路，并把"为什么 16 个候选只出去 3 条"摊开。
     print(f"  念头气泡：送达 {pro['thought_deliveries']}（被看见过 {pro['thought_displayed']}"
           f" / 排队待展示 {pro['thought_queued']}）  死掉的念头 job = {pro['thought_jobs_dead']}")
+    # 触发式（用户约好的提醒 + 他正在等的学习完成回执）单独一行：它不进频率闸，
+    # 所以"这一类一条都没送达"和"送达了但没人看见"是两种不同的坏，混在念头那一行里看不出来。
+    print(f"  触发式推送：送达 {pro['triggered_deliveries']}（被看见过 {pro['triggered_displayed']}"
+          f" / 排队待展示 {pro['triggered_queued']}）  ← 到点提醒与运行完成回执，不受频率管")
     # 漏斗只给绝对数：n=3 的时候算百分比是演戏（这条会话里已经退掉过两个这类指标）。
     print(f"  念头漏斗：候选 {pro['thought_status'].get('candidate', 0)} → 送达 {pro['thought_status'].get('delivered', 0)}"
           f" → 被打开 {pro['thought_opened']}（过期没人看 {pro['thought_expired_unopened']}）"
           "   ← 送达不等于被看见；应用没开时这一档必然全 0")
     print(f"  念头状态分布 = {pro['thought_status']}"
-          "   ← candidate 堆着不动就是抑制在起作用（预算/熟悉度/去重/静默时段）")
+          "   ← candidate 堆着不动就是抑制在起作用（间隔/熟悉度/去重/静默时段）")
 
 
 def compare(current: dict, baseline: dict) -> None:

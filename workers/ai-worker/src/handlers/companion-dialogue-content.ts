@@ -168,7 +168,7 @@ export function looksLikeJsonFragment(text: string): boolean {
  * 无 `g` 标志：可以安全地在同一份文本上反复 test（lastIndex 不会残留）。
  */
 const COMPANION_LEAK_PATTERN =
-  /(companion-persona-v\d+|character\.cue|"cue"|reason\s*id|tool\s*param|promptVersion|"route"\s*:|activeMemories|recentMessages|currentMessage|workspacePolicy|sendToExternal|piiDetection|pageContext|selectedText|groundedTarget|<memory_data>|<persona_data>|<selection_data>|<page_context>|<grounded_target>|<here_and_now>|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+  /(companion-persona-v\d+|companion_[a-z_]{4,}|character\.cue|"cue"|reason\s*id|tool\s*param|promptVersion|"route"\s*:|activeMemories|recentMessages|currentMessage|workspacePolicy|sendToExternal|piiDetection|pageContext|selectedText|groundedTarget|<memory_data>|<persona_data>|<selection_data>|<page_context>|<grounded_target>|<here_and_now>|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 
 /**
  * 内部 token / 上下文回显 / 裸 uuid 的**唯一**判据。
@@ -186,6 +186,27 @@ const COMPANION_LEAK_PATTERN =
  */
 export function containsCompanionInternalToken(text: string): boolean {
   return COMPANION_LEAK_PATTERN.test(text);
+}
+
+/**
+ * 把 `「…」` / `《…》` 里的内容洗成一个点，只留名字的位置。
+ *
+ * 为什么需要：**名字里带数量词的标题不是统计读数**。两张卡/笔记的标题写成
+ * 「背 3 条法律」或《每天 5 张图》是完全正常的，而两处"数字 + 量词"的判据
+ * （念头气泡的 `readsOutStatistics`、记忆抽取的 `isVolatileStatisticMemory`）
+ * 会把它们当成系统读数——后果不是吵人而是**漏**：那张卡再也提醒不了、
+ * 那条记忆根本没写进去，而日志只会说"被统计闸拦了"。
+ *
+ * 只洗名字，不洗整句：`今天学了「背 3 条法律」那张卡，另外累计 45 分钟`
+ * 里的 45 分钟仍然算读数。
+ *
+ * 带 `g` 标志但只配合 `replace` 使用（replace 会自己复位 lastIndex），
+ * 不要拿它去 test。
+ */
+const QUOTED_NAME_TEST = /[「《][^」》]{0,80}[」》]/g;
+
+export function withoutQuotedNames(text: string): string {
+  return text.replace(QUOTED_NAME_TEST, "·");
 }
 
 /**
@@ -397,8 +418,11 @@ export function looksLikeUnfulfilledActionNarration(text: string): boolean {
  *
  * 这是措辞档，不是语义档——命中了也只多花一次模型调用（她仍然自己决定调哪个工具、
  * 参数填什么），漏了则退回今天的行为。所以宁可收得紧一点，只放**动词明确**的说法。
+ * 例外是**她自己的人格设定项**（口头禅/口癖/称呼/活跃度）：动词那一侧说不完
+ * （实机 2026-09-22 说了"设成"，判据里只有"设为/改成/设置成"，于是她零工具直接回
+ * "活跃度调到「活跃」了喵"），而名词是有限的一小撮，出现即可以判定"这轮必须动手"。
  */
-const ACTION_REQUEST_TEST = /(记住|记下|记一下|别记|忘掉|忘了|忘记|删掉|别记着|口头禅|提醒我|提醒一下|以后.{0,8}(别|不要|不准)|别催|改成|设为|设置成|帮我(查|搜|找|看看)|帮你(查|搜|找)|打开|读(原文|一下|出来)|排(个|一下)?复习)/;
+const ACTION_REQUEST_TEST = /(记住|记下|记一下|别记|忘掉|忘了|忘记|删掉|别记着|口头禅|口癖|活跃度|称呼|提醒我|提醒一下|以后.{0,8}(别|不要|不准)|别催|改成|改到|设为|设成|设置成|调成|调到|换到|帮我(查|搜|找|看看)|帮你(查|搜|找)|打开|读(原文|一下|出来)|排(个|一下)?复习)/;
 
 export function looksLikeActionRequest(text: string): boolean {
   return ACTION_REQUEST_TEST.test(text);
@@ -685,6 +709,14 @@ export function buildCompanionPersonaMessages(input: {
    * 基线实测 90.7% 的轮次工具面是空的，把「知道」做成工具等于把这些事实一起关掉。
    */
   hereAndNow?: string | null;
+  /**
+   * 更早对话的摘要块（方案 29 §11 C1），null = 这个会话还没有摘要。
+   *
+   * 历史回放只带最近 20 条，再往前的对话她本来是不可见的；这一块就是那段记忆。
+   * 它**故意不进** `keepRecomputedBlocks` 的数字出处白名单——摘要里的数字是
+   * 写它那一刻的值，放行等于把几周前的统计复活成"本轮查过的事实"。
+   */
+  conversationSummary?: string | null;
   /** 22 方案：用户自定义人格档案（有值则覆盖默认人格风格）。 */
   petProfile?: {
     name: string;
@@ -840,6 +872,12 @@ export function buildCompanionPersonaMessages(input: {
   if (activeMemories.length > 0) {
     presentDataBlocks.push("<memory_data> 是用户的历史记忆，可以自然引用里面的事实。");
   }
+  if (input.conversationSummary) {
+    presentDataBlocks.push(
+      "<conversation_summary> 是更早那段对话的摘要（回放只带最近几条，之前的它替她记着）："
+      + "可以据此接话，但它是**当时**写的，里面的数字不作数。",
+    );
+  }
   if (selectionText) {
     presentDataBlocks.push("<selection_data> 用户刚在页面上划选的原文，引用时只用其中真实存在的文字。");
   }
@@ -894,6 +932,7 @@ export function buildCompanionPersonaMessages(input: {
   const dataBlocks = [
     ...(dataBlocksPreamble ? ["", dataBlocksPreamble] : []),
     ...(input.hereAndNow ? ["", input.hereAndNow] : []),
+    ...(input.conversationSummary ? ["", input.conversationSummary] : []),
     ...(memoryDataBlock ? ["", memoryDataBlock] : []),
     ...(selectionDataBlock ? ["", selectionDataBlock] : []),
     ...(pageContextBlock ? ["", pageContextBlock] : []),

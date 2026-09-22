@@ -15,9 +15,16 @@ import {
   validateCompanionAgentToolArguments,
 } from "@ailearn/shared";
 import {
+  FINAL_ANSWER_HOLD_CHARS,
   boundedToolCallIdentity,
+  actionSteerBudget,
+  joinVisibleSegmentsDeduped,
+  partitionPersonaPatch,
+  stepHoldChars,
+  steerableToolNames,
   runStreamingAgentStep,
   safeArgumentsHash,
+  taskQueueToolResult,
 } from "./companion-agent-runtime.ts";
 import { CompanionStreamStoppedError } from "./companion-dialogue-stream.ts";
 import type { AIProvider } from "../lib/ai-provider.ts";
@@ -413,4 +420,141 @@ test("扁平工具面：read_only 档仍然只剩读工具（权限边界不因�
   assert.ok(readOnly.length > 0, "read_only 下仍要有读工具");
   assert.ok(readOnly.every((d) => d.riskClass === "read"),
     "read_only 绝不能出现任何写/动作工具");
+});
+/**
+ * steer 的提示里到底该点名哪个工具。
+ *
+ * 实机 2026-09-22 场景 T：用户说「以后别主动催我复习」，她两步都只回"我记下了"，
+ * `companion_set_boundary` 一次没调（tools=0，边界其实没改）。查下来不是模型不肯调，
+ * 而是**这一支的提示根本没点名任何工具**：`steerableReadTools` 只收读类工具，
+ * 而 action 那一支用的是泛指文案"调用合适的工具"——同一个文件上面 30 行就写着
+ * "小模型对『你去调用工具』这种泛指不敏感，对『调用 companion_search_notes』会照做"。
+ * 换到兜底模型也一样，因为要它做的仍然是"猜哪个工具"。
+ */
+test("steerableToolNames：lookup 点读类、action 点可逆写，consequential 永不点名", () => {
+  const defs = [
+    { name: "companion_search_notes", riskClass: "read" },
+    { name: "companion_recall_memory", riskClass: "read" },
+    { name: "companion_set_boundary", riskClass: "reversible_low" },
+    { name: "companion_save_memory", riskClass: "reversible_low" },
+    { name: "companion_start_learning", riskClass: "consequential" },
+    { name: "companion_pause_learning", riskClass: "consequential" },
+  ];
+  assert.deepEqual(steerableToolNames(defs, "lookup"), ["companion_search_notes", "companion_recall_memory"]);
+  assert.deepEqual(steerableToolNames(defs, "action"), ["companion_set_boundary", "companion_save_memory"]);
+  // 这条是安全性质，不是风格：一句纠正性提示里出现 companion_start_learning，
+  // 等于系统自己把用户没要过的学习运行推上桌。
+  for (const kind of ["lookup", "action"] as const) {
+    assert.ok(steerableToolNames(defs, kind).every((name) => !name.includes("learning")),
+      `${kind} 那一支绝不能点名 consequential`);
+  }
+  assert.equal(steerableToolNames([...defs, ...defs], "lookup", 3).length, 3);
+});
+
+/**
+ * 分段拼接必须保证"已下发原文是最终正文的前缀"。
+ *
+ * 实机 2026-09-22 场景 T：第 1 步的话被 hold 攒住没发出去、随后被 steer 掉，
+ * 第 3 步真的调了 `companion_set_boundary` 并说出结论——边界改成功了，run 却
+ * 判 `stream_full_text_diverged` 失败（最终正文以那句没发出去的话开头）。
+ * 用户看到的是"报错"，而事情其实做完了——这是最难解释的一种失败。
+ */
+test("joinVisibleSegmentsDeduped：从没下发过的段不能排在已下发段前面", () => {
+  const SEP = "\n\n";
+  // 全下发 → 原样保留（顺序与分段符都不能动）
+  assert.equal(joinVisibleSegmentsDeduped(["第一段话呀呀", "第二段话呀呀"], [true, true]).text,
+    "第一段话呀呀" + SEP + "第二段话呀呀");
+  // 未下发在前、已下发在后 → 丢前面那条，结果以已下发的那条开头
+  const dropped = joinVisibleSegmentsDeduped(["嗯嗯，记住了喵。", "好了，这次是真的设上了喵"], [false, true]);
+  assert.equal(dropped.text, "好了，这次是真的设上了喵");
+  assert.deepEqual(dropped.dropped, ["嗯嗯，记住了喵。"]);
+  // 夹在两个已下发段中间的未下发段同样丢
+  assert.equal(joinVisibleSegmentsDeduped(
+    ["第一段话呀呀", "第二段没发出去", "第三段话呀呀"], [true, false, true],
+  ).text, "第一段话呀呀" + SEP + "第三段话呀呀");
+  // 末尾的未下发段**必须保留**：那是 writeTail 正要补发的尾巴，丢了用户就没答案了
+  assert.equal(joinVisibleSegmentsDeduped(
+    ["第一段话呀呀", "第二段还没发出去"], [true, false],
+  ).text, "第一段话呀呀" + SEP + "第二段还没发出去");
+  // 原有的"复读去重"仍在：未下发且与前面保留段完全相同 → 丢
+  assert.equal(joinVisibleSegmentsDeduped(
+    ["复习入口准备好啦点前往", "复习入口准备好啦点前往"], [true, false],
+  ).text, "复习入口准备好啦点前往");
+});
+
+/**
+ * 用户要的是一个"必须动系统才算做到"的动作时，这一步的话要**整段攒住**。
+ *
+ * 实机 2026-09-22 场景 T：opener「嗯，这条早就设好了喵——你不问，我一个字都不提」
+ * 先落到屏幕上，之后哪怕 steer 出真的 `companion_set_boundary`，也只能在同一条消息里
+ * 自相矛盾（或者干脆留下一句没兑现的承诺）。事后闸救不了已经发出去的字，
+ * 所以这里改的是**发不发**：动作轮里，一步结束前不落屏。
+ */
+test("stepHoldChars：动作轮整段攒住，普通轮仍是 12 字阈值", () => {
+  assert.equal(stepHoldChars({ userAskedForAction: false }), FINAL_ANSWER_HOLD_CHARS);
+  const hold = stepHoldChars({ userAskedForAction: true });
+  assert.ok(hold > 10_000, "动作轮的阈值要高到一步的正文永远达不到");
+  assert.ok("嗯，这条早就设好了喵——你不问，我一个字都不提。".length < hold);
+});
+
+/**
+ * 动作轮可以多补一步，普通形状不行。
+ * 这条额度差是**有条件的**：只有 `stepHoldChars` 把正文整段攒住之后才成立，
+ * 否则第二次 steer 是在已经落屏的假话后面再接一段。
+ */
+test("actionSteerBudget：动作轮两次、其他形状一次", () => {
+  assert.equal(actionSteerBudget({ userAskedForAction: true }), 2);
+  assert.equal(actionSteerBudget({ userAskedForAction: false }), 1);
+});
+
+/**
+ * "她改了但其实没改"这一类（实机 2026-09-22 场景 U）。
+ *
+ * 用户只要一句口头禅，她连着调了两个工具，其中一个把活跃度"调成了「活跃」"——
+ * 而活跃度**本来就是** active（库里 09-20 就是 active，revision 白 +1）。
+ * 她随后自己补了一句"这个是你想要的吗"，说明这不是恶意，是工具结果给了她一个
+ * "已把 X 设为 Y"的**成功摘要**，而这一轮那件事根本没发生。
+ * 所以工具必须区分"改成了"和"本来就是这样"。
+ */
+test("partitionPersonaPatch：与当前值相同的项不算改动", () => {
+  assert.deepEqual(
+    partitionPersonaPatch({ activeness: "active" }, { activeness: "active" }),
+    { changed: {}, unchangedKeys: ["activeness"] },
+  );
+  assert.deepEqual(
+    partitionPersonaPatch(
+      { allowNudgeLearning: true, allowPlayful: true },
+      { allowNudgeLearning: false, allowPlayful: true },
+    ),
+    { changed: { allowNudgeLearning: false }, unchangedKeys: ["allowPlayful"] },
+  );
+  // 当前值缺项（boundaries 从没写过的键）算改动：不能把"没设过"读成"已经是这样"。
+  assert.deepEqual(
+    partitionPersonaPatch({}, { catchphrase: "就这么定了" }),
+    { changed: { catchphrase: "就这么定了" }, unchangedKeys: [] },
+  );
+});
+
+// 实机 2026-09-22 真人轮「我接下来的任务队列里都排着什么？」：她把清单念完了，
+// 但 `list_task_queue` 此前只回文字——既不给 route，`open_page` 白名单里也没有
+// "任务队列"这一页，用户想点开看一眼无路可走。队列属于某一次学习运行，
+// 所以"打开那轮运行"就是它该落到的地方。
+test("taskQueueToolResult：有待办时带出这一轮运行页的 route", () => {
+  const runId = "3f2e1369-7595-466c-af76-6cea5ee7440f";
+  const result = taskQueueToolResult([
+    { task_id: "t1", sequence: 2, status: "pending", label: "过一遍公式", run_phase: "active", run_id: runId },
+    { task_id: "t2", sequence: 3, status: "pending", label: "错题回看", run_phase: "active", run_id: runId },
+  ]);
+  assert.deepEqual(result.route, { kind: "learning_run", runId });
+  assert.equal(result.safeSummary, "队列里有 2 个待办任务");
+  assert.deepEqual((result.value.tasks as { taskId: string }[]).map((t) => t.taskId), ["t1", "t2"]);
+});
+
+test("taskQueueToolResult：没有待办 / 拿不到 run 时不硬造 route", () => {
+  assert.equal(taskQueueToolResult([]).route, undefined);
+  assert.equal(taskQueueToolResult([]).safeSummary, "当前没有排着的任务");
+  assert.equal(
+    taskQueueToolResult([{ task_id: "t1", sequence: 1, status: "pending",
+                           label: "x", run_phase: "active", run_id: null }]).route, undefined,
+    "run_id 为空就不能拼出一个跳转");
 });

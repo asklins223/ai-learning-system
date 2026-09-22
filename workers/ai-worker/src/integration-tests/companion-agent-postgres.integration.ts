@@ -367,6 +367,7 @@ function continuationEvent(ws: string, uid: string, f: Fixture) {
       recentMessages: [],
       activeMemories: [],
       hereAndNow: null,
+      conversationSummary: null,
       petProfile: null,
       nextMessageSeq: 3,
       nextEventSeq: 100,

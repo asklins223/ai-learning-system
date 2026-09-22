@@ -1820,8 +1820,12 @@ export async function callGroundingCritic(args: {
  * 对候选集执行：确定性 precheck → 独立 Grounding + binding plan → 独立 Pedagogy
  * → bounded repair（LLM 模式）→ deck gate → run 终态（review_ready / needs_attention）。
  * 供主管线、regenerate_candidate（单候选）与 replan_set（全量新计划）复用。
+ *
+ * 导出只为一种验证：拿一对**脚本 provider** 把 pedagogy 的三种裁决（keep /
+ * rewrite / drop）各来一次，从而确定性地走到"有界修复 + 丢卡"这条尾段。
+ * 过去这条分支只能靠运气（确定性 pedagogy 恒 pass），运行时行为未因此改变。
  */
-async function critiqueAndFinalizeCandidates(
+export async function critiqueAndFinalizeCandidates(
   tx: WorkerTransaction,
   input: {
     runId: string;

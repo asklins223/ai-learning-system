@@ -15,6 +15,12 @@ test("isVolatileStatisticMemory：拦『现在这一份』统计，不拦用户�
   assert.equal(isVolatileStatisticMemory("每天只能挤出四十分钟学习，希望练习节奏短一点"), false);
   assert.equal(isVolatileStatisticMemory("用户偏好短节奏学习，每次练习约10分钟，每天总计约40分钟，中间需休息。"), false);
   assert.equal(isVolatileStatisticMemory("下个月要考日语N3"), false);
+  // 名字里带量词的卡/笔记标题不是统计。误判的后果是**这条记忆根本没写进去**——
+  // 比误放难发现得多（气泡那条同判据已经踩过一次，见 companion-thought 的 readsOutStatistics）。
+  assert.equal(isVolatileStatisticMemory("今天学了「背 3 条法律」那张卡，还没掌握。"), false);
+  assert.equal(isVolatileStatisticMemory("本周把《每天 5 张图》那篇读完了。"), false);
+  // 掩码只洗名字：名字之外的读数照样要拦。
+  assert.equal(isVolatileStatisticMemory("今天学了「背 3 条法律」那张卡，另外累计 45 分钟。"), true);
 });
 
 test("memory extract messages: 包含 system 提示与拼接对话", () => {
@@ -105,4 +111,51 @@ test("prompt 必须把 JSON 形状与枚举写给模型（契约不能只在代�
     assert.ok(system.includes(kind), `prompt 未列出枚举 ${kind}`);
   }
   assert.ok(system.includes("confidence"), "prompt 未说明 confidence");
+});
+
+// ─── 候选记忆冷静期（方案 29 §11 C2）：SQL 与 TS 必须是同一个判据 ──────────────
+// 0256 那条迁移里的解禁规则跑在 plpgsql（SECURITY DEFINER，跨用户扫），
+// 判据的正主是这个文件的 isVolatileStatisticMemory。两处各写一份正则，
+// 早晚会漂——这条测试把两边按同一批样本对齐，漂了就红。
+import { readFileSync } from "node:fs";
+
+function migrationStatTests(): { window: RegExp; quantity: RegExp } {
+  const url = new URL(
+    "../../../../apps/api/src/db/migrations/0256_companion_candidate_memory_cooling_off.sql",
+    import.meta.url,
+  );
+  const sqlText = readFileSync(url, "utf8");
+  const patterns = [...sqlText.matchAll(/content ~ '([^']+)'/g)].map((m) => m[1]);
+  assert.equal(patterns.length, 2, "迁移里应当有两条 content ~ '…' （时间窗 + 量词）");
+  return { window: new RegExp(patterns[0]), quantity: new RegExp(patterns[1]) };
+}
+
+test("0256 的解禁例外与抽取器的统计判据逐样本一致", () => {
+  const { window, quantity } = migrationStatTests();
+  const sqlBlocks = (content: string) => window.test(content) && quantity.test(content);
+  for (const content of [
+    "截至当前，用户本周累计学习时长为23分钟，拥有10张活跃卡片和9篇笔记。",
+    "用户今天学了 45 分钟。",
+    "这一阵他打开了 12 张卡。",
+    "这周要掌握光合作用的 3 个阶段。",
+    // 下面三条都不该被例外挡住：没有"当前时间窗"，或数字只在名字里。
+    "用户说每天只能挤出 40 分钟。",
+    "卡片「背 3 条法律」还没复习。",
+    "喜欢用语音念题。",
+  ]) {
+    assert.equal(
+      sqlBlocks(content), isVolatileStatisticMemory(content),
+      `判据漂移：${content}`,
+    );
+  }
+});
+
+// 已知且**故意保留**的差异：TS 侧先把「…」/《…》里的内容遮掉再判，SQL 侧没有那一步，
+// 所以"数字只出现在名字里、又恰好带时间窗"的行在 SQL 侧更严——代价只是这条候选
+// 多等一天（手动确认那条路不受影响），反向的误放在这里是要命的那一侧。
+test("0256 的例外比抽取器更严，方向必须是这样", () => {
+  const { window, quantity } = migrationStatTests();
+  const content = "本周的计划写在《背 3 条法律》里。";
+  assert.equal(isVolatileStatisticMemory(content), false, "TS 遮掉名字后不该判成统计");
+  assert.equal(window.test(content) && quantity.test(content), true, "SQL 侧应当更严");
 });

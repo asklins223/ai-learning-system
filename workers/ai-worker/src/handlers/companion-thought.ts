@@ -20,9 +20,12 @@ import { readCompanionThoughtJobPayload } from "@ailearn/shared";
 import {
   evaluateDismissalFeedback,
   isWithinQuietHours,
+  proactiveAvailabilityBlocked,
   proactiveCadenceMs,
   routineCadenceBlocked,
+  type CompanionAvailabilityV1,
   type CompanionInterventionLevelV1,
+  type CompanionQuietHours,
 } from "@ailearn/shared/companion-proactive-policy";
 import { logger } from "../lib/logger.ts";
 import { assertJobLease, withJobTransaction } from "../lib/job-lease.ts";
@@ -38,6 +41,7 @@ import { resolveProviderCallTimeout } from "../lib/handler-timeout-config.ts";
 import {
   containsCompanionInternalToken,
   looksLikeJsonEnvelope,
+  withoutQuotedNames,
   unwrapCompanionJsonEnvelope,
 } from "./companion-dialogue-content.ts";
 import { enqueueSystemEventDelivery } from "./companion-delivery-write.ts";
@@ -383,8 +387,68 @@ export function isDuplicateThought(
  */
 const STATISTIC_QUANTITY_TEST = /\d+(?:\.\d+)?\s*(分钟|小时|天|周|张|篇|项|次|条|题|%)/;
 
+/**
+ * 名字里的数字不算读数：判形状之前先洗掉 `「…」` / `《…》` 里的内容
+ * （`withoutQuotedNames`，与记忆抽取那条判据共用）。
+ *
+ * 不这么做会造出一个**漏报**：一张标题写着「背 3 条法律」的卡，模板句是
+ * 「背 3 条法律」那张卡到点了…，会被这道闸当成"统计读数"永久拦掉——于是这张卡
+ * 再也提醒不了，而日志只会说"被统计闸拦了"，没人往漏报上想。
+ */
 export function readsOutStatistics(text: string): boolean {
-  return STATISTIC_QUANTITY_TEST.test(text);
+  return STATISTIC_QUANTITY_TEST.test(withoutQuotedNames(text));
+}
+
+/**
+ * 例行主动开口的时机判定（四条闸的**唯一实现处**，纯函数）。
+ *
+ * 抽出来有两个原因：
+ * 1. 这四条以前直接写在 handler 里，改任何一条都要连 job + DB 才知道它到底拦没拦，
+ *    而"拦错方向"（该拦的没拦、不该拦的拦了）在读日志上根本看不出来；
+ * 2. 顺序本身是语义——勿扰优先于静默时段，两条都命中时报错了没人会发现。
+ *
+ * 「勿扰」这一条是这次新加的：以前只有 api 的 proactive-hook 认 `presence`，
+ * 念头管线连这一列都没读，所以 HUD 上那个开关对"她主动开口"完全无效
+ * （设置存在、界面能改、其中一条链路不听——和 §9.61 那四套节奏是同一种病）。
+ */
+export interface RoutineCueTimingInput {
+  readonly availability: CompanionAvailabilityV1;
+  readonly quietHours: CompanionQuietHours | null;
+  readonly now: Date;
+  readonly recentDeliveryStates: readonly string[];
+  readonly interventionLevel: CompanionInterventionLevelV1;
+  readonly msSinceLastRoutineCue: number | null;
+}
+
+export function evaluateRoutineCueTiming(input: RoutineCueTimingInput): {
+  allow: boolean;
+  reason: "allowed" | "availability" | "quiet_hours" | "dismissal_feedback" | "cadence";
+  detail: Record<string, unknown>;
+} {
+  if (proactiveAvailabilityBlocked(input.availability)) {
+    return { allow: false, reason: "availability", detail: { availability: input.availability } };
+  }
+  if (input.quietHours && isWithinQuietHours(input.quietHours, input.now)) {
+    return { allow: false, reason: "quiet_hours", detail: {} };
+  }
+  if (evaluateDismissalFeedback(input.recentDeliveryStates).suppress) {
+    return { allow: false, reason: "dismissal_feedback", detail: { recentStates: input.recentDeliveryStates } };
+  }
+  if (routineCadenceBlocked({
+    interventionLevel: input.interventionLevel,
+    msSinceLastCue: input.msSinceLastRoutineCue,
+  })) {
+    return {
+      allow: false,
+      reason: "cadence",
+      detail: {
+        interventionLevel: input.interventionLevel,
+        msSinceLastRoutineCue: input.msSinceLastRoutineCue,
+        cadenceMs: proactiveCadenceMs(input.interventionLevel),
+      },
+    };
+  }
+  return { allow: true, reason: "allowed", detail: {} };
 }
 
 /** 表达校验（切片③）：长度 / 内部 token 泄露 / grounding 命中 / 改写不许改数字。 */
@@ -608,8 +672,9 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
     const accountRows = await tx.execute<{
       quiet_hours: Record<string, unknown> | null;
       intervention_level: string | null;
+      presence: { presence?: "online" | "dnd" | "offline" } | null;
     }>(sql`
-      SELECT quiet_hours, intervention_level FROM user_companion_account_state
+      SELECT quiet_hours, intervention_level, presence FROM user_companion_account_state
       WHERE user_id = ${userId} LIMIT 1
     `);
 
@@ -636,11 +701,15 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
     }
 
     const boundaries = (row.boundaries ?? {}) as Record<string, unknown>;
-    const quietHours = accountRows[0]?.quiet_hours as { startLocal: string; endLocal: string; timezone: string } | null;
+    const quietHours = accountRows[0]?.quiet_hours as CompanionQuietHours | null;
     // 没有账号行时按 moderate 处理：未知不等于"最多"，也不等于"静音"。
     const rawLevel = accountRows[0]?.intervention_level;
     const interventionLevel: CompanionInterventionLevelV1 =
       rawLevel === "quiet" || rawLevel === "active" || rawLevel === "moderate" ? rawLevel : "moderate";
+    // `presence` 可以是 NULL（这一列只有 HUD 上那个开关会写，没动过就是空）。
+    // "没设过"不等于"勿扰"，所以缺省按在线；但用户一旦显式设了勿扰/离线，
+    // 这条链路必须听——以前它连这一列都没读。
+    const availability: CompanionAvailabilityV1 = accountRows[0]?.presence?.presence ?? "online";
 
     return {
       today,
@@ -666,14 +735,16 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
         .filter((values): values is number[] => values !== null),
       quietHours,
       interventionLevel,
+      availability,
       facts: renderHereAndNow(hereAndNow),
     } satisfies ThoughtMaterial & {
-      quietHours: typeof quietHours;
+      quietHours: CompanionQuietHours | null;
       interventionLevel: CompanionInterventionLevelV1;
+      availability: CompanionAvailabilityV1;
     };
   });
 
-  const { quietHours, interventionLevel, ...thoughtMaterial } = material;
+  const { quietHours, interventionLevel, availability, ...thoughtMaterial } = material;
 
   // 每一次调度都留一行结局。沉默本身是对的（"沉默默认"是设计），但**沉默且无日志**
   // 等于这个功能不存在——抱怨 #8 的排查过程里，这条管线跑完就是 "job ok"，
@@ -682,28 +753,19 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
     logger.info({ jobId: job.id, outcome, ...extra }, "companion thought outcome");
   };
 
-  // ── 时机决策：沉默是默认 ─────────────────────────────────────────────
-  // 1) 静默时段（fail closed）；2) 反馈降权；3) 节奏（按偏好的最小间隔）。
-  // 三条都排在**任何模型调用之前**。以前第 3 条是一个"一天 N 条"的额度，而且写在
+  // ── 时机决策：沉默是默认（四条闸见 `evaluateRoutineCueTiming`）─────────
+  // 全部排在**任何模型调用之前**：以前最后一条是"一天 N 条"的额度，而且写在
   // 候选生成之后——于是"今天已经说满"的那些调度照样白烧一次 LLM 才闭嘴。
-  if (quietHours && isWithinQuietHours(quietHours, new Date())) {
-    finish("silent", { reason: "quiet_hours" });
-    return;
-  }
-  if (evaluateDismissalFeedback(thoughtMaterial.recentDeliveryStates).suppress) {
-    finish("silent", { reason: "dismissal_feedback" });
-    return;
-  }
-  if (routineCadenceBlocked({
+  const timing = evaluateRoutineCueTiming({
+    availability,
+    quietHours,
+    now: new Date(),
+    recentDeliveryStates: thoughtMaterial.recentDeliveryStates,
     interventionLevel,
-    msSinceLastCue: thoughtMaterial.msSinceLastRoutineCue,
-  })) {
-    finish("silent", {
-      reason: "cadence",
-      interventionLevel,
-      msSinceLastRoutineCue: thoughtMaterial.msSinceLastRoutineCue,
-      cadenceMs: proactiveCadenceMs(interventionLevel),
-    });
+    msSinceLastRoutineCue: thoughtMaterial.msSinceLastRoutineCue,
+  });
+  if (!timing.allow) {
+    finish("silent", { reason: timing.reason, ...timing.detail });
     return;
   }
 

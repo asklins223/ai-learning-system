@@ -515,7 +515,10 @@ async function collectMaterial(tx: WorkerTransaction, scope: DayScope): Promise<
     WHERE b.workspace_id = ${scope.workspaceId}
       AND b.type IN ('quote', 'paragraph')
       AND length(trim(b.content)) BETWEEN 12 AND 400
-    ORDER BY b.ordinal
+    -- 按**长度**给，不按正文顺序：抓来的网页笔记开头往往是标题和推广行，
+    -- 实测 09-18 前四条里两条是「👉 仓库地址 (记得Star🌟)：网页链接」这种，
+    -- 她照单引用就把推广链接写进日记了。长的那几条才是她想引的东西。
+    ORDER BY length(b.content) DESC, b.ordinal
     LIMIT 4
   `);
   for (const row of Array.isArray(quoteRows) ? quoteRows : []) {

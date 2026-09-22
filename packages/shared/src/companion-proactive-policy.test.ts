@@ -12,6 +12,7 @@ import {
   POLICY_LIMITS,
   PROACTIVE_CADENCE_MS,
   proactiveCadenceMs,
+  proactiveAvailabilityBlocked,
   routineCadenceBlocked,
   type ProactivePolicyInput,
 } from "./companion-proactive-policy.ts";
@@ -104,6 +105,14 @@ test("触发式推送不进任何频率限制", () => {
   assert.deepEqual(evaluateTriggeredPush({ availability: "online", expired: false }), { allow: true, reasonCode: "allowed" });
   assert.equal(evaluateTriggeredPush({ availability: "dnd", expired: false }).reasonCode, "dnd");
   assert.equal(evaluateTriggeredPush({ availability: "online", expired: true }).reasonCode, "expired");
+});
+
+test("勿扰/离线：两条链路共用同一条判定", () => {
+  // 以前这条只有 api 的 proactive-hook 在用，worker 的念头管线连 `presence` 都没读，
+  // 于是 HUD 上的「勿扰」对"她主动开口"完全无效——设置存在、界面能改、一条链路不听。
+  assert.equal(proactiveAvailabilityBlocked("online"), false);
+  assert.equal(proactiveAvailabilityBlocked("dnd"), true);
+  assert.equal(proactiveAvailabilityBlocked("offline"), true);
 });
 
 test("间隔判定与策略同源（念头管线只调这一条）", () => {

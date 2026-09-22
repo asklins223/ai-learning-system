@@ -112,6 +112,7 @@ const ON_REQUEST_GATED_ROUTES: RouteCase[] = [
   { label: "memory: star map", flag: "COMPANION_MEMORY_VECTOR_V1", method: "GET", url: "/companion/memory/star-map" },
   { label: "pet profile: get", flag: "COMPANION_PET_PROFILE_V1", method: "GET", url: "/companion/pet-profile" },
   { label: "daily summary", flag: "COMPANION_DAILY_SUMMARY_V1", method: "GET", url: "/companion/daily" },
+  { label: "daily summary: month marks", flag: "COMPANION_DAILY_SUMMARY_V1", method: "GET", url: "/companion/daily/month?month=2026-09" },
 ];
 
 /** B 组：preHandler 门禁（认证优先）→ 匿名恒 401，路由必须存在。 */

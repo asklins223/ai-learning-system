@@ -12,7 +12,7 @@ import { z } from "zod";
 import { sql } from "drizzle-orm";
 import { logger } from "../lib/logger.ts";
 import { readJobPayloadString } from "@ailearn/shared";
-import { createProvider } from "../lib/ai-provider.ts";
+import { createProvider, withThinkingDisabled } from "../lib/ai-provider.ts";
 import {
   AIConsentRequiredError,
   createGovernedProvider,
@@ -37,21 +37,105 @@ export const conversationSummaryOutputSchema = z.object({
 });
 
 const SUMMARIZER_PROMPT = [
-  "你是桌宠的会话摘要器。把以下对话压缩成结构化摘要：",
-  "- 主题",
-  "- 用户目标",
-  "- 关键事件",
-  "- 用户偏好",
-  "- 待跟进事项",
-  "- 情绪状态",
+  "你是桌宠的会话摘要器。把以下对话压缩成结构化摘要。",
+  // 2026-09-22：这里原来是一行一条**中文**字段名（"主题 / 用户目标 / …"），而 schema
+  // 要的是英文键——模型照着清单回中文键，`schema.parse` 每次都抛，摘要自 0170 建表
+  // 以来落库 0 行（同期审计日志里成功调用 283 次）。字段名必须逐字给出来，
+  // 而"中文标签 + 英文键"两份清单只会让她照错的那份写。
+  "只输出一个 JSON 对象，键名必须逐字用下面这些英文（值用中文）：",
+  '{"title": "一句话主题", "topics": ["主题"], "userGoals": ["用户目标"],',
+  ' "keyEvents": ["关键事件"], "userPreferences": ["用户偏好"],',
+  ' "followUps": ["待跟进事项"], "emotionalState": "neutral"}',
+  "title 不能为空；四个列表没有内容就给空数组；emotionalState 只填一个英文词" +
+    "（neutral / positive / frustrated / tired 里选）。",
   "只输出 JSON。",
 ].join("\n");
+
+export const SUMMARIZER_INPUT_CHARS = 12_000;
+
+/**
+ * `SELECT … ORDER BY seq DESC LIMIT 200` 的行 → 正序可读对话。
+ *
+ * 调用方给的是"最近 200 条"（倒序），这里翻回时间顺序再拼文本。
+ */
+export function formatSummarizerTranscript(
+  rows: Array<{ role: string; blocks: unknown }>,
+): string {
+  return [...rows]
+    .reverse()
+    .map((row) => {
+      const text = Array.isArray(row.blocks)
+        ? (row.blocks as Array<{ type?: string; text?: unknown }>)
+            .filter((b) => b.type === "text")
+            .map((b) => String(b.text ?? ""))
+            .join("")
+        : "";
+      return `${row.role === "assistant" ? "桌宠" : "用户"}：${text}`;
+    })
+    .join("\n");
+}
 
 export function buildSummarizerMessages(conversationText: string): Array<{ role: "system" | "user"; content: string }> {
   return [
     { role: "system", content: SUMMARIZER_PROMPT },
-    { role: "user", content: conversationText.slice(0, 12_000) },
+    // 超预算时留**结尾**：会话是往上长的，砍尾巴等于把"刚才聊了什么"丢掉。
+    { role: "user", content: conversationText.slice(-SUMMARIZER_INPUT_CHARS) },
   ];
+}
+
+/**
+ * 摘要 → 注入对话上下文的 `<conversation_summary>` 数据块（方案 29 §11 C1）。
+ *
+ * 为什么要有这一块：历史回放只带最近 20 条（`recentMessages.slice(-20)`），
+ * 一条 524 消息的连续会话里，更早的那一段对她本来是完全不可见的——
+ * 摘要修好了却没人读，等于没修。
+ *
+ * 两条约束（都在测试里钉住）：
+ * - **数字不作数**：这块不进 `keepRecomputedBlocks` 的白名单。摘要里的数字是
+ *   "写它那一刻"的值，让它当出处等于把她几周前说过的统计复活成事实（§9.35）。
+ * - 摘要正文是模型生成的，与用户自填字段同级处理：先剥掉能提前闭合边界的标记。
+ */
+export const CONVERSATION_SUMMARY_MAX_CHARS = 600;
+
+const SUMMARY_BOUNDARY_TAGS = /<\/?conversation_summary>/gi;
+
+export function renderConversationSummary(
+  summary: unknown,
+): string | null {
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) return null;
+  const row = summary as Record<string, unknown>;
+  const text = (value: unknown): string =>
+    typeof value === "string" ? value.replace(SUMMARY_BOUNDARY_TAGS, "").trim() : "";
+  const list = (value: unknown, max: number): string[] =>
+    Array.isArray(value)
+      ? value.map(text).filter((item) => item.length > 0).slice(0, max)
+      : [];
+
+  const title = text(row.title);
+  if (title.length === 0) return null;
+  const lines = [
+    "<conversation_summary>",
+    `更早那段对话：${title}`,
+    ...(() => {
+      const events = list(row.keyEvents, 3);
+      return events.length > 0 ? [`办过的事：${events.join("；")}`] : [];
+    })(),
+    ...(() => {
+      const followUps = list(row.followUps, 3);
+      return followUps.length > 0 ? [`还没了结：${followUps.join("；")}`] : [];
+    })(),
+    ...(() => {
+      const prefs = list(row.userPreferences, 2);
+      return prefs.length > 0 ? [`他偏好的：${prefs.join("；")}`] : [];
+    })(),
+    "（这段是早些时候留下的摘要，不是这一轮新查的；里面的数字可能已经变了，" +
+      "要报数字得重新查。）",
+    "</conversation_summary>",
+  ];
+  const block = lines.join("\n");
+  return block.length > CONVERSATION_SUMMARY_MAX_CHARS
+    ? `${block.slice(0, CONVERSATION_SUMMARY_MAX_CHARS - 1)}…</conversation_summary>`
+    : block;
 }
 
 export async function runCompanionSummarizer(job: JobPayload): Promise<void> {
@@ -65,8 +149,13 @@ export async function runCompanionSummarizer(job: JobPayload): Promise<void> {
   const govCtx = await resolveAIGovernanceContext(job.workspaceId, userId);
   if (!govCtx.consentOk) throw new AIConsentRequiredError();
   const textRes = resolveProviderForTask(govCtx, "companion_agent");
+  // 2026-09-22 实测：开着思考时这一步 completion=998 token（= maxTokens 1000），
+  // JSON 从句子中间被切断，`parseMemoryExtractJson` 三层兜底全都解不出——
+  // 那 37 条 "invalid output" 的 SyntaxError 就是这个，而不是模型不听话。
+  // 关掉思考之后同一份输入 completion=375、7.6 秒返回且解析通过（开着是 36 秒）。
+  // 伴星的非流式调用一律关思考，这里此前是唯一漏掉的一处。
   const provider = createGovernedProvider(
-    createProvider(textRes.providerName, textRes.providerConfig),
+    createProvider(textRes.providerName, withThinkingDisabled(textRes.providerConfig)),
     govCtx,
     job.workspaceId,
     // AI P0-8（2026-09-15 审计）：接上 ai_audit_log 的唯一写入口（此前零调用）。
@@ -77,22 +166,15 @@ export async function runCompanionSummarizer(job: JobPayload): Promise<void> {
   );
 
   const conversationText = await withJobTransaction(job, async (tx) => {
+    // 取**最近** 200 条（原来写的是 `seq ASC`：一条 524 消息的连续会话，每一次摘要
+    // 都在复述最开头那 200 条，而且 `buildSummarizerMessages` 又按 12 000 字从头切——
+    // 两次都往回看，于是"会话摘要"永远停在几周前的第一段对话上）。
     const rows = await tx.execute<{ role: string; blocks: unknown }>(sql`
       SELECT role, blocks FROM companion_messages
       WHERE conversation_id = ${conversationId}
-      ORDER BY seq ASC LIMIT 200
+      ORDER BY seq DESC LIMIT 200
     `);
-    return rows
-      .map((row) => {
-        const text = Array.isArray(row.blocks)
-          ? (row.blocks as Array<{ type?: string; text?: unknown }>)
-              .filter((b) => b.type === "text")
-              .map((b) => String(b.text ?? ""))
-              .join("")
-          : "";
-        return `${row.role === "assistant" ? "桌宠" : "用户"}：${text}`;
-      })
-      .join("\n");
+    return formatSummarizerTranscript(rows);
   });
 
   if (!conversationText.trim()) {

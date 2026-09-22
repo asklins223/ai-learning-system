@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { extractNoteTitleReference, renderHereAndNow, weekdayLabel, type HereAndNowSnapshot } from "./companion-here-and-now.ts";
+import {
+  asksForBoundaryChange,
+  asksForLearningStats,
+  extractNoteTitleReference,
+  renderHereAndNow,
+  summarizeLearningStats,
+  weekdayLabel,
+  type HereAndNowSnapshot,
+} from "./companion-here-and-now.ts";
 
 function snapshot(overrides: Partial<HereAndNowSnapshot> = {}): HereAndNowSnapshot {
   return {
@@ -19,6 +27,8 @@ function snapshot(overrides: Partial<HereAndNowSnapshot> = {}): HereAndNowSnapsh
     noteReference: null,
     imagesReadable: false,
     currentPage: null,
+    learningStats: null,
+    boundaryFacts: null,
     ...overrides,
   };
 }
@@ -165,4 +175,88 @@ test("笔记标题与目标超长被截断，不撑爆每轮 token", () => {
   assert.match(noteLine, /《.*?…》\(刚刚\)$/);
   assert.ok(noteLine.length < 60, `笔记行应被截住，实际 ${noteLine.length}`);
   assert.ok(block.length < 400, `整块应控制在几百字符内，实际 ${block.length}`);
+});
+
+/**
+ * 用户这句话在要学习数据吗（实机 2026-09-22 场景 B/N）。
+ *
+ * 判据必须**保守**：漏了的代价只是她自己再去调一次工具（今天就是这样），
+ * 误判的代价是把"没问也报数"重新请回来——那正是 §9.60 刚赶出去的东西。
+ */
+test("asksForLearningStats：只认明确在要学习数据的说法", () => {
+  for (const text of [
+    "我今天一共学了多久了？",
+    "我这周总共学了多久？现在有多少张活跃卡片、多少篇笔记？",
+    "今天学了多长时间啦",
+    "我现在有多少个东西到期该复习了？",
+    "最近的学习进度怎么样？",
+  ]) {
+    assert.equal(asksForLearningStats(text), true, `该认出来：${text}`);
+  }
+  for (const text of [
+    "嘿嘿", "哈哈", "你笑什么嘛",
+    "这道题怎么做？",
+    "帮我记住：我习惯在图书馆三楼复习。",
+    "《欧姆定律生成验收》那篇笔记里写了什么？",
+    "把这张卡打开看看",
+    undefined, "",
+  ]) {
+    assert.equal(asksForLearningStats(text), false, `不该误判：${text}`);
+  }
+});
+
+test("问到学习数据时，真值在她开口之前就在场；没问就一行都不加", () => {
+  const stats = {
+    todayMinutes: 33, weekMinutes: 154, dueReviews: 25,
+    dueNext24Hours: 8, activeCards: 16, noteCount: 11,
+  };
+  const asked = renderHereAndNow(snapshot({ learningStats: stats }))!;
+  assert.match(asked, /今日 33 分钟，本周 154 分钟，到期复习 25 项/);
+  assert.match(asked, /活跃卡片 16 张，笔记 11 篇/);
+  // 这一句才是这次修复的重点：历史里的旧数必须被明确降级
+  // （实机她先说"今天 50 分钟"再查出 33，然后在同一条消息里改口）。
+  assert.match(asked, /只用这一行的数字/);
+  assert.match(asked, /历史对话里.*可能已经变/);
+  assert.doesNotMatch(renderHereAndNow(snapshot()) ?? "", /只用这一行的数字/);
+  // 工具与环境块共用同一份摘要，口径不能两份。
+  assert.equal(summarizeLearningStats(stats), "今日 33 分钟，本周 154 分钟，到期复习 25 项");
+});
+
+/**
+ * 用户这一轮要改她的行为边界吗（实机 2026-09-22 场景 T）。
+ *
+ * 判据同样保守，理由与学习数据那条一样：误判只是多一行她用得上的事实，
+ * 漏判则让她在不知道"现在到底是什么状态"的情况下张口承诺——
+ * 实测她说过"嗯，这条早就设好了喵"，而库里 `allowNudgeLearning` 还是 true。
+ */
+test("asksForBoundaryChange：只认明确要改边界/口吻的说法", () => {
+  for (const text of [
+    "以后别主动催我复习，我不问你别说。",
+    "别催我学习了",
+    "给你自己加个口头禅：就这么定了",
+    "把玩趣关掉",
+    "以后不要主动提醒我复习",
+  ]) {
+    assert.equal(asksForBoundaryChange(text), true, `该认出来：${text}`);
+  }
+  for (const text of [
+    "我今天一共学了多久了？",
+    "帮我记住：我习惯在图书馆三楼复习。",
+    "嘿嘿", "哈哈",
+    "这道题怎么做？",
+    undefined, "",
+  ]) {
+    assert.equal(asksForBoundaryChange(text), false, `不该误判：${text}`);
+  }
+});
+
+test("要改边界时，当前状态先摆出来；说「记住了」不等于改了", () => {
+  const asked = renderHereAndNow(snapshot({
+    boundaryFacts: { allowNudgeLearning: true, allowPlayful: true, allowVoiceTags: false },
+  }))!;
+  assert.match(asked, /催复习=开着/);
+  assert.match(asked, /语音情绪标签=关着/);
+  // 这一句是这次要买的后果：她以前把"应下来"当成"已经改好了"。
+  assert.match(asked, /光答"记下了"什么都没变/);
+  assert.doesNotMatch(renderHereAndNow(snapshot()) ?? "", /催复习=/);
 });

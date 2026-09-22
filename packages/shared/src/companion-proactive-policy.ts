@@ -117,6 +117,18 @@ export function evaluateTriggeredPush(input: {
   return { allow: true, reasonCode: "allowed" };
 }
 
+/**
+ * 设备在不在：`dnd` / `offline` 时不推气泡（不是"少推"，是不推——用户按下勿扰
+ * 之后还被打扰，比没有这个开关更糟）。
+ *
+ * 单独导出是因为**这条以前只有一条链路在用**：API 的 proactive-hook 认它，
+ * worker 的念头管线压根没读 `presence` 这一列——于是 HUD 上那个「勿扰」开关
+ * 对"她主动开口"这件事是无效的（设置存在、界面能改、其中一条链路不听）。
+ */
+export function proactiveAvailabilityBlocked(availability: CompanionAvailabilityV1): boolean {
+  return availability === "dnd" || availability === "offline";
+}
+
 /** 确定性主动策略（§10.2 的允许边界；不读模型输出）。 */
 export function evaluateProactivePolicy(input: ProactivePolicyInput): ProactivePolicyDecision {
   if ((input.kind ?? "routine") === "triggered") {

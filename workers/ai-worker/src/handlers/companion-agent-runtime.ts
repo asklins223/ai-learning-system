@@ -29,7 +29,7 @@ import { buildAgentTurnMessages } from "../lib/providers/json-response.ts";
 import { createCompanionEnvelopeDecoder } from "./companion-dialogue-envelope.ts";
 import { CompanionStreamStoppedError } from "./companion-dialogue-stream.ts";
 import { withWorkerWorkspaceTransaction } from "../db.ts";
-import { ageLabel, tzSubquery } from "./companion-here-and-now.ts";
+import { ageLabel, readLearningStats, summarizeLearningStats, tzSubquery } from "./companion-here-and-now.ts";
 import { createEmbeddingProvider, createProvider } from "../lib/ai-provider.ts";
 import {
   AIDataPolicyDeniedError,
@@ -98,7 +98,63 @@ export const AGENT_PERSISTENCE_MARGIN_MS = 15_000;
  * 12 字是"值不值得流式"的分界：短于它的回复本来一跳就完，省下流式没有任何损失；
  * 长于它的正常回复照旧逐字下发。真正的目的不是省流量，而是让坍缩闸还能有机会拦。
  */
-const FINAL_ANSWER_HOLD_CHARS = 12;
+export const FINAL_ANSWER_HOLD_CHARS = 12;
+
+/** 高到一步的正文永远达不到 = **整段攒住**（只有动作轮用）。 */
+const BUFFERED_STEP_HOLD_CHARS = 1_000_000;
+
+/**
+ * 这一步的话什么时候允许落到屏幕上。
+ *
+ * 普通轮照旧：攒够 12 字就开始逐字下发（流式体验优先，见 `FINAL_ANSWER_HOLD_CHARS`）。
+ * **动作轮整段攒住**：用户要的是"必须动系统才算做到"的事（改边界、记/忘、排提醒），
+ * 这一步结束之前没人知道她到底调没调工具。先落屏的代价实测过（2026-09-22 场景 T）：
+ * "嗯，这条早就设好了喵"先到屏幕上，之后哪怕真调了 `companion_set_boundary`，
+ * 也只能在同一条消息里自相矛盾；没调就留下一句没兑现的承诺。
+ *
+ * 攒住不会让字丢失：没下发过的内容由 writeTail 在终态整段补发（T 轮实测
+ * delta=1 批 73 字就是这条路径），代价是动作轮开头会有几秒安静——
+ * 按用户口径（"说了没做"是最重的一类抱怨），这个方向值。
+ */
+export function stepHoldChars(input: { userAskedForAction: boolean }): number {
+  return input.userAskedForAction ? BUFFERED_STEP_HOLD_CHARS : FINAL_ANSWER_HOLD_CHARS;
+}
+
+/**
+ * "让她做事却没做"这一支可以补几步。
+ *
+ * 动作轮给**两次**（普通形状仍是一次），前提是 `stepHoldChars` 已经把整段攒住：
+ * 多试一次不会先把假话落到屏幕上，只是多等几秒。其他形状的话已经流出去了，
+ * 再补一步只会让她在同一条消息里自相矛盾（那是 §9.28 定一次性额度的原因）。
+ */
+export function actionSteerBudget(input: { userAskedForAction: boolean }): number {
+  return input.userAskedForAction ? 2 : 1;
+}
+
+/**
+ * 把"与当前值完全相同"的项从补丁里剔掉。
+ *
+ * 为什么工具侧要做这件事：工具结果里那句"已把 X 设为 Y"是她措辞的唯一依据。
+ * 实机 2026-09-22 场景 U，用户只要一句口头禅，她顺手把活跃度也"调成了「活跃」"
+ * ——而活跃度本来就是 active（revision 白 +1，什么都没变）。那不是恶意，是
+ * **一个没发生的变化被写成了成功**。区分"改成了"和"本来就是这样"是工具的责任。
+ */
+export function partitionPersonaPatch(
+  current: Record<string, unknown>,
+  patch: Record<string, string | boolean>,
+): { changed: Record<string, string | boolean>; unchangedKeys: string[] } {
+  const changed: Record<string, string | boolean> = {};
+  const unchangedKeys: string[] = [];
+  for (const [key, value] of Object.entries(patch)) {
+    // 当前值缺项不算"已经是这样"：没设过 ≠ 设成了这个值。
+    if (Object.prototype.hasOwnProperty.call(current, key) && current[key] === value) {
+      unchangedKeys.push(key);
+    } else {
+      changed[key] = value;
+    }
+  }
+  return { changed, unchangedKeys };
+}
 
 /**
  * 扁平工具面下的固定步数预算（方案 29 §4.1）。
@@ -467,21 +523,51 @@ function missingImageMessage(assetId: string | null): string {
     : "那篇笔记里没有这张图（可能已经删了，也可能当初只是把图片地址写进了正文）";
 }
 
-interface LearningStatsRow extends Record<string, unknown> {
-  today_seconds: string;
-  week_seconds: string;
-  due_reviews: string;
-  due_next_24h: string;
-  active_cards: string;
-  note_count: string;
-}
-
 interface TaskQueueRow extends Record<string, unknown> {
   task_id: string;
   sequence: number;
   status: string;
   label: string | null;
   run_phase: string;
+  run_id: string | null;
+}
+
+/**
+ * `companion_list_task_queue` 的结果（纯函数，便于测）。
+ *
+ * 带 route 的理由（实机 2026-09-22 真人轮「我接下来的任务队列里都排着什么？」）：
+ * 这个工具此前只回文字清单，**既不给 route 也不出块**，而 `open_page` 的白名单里
+ * 又没有一个"任务队列"页可跳——她把清单念完了，用户想点开看一眼却无路可走。
+ * 队列本来就属于某一次学习运行，所以跳到那一轮的运行页就是它该去的地方。
+ */
+export function taskQueueToolResult(rows: TaskQueueRow[]): {
+  value: Record<string, unknown>;
+  safeSummary: string;
+  route?: Record<string, unknown>;
+  routeLabel?: string;
+} {
+  const tasks = rows.map((row) => ({
+    taskId: row.task_id,
+    step: Number(row.sequence),
+    status: row.status,
+    label: String(row.label ?? "").slice(0, 80),
+  }));
+  if (tasks.length === 0) {
+    return { value: { tasks }, safeSummary: "当前没有排着的任务" };
+  }
+  // 行是按 `r.updated_at DESC, t.sequence` 排的，第一条就是"下一个要做的"，
+  // 它所属的那轮运行也就是用户点进去最该落到的地方。
+  const firstRunId = rows[0].run_id;
+  return {
+    value: { tasks },
+    safeSummary: `队列里有 ${tasks.length} 个待办任务`,
+    ...(firstRunId
+      ? {
+        route: { kind: "learning_run", runId: firstRunId },
+        routeLabel: "打开这轮学习，看完整任务队列",
+      }
+      : {}),
+  };
 }
 
 interface ActivityRow extends Record<string, unknown> {
@@ -988,51 +1074,20 @@ async function executeReadTool(
       };
     }
     case "companion_get_learning_stats": {
+      // 取数与环境块共用同一份（`readLearningStats`）：她答话的口径和"用户问到学习数据
+      // 时先注入的真值"必须是同一个数，两处各写一份迟早会分叉。
       const stats = await withWorkerWorkspaceTransaction(
         { workspaceId: event.ctx.workspaceId, userId: event.read.userId },
-        async (tx) => {
-          const rows = await tx.execute<LearningStatsRow>(sql`
-            SELECT
-              (SELECT coalesce(sum(active_seconds_used), 0) FROM learning_metric_events
-                WHERE workspace_id = ${event.ctx.workspaceId} AND user_id = ${event.read.userId}
-                  AND occurred_at >= date_trunc('day', now() AT TIME ZONE ${tzSubquery(event.read.userId)}) AT TIME ZONE ${tzSubquery(event.read.userId)}
-              ) AS today_seconds,
-              (SELECT coalesce(sum(active_seconds_used), 0) FROM learning_metric_events
-                WHERE workspace_id = ${event.ctx.workspaceId} AND user_id = ${event.read.userId}
-                  AND occurred_at > now() - interval '7 days'
-              ) AS week_seconds,
-              (SELECT count(*) FROM review_schedules
-                WHERE workspace_id = ${event.ctx.workspaceId} AND user_id = ${event.read.userId}
-                  AND status = 'pending' AND next_review_at <= now()
-                  AND (user_deferred_until IS NULL OR user_deferred_until <= now())
-              ) AS due_reviews,
-              (SELECT count(*) FROM review_schedules
-                WHERE workspace_id = ${event.ctx.workspaceId} AND user_id = ${event.read.userId}
-                  AND status = 'pending'
-                  AND coalesce(user_deferred_until, next_review_at) > now()
-                  AND coalesce(user_deferred_until, next_review_at) <= now() + interval '24 hours'
-              ) AS due_next_24h,
-              (SELECT count(*) FROM learning_cards_v2
-                WHERE workspace_id = ${event.ctx.workspaceId} AND lifecycle = 'active'
-              ) AS active_cards,
-              (SELECT count(*) FROM notes
-                WHERE workspace_id = ${event.ctx.workspaceId} AND deleted_at IS NULL
-              ) AS note_count
-          `);
-          return rows[0] ?? null;
-        },
+        (tx) => readLearningStats(tx, {
+          workspaceId: event.ctx.workspaceId,
+          userId: event.read.userId,
+        }),
       );
-      const value = {
-        todayMinutes: Math.round(Number(stats?.today_seconds ?? 0) / 60),
-        weekMinutes: Math.round(Number(stats?.week_seconds ?? 0) / 60),
-        dueReviews: Number(stats?.due_reviews ?? 0),
-        dueNext24Hours: Number(stats?.due_next_24h ?? 0),
-        activeCards: Number(stats?.active_cards ?? 0),
-        noteCount: Number(stats?.note_count ?? 0),
-      };
+      // 摊成字面量：工具合同要的是 `Record<string, unknown>`，接口没有隐式索引签名。
+      const value = { ...stats };
       return {
         value,
-        safeSummary: `今日 ${value.todayMinutes} 分钟，本周 ${value.weekMinutes} 分钟，到期复习 ${value.dueReviews} 项`,
+        safeSummary: summarizeLearningStats(stats),
       };
     }
     case "companion_list_task_queue": {
@@ -1043,7 +1098,8 @@ async function executeReadTool(
                  t.sequence,
                  t.status,
                  coalesce(nullif(t.target_summary, ''), left(t.prompt, 60)) AS label,
-                 r.phase AS run_phase
+                 r.phase AS run_phase,
+                 t.run_id::text AS run_id
           FROM learning_tasks t
           JOIN learning_runs r ON r.id = t.run_id
           WHERE t.workspace_id = ${event.ctx.workspaceId}
@@ -1054,16 +1110,7 @@ async function executeReadTool(
           LIMIT 12
         `),
       );
-      const tasks = rows.map((row) => ({
-        taskId: row.task_id,
-        step: Number(row.sequence),
-        status: row.status,
-        label: String(row.label ?? "").slice(0, 80),
-      }));
-      return {
-        value: { tasks },
-        safeSummary: tasks.length > 0 ? `队列里有 ${tasks.length} 个待办任务` : "当前没有排着的任务",
-      };
+      return taskQueueToolResult(rows);
     }
     case "companion_list_due_reviews": {
       const limit = typeof args.limit === "number" ? Math.min(20, Math.max(1, args.limit)) : 8;
@@ -1214,9 +1261,19 @@ async function executeDirectTool(
   switch (definition.name) {
     case "companion_set_activeness": {
       const activeness = String(args.activeness);
-      const updated = await withWorkerWorkspaceTransaction(
+      const label = activeness === "quiet" ? "安静" : activeness === "active" ? "活跃" : "适中";
+      const outcome = await withWorkerWorkspaceTransaction(
         { workspaceId: event.ctx.workspaceId, userId: event.read.userId },
         async (tx) => {
+          const current = await tx.execute<{ activeness: string }>(sql`
+            SELECT activeness FROM pet_profiles
+            WHERE workspace_id = ${event.ctx.workspaceId} AND user_id = ${event.read.userId}
+            LIMIT 1
+          `);
+          const row = (Array.isArray(current) ? current : [])[0];
+          if (!row) return "missing" as const;
+          // 已经是这样了就不写 revision，也不给她一个"已设为"的成功摘要。
+          if (row.activeness === activeness) return "unchanged" as const;
           const rows = await tx.execute<{ id: string }>(sql`
             UPDATE pet_profiles
             SET activeness = ${activeness}, revision = revision + 1, updated_at = now()
@@ -1224,12 +1281,17 @@ async function executeDirectTool(
               AND user_id = ${event.read.userId}
             RETURNING id
           `);
-          return rows.length > 0;
+          return rows.length > 0 ? ("changed" as const) : ("missing" as const);
         },
       );
-      if (!updated) throw new CompanionToolError("pet profile not found in current workspace");
-      const label = activeness === "quiet" ? "安静" : activeness === "active" ? "活跃" : "适中";
-      return { value: { activeness }, safeSummary: `已把伴星活跃度设为「${label}」` };
+      if (outcome === "missing") throw new CompanionToolError("pet profile not found in current workspace");
+      if (outcome === "unchanged") {
+        return {
+          value: { activeness, changed: false },
+          safeSummary: `活跃度本来就有「${label}」这一档，没改动`,
+        };
+      }
+      return { value: { activeness, changed: true }, safeSummary: `已把伴星活跃度设为「${label}」` };
     }
     case "companion_save_memory": {
       // 写入口径对齐 API memory-service.upsertMemory 的"用户明确陈述"路径：
@@ -1299,31 +1361,52 @@ async function executeDirectTool(
       }
       if (typeof args.catchphrase === "string") patch.catchphrase = args.catchphrase.slice(0, 30);
       if (Object.keys(patch).length === 0) throw new CompanionToolError("没有要调整的边界项");
-      const updated = await withWorkerWorkspaceTransaction(
-        { workspaceId: event.ctx.workspaceId, userId: event.read.userId },
-        async (tx) => {
-          const rows = await tx.execute<{ boundaries: Record<string, unknown> | null }>(sql`
-            UPDATE pet_profiles
-               SET boundaries = coalesce(boundaries, '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb,
-                   revision = revision + 1, updated_at = now()
-             WHERE workspace_id = ${event.ctx.workspaceId} AND user_id = ${event.read.userId}
-             RETURNING boundaries
-          `);
-          return (Array.isArray(rows) ? rows : [])[0] ?? null;
-        },
-      );
-      if (!updated) throw new CompanionToolError("pet profile not found in current workspace");
       const labels: Record<string, string> = {
         allowPlayful: "玩趣",
         allowNudgeLearning: "催学习",
         allowVoiceTags: "语音情绪标签",
         catchphrase: "口头禅",
       };
-      const changed = Object.entries(patch)
+      const describe = (entries: Record<string, string | boolean>) => Object.entries(entries)
         .map(([key, value]) => `${labels[key]}=${typeof value === "boolean" ? (value ? "可以" : "不要") : value}`);
+      const outcome = await withWorkerWorkspaceTransaction(
+        { workspaceId: event.ctx.workspaceId, userId: event.read.userId },
+        async (tx) => {
+          const current = await tx.execute<{ boundaries: Record<string, unknown> | null }>(sql`
+            SELECT boundaries FROM pet_profiles
+            WHERE workspace_id = ${event.ctx.workspaceId} AND user_id = ${event.read.userId}
+            LIMIT 1
+          `);
+          const row = (Array.isArray(current) ? current : [])[0];
+          if (!row) return null;
+          const before = row.boundaries ?? {};
+          const { changed, unchangedKeys } = partitionPersonaPatch(before, patch);
+          if (Object.keys(changed).length === 0) {
+            return { boundaries: before, changed: {}, unchangedKeys } as const;
+          }
+          const rows = await tx.execute<{ boundaries: Record<string, unknown> | null }>(sql`
+            UPDATE pet_profiles
+               SET boundaries = coalesce(boundaries, '{}'::jsonb) || ${JSON.stringify(changed)}::jsonb,
+                   revision = revision + 1, updated_at = now()
+             WHERE workspace_id = ${event.ctx.workspaceId} AND user_id = ${event.read.userId}
+             RETURNING boundaries
+          `);
+          const after = (Array.isArray(rows) ? rows : [])[0];
+          if (!after) return null;
+          return { boundaries: after.boundaries ?? {}, changed, unchangedKeys } as const;
+        },
+      );
+      if (!outcome) throw new CompanionToolError("pet profile not found in current workspace");
+      const parts: string[] = [];
+      if (Object.keys(outcome.changed).length > 0) parts.push(`已调整边界：${describe(outcome.changed).join("、")}`);
+      // 用户没点名要改的项、或改了等于没改的项，都如实说"本来就是这样"，
+      // 不给"这一轮发生了什么"留下第二个版本。
+      if (outcome.unchangedKeys.length > 0) {
+        parts.push(`本来就是这样、没动的：${outcome.unchangedKeys.map((key) => labels[key] ?? key).join("、")}`);
+      }
       return {
-        value: { boundaries: updated.boundaries ?? {} },
-        safeSummary: `已调整边界：${changed.join("、")}`,
+        value: { boundaries: outcome.boundaries, changed: Object.keys(outcome.changed) },
+        safeSummary: parts.join("；"),
       };
     }
     case "companion_schedule_reminder": {
@@ -1593,6 +1676,27 @@ export function boundedToolCallIdentity(
   if (call.id.length === 0 || call.id.length > TOOL_CALL_ID_MAX_CHARS) return null;
   if (call.name.length === 0 || call.name.length > TOOL_NAME_MAX_CHARS) return null;
   return { id: call.id, name: call.name };
+}
+
+/**
+ * steer 的提示里可以点名的工具。
+ *
+ * 为什么要点名而不是泛指：这个文件里已经写着"小模型对『你去调用工具』不敏感，
+ * 对『调用 companion_search_notes』会照做"——可 action 那一支的提示以前就是泛指，
+ * 于是"用户让她改边界，她两步只回『我记下了』"这种整轮空转一直留着（实机 2026-09-22 场景 T）。
+ *
+ * `consequential` 永远不点名，这是安全性质不是风格：一句纠正性提示里出现
+ * `companion_start_learning`，等于系统自己把用户没要过的学习运行推上桌。
+ */
+export function steerableToolNames(
+  definitions: readonly { name: string; riskClass: string }[],
+  kind: "lookup" | "action",
+  limit = 10,
+): string[] {
+  const wanted = kind === "lookup" ? "read" : "reversible_low";
+  return definitions.filter((definition) => definition.riskClass === wanted)
+    .map((definition) => definition.name)
+    .slice(0, limit);
 }
 
 /** Hash of a rejected call's arguments; never throws on odd provider payloads. */
@@ -2179,22 +2283,33 @@ const VISIBLE_SEGMENT_SEPARATOR = "\n\n";
  * - 同理**不对分段做 trim**：trim 掉的字符在流式侧是发出去过的，两侧必须共用
  *   同一段原文，净化统一在出口（validateCompanionOutput / 交付管线的 sanitize）做。
  *
- * 在此之上只做一件事：丢弃**从未流式下发过**的分段里，与前面某个保留分段
- * trim 后完全重复的那一条（模型复读：工具步说完结论、终答步原样再说一遍）。
+ * 在此之上做两件事，都只动**从未流式下发过**的分段：
+ * 1. 丢重复：与前面某个保留分段 trim 后完全相同的那一条（模型复读：工具步说完结论、
+ *    终答步原样再说一遍）。
+ * 2. 丢"夹在已下发段前面的未下发段"：这种段从没出现在下发原文里，却会排在已下发的
+ *    内容前面——最终正文就不再以下发原文开头，`writeTail` 判
+ *    `stream_full_text_diverged`，整轮失败。实机 2026-09-22 场景 T 就是这个形状：
+ *    第 1 步"嗯嗯，记住了喵"被 hold 攒住没发出去 → 被 steer 掉 → 第 3 步真的调了工具
+ *    并说出"好了，这次是真的设上了"，边界**其实改成功了**，run 却因为分叉被判 failed。
+ *    末尾那条不丢：它是 writeTail 正要补发的尾巴。
+ *
  * 已下发过的分段一律保留——它已经在客户端草稿里，删掉等于与最终正文分叉。
- * 前缀不变量仍成立：下发按步顺序进行，被丢的段从未出现在下发原文里；保留段
- * 的相对顺序与分段符与交付时一致，`startsWith(delivered)` 不受影响。
  */
-function joinVisibleSegmentsDeduped(
+export function joinVisibleSegmentsDeduped(
   segments: readonly string[],
   delivered: readonly boolean[],
 ): { text: string; dropped: string[] } {
+  const lastDelivered = delivered.lastIndexOf(true);
   const kept: string[] = [];
   const keptKeys = new Set<string>();
   const dropped: string[] = [];
   for (let index = 0; index < segments.length; index += 1) {
     const segment = segments[index];
     if (segment.length === 0) continue;
+    if (!delivered[index] && index < lastDelivered) {
+      dropped.push(segment);
+      continue;
+    }
     const key = segment.trim();
     if (key.length >= 8 && keptKeys.has(key) && !delivered[index]) {
       dropped.push(segment);
@@ -2340,10 +2455,10 @@ export async function runCompanionAgentLoop(args: {
   }));
   // steer 时要**点名**该调哪个工具：小模型对"你去调用工具"这种泛指不敏感，
   // 对"调用 companion_search_notes"会照做（只列读类，且限 10 个免得提示比正文还长）。
-  const steerableReadTools = definitions
-    .filter((definition) => definition.riskClass === "read")
-    .map((definition) => definition.name)
-    .slice(0, 10);
+  const steerableReadTools = steerableToolNames(definitions, "lookup");
+  // action 那一支以前没有名字可点（只有泛指文案），实机 2026-09-22 场景 T 就是在这儿翻车的：
+  // 用户说「以后别主动催我复习」，她两步都只回"我记下了"，`companion_set_boundary` 一次没调。
+  const steerableActionTools = steerableToolNames(definitions, "action");
   const providerCapabilities = args.provider.getCapabilities?.();
   const providerCapabilityFingerprint = sha256Utf8V1(canonicalJsonV1({
     capabilityFingerprint: providerCapabilities?.fingerprint ?? null,
@@ -2421,7 +2536,7 @@ export async function runCompanionAgentLoop(args: {
   /** 退化回复闸每轮至多触发一次（2026-09-19 深夜，tokenrhythm 退化窗口实测）。 */
   let degenerateRetried = false;
   /** "让她做件事却没落地"闸每轮至多一次：补一步就够，不把她逼成循环。 */
-  let actionSteered = false;
+  let actionSteerAttempts = 0;
   /**
    * "她说查过了、其实没查"单独一条额度（下面闸的注释说为什么不能共用）。
    */
@@ -2547,6 +2662,9 @@ export async function runCompanionAgentLoop(args: {
         // 每一步都走真实流式：增量实时交给交付管线（净化 + 校验 + 落库 + SSE 下发）。
         // 分段符与最终正文的拼接口径必须一致（非首段 "\n\n"），否则已下发前缀
         // 与最终正文会分叉——见 joinVisibleSegmentsDeduped。
+        // "非首段"要按**实际下发过**判断，不能按分段数组长度：被 hold 攒住、从没发出去
+        // 的那一段留在数组里时，客户端其实一个字都没收到，此时再补一个分段符就成了
+        // 下发原文的开头两个换行（实机 2026-09-22 场景 T 的分叉就是这么来的）。
         const attemptStream = (): Promise<AgentTurnResult> =>
           runStreamingAgentStep({
             provider: stepProvider,
@@ -2554,7 +2672,7 @@ export async function runCompanionAgentLoop(args: {
             ctxSignal: args.ctx.signal,
             timeoutMs: providerCallTimeout,
             onProviderDelta: args.onProviderDelta!,
-            separatorBefore: visibleSegments.length > 0 ? VISIBLE_SEGMENT_SEPARATOR : "",
+            separatorBefore: visibleSegmentDelivered.includes(true) ? VISIBLE_SEGMENT_SEPARATOR : "",
             // 每一步都攒批，不只终答步。`finalAnswerOnly` 是 `stepCount >= maxSteps`，
             // 也就是"只有被强制收尾的那一步"才算终答——而她**直接答话**（不调工具）
             // 是第 1 步，那时 hold=0，字当场流出去、stepEmitted 置位，
@@ -2566,7 +2684,7 @@ export async function runCompanionAgentLoop(args: {
             // 换来的是坍缩闸可达——按用户口径（"说的太短了"是抱怨 #1），这个方向值。
             // 攒批不影响正确性：没下发过的内容仍由 writeTail 在终态补发，
             // "已下发是最终正文的前缀"这条不变量照旧成立。
-            holdUntilChars: FINAL_ANSWER_HOLD_CHARS,
+            holdUntilChars: stepHoldChars({ userAskedForAction }),
             onTextEmitted: () => { stepEmitted = true; },
           });
         /**
@@ -2773,7 +2891,7 @@ export async function runCompanionAgentLoop(args: {
     // 额度被第 1 步那句引言（"我换个词再搜一次"，命中 action-request）先花掉，
     // 第 2 步才讲出"两个词都搜过了，笔记库里没有这篇"——而这条才是真正不能交付的：
     // 承诺只是没做事，这句是把可证伪的**假阴性**当结论说出去（那篇笔记在库里，3 个正文块）。
-    const shapeSteer = !actionSteered
+    const shapeSteer = actionSteerAttempts < actionSteerBudget({ userAskedForAction })
       && (userAskedForAction
         || unverifiedClaims.length > 0
         || looksLikeUnfulfilledActionNarration(said));
@@ -2786,7 +2904,7 @@ export async function runCompanionAgentLoop(args: {
       && Date.now() < deadlineAt
       && (shapeSteer || lookupSteer)
     ) {
-      if (shapeSteer) actionSteered = true;
+      if (shapeSteer) actionSteerAttempts += 1;
       lookupClaimSteered = true;
       // 「说查过而没查」和「让她做事却没做」这两类，补的那一步都换兜底模型：
       // 指名道姓要求她调用工具都换不来一次真实调用（实机 2026-09-21 两次），
@@ -2799,8 +2917,16 @@ export async function runCompanionAgentLoop(args: {
       // 空的一步（provider 退化时会一个字都不给）不写进正文，也不回灌空的
       // assistant 消息——那会在拼接里留下一个孤立的空段。
       if (said.trim().length > 0) {
-        visibleSegments.push(said);
-        visibleSegmentDelivered.push(stepEmitted);
+        // 被 steer 掉的那一步：**只有已经流式下发过的话才留在最终正文里**。
+        // 没发出去的那句（被 hold 攒住）如果留下，用户会在同一条消息里先看到
+        // "嗯，记住了喵。"再看到纠正后的正文——三遍同义反复就是这么拼出来的
+        // （实机 2026-09-22 场景 T，delta 只有 1 批 73 字 = 全程没流式，最后整段补发）。
+        // 丢掉它对用户不可见（他本来就没收到），而这句话正是这次要纠正的内容。
+        // assistant 消息仍然回灌：模型要看得见自己说过什么，纠正才接得上。
+        if (stepEmitted) {
+          visibleSegments.push(said);
+          visibleSegmentDelivered.push(true);
+        }
         messages.push({ role: "assistant", content: said });
       }
       messages.push({
@@ -2817,9 +2943,15 @@ export async function runCompanionAgentLoop(args: {
             ? `（系统提示：你还没有真的查过。现在就调用下面这些工具之一：`
               + `${steerableReadTools.join("、")}；`
               + "查完按真实结果回答；工具返回空就照实说没查到，不要替工具编结论。）"
-            : "（系统提示：你还没有调用任何工具，所以那件事一件也没有发生。"
-              + "要么在这一轮调用合适的工具再回答，要么直接回答用户；"
-              + "不要说已经做过，也不要只说你要去做。）",
+            : steerableActionTools.length > 0
+              // 点名可逆写那一组（记/忘、提醒、边界、活跃度）。read_only 档下这一组是空的
+              // ——那时她本来就不许动这些工具，退回泛指，不能拿提示去绕权限。
+              ? `（系统提示：你还没有调用任何工具，所以那件事一件也没有发生。`
+                + `用户要的这个动作需要工具：${steerableActionTools.join("、")}。`
+                + "在这一轮调用它再回答；没有真的调用就不要说已经做过，也不要只说你要去做。）"
+              : "（系统提示：你还没有调用任何工具，所以那件事一件也没有发生。"
+                + "要么在这一轮调用合适的工具再回答，要么直接回答用户；"
+                + "不要说已经做过，也不要只说你要去做。）",
       });
       await finishStep(event, stepId, "succeeded", sha256Utf8V1(said));
       await updateRunMeta(event, { stepCount, toolCallCount, elapsedMsDelta: elapsedDelta() });

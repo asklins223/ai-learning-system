@@ -1,11 +1,16 @@
 /**
- * 方案 16 §6.5/§9.5/§10.2/§20.2：proactive-hook 真实门禁集成测试（postgres）。
+ * proactive-hook 真实门禁集成测试（postgres）。方案 16 §10.2 + 方案 29 §9.61。
  *
- * 覆盖：
- * - 无正式作答 context + 空预算 → run.completed 提醒入队（allowed）；
- * - 存在未过期 formal_answer page context → 抑制（formal_answer_in_progress）；
- * - 24h 主动 delivery 已达 moderate 预算（3）→ 抑制（daily_budget_exhausted）；
- * - quiet 介入级别 → 恒抑制（quietDailyLimit=0）。
+ * 这个 hook 产的是**触发式**推送（run.completed：用户刚跑完一个运行，正在等回执），
+ * 所以它不进任何频率闸。覆盖：
+ * - 空账号状态 → 入队；
+ * - 正式作答中 / 24h 内已有 4 条主动提示 / 6 分钟前刚说过 → **照样入队**；
+ * - 设备 dnd、账号级总开关关闭 → 不推（这两条是反向兜底，证明"不进频率"
+ *   没被写成"无条件放行"）。
+ *
+ * 以前这里断言的是"预算满 → 抑制""cooldown → 抑制""quiet 恒抑制"。
+ * 那套"一天 N 条"的额度 2026-09-21 被用户否掉（三条气泡根本感知不到主动推送能力），
+ * 例行主动改成按偏好定间隔，触发式整个移出频率。
  */
 
 import { after, test } from "node:test";
@@ -98,7 +103,10 @@ test("§10.2/§20.2：无正式作答 + 空预算 → run.completed 提醒入队
   }
 });
 
-test("§6.5/§9.5/§20.2：formal_answer 页面 context 未过期 → 抑制（0 delivery）", async () => {
+test("触发式：formal_answer 页面 context 未过期 → 照样入队", async () => {
+  // 这条以前断言的是"0 delivery（正式作答期间零主动提示）"。
+  // run.completed 不是她随口搭话，是用户刚跑完一个运行、正在等的回执；
+  // 触发式不进任何频率/打断闸（用户 2026-09-21 的口径），所以这里翻成"照样入队"。
   const seeded = await seedBase();
   try {
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
@@ -106,7 +114,7 @@ test("§6.5/§9.5/§20.2：formal_answer 页面 context 未过期 → 抑制（0
     await withWorkspaceTransaction(scope, (tx) =>
       hookProactiveOnRunCompleted(tx, scope, { runId: randomUUID(), outcome: "demonstrated" }),
     );
-    assert.equal(await countDeliveries(seeded.workspaceId, seeded.userId), 0, "正式作答期间零主动提示");
+    assert.equal(await countDeliveries(seeded.workspaceId, seeded.userId), 1, "作答中也要给完成回执");
   } finally {
     await seeded.cleanup();
   }
@@ -131,32 +139,58 @@ async function insertHistoricalDeliveries(
   });
 }
 
-test("§10.2：24h 预算 moderate=3 已满 → 抑制（daily_budget_exhausted）", async () => {
+/**
+ * 这两条以前分别断言"24h 预算 moderate=3 已满 → 抑制"和"< 30min cooldown → 抑制"。
+ * 现在换成**反向**断言：触发式两类闸都不沾。
+ *
+ * 为什么必须留在集成测试里而不是只留单测：闸是在这个函数里读的账号状态与
+ * 这些历史 delivery，改错方向（把触发式也套进频率）在这里才会红。
+ */
+test("触发式：历史主动提示再多、刚说过话，都照样入队", async () => {
   const seeded = await seedBase();
   try {
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
-    // 预置 3 条历史主动 delivery（24h 内、间隔 > 30min cooldown）
-    await insertHistoricalDeliveries(seeded.workspaceId, seeded.userId, [60, 120, 180]);
-    assert.equal(await countDeliveries(seeded.workspaceId, seeded.userId), 3);
-    // 新 run 完成：预算已满 → 抑制
+    // 3 条 24h 内的历史（以前正好占满 moderate 额度）+ 1 条 6 分钟前的（以前落在冷却里）。
+    await insertHistoricalDeliveries(seeded.workspaceId, seeded.userId, [6, 60, 120, 180]);
+    assert.equal(await countDeliveries(seeded.workspaceId, seeded.userId), 4);
     await withWorkspaceTransaction(scope, (tx) =>
       hookProactiveOnRunCompleted(tx, scope, { runId: randomUUID(), outcome: "demonstrated" }),
     );
-    assert.equal(await countDeliveries(seeded.workspaceId, seeded.userId), 3, "moderate 预算 3 条上限");
+    assert.equal(await countDeliveries(seeded.workspaceId, seeded.userId), 5, "触发式不进频率限制");
   } finally {
     await seeded.cleanup();
   }
 });
 
-test("§10.2：最近一次展示 < 30min cooldown → 抑制（cooldown）", async () => {
+/**
+ * "不进频率限制"不等于"无条件放行"——下面两条是反向兜底：
+ * 方向改坏了（整个 hook 变成无条件写投递）时，这两条会红。
+ */
+test("设备在勿扰：触发式也不推（气泡等用户回来）", async () => {
   const seeded = await seedBase();
   try {
+    await sql`UPDATE user_companion_account_state
+              SET presence = ${{ presence: "dnd" } as never} WHERE user_id = ${seeded.userId}`;
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
-    await insertHistoricalDeliveries(seeded.workspaceId, seeded.userId, [6]);
     await withWorkspaceTransaction(scope, (tx) =>
       hookProactiveOnRunCompleted(tx, scope, { runId: randomUUID(), outcome: "demonstrated" }),
     );
-    assert.equal(await countDeliveries(seeded.workspaceId, seeded.userId), 1, "30 分钟冷却内抑制");
+    assert.equal(await countDeliveries(seeded.workspaceId, seeded.userId), 0, "dnd 不该弹提示");
+  } finally {
+    await seeded.cleanup();
+  }
+});
+
+test("账号级总开关关掉：触发式同样不推", async () => {
+  const seeded = await seedBase();
+  try {
+    await sql`UPDATE user_companion_account_state
+              SET global_enabled = false WHERE user_id = ${seeded.userId}`;
+    const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
+    await withWorkspaceTransaction(scope, (tx) =>
+      hookProactiveOnRunCompleted(tx, scope, { runId: randomUUID(), outcome: "demonstrated" }),
+    );
+    assert.equal(await countDeliveries(seeded.workspaceId, seeded.userId), 0, "globalEnabled=false 是一切的开关");
   } finally {
     await seeded.cleanup();
   }

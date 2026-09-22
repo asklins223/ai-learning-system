@@ -5,6 +5,7 @@ import {
   buildDeterministicThoughts,
   buildExpressionPrompt,
   cosineSimilarity,
+  evaluateRoutineCueTiming,
   isDuplicateThought,
   introducesUnverifiedNumbers,
   readsOutStatistics,
@@ -226,11 +227,70 @@ test("气泡里的数字：统计形状一律拒，改写更不许改数字", ()
     "数字是名字的一部分，不是统计");
   assert.equal(readsOutStatistics("今晚这42分钟学得很扎实"), true);
   assert.equal(readsOutStatistics("《IndexTTS 2.5》那篇还想接着看吗"), false);
+  // 名字里带量词的标题不能被误判成读数。今天库里的 12 条到期卡标题都是干净的
+  // （遗忘曲线 / 牛顿第二定律…），所以这道闸一次都没触发过——但"背 3 条法律"
+  // "看 5 分钟教程"这种标题完全可能，误判的后果是**这张卡永远不会被提醒**，
+  // 而日志只会说"被统计闸拦了"，没人会往漏报上想。
+  assert.equal(readsOutStatistics("「背 3 条法律」那张卡到点了，要不要过一遍？"), false,
+    "直角引号里的数字是名字的一部分");
+  assert.equal(readsOutStatistics("《每天 3 张图》那篇想接着看吗？"), false);
+  // 掩码只洗名字，不洗整句：名字之外还有读数就得拦。
+  assert.equal(readsOutStatistics("「背 3 条法律」那张卡到点了，今天已经学了 42 分钟"), true);
+  // 端到端：确定性模板把真标题嵌进去之后，这条候选必须仍然送得出去
+  // （模板与闸分两处写时，最容易变成"模板造的句子被自己的闸杀掉"）。
+  const titledCard = buildDeterministicThoughts(baseMaterial({
+    readyReviews: 2, dueReviewTitles: ["背 3 条法律"], allowNudgeLearning: true,
+  }))[0];
+  assert.ok(titledCard, "带数字标题的到期卡该产出一条候选");
+  assert.equal(readsOutStatistics(titledCard.text), false, `模板句被自己的闸拦了：${titledCard.text}`);
   // 回落到模板原句由调用方负责（selectThoughtExpression 返回 null 时 expression 不变），
   // 代价只是少一点花样，不是没有气泡——这一点和对话链路相反，那边拒绝=用户没回答。
   assert.equal(selectThoughtExpression(["明天有 3 条到期啦"], [], "复习快到期啦"), null);
   assert.equal(introducesUnverifiedNumbers("学了 47 分钟", "学了 47 分钟"), false);
   assert.equal(introducesUnverifiedNumbers("学了 47 分钟", "今天学了一些"), true);
+});
+
+/**
+ * 例行主动开口的四条闸。以前这四条直接写在 handler 里，改任何一条都要连 job + DB
+ * 才知道它到底拦没拦；而"拦错了方向"（该拦的没拦、不该拦的拦了）在读日志上看不出来。
+ * 抽成纯函数之后顺序也是被钉住的语义。
+ */
+test("时机判定：勿扰 → 静默时段 → 划走两次 → 间隔", () => {
+  const base = {
+    availability: "online",
+    quietHours: null,
+    now: new Date("2026-09-21T12:00:00Z"),
+    recentDeliveryStates: [],
+    interventionLevel: "moderate",
+    msSinceLastRoutineCue: null,
+  } as const;
+  assert.equal(evaluateRoutineCueTiming(base).reason, "allowed");
+  // 「勿扰」以前只有 api 那条链路认，念头管线连 presence 这列都没读——用户按了没用。
+  assert.equal(evaluateRoutineCueTiming({ ...base, availability: "dnd" }).reason, "availability");
+  assert.equal(evaluateRoutineCueTiming({ ...base, availability: "offline" }).reason, "availability");
+  assert.equal(evaluateRoutineCueTiming({
+    ...base, quietHours: { startLocal: "11:00", endLocal: "13:00", timezone: "UTC" },
+  }).reason, "quiet_hours");
+  assert.equal(evaluateRoutineCueTiming({
+    ...base, recentDeliveryStates: ["dismissed", "dismissed", "acted"],
+  }).reason, "dismissal_feedback");
+  const cadence = evaluateRoutineCueTiming({ ...base, msSinceLastRoutineCue: 60 * 60_000 });
+  assert.equal(cadence.reason, "cadence");
+  // 沉默的理由必须自带读数（"为什么没说"要能从一行日志里读出来，这是抱怨 #8 的账）。
+  assert.deepEqual(cadence.detail, {
+    interventionLevel: "moderate",
+    msSinceLastRoutineCue: 3_600_000,
+    cadenceMs: 5_400_000,
+  });
+  // 顺序也是语义：勿扰优先于静默时段（两条都命中时报错了没人会发现）。
+  assert.equal(evaluateRoutineCueTiming({
+    ...base, availability: "dnd",
+    quietHours: { startLocal: "11:00", endLocal: "13:00", timezone: "UTC" },
+  }).reason, "availability");
+  // 静默时段坏配置一律按静默处理（fail closed），不是"当成没配"。
+  assert.equal(evaluateRoutineCueTiming({
+    ...base, quietHours: { startLocal: "25:00", endLocal: "07:00", timezone: "UTC" },
+  }).reason, "quiet_hours");
 });
 
 test("LLM 现编的念头里，服务端没给过的数字在解析这一步就被丢", () => {

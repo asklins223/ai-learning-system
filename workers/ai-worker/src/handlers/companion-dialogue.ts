@@ -33,6 +33,7 @@ import { sql } from "drizzle-orm";
 import { logger } from "../lib/logger.ts";
 import { withWorkerWorkspaceTransaction } from "../db.ts";
 import { loadHereAndNow, renderHereAndNow } from "./companion-here-and-now.ts";
+import { renderConversationSummary } from "./companion-summarizer.ts";
 import { createProvider, createEmbeddingProvider, withThinkingDisabled } from "../lib/ai-provider.ts";
 import {
   CompanionStreamStoppedError,
@@ -350,6 +351,16 @@ export async function runCompanionDialogue(
           pageContext: run.page_context,
           userText,
         }));
+        // 更早那段对话（历史回放只带最近 20 条，之外她本来看不见）。同一道
+        // RLS 读事务里取最新一条摘要，不为它单开一次往返。
+        const summaryRows = await tx.execute<{ summary: unknown }>(sql`
+          SELECT summary FROM conversation_summaries
+          WHERE conversation_id = ${run.conversation_id} AND status <> 'archived'
+          ORDER BY created_at DESC LIMIT 1
+        `);
+        const conversationSummary = renderConversationSummary(
+          (Array.isArray(summaryRows) ? summaryRows : [])[0]?.summary,
+        );
         return {
           runId: run.id,
           conversationId: run.conversation_id,
@@ -364,6 +375,7 @@ export async function runCompanionDialogue(
           recentMessages,
           activeMemories,
           hereAndNow,
+          conversationSummary,
           petProfile,
           nextMessageSeq: Number(conv.next_message_seq),
           nextEventSeq: Number(conv.next_event_seq),
@@ -515,6 +527,7 @@ export async function runCompanionDialogue(
     groundedTutorContext: read.groundedTutorContext,
     activeMemories: read.activeMemories,
     hereAndNow: read.hereAndNow,
+    conversationSummary: read.conversationSummary,
     petProfile: read.petProfile,
   });
 

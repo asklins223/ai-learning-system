@@ -1786,6 +1786,13 @@
       "tag": "0255_candidate_quality_state_dropped",
       "breakpoints": true,
       "when": 1789800000009
+    },
+    {
+      "idx": 255,
+      "version": "7",
+      "tag": "0256_companion_candidate_memory_cooling_off",
+      "breakpoints": true,
+      "when": 1789800000010
     }
   ]
 }

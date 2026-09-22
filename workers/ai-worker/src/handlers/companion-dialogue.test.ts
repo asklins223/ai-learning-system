@@ -526,6 +526,47 @@ test("hereAndNow 注入 <here_and_now> 数据块并点名它的用法", () => {
     "环境快照必须在记忆块之前");
 });
 
+// §11 C1：摘要接入。历史回放只带最近 20 条，更早的对话她本来完全看不见，
+// 所以"摘要修好了"必须配一句"她真的能读到它"。
+test("conversationSummary 注入数据块，并在 C 层点名它是旧数据", () => {
+  const block = [
+    "<conversation_summary>",
+    "更早那段对话：桌宠功能调试与用户偏好设置",
+    "办过的事：设了口头禅；关掉催复习",
+    "</conversation_summary>",
+  ].join("\n");
+  const messages = buildCompanionPersonaMessages({
+    userText: "上次那个口头禅还在吗",
+    recentMessages: [],
+    pageContext: null,
+    activeMemories: [{ kind: "preference", content: "习惯在图书馆三楼复习" }],
+    conversationSummary: block,
+  });
+  const system = String(messages[0].content);
+  assert.match(system, /更早那段对话：桌宠功能调试与用户偏好设置/);
+  assert.match(system, /是更早那段对话的摘要/);
+  // 位置：排在记忆块之前。摘要说的是"她亲历的那段对话"，比抽取出的第三方记忆更近。
+  // 比**块体**而不是比标签名：C 层前言里两个标签名都先出现过一次，那样量到的是前言。
+  assert.ok(
+    system.indexOf("更早那段对话：桌宠功能调试") < system.indexOf("习惯在图书馆三楼复习"),
+    "有记忆块时摘要要排在它之前",
+  );
+});
+
+// 这条是 C1 真正的安全边界：摘要里的数字是**写它那一刻**的值。
+// 放进白名单，就等于允许她把几周前的"本周 23 分钟"当"本轮查过的事实"复述（§9.35）。
+test("conversation_summary 不算数字的合法出处", () => {
+  const context = [
+    "<here_and_now>", "到期待复习 25 项", "</here_and_now>",
+    "<conversation_summary>", "办过的事：那周学了 23 分钟", "</conversation_summary>",
+    "<memory_data>", "偏好：喜欢语音", "</memory_data>",
+  ].join("\n");
+  const kept = keepRecomputedBlocks(context);
+  assert.match(kept, /到期待复习 25 项/, "环境快照仍是出处");
+  assert.doesNotMatch(kept, /23 分钟/, "摘要里的数字不能当出处");
+  assert.ok(!kept.includes("conversation_summary"), "整块都不许进白名单");
+});
+
 test("环境快照原文不得被当成正文回显出去", () => {
   // 实机有过"模型把 activeMemories 整段复述成回复"的先例，新数据块必须同等设防。
   const verdict = validateCompanionOutput("<here_and_now>\n现在：2026-09-20 19:17\n</here_and_now>");
@@ -595,6 +636,12 @@ test("containsCompanionInternalToken：上下文回显与裸 uuid 都算泄露�
   // 正常中文句子、以及她真该说的话，都不许被这条误伤
   assert.equal(containsCompanionInternalToken("今天想继续昨天那三个公式吗？"), false);
   assert.equal(containsCompanionInternalToken("F 等于 m a 这条我陪你再过一遍"), false);
+  // 实机 2026-09-22 场景 U：兜底模型在被强制收尾的那一步**用文本假装调用工具**，
+  // 结果整段原始调用文本被当正文落库（run 还是 succeeded）——用户会在气泡里看到
+  // 一个内部标识符，而它会进历史、被下一轮当先例复读。
+  assert.equal(containsCompanionInternalToken('companion_set_boundary\n{"催复习": "关"}'), true,
+    "她自己工具的调用文本不能当正文");
+  assert.equal(containsCompanionInternalToken("我把催复习的开关关掉了，以后你不问就不提。"), false);
   // 增量校验走同一个判定（拒绝原因要还是 internal_token_leak）
   assert.equal(
     companionOutputRejectionReason("<here_and_now> 今日已学 12 分钟"),
@@ -627,6 +674,14 @@ test("looksLikeActionRequest：实机四条『她该动手』的请求全部命�
   assert.equal(looksLikeActionRequest("以后别主动催我复习，我不问你别说。"), true);
   assert.equal(looksLikeActionRequest("给你自己加个口头禅：就这么定了。偶尔带上就行。"), true);
   assert.equal(looksLikeActionRequest("明天早上九点提醒我把疏散路线再背一遍。"), true);
+  // 实机 2026-09-22 场景 AA（`steps=1 tools=0`）：她没调任何工具，直接交回
+  // "好嘞，活跃度调到「活跃」了喵"——因为原判据只有 `设为|改成|设置成`，
+  // 而人说的是"设成/调成"。动词漏一个档，谎就没有拦。
+  assert.equal(looksLikeActionRequest("把你的活跃度设成「活跃」。"), true);
+  assert.equal(looksLikeActionRequest("你调成安静一点好不好。"), true);
+  // 名词侧也要认：她自己的设定项（活跃度/口头禅/称呼）出现在请求里就该动手，
+  // 动词怎么说是说不完的。
+  assert.equal(looksLikeActionRequest("你的活跃度现在是哪一档？换到最安静那档。"), true);
 });
 
 test("looksLikeActionRequest：普通聊天与提问不算（不为它们白烧一次调用）", () => {

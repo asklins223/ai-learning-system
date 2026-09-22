@@ -56,6 +56,11 @@ export interface ReadContext {
    * 每轮无条件注入，不经工具、不经模型。
    */
   hereAndNow: string | null;
+  /**
+   * `<conversation_summary>` 数据块（方案 29 §11 C1），null = 这个会话还没有摘要。
+   * 历史回放只带最近 20 条，更早的那段对话靠这一块对她可见。
+   */
+  conversationSummary: string | null;
   petProfile: {
     name: string;
     speakingStyle: string;
@@ -346,6 +351,21 @@ export function isCompanionMemoryContextEnabled(): boolean {
     || process.env.COMPANION_SUMMARIZER_V1 === "true";
 }
 
+/** 每 40 条消息一桶：桶号进幂等键，同桶内的后续轮次不再重复摘要。 */
+export const SUMMARIZER_MESSAGE_BUCKET = 40;
+
+/**
+ * 摘要任务的幂等键。**键里不许出现 runId**——那正是"每轮都排一次、每轮都烧一次
+ * 调用"的成因（实测 7.6s / 6 932 token 每轮）。同桶内无论跑多少个 run，
+ * 只有第一个能插进 jobs。
+ */
+export function summarizerJobKey(input: {
+  conversationId: string;
+  messageSeq: number;
+}): string {
+  return `summary:${input.conversationId}:bucket:${Math.floor(input.messageSeq / SUMMARIZER_MESSAGE_BUCKET)}`;
+}
+
 /**
  * 在终态事务内异步入队记忆提取/摘要任务。
  * 幂等：jobs.idempotency_key 唯一索引兜底。
@@ -373,6 +393,9 @@ export async function enqueueCompanionMemoryJobs(
       DO NOTHING
     `);
   }
+  // 2026-09-22 实测：这条排队原来是"每个 run 排一次"（连续会话每轮都过 seq≥30），
+  // 摘要器修好之后就变成**每轮**稳定烧 7.6 秒 / 6 932 token、并写一行新摘要。
+  // 改成按消息数分桶：同一段对话每满 40 条才摘一次，与 §9.61 念头排队的 bucket 同法。
   if (process.env.COMPANION_SUMMARIZER_V1 === "true" && args.messageSeq >= 30) {
     await tx.execute(sql`
       INSERT INTO jobs
@@ -380,7 +403,8 @@ export async function enqueueCompanionMemoryJobs(
       VALUES
         ('companion_summarizer', ${args.workspaceId}, ${args.userId},
          ${JSON.stringify({ conversationId: args.conversationId, userId: args.userId, sourceRunId: args.runId })},
-         'pending', 10, 'maintenance', ${`summary:${args.conversationId}:${args.runId}`})
+         'pending', 10, 'maintenance',
+         ${summarizerJobKey({ conversationId: args.conversationId, messageSeq: args.messageSeq })})
       ON CONFLICT (workspace_id, idempotency_key)
         WHERE idempotency_key IS NOT NULL
       DO NOTHING
