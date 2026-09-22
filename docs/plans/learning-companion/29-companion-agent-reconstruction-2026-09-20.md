@@ -4322,17 +4322,22 @@ playback：played 75 / deadline 2（等待时长 3002ms）/ dropped 7
   id 对得上"。"总共只有一帧"断言的不是被测语义，而是"这一刻没有别人往这条会话里写"，
   在共享开发库上永远不可能稳定。
 
-**但这条套件仍然不是"随便什么时候跑都绿"**：连跑四次，每次红 1–2 条，**红在哪条会变**，
-错固定是 `40P01 deadlock detected`（出现在幂等、active run、messages 历史、SSE 各次不同的
-用例里），另有一次 `duplicate key ... companion_stream_events_pkey`。这两条都不是测试
-写错的样子：
+**但我上一条里写的"生产含义是用户发一轮可能 500"是错的，现在收回。** 抓到 Postgres 的
+`DETAIL` 之后，那对死锁的两条语句是：
 
-1. **死锁**：`createCompanionTurn` 的事务（messages → conversations 计数 → runs → events → jobs）
-   与 `ailearn_claim_jobs`（跨工作区按优先级排候选行再 UPDATE）在并发下互相拿锁。
-   生产含义是**用户发一轮可能直接 500**，不是"测试环境问题"。
-2. **事件 seq 撞号**：两个写者能拿到同一个 `(conversation_id, seq)`。所有已知分配点都是
-   `UPDATE ... RETURNING` 原子取的，所以还有一条没找到的路径在**手算 seq**。
+```
+Process A:  UPDATE companion_stream_events SET expires_at = … WHERE conversation_id=$2 AND run_id=$3   ← worker 的失败收尾
+Process B:  DELETE FROM companion_turn_runs WHERE conversation_id = $1                                  ← 测试自己的 cleanup
+```
 
-这两条都不属于 D3 的范围，单独立成 **D6**（下一批的第一位），先量再修：
-死锁要抓 `pg_stat`/日志里的两条语句对；撞号要先把所有写 `companion_stream_events` 的
-入口列出来，逐个看它是"取号"还是"算号"。
+也就是说**不是** `createCompanionTurn` 与 `ailearn_claim_jobs` 在生产里互相拿锁，而是
+**测试的清理**与一个还在跑这条会话 job 的活 worker 互相等锁。修法在测试侧：cleanup
+先删 `jobs`（不再被认领）、撞 40P01 就重试一次。改完连跑三次，**死锁一次都没有再出现**。
+
+剩下的只有一条：测试 6（SSE）在**整文件跑**时红、**单独跑必绿**（`--test-name-pattern`
+1/1 绿），所以它是被前面用例的在飞 job 干扰，不是自己的断言坏了。同一次运行里还伴随
+一条 `duplicate key ... companion_stream_events_pkey`——这条值得单独查：所有已知的
+seq 分配点都是 `UPDATE … RETURNING` 原子取号，能撞号说明还有一条路径在**算号**，
+头号嫌疑是跨会话扫描的孤儿回收（`ailearn_reclaim_orphaned_companion_runs`）。
+立为 **D6**，判据：列出每一个写 `companion_stream_events` 的入口，逐个看它是取号还是算号；
+在证明之前不再写生产结论。

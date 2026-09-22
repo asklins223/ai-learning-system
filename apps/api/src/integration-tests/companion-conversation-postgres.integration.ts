@@ -109,16 +109,31 @@ async function seedConversation(): Promise<{
     await tx`INSERT INTO companion_conversations (id, workspace_id, user_id, kind, title, title_source, status)
              VALUES (${conversationId}, ${workspaceId}, ${userId}, 'dialogue', '新对话', 'placeholder', 'active')`;
   });
+  // 清理要**先停 job**，并且撞死锁就重试一次。
+  // 理由（实机 2026-09-22 抓到的 DETAIL）：开发栈上那个 worker 可能还在跑这一轮的 job，
+  // 它失败时执行的 `UPDATE companion_stream_events SET expires_at … WHERE run_id=…`
+  // 与本函数的 `DELETE FROM companion_turn_runs` 互相等锁 → 40P01，红的是清理而不是断言。
+  // 死锁本身是可重试的；先把 jobs 删掉是为了不再被认领，剩下的行没人会再来写。
   const cleanup = async () => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await cleanupOnce();
+        return;
+      } catch (error) {
+        if (attempt === 1 || (error as { code?: string }).code !== "40P01") throw error;
+      }
+    }
+  };
+  const cleanupOnce = async () => {
     await sql.begin(async (tx) => {
       await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
       await tx`SELECT set_config('app.user_id', ${userId}, true)`;
+      await tx`DELETE FROM jobs WHERE workspace_id = ${workspaceId}`;
       await tx`DELETE FROM companion_proactive_deliveries WHERE conversation_id = ${conversationId}`;
       await tx`DELETE FROM companion_tts_outcomes WHERE conversation_id = ${conversationId}`;
       await tx`DELETE FROM companion_stream_events WHERE conversation_id = ${conversationId}`;
       await tx`DELETE FROM companion_turn_runs WHERE conversation_id = ${conversationId}`;
       await tx`DELETE FROM companion_messages WHERE conversation_id = ${conversationId}`;
-      await tx`DELETE FROM jobs WHERE workspace_id = ${workspaceId}`;
       await tx`DELETE FROM companion_conversations WHERE id = ${conversationId}`;
       await tx`DELETE FROM workspace_members WHERE workspace_id = ${workspaceId}`;
       await tx`DELETE FROM workspaces WHERE id = ${workspaceId}`;
