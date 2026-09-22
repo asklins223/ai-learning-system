@@ -188,6 +188,63 @@ if (process.env.LIB_PROBE === "1") {
   process.exit(0);
 }
 
+// CREATE_NOTE=1：在**应用里**新建一篇笔记并打字存下来。
+// 为什么绕这一圈：SQL 夹具造的笔记在桌面端读不出正文（详情稳定报「研究册暂时不可用」），
+// 拿它量 B4 只会量到别人的读路径缺陷。走一遍真实的新建与自动保存，才有一篇读得好的宿主笔记。
+if (process.env.CREATE_NOTE === "1") {
+  const titleLine = process.env.B4_NEW_NOTE || "B4 实机量测笔记 已经写好的卡";
+  await clickViaJs(page.locator('.nav-chip[aria-label="笔记"], .hud-rail button[aria-label="笔记"]'), { waitMs: 20_000 });
+  await page.waitForTimeout(4000);
+  // 先直接找「新建笔记」；找不到再点开全量列表重试一次（上一版反过来，点开列表之后
+  // 那一屏反而没有这个按钮了）。
+  const newBtn = page.locator("button").filter({ hasText: /新建笔记/ });
+  const allNotesBtn = page.locator("button").filter({ hasText: /全部笔记/ });
+  let hasNew = await newBtn.count();
+  if (!hasNew && (await allNotesBtn.count())) {
+    await clickViaJs(allNotesBtn, { waitMs: 8_000 }).catch(() => undefined);
+    await page.waitForTimeout(2500);
+    hasNew = await newBtn.count();
+  }
+  if (!hasNew) {
+    console.log(JSON.stringify({
+      fatal: "书架上没有「新建笔记」",
+      hudPage: await hudPage(),
+      body: (await page.evaluate(() => document.body.innerText).catch(() => "")).split("\n").filter(Boolean).slice(0, 14),
+    }, null, 2));
+    process.exit(2);
+  }
+  await clickViaJs(newBtn, { waitMs: 10_000 });
+  for (let i = 0; i < 30 && !(await page.locator(".note-editor [contenteditable='true']").count()); i += 1) await page.waitForTimeout(700);
+  const editable = page.locator(".note-editor [contenteditable='true']").first();
+  if (!(await editable.count())) {
+    console.log(JSON.stringify({ fatal: "新建之后没等到编辑器", hudPage: await hudPage() }, null, 2));
+    process.exit(2);
+  }
+  await editable.evaluate((el) => el.focus());
+  await editable.click({ timeout: 5000 }).catch(() => undefined);
+  await page.keyboard.type(titleLine, { delay: 25 });
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("第一段：候选是一张一张写出来的，写完的那张应该先看到。", { delay: 15 });
+  // 时间线：每 2 秒记一次"还在不在编辑器、正文读到几个字"。上一轮 12 秒后 editorText 是空的，
+  // 只报最后一个时刻分不清是"字没进去"还是"页面被弹走了"。
+  const timeline = [];
+  for (let i = 0; i < 10; i += 1) {
+    await page.waitForTimeout(2000);
+    timeline.push({
+      atSec: (i + 1) * 2,
+      hudPage: await hudPage(),
+      editorPresent: await page.locator(".note-editor [contenteditable='true']").count(),
+      chars: (await editable.innerText().catch(() => "")).length,
+    });
+  }
+  console.log(JSON.stringify({
+    mode: "CREATE_NOTE", titleLine, timeline,
+    hudPage: await hudPage(),
+    editorText: (await editable.innerText().catch(() => "")).slice(0, 80),
+  }, null, 2));
+  process.exit(0);
+}
+
 // 进笔记详情这一段要重来几次才稳：刚进书架那一屏是"正在整理今天的书桌…同步中"，
 // 列表还没到就去找行，会把"同步没完"误报成"这一屏没这个入口"。
 let opened = false;
