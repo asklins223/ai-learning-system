@@ -47,7 +47,7 @@ import type {
   KnowledgeFormV2,
   ObjectiveSurfaceLifecycleV3,
 } from "@ailearn/shared";
-import { DomainError, learningRunOutcomeSchema } from "@ailearn/shared";
+import { DomainError, cardStrategyV2Schema, learningRunOutcomeSchema } from "@ailearn/shared";
 import { listOriginsByObjective, rowToWire } from "./origin-service.ts";
 import { resolvePrimaryActionV3, type ActionResolverInputV3 } from "./action-resolver.ts";
 import { readAnswerModePreference } from "../companion-shell/answer-mode-preference.ts";
@@ -530,6 +530,7 @@ async function assembleObjectiveSurfaceV3Inner(
       conceptLabel: revision?.conceptLabel ?? null,
       publicSummary: revision?.publicSummary ?? "",
       knowledgeForm: (revision?.knowledgeForm ?? "fact") as KnowledgeFormV2,
+      cardStrategy: card ? cardStrategyV2Schema.parse(card.strategy) : null,
       lifecycle: objective.lifecycle as ObjectiveSurfaceLifecycleV3,
       freshness,
       presentation: {
@@ -1097,6 +1098,7 @@ async function batchAssembleObjectiveSurfacesV3(
         conceptLabel: revision?.conceptLabel ?? null,
         publicSummary: revision?.publicSummary ?? "",
         knowledgeForm: (revision?.knowledgeForm ?? "fact") as KnowledgeFormV2,
+        cardStrategy: card ? cardStrategyV2Schema.parse(card.strategy) : null,
         lifecycle: lifecycle as ObjectiveSurfaceLifecycleV3,
         freshness,
         presentation: {
@@ -1140,6 +1142,7 @@ export function toObjectiveListItemV3(surface: LearningObjectiveSurfaceV3): Obje
     conceptLabel: surface.content.conceptLabel,
     publicSummary: surface.content.publicSummary,
     knowledgeForm: surface.content.knowledgeForm,
+    cardStrategy: surface.content.cardStrategy,
     lifecycle: surface.content.lifecycle,
     freshness: surface.content.freshness,
     primaryNoteTitle: surface.sources.primaryNote?.title ?? null,

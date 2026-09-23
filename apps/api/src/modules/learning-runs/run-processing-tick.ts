@@ -321,6 +321,7 @@ async function processClaimedCommand(row: ClaimedCommand, workerId: string): Pro
             criticContext.assessmentId,
             new Date(),
             criticContext.runtimeEpoch,
+            classifyFailClosedReason(err.message),
           ),
         );
         return;
@@ -437,17 +438,47 @@ interface CommandRow {
  */
 const SUPPLEMENT_FOLLOWUP_ID = "supplement:1";
 
+/**
+ * 审计 F28：`not_assessable` 的原因码，与 `packages/shared` 的
+ * `LearningRunPublicV1["checkpoint"]["reasonCode"]` 同集合。
+ */
+type CheckpointReasonCode = "no_frozen_evidence" | "critic_unavailable" | "input_incomplete";
+
 /** 该 run 还能不能被签发一次补充证据；已用过则返回空数组（按钮消失）。 */
 async function supplementOffer(
   tx: Parameters<Parameters<typeof withWorkspaceTransaction>[1]>[0],
   runId: string,
+  reasonCode?: CheckpointReasonCode,
 ): Promise<string[]> {
+  // 审计 F28：系统侧缺冻结证据时，「继续补充证据」是一条注定再次失败的按钮——
+  // 缺的是结算闸要拿来做比对的原文证据，用户再写一段话也补不上（实机：两题各
+  // 39 毫秒空判，第二次连按钮都消失了）。所以这一种原因下不签发它。
+  if (reasonCode === "no_frozen_evidence") return [];
   const used = await tx
     .select({ id: learningTasks.id })
     .from(learningTasks)
     .where(and(eq(learningTasks.runId, runId), gte(learningTasks.sequence, 2)))
     .limit(1);
   return used.length > 0 ? [] : [SUPPLEMENT_FOLLOWUP_ID];
+}
+
+/**
+ * 审计 F28：把 `not_assessable` 的原因从自由文本收敛成可判定的码。
+ *
+ * 结算闸（`task rubric has no frozen evidence`）与通道故障以前都只留下一句
+ * 「判不出结论」，界面因此把它们说成同一件事，并给出同一条注定无效的出路。
+ * 判据按消息前缀匹配——抛错处就是这两句（`:826` 与 `commit fail-closed: …`），
+ * 这里不做模糊猜测：不匹配的一律归 `input_incomplete`（也就是"这次提交本身
+ * 不足以判定"），不编造系统侧原因。
+ */
+function classifyFailClosedReason(message: string): CheckpointReasonCode {
+  if (message.startsWith("task rubric has no frozen evidence")) return "no_frozen_evidence";
+  // 同一族：任务闭包漏掉必选评分点，效果与"该评分点没有证据"完全一样——
+  // 用户提交多少字都补不上。
+  if (message.startsWith("task closure omits required rubric")) return "no_frozen_evidence";
+  if (message.startsWith("commit fail-closed:")) return "no_frozen_evidence";
+  if (message.startsWith("empty answer text") || message.startsWith("task not found")) return "input_incomplete";
+  return "critic_unavailable";
 }
 
 async function processAssessmentCommand(
@@ -496,14 +527,19 @@ async function processAssessmentCommand(
     } catch (err) {
       if (err instanceof CriticOutputError) {
         const reportHash = sha256Hex(`fail-closed:${assessmentId}:structured:${err.message}`);
+        const reasonCode = classifyFailClosedReason(err.message);
         await tx.update(learningAssessments)
           .set({ status: "not_assessable", rubricResults: [], trustClass: null, reportHash, updatedAt: at })
           .where(eq(learningAssessments.id, assessmentId));
-        await appendRunEvent(tx, command, "learning_assessment.not_assessable", { assessmentId }, at);
+        await appendRunEvent(tx, command, "learning_assessment.not_assessable", { assessmentId, reasonCode }, at);
         await tx.update(learningRuns)
           .set({
             phase: "checkpoint",
-            checkpoint: { kind: "not_assessable", allowedFollowupIds: await supplementOffer(tx, command.runId) },
+            checkpoint: {
+              kind: "not_assessable",
+              allowedFollowupIds: await supplementOffer(tx, command.runId, reasonCode),
+              reasonCode,
+            },
             revision: run.revision + 1,
             updatedAt: at,
           })
@@ -524,7 +560,14 @@ async function processAssessmentCommand(
       // 分支静默 fail closed，于是"每题都 not_assessable"在 API 日志里读不出
       // 任何原因（2026-09-23 定位补充任务的 500 只能去翻 postgres 日志）。
       process.stderr.write(`[run-tick] critic input fail-closed for assessment=${assessmentId}: ${err.message}\n`);
-      await failClosedNotAssessable(tx, command, assessmentId, at);
+      await failClosedNotAssessable(
+        tx,
+        command,
+        assessmentId,
+        at,
+        undefined,
+        classifyFailClosedReason(err.message),
+      );
       return null;
     }
     throw err;
@@ -542,6 +585,7 @@ async function failClosedNotAssessable(
   assessmentId: string,
   at: Date = new Date(),
   expectedRuntimeEpoch?: number,
+  reasonCode: CheckpointReasonCode = "critic_unavailable",
 ): Promise<void> {
   // Critic HTTP 在事务外完成。写回前必须与 end(abandonLockedEvidence)
   // 争夺同一 run row lock，避免迟到的失败结算把已结束 run 改回 checkpoint。
@@ -569,11 +613,15 @@ async function failClosedNotAssessable(
   await tx.update(learningAssessments)
     .set({ status: "not_assessable", rubricResults: [], trustClass: null, reportHash, updatedAt: at })
     .where(eq(learningAssessments.id, assessmentId));
-  await appendRunEvent(tx, command, "learning_assessment.not_assessable", { assessmentId }, at);
+  await appendRunEvent(tx, command, "learning_assessment.not_assessable", { assessmentId, reasonCode }, at);
   await tx.update(learningRuns)
     .set({
       phase: "checkpoint",
-      checkpoint: { kind: "not_assessable", allowedFollowupIds: await supplementOffer(tx, command.runId) },
+      checkpoint: {
+        kind: "not_assessable",
+        allowedFollowupIds: await supplementOffer(tx, command.runId, reasonCode),
+        reasonCode,
+      },
       revision: sql`revision + 1`,
       updatedAt: at,
     })
@@ -1267,10 +1315,15 @@ async function settleCommitRejection(
   reason: string,
 ): Promise<null> {
   const at = new Date();
+  const reasonCode = classifyFailClosedReason(reason);
   await tx.update(learningRuns)
     .set({
       phase: "checkpoint",
-      checkpoint: { kind: "not_assessable", allowedFollowupIds: await supplementOffer(tx, command.runId) },
+      checkpoint: {
+        kind: "not_assessable",
+        allowedFollowupIds: await supplementOffer(tx, command.runId, reasonCode),
+        reasonCode,
+      },
       revision: run.revision + 1,
       updatedAt: at,
     })

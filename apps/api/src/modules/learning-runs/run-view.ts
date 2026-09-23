@@ -145,7 +145,7 @@ export interface RunRow {
   plannedActiveSeconds: number;
   activeSecondsUsed: number;
   activeTaskId: string | null;
-  checkpoint: { kind: "partial" | "not_assessable" | "skipped_task"; allowedFollowupIds: string[] } | null;
+  checkpoint: NonNullable<LearningRunPublicV1["checkpoint"]> | null;
   failure: LearningRunPublicV1["failure"];
   projectionStatus: LearningRunPublicV1["projectionStatus"];
   projectionBaselineCheckpointToken: string | null;

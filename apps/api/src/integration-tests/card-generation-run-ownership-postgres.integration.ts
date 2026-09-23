@@ -10,12 +10,13 @@
  */
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import postgres from "postgres";
 import { closeDatabase, withWorkspaceTransaction } from "../db/client.ts";
 import { cardGenerationRunsV2 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { createNote } from "../modules/note/service.ts";
-import { getLatestGenerationRunForNoteV2 } from "../modules/card-generation-v2/generation-run-service.ts";
+import { getLatestGenerationRunForNoteV2, listActiveGenerationRunsV2 } from "../modules/card-generation-v2/generation-run-service.ts";
+import { projectCardGenerationActiveSummaryListV1 } from "../modules/card-generation-v2/desktop-projection.ts";
 import { listActiveCardsV2, readPublicCardV2 } from "../modules/card-generation-v2/card-service.ts";
 import { addV2ObjectiveToWorkspace } from "./helpers/v2-card-fixture.ts";
 import { assembleObjectiveSurfaceV3, listObjectiveSurfacesV3 } from "../modules/learning-objectives/surface-service.ts";
@@ -95,6 +96,14 @@ after(async () => {
   await closeDatabase().catch(() => {});
 });
 
+/**
+ * 哈希位必须是**真形状**（`/^[0-9a-f]{64}$/`）。夹具以前写 `"h"`，任何走投影层的读
+ * （`projectCardGenerationActiveSummaryListV1` 里 `z.array(serverView).parse`）都会
+ * 在正则上炸掉——报出来的是"投影层 500"，而那正是这一条要测的缺陷本身，
+ * 假形状会把真缺陷淹在假失败里。
+ */
+const hex64 = (seed: string) => createHash("sha256").update(seed).digest("hex");
+
 /** 造一条"某人已经在这篇上有过一批"的记录（走 API 现在造不出成员的那一条）。 */
 async function seedRun(userId: string, status: string): Promise<string> {
   return withWorkspaceTransaction({ workspaceId, userId }, async (tx) => {
@@ -109,14 +118,14 @@ async function seedRun(userId: string, status: string): Promise<string> {
         // 键的话第二条用例是在测"幂等冲突"而不是"归属"。
         idempotencyKey: `fixture-${tag}-${userId}-${status}-${randomUUID().slice(0, 8)}`,
         status,
-        semanticSpecHash: "h",
-        inputSnapshotHash: "h",
-        generationFingerprint: `fp-${tag}-${userId}`,
-        sourceSnapshotHash: "h",
-        sourceContentHash: "h",
-        blockManifestHash: "h",
-        assetManifestHash: "h",
-        scopeManifestHash: "h",
+        semanticSpecHash: hex64(`sem-${tag}-${userId}-${status}`),
+        inputSnapshotHash: hex64(`inp-${tag}-${userId}-${status}`),
+        generationFingerprint: hex64(`fp-${tag}-${userId}-${status}`),
+        sourceSnapshotHash: hex64(`src-${tag}-${userId}-${status}`),
+        sourceContentHash: hex64(`cnt-${tag}-${userId}-${status}`),
+        blockManifestHash: hex64(`blk-${tag}-${userId}-${status}`),
+        assetManifestHash: hex64(`ast-${tag}-${userId}-${status}`),
+        scopeManifestHash: hex64(`scp-${tag}-${userId}-${status}`),
       })
       .returning({ id: cardGenerationRunsV2.id });
     return row.id;
@@ -375,5 +384,37 @@ test("搜索这一侧也一样：私有笔记的目标不出现在别人的命�
   assert.ok(
     hits.author.includes(seeded.objectiveId),
     `作者自己也搜不到（正向对照失败：${hits.author.length} 条命中）`,
+  );
+});
+
+test("「有没有在制的批次」这个恢复查询，在真有批次时给得出东西", async () => {
+  const runId = await seedRun(author, "authoring");
+
+  const runs = await listActiveGenerationRunsV2({ workspaceId, userId: author });
+  // 正向对照：列表里必须真的有东西。少了这一句，"查询整个坏掉返回 []"
+  // 会让下面所有断言都绿——而那次 500 的现场恰恰是列表非空。
+  assert.ok(runs.length > 0, "在制批次列表是空的（夹具没落地），这条用例在测空列表");
+
+  // 500 的成因：`serializeRunPublic` 是 async，列表那一支漏了 await，
+  // 于是交给投影层的是一排 Promise，zod 判 `invalid_type: received promise`。
+  // 这一条要**先于**下面的 runId 断言：漏了 await 时 `run.runId` 是 undefined，
+  // 如果先查 runId，报出来的是"没列出来"，把真因说成了假因。
+  const stillPromises = runs.filter(
+    (run) => typeof (run as { then?: unknown }).then === "function",
+  );
+  assert.equal(
+    stillPromises.length,
+    0,
+    `列表里有 ${stillPromises.length} 个元素还是 Promise——交出去之前必须把这一批 await 完`,
+  );
+
+  const mine = runs.find((run) => run.runId === runId);
+  assert.ok(mine, "刚造的在制批次没被列出来");
+  assert.equal(mine?.status, "authoring", "列表元素不是投影对象（读不到 status）");
+
+  const summary = projectCardGenerationActiveSummaryListV1(runs);
+  assert.ok(
+    summary.items.some((item) => item.runId === runId && item.route.kind === "note.cardGeneration"),
+    "恢复列表没把这一批投影成可跳转的条目",
   );
 });

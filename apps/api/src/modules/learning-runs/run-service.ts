@@ -1225,6 +1225,8 @@ function projectLearningRunPublicSnapshotV2(
     activeTask: view.activeTask,
     allowedActions: buildLearningRunAllowedActionsV2(view),
     publishedTargetEligibility: context.publishedTargetEligibility,
+    // 审计 F28：只有 checkpoint 相位才有"为什么停在这里"；其他相位不编造原因。
+    checkpointReason: view.phase === "checkpoint" ? view.checkpoint?.reasonCode ?? "input_incomplete" : null,
   });
 }
 

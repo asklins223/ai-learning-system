@@ -476,7 +476,12 @@ export async function listActiveGenerationRunsV2(ctx: RunContext) {
       .limit(20);
     // 一批评判据一次算完（2 次往返），不再逐行把各自的源笔记全文搬回来。
     const outdatedByRunId = await computeSourceOutdatedForRunsV2(tx, rows);
-    return rows.map((row) => serializeRunPublic(row, tx, null, outdatedByRunId.get(row.id) ?? false));
+    // `serializeRunPublic` 是 async：这里必须把这一批 await 完再交出去，否则交出去的是
+    // 一排 Promise，投影层的 zod 会把每个元素判成 `invalid_type: promise`，
+    // 于是**只要用户手上真的有一个在制的生成**这个恢复端点就 500（0 个的空间反而 200）。
+    return await Promise.all(
+      rows.map((row) => serializeRunPublic(row, tx, null, outdatedByRunId.get(row.id) ?? false)),
+    );
   });
 }
 

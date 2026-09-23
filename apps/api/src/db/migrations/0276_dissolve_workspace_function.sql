@@ -76,6 +76,33 @@ BEGIN
     v_retired_memories := v_retired_memories
       + public.ailearn_retire_workspace_memories_on_departure(p_workspace_id, v_member.user_id);
 
+    -- 先把"个人空间里已经有同一件事"的那一份丢掉，再改指针。
+    -- 为什么必须先丢：伴星的 global 记忆是**按空间扇出**的——同一条记忆带着完全相同的
+    -- `source_event_id` 同时存在于用户的每一个空间里。而
+    -- `assistant_memory_items_content_unique_idx` 是 (workspace_id, user_id, kind,
+    -- source_event_id) 的部分唯一索引，只把 workspace_id 改成个人空间必然撞它，
+    -- 于是整个解散事务回滚，用户看到的是"学习服务内部出了点问题，请稍后重试"，
+    -- 而重试永远再失败（2026-09-23 全链路审计 F43/F44）。
+    -- 丢的是被解散空间里的那一份，个人空间里的原件不动，所以不丢任何信息。
+    DELETE FROM public.assistant_memory_items m
+     USING public.users u
+     WHERE m.workspace_id = p_workspace_id
+       AND m.user_id = u.id
+       AND m.scope = 'global'
+       AND u.personal_workspace_id IS NOT NULL
+       AND u.personal_workspace_id <> p_workspace_id
+       AND m.source_event_id IS NOT NULL
+       AND EXISTS (
+         SELECT 1 FROM public.assistant_memory_items p
+          WHERE p.workspace_id = u.personal_workspace_id
+            AND p.user_id = m.user_id
+            AND p.kind = m.kind
+            AND p.source_event_id = m.source_event_id
+            AND p.deleted_at IS NULL
+       );
+    GET DIAGNOSTICS v_pass_rows = ROW_COUNT;
+    v_retired_memories := v_retired_memories + v_pass_rows;
+
     UPDATE public.assistant_memory_items m
        SET workspace_id = u.personal_workspace_id, updated_at = now()
       FROM public.users u

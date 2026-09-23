@@ -52,6 +52,13 @@ async function workspaceTables(): Promise<string[]> {
   return rows.map((r) => String(r.relname));
 }
 
+// 扇出形状（F43/F44）：同一条 global 记忆带着**完全相同的 source_event_id**
+// 同时挂在被解散空间与发起者的个人空间里。伴星的记忆是按空间复制的，所以这是真实形状，
+// 而原来的夹具只有"一条 global 记忆"，正好错过了唯一会让解散 100% 失败的那种数据。
+const fanoutInDissolved = randomUUID();
+const fanoutInPersonal = randomUUID();
+const FANOUT_SOURCE_EVENT_ID = `memory-extract:${randomUUID()}:0`;
+
 before(async () => {
   await admin.begin(async (tx) => {
     await tx`SELECT set_config('app.workspace_id', ${ws}, true)`;
@@ -75,6 +82,9 @@ before(async () => {
       VALUES (${globalMemory}, ${ws}, ${owner}, 'preference', '属于人的那条', 'global'),
               (${workspaceMemory}, ${ws}, ${owner}, 'preference', '关联空间的那条', 'workspace')`;
     await tx`UPDATE assistant_memory_items SET global_key = ${globalMemory} WHERE id = ${globalMemory}`;
+    await tx`INSERT INTO assistant_memory_items (id, workspace_id, user_id, kind, content, scope, source_event_id)
+      VALUES (${fanoutInDissolved}, ${ws}, ${owner}, 'preference', '扇出到本空间的那一份', 'global', ${FANOUT_SOURCE_EVENT_ID}),
+              (${fanoutInPersonal}, ${ownerPersonal}, ${owner}, 'preference', '个人空间里的原件', 'global', ${FANOUT_SOURCE_EVENT_ID})`;
   });
 });
 
@@ -85,7 +95,7 @@ after(async () => {
     for (const id of [globalMemory, workspaceMemory]) {
       await tx`DELETE FROM assistant_memory_embeddings WHERE memory_id = ${id}`;
     }
-    await tx`DELETE FROM assistant_memory_items WHERE id IN (${globalMemory}, ${workspaceMemory})`;
+    await tx`DELETE FROM assistant_memory_items WHERE id IN (${globalMemory}, ${workspaceMemory}, ${fanoutInDissolved}, ${fanoutInPersonal})`;
     await tx`DELETE FROM notes WHERE id = ${noteId}`;
     await tx`DELETE FROM workspace_audit_log WHERE target_id = ${ws} OR workspace_id IN (${ws}, ${ownerPersonal}, ${memberPersonal})`;
     await tx`DELETE FROM workspace_members WHERE workspace_id IN (${ws}, ${ownerPersonal}, ${memberPersonal})`;
@@ -134,6 +144,17 @@ test("解散：逐表清干净、属于人的记忆活着、审计留得下", as
   assert.equal(String(survived[0].workspace_id), ownerPersonal, "global 记忆没被改指回个人空间");
   const gone = await admin`SELECT id FROM assistant_memory_items WHERE id = ${workspaceMemory}`;
   assert.equal(gone.length, 0, "关联空间的记忆还挂在已消失的空间上");
+
+  // F43 的形状：同一条 global 记忆按空间扇出，两份带着同一个 source_event_id。
+  // 改指针前不先丢掉重复的那一份，就会撞
+  // `assistant_memory_items_content_unique_idx`，整个解散事务回滚——用户侧是
+  // "学习服务内部出了点问题，请稍后重试"，而重试永远再失败。
+  const fanout = await admin`SELECT id FROM assistant_memory_items
+    WHERE id IN (${fanoutInDissolved}, ${fanoutInPersonal})`;
+  assert.equal(fanout.length, 1,
+    "扇出的 global 记忆让解散失败/或两份都在：应丢掉重复的一份、留下个人空间原件");
+  assert.equal(String(fanout[0].id), fanoutInPersonal,
+    "丢掉的是个人空间的原件而不是被解散空间那一份——用户会看到记忆凭空变少");
 
   // tombstone 记在**发起者的个人空间**名下：`workspace_audit_log.workspace_id` 对 workspaces
   // 是 ON DELETE CASCADE，记在被解散的空间名下等于自己把它删了。

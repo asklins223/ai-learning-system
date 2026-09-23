@@ -10,6 +10,7 @@ import {
 import { ReviewStatus, reviewQueueV2Schema, type ReviewQueueV2 } from "@ailearn/shared";
 import { decodeCursor, encodeCursor } from "../../lib/pagination.ts";
 import { reviewScheduleTargetsConsumableCardPredicate } from "./consumer-eligibility.ts";
+import { loadMissingFrozenRubricUnits } from "./frozen-evidence.ts";
 
 export type ReviewReason =
   | "evidence_gap"
@@ -67,6 +68,11 @@ export interface SanitizedReviewItem {
   unassistedEligibleAt: string | null;
   effectiveStartAt: string;
   blockedReason: ReviewBlockedReason;
+  /**
+   * 审计 F28：这条目标的必选评分点里有哪些没有冻结证据（空数组 = 没有缺口）。
+   * 结算闸会因为这种缺口 fail closed，队列与简报都要在用户投入时间之前说出来。
+   */
+  missingFrozenRubricUnitIds: string[];
   isV2?: boolean;
 }
 
@@ -120,6 +126,12 @@ export function projectReviewQueueV2(
       scheduleGeneration: item.generation,
       dueAt: item.nextReviewAt,
       startability,
+      // 审计 F28：缺冻结证据的条目照样留在队列里（它确实到期了），但必须
+      // 带着"这次判不出结论、原因不在你"一起下发。静默藏掉会让用户以为
+      // 排程丢了；把它说成"可正式复习"就是这次审计记的那句误导。
+      formalValidationBlocked: item.missingFrozenRubricUnitIds.length > 0
+        ? { reason: "evidence_gap" as const, missingRubricUnitIds: item.missingFrozenRubricUnitIds }
+        : null,
     };
   });
   return reviewQueueV2Schema.parse({
@@ -415,6 +427,8 @@ export async function listSanitizedReviews(
   const objectiveIds = result.items
     .map((item) => item.objective?.id)
     .filter((id): id is string => Boolean(id));
+  // 审计 F28：与结算闸同源的证据完备性判据。一次批量读，不进 N+1。
+  const missingFrozenEvidence = await loadMissingFrozenRubricUnits(queryDb, workspaceId, objectiveIds);
   const eligibleByObjective = new Map<string, Date>();
   if (userId && objectiveIds.length > 0) {
     const exposures = await queryDb.query.validationAssistanceExposures.findMany({
@@ -473,6 +487,7 @@ export async function listSanitizedReviews(
         generation: item.review.generation ?? 0,
         reviewReason: item.reviewReason,
         isV2: item.isV2,
+        missingFrozenRubricUnitIds: objectiveId ? missingFrozenEvidence.get(objectiveId) ?? [] : [],
         ...availability,
       };
     }),
