@@ -606,6 +606,7 @@ export function ObjectiveDetailSurface() {
   const activeObjectiveId = useRoomStore((state) => state.activeObjectiveId);
   const setActiveObjectiveId = useRoomStore((state) => state.setActiveObjectiveId);
   const setActiveRunId = useRoomStore((state) => state.setActiveRunId);
+  const setActiveNoteRef = useRoomStore((state) => state.setActiveNoteRef);
   const invoke = useRoomStore((state) => state.invoke);
   const epochRef = useRef<number | undefined>(undefined);
   const [objective, setObjective] = useState<LearningObjectiveSurfaceV3 | null>(null);
@@ -660,6 +661,19 @@ export function ObjectiveDetailSurface() {
   const evidenceSnapshotCount = objective?.sources.origins.reduce((sum, origin) => sum + origin.evidenceSnapshotIds.length, 0) ?? 0;
   const detailMode = objective ? runModePresentation(objective.primaryAction) : null;
   const previousResult = objective?.personal.latestResult;
+  /**
+   * 打开"这个目标自己的"主笔记（审计 F05）。
+   *
+   * 病是这么来的：这颗按钮只 `invoke("open-notebook")`，不带指的是哪一篇——于是
+   * 阅读面按 store 里残留的 `activeNoteRef`（或首页焦点目标的主笔记）打开，实测在
+   * 非焦点目标上点开的是**另一个目标**的笔记。入口必须自己把身份交出去：
+   * 先按这颗按钮上写的那一篇设 ref，再导航；没有可用版本时**不跳**，就地说明。
+   */
+  const openPrimaryNote = (note: { readonly noteId: string; readonly noteVersionId: string }) => {
+    setActiveNoteRef({ noteId: note.noteId, noteVersionId: note.noteVersionId });
+    invoke("open-notebook");
+  };
+
   const openPreviousResult = () => {
     if (!previousResult) return;
     setActiveRunId(previousResult.runId);
@@ -727,7 +741,7 @@ export function ObjectiveDetailSurface() {
             <details className="objective-brief__dossier">
               <summary><span><Layers3 size={16} aria-hidden="true" /><strong>资料卷宗</strong></span><small>{objective.sources.origins.length} 条来源 · {evidenceSnapshotCount} 条原文证据</small></summary>
               <div className="objective-brief__dossier-body">
-                {objective.sources.primaryNote ? <button type="button" className="v3-primary-note" onClick={() => invoke("open-notebook")}><FileText size={17} aria-hidden="true" /><span><small>主笔记</small><strong>{objective.sources.primaryNote.title}</strong></span><ChevronRight size={16} aria-hidden="true" /></button> : <div className="v3-primary-note v3-primary-note--missing"><AlertTriangle size={17} aria-hidden="true" /><span><small>主笔记</small><strong>尚未关联主笔记</strong></span></div>}
+                {objective.sources.primaryNote ? <button type="button" className="v3-primary-note" onClick={() => openPrimaryNote(objective.sources.primaryNote!)}><FileText size={17} aria-hidden="true" /><span><small>主笔记</small><strong>{objective.sources.primaryNote.title}</strong></span><ChevronRight size={16} aria-hidden="true" /></button> : <div className="v3-primary-note v3-primary-note--missing"><AlertTriangle size={17} aria-hidden="true" /><span><small>主笔记</small><strong>尚未关联主笔记</strong></span></div>}
                 {objective.sources.missingOrigin ? <p className="v3-lineage-warning"><AlertTriangle size={14} aria-hidden="true" />部分来源还没对上，验证前建议先补齐。</p> : null}
                 <div className="v3-origin-list">
                   {objective.sources.origins.length ? objective.sources.origins.map((origin, index) => <article key={origin.originId} className="v3-origin-row"><span className="v3-origin-row__index">{String(index + 1).padStart(2, "0")}</span><div><div><strong>{formatOriginKind(origin.kind)}</strong><span>{formatSupportGrade(origin.supportGrade)}</span></div><p>{formatOriginIntegrity(origin.integrity)}{origin.evidenceSnapshotIds.length ? ` · ${origin.evidenceSnapshotIds.length} 条原文证据` : ""}</p><small>{origin.kind === "imported" ? `导入批次 ${origin.importBatchRef}` : origin.sourceSnapshotId ? "留了当时引用的原文" : "没有留当时引用的原文"}</small></div></article>) : <div className="v3-origin-empty"><FolderOpen size={19} aria-hidden="true" /><strong>还没有可公开的出处</strong><span>这里不会用示例证据填充空白。</span></div>}
