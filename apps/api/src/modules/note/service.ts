@@ -373,26 +373,33 @@ export async function createNote(
  * 也比在 SQL 里写 DISTINCT ON 更好读。内容原样返回（`![alt](url)`），解析留给
  * 渲染层那一份 `parseImageBlock`。
  */
-async function firstImageBlockByVersion(
+async function versionFactsByVersion(
   executor: ApiTransaction,
   workspaceId: string,
   versionIds: string[],
-): Promise<Map<string, string>> {
-  const firstBy = new Map<string, string>();
-  if (versionIds.length === 0) return firstBy;
+): Promise<Map<string, { firstImageBlock: string | null; hasBody: boolean }>> {
+  const facts = new Map<string, { firstImageBlock: string | null; hasBody: boolean }>();
+  if (versionIds.length === 0) return facts;
   const blocks = await executor
-    .select({ versionId: noteBlocks.versionId, content: noteBlocks.content })
+    .select({ versionId: noteBlocks.versionId, content: noteBlocks.content, type: noteBlocks.type })
     .from(noteBlocks)
     .where(and(
       eq(noteBlocks.workspaceId, workspaceId),
       inArray(noteBlocks.versionId, versionIds),
-      eq(noteBlocks.type, "image"),
     ))
     .orderBy(asc(noteBlocks.versionId), asc(noteBlocks.ordinal), asc(noteBlocks.id));
   for (const block of blocks) {
-    if (!firstBy.has(block.versionId)) firstBy.set(block.versionId, block.content);
+    const entry = facts.get(block.versionId) ?? { firstImageBlock: null, hasBody: false };
+    // 封面取第一张图；正文只看"非图片且内容非空"的块——空段落是编辑器光标的落点，
+    // 不算正文（与渲染层 `noteParagraphCount` 同一口径，审计 F37）。
+    if (block.type === "image") {
+      if (entry.firstImageBlock === null) entry.firstImageBlock = block.content;
+    } else if (block.content.trim().length > 0) {
+      entry.hasBody = true;
+    }
+    facts.set(block.versionId, entry);
   }
-  return firstBy;
+  return facts;
 }
 
 export async function listNotes(
@@ -475,7 +482,7 @@ export async function listNotes(
   const versionIds = pageRows
     .map((r) => r.currentVersionId)
     .filter((v): v is string => typeof v === "string" && v.length > 0);
-  const coverByVersion = await firstImageBlockByVersion(executor, workspaceId, versionIds);
+  const factsByVersion = await versionFactsByVersion(executor, workspaceId, versionIds);
 
   return {
     // 列表行自己带归属与"你能不能改归属"：库页的每一行都要显示「仅自己可见 /
@@ -487,7 +494,9 @@ export async function listNotes(
       titleSource: r.titleSource,
       shareScope: r.shareScope,
       canShare: r.createdBy === opts.userId,
-      firstImageBlock: r.currentVersionId ? coverByVersion.get(r.currentVersionId) ?? null : null,
+      firstImageBlock: r.currentVersionId ? factsByVersion.get(r.currentVersionId)?.firstImageBlock ?? null : null,
+      // 空稿和写过正文的笔记在列表里必须能分开（审计 F37）：没有版本的笔记同样算空稿。
+      hasBody: r.currentVersionId ? factsByVersion.get(r.currentVersionId)?.hasBody ?? false : false,
       currentVersionId: r.currentVersionId,
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,

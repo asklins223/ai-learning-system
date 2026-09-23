@@ -316,15 +316,19 @@ describe("note/service listNotes", () => {
       { id: "note-1", title: "有图", titleSource: "manual" as const, createdAt: now, updatedAt: now, currentVersionId: "v1", workspaceId: WS_ID, createdBy: USER_ID },
       { id: "note-2", title: "没图", titleSource: "manual" as const, createdAt: now, updatedAt: now, currentVersionId: "v2", workspaceId: WS_ID, createdBy: USER_ID },
     ];
-    // mock 的 select 队列按调用顺序取值：笔记行 → count → 图片块（服务端已按
-    // version_id, ordinal 排好，所以这里就按"每版第一块在前"给）。
+    // mock 的 select 队列按调用顺序取值：笔记行 → count → 该版本的全部块（服务端已按
+    // version_id, ordinal 排好，所以这里就按"每版第一块在前"给）。块行必须带 `type`：
+    // 投影要按它分"封面图"与"正文"（审计 F37 的 hasBody 就是从这一趟里算出来的）。
     const mock = createMockExecutor({
       selectResult: [
         notes,
         [{ count: 2 }],
         [
-          { versionId: "v1", content: "![装置](/api/uploads/a.png)" },
-          { versionId: "v1", content: "![第二张](/api/uploads/b.png)" },
+          { versionId: "v1", type: "image", content: "![装置](/api/uploads/a.png)" },
+          { versionId: "v1", type: "image", content: "![第二张](/api/uploads/b.png)" },
+          { versionId: "v1", type: "paragraph", content: "第一段正文" },
+          { versionId: "v1", type: "paragraph", content: "" },
+          { versionId: "v2", type: "paragraph", content: "   " },
         ],
       ],
     });
@@ -333,6 +337,9 @@ describe("note/service listNotes", () => {
 
     assert.equal(result.items[0]?.firstImageBlock, "![装置](/api/uploads/a.png)");
     assert.equal(result.items[1]?.firstImageBlock, null, "没有图片块的要显式回 null");
+    // 审计 F37：空段落（编辑器光标落点）不算正文；只有空白的版本是空稿。
+    assert.equal(result.items[0]?.hasBody, true);
+    assert.equal(result.items[1]?.hasBody, false, "只有空白段落的版本必须算空稿");
   });
 
   it("结果数等于 limit 时不猜测存在下一页", async () => {

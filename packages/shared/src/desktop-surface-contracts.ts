@@ -247,6 +247,12 @@ export const desktopNoteListItemSchema = z.object({
    * 不带结构化的 url/alt。
    */
   firstImageBlock: z.string().max(4000).nullable(),
+  /**
+   * 这一版里有没有真正的正文（非图片块、且内容非空）。审计 F37：点一次「新建笔记」
+   * 就落一篇空稿，而列表行以前只写「已有版本」——空稿和写了八段的笔记在列表里长得
+   * 一样。判据与渲染层的 `noteParagraphCount` 同源：空段落（光标落点）不算正文。
+   */
+  hasBody: z.boolean().default(false),
   /** `private` = 「仅自己可见」，`shared` = 「已共享给空间」。 */
   shareScope: z.enum(["private", "shared"]).default("private"),
   /** 只有作者能点那个动作；不是作者时入口要禁用并说明原因，而不是点下去吃一个 404。 */

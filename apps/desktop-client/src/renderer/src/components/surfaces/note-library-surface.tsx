@@ -566,6 +566,9 @@ export function NoteLibrarySurface() {
       spaceIdentity?.isPersonal ? "" : noteShareScopeLabel(note.shareScope),
       `${formatRelative(note.updatedAt)}更新`,
       note.currentVersionId ? "已有版本" : "等待首版",
+      // 审计 F37：点一次「新建笔记」就落一篇空稿，以前它在列表里和写过正文的笔记
+      // 长得完全一样（都写"已有版本"）。这一格是"这一版里一个字都没有"。
+      !note.hasBody ? "还没有写正文" : "",
     ].filter((part) => part !== "").join(" · ");
   };
 
