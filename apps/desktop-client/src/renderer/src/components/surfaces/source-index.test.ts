@@ -160,6 +160,37 @@ describe("counts", () => {
     expect(tabCount(counts, "processing", 128)).toBe(0);
     expect(tabCount(counts, "archived", 128)).toBe(0);
   });
+
+  /**
+   * 审计 F32：行上写「待解析」、而「解析中」这一档数 0——两处各说各话。
+   * 排队等待（draft）与正在解析（processing）是同一件事的两个时刻，同一个档收，
+   * 计数与列表也必须同一口径（否则数字和它对出来的行又会分叉）。
+   */
+  it("「解析中」把排队等待的也算进来，且与它筛出来的行数一致", () => {
+    const items = [
+      source({ id: "1", status: "draft" }),
+      source({ id: "2", status: "processing" }),
+      source({ id: "3", status: "ready" }),
+      source({ id: "4", status: "draft" }),
+    ];
+    const counts = countSourcesByStatus(items);
+    expect(tabCount(counts, "processing", items.length)).toBe(3);
+    expect(selectSources(items, "processing", "").map((item) => item.id)).toEqual(["1", "2", "4"]);
+  });
+
+  it("「已就绪」「解析失败」只收自己那一档（不跟着膨胀）", () => {
+    const items = [
+      source({ id: "1", status: "draft" }),
+      source({ id: "2", status: "processing" }),
+      source({ id: "3", status: "ready" }),
+      source({ id: "4", status: "failed" }),
+    ];
+    const counts = countSourcesByStatus(items);
+    expect(tabCount(counts, "ready", items.length)).toBe(1);
+    expect(tabCount(counts, "failed", items.length)).toBe(1);
+    expect(selectSources(items, "ready", "").map((item) => item.id)).toEqual(["3"]);
+    expect(selectSources(items, "failed", "").map((item) => item.id)).toEqual(["4"]);
+  });
 });
 
 describe("needsStatusRefresh", () => {

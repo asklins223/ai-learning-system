@@ -153,7 +153,12 @@ export function selectSources(
   fullTextIds: ReadonlySet<string> = new Set(),
 ): readonly DesktopSourceListItem[] {
   return items.filter((item) => {
-    if (tab !== "all" && item.status !== tab) return false;
+    // 「解析中」这一档收的是"还没解析完的"：job 还没被 worker 领走的 `draft`
+    // 与正在跑的 `processing` 是同一件事的两个时刻（审计 F32：行上写「待解析」、
+    // 这一档却数 0，两处各说各话）。分开数会逼用户在两档之间来回找。
+    const inTab = tab === "all"
+      || (tab === "processing" ? item.status === "processing" || item.status === "draft" : item.status === tab);
+    if (!inTab) return false;
     if (!needle) return true;
     return matchesSourceQuery(item, needle) || fullTextIds.has(item.id);
   });
@@ -179,7 +184,10 @@ export function tabCount(
   tab: SourceStatusTab,
   total: number,
 ): number {
-  return tab === "all" ? total : counts[tab];
+  // 与 `selectSources` 同一口径：哪个档收哪些状态，两处必须一起动。
+  if (tab === "all") return total;
+  if (tab === "processing") return counts.processing + counts.draft;
+  return counts[tab];
 }
 
 /**

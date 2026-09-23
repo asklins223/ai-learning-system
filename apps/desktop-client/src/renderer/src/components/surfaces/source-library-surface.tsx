@@ -328,6 +328,14 @@ export function SourceLibrarySurface() {
                 className={status === value ? "active" : undefined}
                 aria-pressed={status === value}
                 onClick={() => setStatus(value)}
+                // 「全部」不含已归档（归档就是"不再出现在默认索引"那条合同），
+                // 但"全部"这个词本身会被读成包含——所以把这件事写在悬停里，
+                // 而不是让用户自己拿 全部 8 + 已归档 1 去对总数（审计 F32）。
+                title={value === "all"
+                  ? `这里的 ${total} 份不含已归档${data?.archivedTotal ? `（另有 ${data.archivedTotal} 份在「已归档」页签）` : ""}`
+                  : value === "processing"
+                    ? `还没解析完的：正在解析 ${counts.processing} 份 + 排队等待 ${counts.draft} 份`
+                    : undefined}
               >
                 {value === "all" ? `全部 ${total}` : `${formatSourceStatus(value)} ${tabCount(counts, value, total)}`}
               </button>
