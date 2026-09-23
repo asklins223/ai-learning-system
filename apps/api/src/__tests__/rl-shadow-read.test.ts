@@ -10,7 +10,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  createCapabilityConfig,
   findPrivatePayloadLeaks,
   learningObjectiveSurfaceV3Schema,
   type LearningObjectiveSurfaceV3,
@@ -87,40 +86,20 @@ function makeListItem(overrides: Partial<ObjectiveListItemV3> = {}): ObjectiveLi
 
 describe("RL-11: capability shadow read 列表计数一致性", () => {
   it("OFF 状态：bundle 默认 disabled，不改变 Surface 内容", () => {
-    const config = createCapabilityConfig({
-      revision: 1,
-      overrides: { learning_objective_system_v3: { status: "disabled" } },
-    });
-    const state = config.states.learning_objective_system_v3;
-    assert.ok(state);
-    assert.equal(state.status, "disabled");
-    // Surface 合同不因 capability 状态变化
+    // bundle 机器已整条删除（doc 34 L34）：这里不再断言它的状态读回来是什么，
+    // 那等于拿手搓夹具测夹具。仍然成立的是这半句——Surface 合同与之无关。
     const surface = makeSurface();
     const parsed = learningObjectiveSurfaceV3Schema.safeParse(surface);
     assert.equal(parsed.success, true);
   });
 
   it("ON 状态：bundle enabled，Surface 合同一致", () => {
-    const config = createCapabilityConfig({
-      revision: 2,
-      overrides: { learning_objective_system_v3: { status: "enabled" } },
-    });
-    const state = config.states.learning_objective_system_v3;
-    assert.ok(state);
-    assert.equal(state.status, "enabled");
+    // 同上（doc 34 L34）：`enabled` 那一侧的 bundle 断言随机器一起删除。
     const surface = makeSurface();
     const parsed = learningObjectiveSurfaceV3Schema.safeParse(surface);
     assert.equal(parsed.success, true);
   });
 
-  it("列表项计数：OFF 与 ON 产生相同数量（shadow 不改变结果集）", () => {
-    const items = [makeListItem(), makeListItem({ objectiveId: "22222222-2222-4222-8222-222222222222" })];
-    // shadow read 比较逻辑：两侧 count 一致
-    const countOff = items.length;
-    const countOn = items.length;
-    assert.equal(countOff, countOn);
-    assert.equal(countOff, 2);
-  });
 });
 
 describe("RL-12: shadow 差异清零验证", () => {

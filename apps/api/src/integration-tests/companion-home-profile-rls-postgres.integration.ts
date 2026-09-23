@@ -61,6 +61,27 @@ after(async () => {
 });
 
 /** 与 identity/service.ts hashToken 一致（SHA-256 hex）。 */
+/**
+ * 合同声明的字段清单——从 schema 自己推，避免测试里再手抄一份名单。
+ *
+ * `companionRoomProfileV1Schema` 是 `strictObject(...).superRefine(...)`，在 zod 3 里
+ * 那是 `ZodEffects`：顶层没有 `.shape`，内层才有（直接 `.shape` 会拿到 undefined，
+ * `Object.keys(undefined)` 当场抛"Cannot convert undefined or null to object"）。
+ * 两种写法都试，**读不到就喊**——不许退化成"两边都是空数组"的假绿。
+ */
+function declaredRoomProfileKeys(): string[] {
+  const asObject = companionRoomProfileV1Schema as unknown as {
+    shape?: Record<string, unknown>;
+    _def?: { schema?: { shape?: Record<string, unknown> } };
+  };
+  const shape = asObject.shape ?? asObject._def?.schema?.shape;
+  assert.ok(
+    shape && Object.keys(shape).length >= 7,
+    "读不到 room-profile 合同的 shape，字段对账不能空跑",
+  );
+  return Object.keys(shape).sort();
+}
+
 function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
@@ -574,18 +595,13 @@ test("PATCH /companion/room-profile：认证请求的 400/409/200 由真实 hand
     assert.equal(applied.statusCode, 200);
     assert.equal(applied.headers["cache-control"], "private, no-store");
     const profile = companionRoomProfileV1Schema.parse(applied.json());
+    // 字段清单取合同自己那份 shape，不在测试里手抄第二份——手抄那份在 `proactiveMuted`
+    // 进合同时就已经悄悄过期过一次（这条用例红的原因与角色无关，谁都没怀疑到自己抄的名单上）。
+    // `strictObject` 已经守住"多一个字段当场抛错"，这里守的是"声明的字段一个都不少"。
     assert.deepEqual(
       Object.keys(profile).sort(),
-      [
-        "equippedDecorBySlot",
-        "equippedEffectId",
-        "revision",
-        "unlockedDecorIds",
-        "unlockedEffectIds",
-        "updatedAt",
-        "version",
-      ].sort(),
-      "响应必须是严格 room-profile body（无额外字段）",
+      declaredRoomProfileKeys(),
+      "响应字段与合同声明不一致",
     );
     assert.equal(profile.revision, 2);
     assert.deepEqual(profile.unlockedDecorIds, ["keepsake.first-note"]);

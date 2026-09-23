@@ -216,6 +216,45 @@ export async function ackDelivery(
   return toContract(updated[0]);
 }
 
+/**
+ * 服务端结账：把某条记忆对应的**尚未终态**候选交付写成终态。
+ *
+ * 为什么需要它（doc 34 L42）：候选交付经活动条到达用户（`payload_ref.kind`
+ * 是 `memory_item`，桌面的分支读的是那一位，不是 `kind` 那一列），用户随后在
+ * 记忆管理页确认或忽略——但那两个动作过去**一个字节都不碰这张表**，于是交付永远停在
+ * `displayed`，而 `acted`/`dismissed` 这两个早已定义好的终态在整库里 0 行。
+ *
+ * 状态机仍然只有这一个写者：记忆侧调这个函数，不自己 UPDATE 这张表。
+ * 设备 ACK 那条路（`ackDelivery`）要校验展示租约，这里不能复用——**做事的人未必是
+ * 当初领到租约的那台设备**（手机上看气泡、桌面上确认，是同一条记忆的两个端）。
+ */
+export async function closeDeliveriesForMemoryItem(
+  tx: ApiTransaction,
+  scope: DeliveryScope,
+  input: { memoryItemId: string; transition: "acted" | "dismissed" },
+  now: Date = new Date(),
+): Promise<number> {
+  const closed = await tx
+    .update(assistantDeliveries)
+    .set({ state: input.transition, displayLease: null, updatedAt: now })
+    .where(and(
+      eq(assistantDeliveries.workspaceId, scope.workspaceId),
+      eq(assistantDeliveries.userId, scope.userId),
+      sql`${assistantDeliveries.payloadRef} ->> 'memoryItemId' = ${input.memoryItemId}`,
+      sql`${assistantDeliveries.state} IN (${sql.join(ACTIVE_STATES.map((state) => sql`${state}`), sql`, `)})`,
+    ))
+    .returning({ id: assistantDeliveries.id });
+  if (closed.length > 0) {
+    // 与 `deliver` 同一形状：随事务 NOTIFY，让别的设备立刻把这张卡片重画成终态。
+    // 漏掉这一句的话，只有"结账成功"这个事实要在下一次 durable poll 才看得见——
+    // 用户已经表过态，卡片却还挂着两个按钮。
+    await tx.execute(sql`
+      SELECT pg_notify(${COMPANION_INBOX_NOTIFY_CHANNEL}, ${JSON.stringify({ userId: scope.userId })})
+    `);
+  }
+  return closed.length;
+}
+
 /** inbox 拉取：Last-Event-ID 语义（sequence 游标）。 */
 export async function listInbox(
   tx: ApiTransaction,

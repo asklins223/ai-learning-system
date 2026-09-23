@@ -140,11 +140,13 @@ import {
   type DesktopSourceNoteResult,
   type DesktopSourceUpdateRequest,
   type DesktopSourceArchiveResult,
+  type DesktopSourceReparseResult,
   desktopNoteListPageSchema,
   type DesktopNoteCreateRequest,
   type DesktopNoteMutationResult,
   desktopNoteVersionListSchema,
   desktopSearchPageSchema,
+  desktopAiAuditPageV1Schema,
 } from "./desktop-surface-contracts.ts";
 import { objectiveListPageV3Schema, learningObjectiveSurfaceV3Schema } from "./learning-objective-surface-contracts.ts";
 import { understandingTopologySnapshotV3Schema } from "./understanding-topology-v3-contracts.ts";
@@ -215,6 +217,8 @@ export const DESKTOP_IPC_CHANNELS = {
   inviteRevoke: "ailearn.v1.invite.revoke",
   memberList: "ailearn.v1.member.list",
   memberRemove: "ailearn.v1.member.remove",
+  workspaceDissolve: "ailearn.v1.workspace.dissolve",
+  workspaceTransferOwnership: "ailearn.v1.workspace.transferOwnership",
   // 数据维护工具：Markdown 批量导入、搜索索引漂移检测与重建。
   settingsMarkdownImport: "ailearn.v1.settings.markdownImport",
   searchDriftGet: "ailearn.v1.search.drift",
@@ -305,6 +309,7 @@ export const DESKTOP_IPC_CHANNELS = {
   sourceUpdate: "ailearn.v1.source.update",
   sourceCreateNote: "ailearn.v1.source.createNote",
   sourceArchive: "ailearn.v1.source.archive",
+  sourceReparse: "ailearn.v1.source.reparse",
   sourceImageGet: "ailearn.v1.source.image.get",
   noteList: "ailearn.v1.note.list",
   noteCreate: "ailearn.v1.note.create",
@@ -368,8 +373,11 @@ export const DESKTOP_IPC_CHANNELS = {
   workspaceAiSettingsGet: "ailearn.v1.workspace.aiSettings.get",
   workspaceAiConsentUpdate: "ailearn.v1.workspace.aiConsent.update",
   workspaceAiDataPolicyUpdate: "ailearn.v1.workspace.aiDataPolicy.update",
+  /** 设置 → 隐私「记录 AI 审计日志，供你回看」那一行的读端；服务端路由挂着 requireOwner。 */
+  workspaceAiAuditLog: "ailearn.v1.workspace.aiAuditLog",
   workspaceExport: "ailearn.v1.workspace.export",
   clipboardReadLinks: "ailearn.v1.clipboard.readLinks",
+  shellOpenExternal: "ailearn.v1.shell.openExternal",
 } as const;
 
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
@@ -726,6 +734,13 @@ export const gatewayErrorCodeValues = [
   "invalid_credentials",
   "reauth_required",
   "forbidden",
+  /**
+   * "没签 AI 使用同意"不能混在 `forbidden` 里：那一句"没有权限"会把人送去问管理员，
+   * 而这件事其实是他自己在设置页点一下就能解的（doc 34 L13 的下游那一半）。
+   * 服务端在语音那三条外发端点上回 403 + `error: "ai_consent_required"`
+   * （`apps/api/src/modules/identity/ai-consent-gate.ts`），网关按 token 翻成这个码。
+   */
+  "ai_consent_required",
   "feature_disabled",
   "not_found",
   "validation",
@@ -990,6 +1005,32 @@ export const clipboardReadLinksResultSchema = z.strictObject({
 });
 export type ClipboardReadLinksResult = z.infer<typeof clipboardReadLinksResultSchema>;
 
+/**
+ * 「这条地址算不算一条能打开的网页链接」只在这里定义一次。
+ *
+ * 两边都读它：主进程拿它当真正的闸门（URL 来自模型给的回答，渲染层说什么都不算），
+ * 渲染层拿它决定**这颗画不画成能点的**。以前伴星那侧只有渲染层一份 `https?:` 正则，
+ * 于是链接被排成"标签 + 去处"两行文字却点不动 —— 因为全应用确实没有打开外链的通道。
+ */
+export function isWebLinkUrl(value: string): boolean {
+  if (value.length === 0 || value.length > MAX_CANDIDATE_LINK_LENGTH) return false;
+  try {
+    const protocol = new URL(value).protocol;
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+export const shellOpenExternalRequestV1Schema = z.strictObject({
+  url: z.string().min(1).max(MAX_CANDIDATE_LINK_LENGTH),
+});
+export const shellOpenExternalResultV1Schema = z.strictObject({
+  opened: z.literal(true),
+});
+export type ShellOpenExternalRequestV1 = z.infer<typeof shellOpenExternalRequestV1Schema>;
+export type ShellOpenExternalResultV1 = z.infer<typeof shellOpenExternalResultV1Schema>;
+
 export const actionCapabilityValues = [
   "source.read", "source.create", "source.update", "source.archive", "source.createNote",
   "note.read", "note.create", "note.save", "note.delete", "note.restore", "note.permanentDelete",
@@ -1146,6 +1187,32 @@ export const renameWorkspaceResultV1Schema = z.strictObject({
   name: nonEmptyStringSchema,
 });
 export type RenameWorkspaceResultV1 = z.infer<typeof renameWorkspaceResultV1Schema>;
+
+/**
+ * `DELETE /workspaces/:id` 的结果（迁移 0276 那支函数的逐表计数原样带回）。
+ *
+ * 为什么把计数送到界面：解散是不可逆动作，"删了什么、删了几条"必须看得见，
+ * 不然这颗按钮就是个盲盒。key 是表名，`_` 前缀那几个是判据摘要（记忆改指/收掉的数量）。
+ */
+export const dissolveWorkspaceResultV1Schema = z.strictObject({
+  version: z.literal(1),
+  workspaceId: z.string().uuid(),
+  counts: z.record(z.string(), z.number().int().min(0)),
+});
+export type DissolveWorkspaceResultV1 = z.infer<typeof dissolveWorkspaceResultV1Schema>;
+
+/**
+ * `POST /workspaces/:id/transfer-ownership` 的结果（服务端的 `ok:true` 形状已经在网关摊平）。
+ *
+ * 转让是 owner 唯一的"体面出口"：没有它，`leaveWorkspace` 对 owner 永远是
+ * `owner_cannot_leave`——既不能退也不能交，这个空间就把人锁死了（doc 34 L6）。
+ */
+export const transferWorkspaceOwnershipResultV1Schema = z.strictObject({
+  version: z.literal(1),
+  workspaceId: z.string().uuid(),
+  newOwnerUserId: z.string().uuid(),
+});
+export type TransferWorkspaceOwnershipResultV1 = z.infer<typeof transferWorkspaceOwnershipResultV1Schema>;
 
 /**
  * POST /workspaces 的回执：新建一个协作空间。
@@ -1768,12 +1835,25 @@ export interface AILearnDesktopApiM1 {
       policy: AiDataPolicyV1;
     }): Promise<GatewayResultV1<WorkspaceAiSettingsV1>>;
     /**
+     * AI 外发审计日志的一页（doc 34 L3 的另一半：写侧早就在记，读侧只有这条路由，
+     * 桌面以前没有任何入口）。`limit/offset` 原样交给服务端 clamp。
+     */
+    getAiAuditLog(input: {
+      meta: RequestMetaV1;
+      limit?: number;
+      offset?: number;
+    }): Promise<GatewayResultV1<z.infer<typeof desktopAiAuditPageV1Schema>>>;
+    /**
      * 整库导出：主进程读服务端的导出数据，然后由读者在系统保存对话框里选位置
      * 并落盘。渲染进程只拿到回执，看不到也不写文件系统。
      */
     export(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<WorkspaceExportResultV1>>;
     /** PROFILE-01：重命名自己的个人工作区。 */
     rename(input: { meta: RequestMetaV1; workspaceId: Uuid; name: string }): Promise<GatewayResultV1<RenameWorkspaceResultV1>>;
+    /** 解散协作空间（不可逆）。返回逐表计数，界面用它说明"删了什么"。 */
+    dissolve(input: { meta: RequestMetaV1; workspaceId: Uuid }): Promise<GatewayResultV1<DissolveWorkspaceResultV1>>;
+    /** 转让所有权（仅 owner）。转让后原 owner 降为 member，于是可以退出这个空间。 */
+    transferOwnership(input: { meta: RequestMetaV1; workspaceId: Uuid; toUserId: Uuid }): Promise<GatewayResultV1<TransferWorkspaceOwnershipResultV1>>;
     /** 新建协作空间：唯一能把别人正当地加进来的空间类型。 */
     create(input: { meta: RequestMetaV1; name: string }): Promise<GatewayResultV1<CreateWorkspaceResultV1>>;
   };
@@ -1809,6 +1889,14 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
    */
   readonly clipboard: {
     readLinks(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<ClipboardReadLinksResult>>;
+  };
+  /**
+   * 把一条网页链接交给系统浏览器。**应用自己永远不导航出去**（`will-navigate` 仍拦外链），
+   * 所以"能打开"只有这一条路。协议白名单在主进程判，渲染层用同一个 `isWebLinkUrl`
+   * 决定画不画成能点的。
+   */
+  readonly shell: {
+    openExternal(input: { meta: RequestMetaV1; request: ShellOpenExternalRequestV1 }): Promise<GatewayResultV1<ShellOpenExternalResultV1>>;
   };
   readonly room: {
     getProjection(input: { meta: RequestMetaV1 }): Promise<GatewayResultV1<z.infer<typeof roomProjectionV1Schema>>>;
@@ -1848,6 +1936,12 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
     createNote(input: { meta: RequestMetaV1; sourceId: Uuid; force?: boolean }): Promise<GatewayResultV1<DesktopSourceNoteResult>>;
     /** Soft-deletes the source into `archived`; the record stays under 全部. */
     archive(input: { meta: RequestMetaV1; sourceId: Uuid }): Promise<GatewayResultV1<DesktopSourceArchiveResult>>;
+    /**
+     * 重新解析这一篇（doc 34 L7）。job 被判 dead 时 `sources.status` 会永远停在
+     * `processing`，界面那句"打开来源后可以重新解析"此前没有对应的端点。
+     * 已有任务在跑时服务端回 409，回执只是"排上了"。
+     */
+    reparse(input: { meta: RequestMetaV1; sourceId: Uuid }): Promise<GatewayResultV1<DesktopSourceReparseResult>>;
     /**
      * 站内图片的原始字节。渲染层的 origin 是 `ailearn-app://`，相对路径
      * `/api/uploads/…` 会落到应用包内（404），外链又被渲染层 CSP 拦掉，所以

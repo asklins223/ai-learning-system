@@ -11,14 +11,13 @@ import type { ApiTransaction } from "../../db/client.ts";
 import {
   cardGenerationCandidatesV2,
   cardExposureLedgerV2,
-  evidenceSnapshotsV2,
 } from "@ailearn/shared/db-schema/card-generation-v2";
-import { noteBlocks } from "@ailearn/shared/db-schema/note";
 import {
   parseCandidateRevealV2,
   type CandidateRevealV2,
 } from "@ailearn/shared/card-generation-v2-contracts";
 import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
+import { loadEvidencePreviewItems } from "./evidence-preview.ts";
 import {
   CardGenerationV2ServiceError,
   insertEvent,
@@ -223,54 +222,8 @@ async function buildCandidateReveal(
     boundary: obj.learningSupport.boundary || undefined,
     misconception: obj.learningSupport.misconception || undefined,
     workedExample: obj.learningSupport.workedExample || undefined,
-    evidencePreviews: await loadEvidencePreviews(tx, workspaceId, obj.evidenceRefIds ?? []),
+    evidencePreviews: await loadEvidencePreviewItems(tx, workspaceId, obj.evidenceRefIds ?? []),
     exposedAt,
   };
   return parseCandidateRevealV2(reveal);
-}
-
-/** 按 evidenceRefIds 取 sealed 证据原文切片作为预览（最多 20 条，每条 ≤2000 字符）。 */
-async function loadEvidencePreviews(
-  tx: ApiTransaction,
-  workspaceId: string,
-  refIds: string[],
-): Promise<CandidateRevealV2["evidencePreviews"]> {
-  const ids = [...new Set(refIds)].slice(0, 20);
-  if (ids.length === 0) return [];
-
-  const rows = await tx.select().from(evidenceSnapshotsV2)
-    .where(and(
-      eq(evidenceSnapshotsV2.workspaceId, workspaceId),
-      inArray(evidenceSnapshotsV2.evidenceSnapshotId, ids),
-    ))
-    .limit(20);
-  if (rows.length === 0) return [];
-
-  const blockIds = [...new Set(
-    rows.map((r) => r.blockId).filter((b): b is string => Boolean(b)),
-  )];
-  const blockTextById = new Map<string, string>();
-  if (blockIds.length > 0) {
-    const blockRows = await tx.select().from(noteBlocks)
-      .where(and(
-        eq(noteBlocks.workspaceId, workspaceId),
-        inArray(noteBlocks.id, blockIds),
-      ));
-    for (const b of blockRows) blockTextById.set(b.id, b.content);
-  }
-
-  const previews: CandidateRevealV2["evidencePreviews"] = [];
-  for (const row of rows) {
-    const blockText = row.blockId ? blockTextById.get(row.blockId) ?? "" : "";
-    const start = Math.max(0, row.startOffset ?? 0);
-    const end = Math.min(blockText.length, row.endOffset ?? blockText.length);
-    const preview = blockText.slice(start, end).trim();
-    if (!preview) continue;
-    previews.push({
-      evidenceSnapshotId: row.evidenceSnapshotId,
-      preview: preview.slice(0, 2000),
-      sourceLabel: null,
-    });
-  }
-  return previews;
 }

@@ -16,9 +16,12 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
 
-const CONN = process.env.DATABASE_URL_API ?? process.env.DATABASE_URL;
+// 夹具连接要能不带 `app.workspace_id` 写 `user_companion_account_state`（受限角色下
+// 那一句直接 `new row violates row-level security policy`）。被测侧不受影响：
+// service 走 app 自己的池，`db/client.ts` 优先读 `DATABASE_URL_API`。
+const CONN = process.env.DATABASE_URL ?? process.env.DATABASE_URL_API;
 if (!CONN) {
-  throw new Error("DATABASE_URL_API 未配置——日记入队窗口集成测试要求真实 Postgres");
+  throw new Error("DATABASE_URL 未配置——日记入队窗口集成测试要求真实 Postgres");
 }
 
 const sql = postgres(CONN, { max: 2 });

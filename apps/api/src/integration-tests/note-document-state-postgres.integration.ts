@@ -32,9 +32,20 @@ import {
   type NoteDocBlock,
 } from "../modules/note/doc-fragment.ts";
 
-const databaseUrl = process.env.DATABASE_URL_API ?? process.env.DATABASE_URL;
+/**
+ * 夹具/管理连接优先用**超级用户**那条（`DATABASE_URL`），被测的应用连接仍然是生产形状。
+ *
+ * `db/client.ts` 自己优先读 `DATABASE_URL_API`，所以 HTTP 与 service 层的读写照旧跑在
+ * `ailearn_api`（NOBYPASSRLS）上——被验的东西没变。变的是这份夹具：它对 `note_versions`
+ * 的原生写在没有 `app.workspace_id` 的连接上会被 RESTRICTIVE 守卫**当场拒绝**（
+ * `sec01_v1_note_versions_tenant_guard`），而它还需要故意写进"note 属于 A、workspace_id 写成 B"
+ * 这种 RLS 本来就禁止的行，去证明**组合外键**在挡（不是策略在挡）。
+ * 另外两处 `SET LOCAL ROLE ailearn_api` 也只有超级用户登录才做得到。
+ * 同一形状的理由见 `workspace-collab-postgres` 与 doc 34 §1.2 ②④。
+ */
+const databaseUrl = process.env.DATABASE_URL ?? process.env.DATABASE_URL_API;
 if (!databaseUrl) {
-  throw new Error("DATABASE_URL_API 未配置——笔记文档状态集成测试要求真实 Postgres");
+  throw new Error("DATABASE_URL 未配置——笔记文档状态集成测试要求真实 Postgres");
 }
 
 const sql = postgres(databaseUrl, { max: 4 });

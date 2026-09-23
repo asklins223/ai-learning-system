@@ -267,7 +267,11 @@ export async function getTodayActivity(
       .where(and(
         eq(jobs.workspaceId, ctx.workspaceId),
         eq(jobs.requestedBy, ctx.userId),
-        inArray(jobs.status, ["failed", "dead"]),
+        // 只认 `dead`：`job_status` 枚举里那个 `failed` 没有任何写入者——
+        // 三支队列 SQL 函数（0113 fail / 0221 reap / 0228 claim）只写
+        // pending / running / succeeded / dead（doc 34 L29）。留着它不会报错，
+        // 只会让人以为"失败的任务也被算进来了"，而失败与耗尽都收敛到 dead。
+        inArray(jobs.status, ["dead"]),
         gte(jobs.finishedAt, from),
         lt(jobs.finishedAt, to),
       ))

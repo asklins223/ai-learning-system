@@ -39,6 +39,15 @@ export interface ProactivePolicyInput {
   recentShownCount: number;
   /** 提示是否已过期（now > expiresAt）。 */
   expired: boolean;
+  /**
+   * **这个房间**有没有被她静音（0266）。三位新增字段都是必填：
+   * 可选就会退化成"调用方忘了传 = 允许打扰"，而那正是 doc 34 L10 的失败形状。
+   */
+  spaceMuted: boolean;
+  /** 静默时段配置；null = 没设。判定只用本文件那一份实现。 */
+  quietHours: CompanionQuietHours | null;
+  /** 最近的送达状态序列（用于"划走两次就别再说"）。 */
+  recentDeliveryStates: readonly string[];
   /** 这次推送是哪一类；缺省按 routine（宁可少说，不可吞掉用户约好的东西）。 */
   kind?: ProactivePushKind;
   now: number;
@@ -48,6 +57,9 @@ export interface ProactivePolicyDecision {
   allow: boolean;
   reasonCode:
     | "allowed"
+    | "space_muted"
+    | "quiet_hours"
+    | "dismissal_feedback"
     | "dnd"
     | "offline"
     | "formal_answer_in_progress"
@@ -129,23 +141,36 @@ export function proactiveAvailabilityBlocked(availability: CompanionAvailability
   return availability === "dnd" || availability === "offline";
 }
 
-/** 确定性主动策略（§10.2 的允许边界；不读模型输出）。 */
+/**
+ * 确定性主动策略（§10.2 的允许边界；不读模型输出）。
+ *
+ * **这是"她此刻能不能主动开口"的唯一实现**。顺序是有意排的，别重排：
+ * `space_muted` 最前（"别在这个房间说话"是最具体的一句指令，压过一切账号级判断），
+ * 然后设备在不在、是不是正在正式作答，再到时段/划走反馈/去重/节奏。
+ */
 export function evaluateProactivePolicy(input: ProactivePolicyInput): ProactivePolicyDecision {
   if ((input.kind ?? "routine") === "triggered") {
     return evaluateTriggeredPush({ availability: input.availability, expired: input.expired });
   }
+  if (input.spaceMuted) return { allow: false, reasonCode: "space_muted" };
   if (input.availability === "dnd") return { allow: false, reasonCode: "dnd" };
   if (input.availability === "offline") return { allow: false, reasonCode: "offline" };
-  if (input.expired) return { allow: false, reasonCode: "expired" };
   if (input.formalAnswerInProgress) return { allow: false, reasonCode: "formal_answer_in_progress" };
+  if (input.expired) return { allow: false, reasonCode: "expired" };
+  if (input.quietHours && isWithinQuietHours(input.quietHours, new Date(input.now))) {
+    return { allow: false, reasonCode: "quiet_hours" };
+  }
+  if (evaluateDismissalFeedback(input.recentDeliveryStates).suppress) {
+    return { allow: false, reasonCode: "dismissal_feedback" };
+  }
+  if (input.recentShownCount >= POLICY_LIMITS.dedupeWindowLimit) {
+    return { allow: false, reasonCode: "dedupe_recent" };
+  }
   if (routineCadenceBlocked({
     interventionLevel: input.interventionLevel,
     msSinceLastCue: input.msSinceLastShown,
   })) {
     return { allow: false, reasonCode: "cooldown" };
-  }
-  if (input.recentShownCount >= POLICY_LIMITS.dedupeWindowLimit) {
-    return { allow: false, reasonCode: "dedupe_recent" };
   }
   return { allow: true, reasonCode: "allowed" };
 }

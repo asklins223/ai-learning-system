@@ -354,6 +354,78 @@ export async function updateSource(
   return getSource(executor, sourceId, workspaceId);
 }
 
+/**
+ * 重新解析一条来源（doc 34 L7）。
+ *
+ * 之前的事实是：`parse_source` 的 job 被判 `dead` 之后，只碰 `jobs` 那张表，
+ * `sources.status` 永远停在 `processing`（`SourceStatus.PROCESSING` 全仓唯一的写入点
+ * 在 worker 的 handler 里，它失败时又要求租约仍有效），而界面写着"打开来源后可以重新解析"
+ * ——**那句话没有对应的端点**。这条就是那句文案的落地。
+ *
+ * 判据只有一条：**没有在跑的 job 就允许再跑一次**。
+ * - 有 `pending`/`running` 的 job → `already_queued`。重复入队是同一份外部调用付两遍钱，
+ *   也让两个 worker 抢同一篇来源。回收（`dead`）与终态（`succeeded`）都不算在跑，
+ *   所以卡住的 `processing` 正好能从这条路走出去。
+ * - `archived` → `archived`，与删除一条边界：归档的东西不该被后台任务复活。
+ *
+ * 与入队同事务：状态改回去了却没排上队，界面就 again 永远等着一个不会来的 worker。
+ */
+export type SourceReparseResult =
+  | { ok: true; status: typeof SourceStatus.DRAFT }
+  | { ok: false; error: "not_found" | "already_queued" | "archived" };
+
+export async function reparseSource(
+  executor: ApiTransaction,
+  sourceId: string,
+  workspaceId: string,
+  userId: string,
+): Promise<SourceReparseResult> {
+  const [source] = await executor
+    .select({ id: sources.id, status: sources.status, metadata: sources.metadata })
+    .from(sources)
+    .where(and(eq(sources.id, sourceId), eq(sources.workspaceId, workspaceId)))
+    .for("update");
+  if (!source) return { ok: false, error: "not_found" };
+  if (source.status === SourceStatus.ARCHIVED) return { ok: false, error: "archived" };
+
+  const live = await executor
+    .select({ id: jobs.id })
+    .from(jobs)
+    .where(and(
+      eq(jobs.workspaceId, workspaceId),
+      eq(jobs.type, JobType.PARSE_SOURCE),
+      inArray(jobs.status, [JobStatus.PENDING, JobStatus.RUNNING]),
+      // payload 里的 sourceId 才是"这一篇"的身份；job 表没有指向 sources 的列。
+      sql`${jobs.payload} ->> 'sourceId' = ${sourceId}`,
+    ))
+    .limit(1);
+  if (live.length > 0) return { ok: false, error: "already_queued" };
+
+  await executor
+    .update(sources)
+    .set({ status: SourceStatus.DRAFT, updatedAt: new Date() })
+    .where(eq(sources.id, sourceId));
+
+  // payload 与 createSource 那一支同源：URL 型来源要带 `fetchUrlContent`，
+  // 否则 worker 会去读一份从来没落库的正文，把这次重新解析变成一次必然失败。
+  const metadata = (source.metadata ?? {}) as { url?: string; content?: string };
+  const isUrlWithoutContent = Boolean(metadata.url) && !metadata.content;
+  const payload: ParseSourceJobPayload = isUrlWithoutContent
+    ? { sourceId, fetchUrlContent: true }
+    : { sourceId };
+  await executor.insert(jobs).values({
+    type: JobType.PARSE_SOURCE,
+    workspaceId,
+    requestedBy: userId,
+    payload,
+    status: JobStatus.PENDING,
+    priority: 70,
+    resourceClass: "card_foreground",
+  });
+
+  return { ok: true, status: SourceStatus.DRAFT };
+}
+
 export async function deleteSource(
   executor: ApiTransaction,
   sourceId: string,

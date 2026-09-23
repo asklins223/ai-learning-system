@@ -128,6 +128,52 @@ export const desktopSourceArchiveResultSchema = z.object({
 export type DesktopSourceArchiveResult = z.infer<typeof desktopSourceArchiveResultSchema>;
 
 /**
+ * 重新解析的回执（doc 34 L7）。服务端返回 202 + 新状态，`draft` 意思是
+ * "已排去解析、还没开始"，不是"已经解析完"——界面上要说的下一句是"排上了"。
+ */
+export const desktopSourceReparseResultSchema = z.object({
+  sourceId: uuid,
+  status: z.literal("draft"),
+}).passthrough();
+export type DesktopSourceReparseResult = z.infer<typeof desktopSourceReparseResultSchema>;
+
+/**
+ * AI 外发审计的一页（设置 → 隐私那条「记录 AI 审计日志，供你回看」的读端，doc 34 L3 另一半）。
+ *
+ * 字段逐条对着服务端的 `ai_audit_log` 列与 `listAIAuditLog` 的 select 写，
+ * 不是界面想要什么就声明什么：
+ * - `createdAt` 是 JSON 化的 timestamp，所以是字符串不是 Date；
+ * - `modelId`/`provider`/`operation`/`status` 在服务端都是 notNull，这里不放宽成可空；
+ * - `operator` 是 `userId+email` 都在才有值，历史行里用户被删掉了会留 null
+ *   （服务端刻意保留 null 而不是丢行，这里跟着保留同一语义）。
+ *
+ * 只有 Owner 读得到：那条路由挂着 `requireOwner`，所以这条通道的门在主进程那一侧，
+ * 不在界面"是不是显示"这一侧。
+ */
+export const desktopAiAuditItemV1Schema = z.object({
+  id: uuid,
+  provider: z.string().min(1),
+  modelId: z.string().min(1),
+  operation: z.string().min(1),
+  dataCategories: z.array(z.string()),
+  dataSizeBytes: z.number().int().nullable(),
+  costTokens: z.number().int().nullable(),
+  durationMs: z.number().int().nullable(),
+  status: z.enum(["success", "failed", "blocked"]),
+  errorMessage: z.string().nullable(),
+  createdAt: z.string().datetime(),
+  operator: z.object({ userId: uuid, email: z.string().min(1) }).nullable(),
+}).passthrough();
+export type DesktopAiAuditItemV1 = z.infer<typeof desktopAiAuditItemV1Schema>;
+
+export const desktopAiAuditPageV1Schema = z.object({
+  items: z.array(desktopAiAuditItemV1Schema).max(100),
+  /** 这个空间的审计总行数（不是本页条数）：界面要说"还有多少"，只能拿服务端这个数。 */
+  total: z.number().int().min(0),
+}).passthrough();
+export type DesktopAiAuditPageV1 = z.infer<typeof desktopAiAuditPageV1Schema>;
+
+/**
  * One page of the notes a source produced.
  *
  * `items` is capped by the API (newest first), so `total` is the workspace's real

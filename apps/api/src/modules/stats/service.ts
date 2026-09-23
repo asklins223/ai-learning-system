@@ -1,10 +1,11 @@
-import { and, eq, count, isNull, lt, or } from "drizzle-orm";
+import { and, eq, count, countDistinct, isNull, lt, lte, or } from "drizzle-orm";
 import { withWorkspaceTransaction } from "../../db/client.ts";
 import { learningCardsV2, learningObjectiveEvidenceBindingsV2, learningObjectiveRevisionsV2, learningObjectivesV2 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
 import { notes } from "@ailearn/shared/db-schema/note";
 import type { AllWorkspacesStatsOverviewV1, StatsOverviewV1, WorkspaceStatsOverviewRowV1 } from "@ailearn/shared";
 import { visibleCardsCondition, visibleNotesCondition, visibleObjectivesCondition } from "../note/visibility.ts";
+import { reviewScheduleTargetsConsumableCardPredicate } from "../review/consumer-eligibility.ts";
 import { ReviewStatus } from "@ailearn/shared";
 import { listUserWorkspaces, MAX_COLLABORATIVE_WORKSPACES, type WorkspaceInfo } from "../identity/service.ts";
 
@@ -122,10 +123,18 @@ export async function getStatsOverview(workspaceId: string, userId: string): Pro
 
     const capped = activeCardCount > STATS_ACTIVE_CARDS_MAX;
 
-  // V2 学习卡绑定的 evidence 计数
-  const v2BindingRows = v2ActiveCardCount > 0
-    ? await tx
-        .select({ evidenceSnapshotId: learningObjectiveEvidenceBindingsV2.evidenceSnapshotId })
+  /**
+   * V2 学习卡绑定的 evidence 计数——**去重在 SQL 里做**。以前是把这一空间的全部绑定行
+   * 拉回 JS，再 `new Set(rows.map(...)).size`：行数没有任何上限，而屏幕上只要一个数。
+   * 首页每次刷新都要付一次这个传输 + 建集合。
+   *
+   * 等价性：`evidence_snapshot_id` 是 `NOT NULL`（实测 `information_schema.columns`，
+   * 且当前 0 行为空），所以 `COUNT(DISTINCT …)` 与"`Set` 里含 null 也算一个"的旧写法
+   * 同解；join 与 where 一字未动。
+   */
+  const v2HardEvidenceCount = v2ActiveCardCount > 0
+    ? Number((await tx
+        .select({ n: countDistinct(learningObjectiveEvidenceBindingsV2.evidenceSnapshotId) })
         .from(learningObjectiveEvidenceBindingsV2)
         .innerJoin(
           learningObjectiveRevisionsV2,
@@ -142,28 +151,35 @@ export async function getStatsOverview(workspaceId: string, userId: string): Pro
             eq(learningCardsV2.lifecycle, "active"),
           ),
         )
-        .where(eq(learningObjectiveEvidenceBindingsV2.workspaceId, workspaceId))
-    : [];
-  const v2HardEvidenceCount = new Set(v2BindingRows.map((row) => row.evidenceSnapshotId)).size;
+        .where(eq(learningObjectiveEvidenceBindingsV2.workspaceId, workspaceId)))[0]?.n ?? 0)
+    : 0;
 
-  // V2 review 计数（subjectType='card'，§29.4 alias 规则：subjectId=objectiveId）
+  /**
+   * 「待复习」这一个读数只许有一个来源（L23）。
+   *
+   * 以前它是"全部 pending 排程"——不判到点、不判展示层延后、也不判这条排程指向的
+   * 卡还可不可消费，于是它恒大于用户点进复习列表看到的条数（`listReviews` 的 total）。
+   * 现在直接复用队列那一条判据函数：`reviewScheduleTargetsConsumableCardPredicate()`
+   * 与到期/延后两个条件，和 `review/service.ts` 里那一句一字不差（同一份实现，不是抄一份）。
+   *
+   * 顺带去掉 `learningCardsV2` 那次 innerJoin：`lc_v2_ws_obj_active_idx` 是
+   * (workspace_id, objective_id) 上 `lifecycle='active'` 的**部分唯一索引**，
+   * 一个目标最多一张活卡，join 不会改变条数；而活卡这一半已经在那条 predicate 里判了。
+   */
   const v2ReviewCountRows = v2ActiveCardCount > 0
     ? await tx
         .select({ count: count() })
         .from(reviewSchedules)
-        .innerJoin(
-          learningCardsV2,
-          and(
-            eq(learningCardsV2.objectiveId, reviewSchedules.subjectId),
-            eq(learningCardsV2.workspaceId, workspaceId),
-            eq(learningCardsV2.lifecycle, "active"),
-          ),
-        )
         .where(and(
           eq(reviewSchedules.workspaceId, workspaceId),
           or(isNull(reviewSchedules.userId), eq(reviewSchedules.userId, userId)),
           eq(reviewSchedules.status, ReviewStatus.PENDING),
-          eq(reviewSchedules.subjectType, "card"),
+          lt(reviewSchedules.nextReviewAt, now),
+          or(
+            isNull(reviewSchedules.userDeferredUntil),
+            lte(reviewSchedules.userDeferredUntil, now),
+          ),
+          reviewScheduleTargetsConsumableCardPredicate(),
         ))
     : [];
   const pendingReviewCount = Number(v2ReviewCountRows[0]?.count ?? 0);

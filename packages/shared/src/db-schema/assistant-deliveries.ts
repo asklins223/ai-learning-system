@@ -44,9 +44,6 @@ export const assistantDeliveries = pgTable(
     dedupeUnique: uniqueIndex("assistant_deliveries_dedupe_unique_idx").on(
       t.workspaceId, t.userId, t.dedupeKey,
     ),
-    inboxIdx: index("assistant_deliveries_inbox_idx").on(
-      t.workspaceId, t.userId, t.inboxSequence,
-    ),
     stateIdx: index("assistant_deliveries_state_idx").on(t.state, t.expiresAt),
   }),
 );

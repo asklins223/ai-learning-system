@@ -22,11 +22,13 @@ function base(over: Partial<ActionResolverInputV3> = {}): ActionResolverInputV3 
     hasActiveCard: true,
     cardId: CARD,
     activeRun: null,
+    hasPriorFormalResult: false,
     reviewDue: null,
     initialReady: null,
     initialDeferred: null,
     practiceOnly: false,
     practiceReasonCodes: [],
+    answerModePreference: "any",
     ...over,
   };
 }
@@ -87,6 +89,15 @@ test("initial ready → create_run（启动参数由服务端完整下发）", (
       responsePreference: "adaptive",
     },
   });
+});
+
+test("已有正式结果时，重新挑战不能再写成首次验证", () => {
+  const action = resolvePrimaryActionV3(base({
+    hasPriorFormalResult: true,
+    initialReady: { reminderId: REMINDER, qualificationNotBefore: "2026-08-16T00:00:00.000Z" },
+  }));
+  assert.equal(action.kind, "create_run");
+  assert.equal(action.label, "再做一次正式挑战");
 });
 
 test("initial deferred → wait_for_initial_validation（§7.5）", () => {
@@ -156,4 +167,39 @@ test("active 但无 Card 且无个人状态 → refresh（修复入口）", () =
 
 test("generation=0 的 review 不会生成不可执行启动参数", () => {
   assert.deepEqual(resolvePrimaryActionV3(base({ reviewDue: { scheduleId: SCHED, generation: 0 } })), { kind: "refresh" });
+});
+
+// ─── doc 34 L15：账号「作答方式」偏好要真的进到启动参数 ────────────────────
+// 这三条存在的理由：过去 `responsePreference` 在本文件两处硬写 `adaptive`，
+// 设置页那个三选纯展示。把两处改回硬编码，下面每一条都会红。
+
+test("作答偏好 voice：卡开跑与到期复习都换成语音优先的启动参数", () => {
+  const card = resolvePrimaryActionV3(base({ answerModePreference: "voice" }));
+  assert.equal(card.kind, "create_run");
+  if (card.kind === "create_run") assert.equal(card.start.responsePreference, "voice");
+  const review = resolvePrimaryActionV3(base({ answerModePreference: "voice", reviewDue: { scheduleId: SCHED, generation: 1 } }));
+  assert.equal(review.kind, "create_review_run");
+  if (review.kind === "create_review_run") assert.equal(review.start.responsePreference, "voice");
+});
+
+test("作答偏好 silent → structured（不是 text）", () => {
+  const action = resolvePrimaryActionV3(base({ answerModePreference: "silent" }));
+  assert.equal(action.kind === "create_run" && action.start.responsePreference, "structured");
+});
+
+test("作答偏好未设置（any）才走 adaptive，text 原样透传", () => {
+  const unset = resolvePrimaryActionV3(base({ answerModePreference: "any" }));
+  assert.equal(unset.kind === "create_run" && unset.start.responsePreference, "adaptive");
+  const text = resolvePrimaryActionV3(base({ answerModePreference: "text" }));
+  assert.equal(text.kind === "create_run" && text.start.responsePreference, "text");
+});
+
+test("偏好不改变行动种类：语音偏好也拿不到越过冷却的正式验证", () => {
+  const action = resolvePrimaryActionV3(base({
+    answerModePreference: "voice",
+    initialDeferred: { reminderId: REMINDER, qualificationNotBefore: "2026-08-16T00:00:00.000Z" },
+    practiceOnly: true,
+    practiceReasonCodes: ["exposed"],
+  }));
+  assert.equal(action.kind, "practice_only");
 });

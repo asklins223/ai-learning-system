@@ -248,9 +248,18 @@ async function planFollowupTask(
     estimatedActiveSeconds: 40,
   };
   const textVariant = buildVariant(run.id, taskId, "text", 40, plannerTarget, followupTask);
+  // §16.6：rubric 目标必须用冻结快照的 required unit ids（主任务在
+  // planV2Run 里就是这么传的）。缺这个覆盖时 buildClosure 会现造
+  // `rubric:repair:<hash>`，gatherCriticInput 按快照解析必然落空 →
+  // 补充任务**每一次**都被 fail closed 成 not_assessable（2026-09-23 实测
+  // 5/5，与卡片有没有证据无关）。
+  const requiredRubricTargetIds = t.scoringRubric.units
+    .filter((unit) => unit.required)
+    .map((unit) => unit.rubricUnitId);
   const closure = buildClosure(
     run.id, taskId, textVariant, plannerTarget, followupTask,
     sha256Hex(`followup:${run.id}:${taskId}`),
+    undefined, requiredRubricTargetIds,
   );
   await tx.insert(learningTasks).values({
     id: taskId,
@@ -1917,6 +1926,18 @@ export async function applyAction(
       const followupId = String((input.action as { followupId?: string }).followupId ?? "");
       if (!checkpoint || !Array.isArray(checkpoint.allowedFollowupIds) || !checkpoint.allowedFollowupIds.includes(followupId)) {
         throw new LearningRunServiceError("followup_not_authorized", "该补充任务未获授权", 409);
+      }
+      // 单槽额度（与 tick 的 supplementOffer 同一条不变量）：用过就明确 409，
+      // 不让下面写死 sequence 2 的插入去撞 learning_tasks_run_sequence_unique
+      // ——那对调用方是一个裸 500（2026-09-23 实走）。仍带旧签发值的存量
+      // checkpoint 也只在这一层被挡住。
+      const usedFollowup = await tx
+        .select({ id: learningTasks.id })
+        .from(learningTasks)
+        .where(and(eq(learningTasks.runId, run.id), gte(learningTasks.sequence, 2)))
+        .limit(1);
+      if (usedFollowup.length > 0) {
+        throw new LearningRunServiceError("followup_already_used", "这个 run 已经用过唯一一次补充机会", 409);
       }
       const at = now();
       const { taskId } = await planFollowupTask(tx, {

@@ -1,4 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+
+import { retireWorkspaceMemoriesOnDeparture } from "../companion-conversation/memory-departure.ts";
 import { DomainError } from "@ailearn/shared";
 import bcrypt from "bcryptjs";
 import { and, eq, isNull, lt, or, gte, inArray, desc, count, sql, ne } from "drizzle-orm";
@@ -1061,6 +1063,12 @@ export async function leaveWorkspace(
         ),
       );
 
+    // 离开时收掉**这个空间那一侧的记忆**（doc 34 L38）：`scope='workspace'` 的行软删除，
+    // 跟人绑定的 `scope='global'` 不动。与被退同一事务——回滚了却留下一堆"被收掉的记忆"
+    // 是假证据。走数据库函数是因为策略要求 app.user_id 等于行的 user_id，
+    // 而 owner 移人时上下文里的 actor 不是当事人。
+    await retireWorkspaceMemoriesOnDeparture(tx, { workspaceId, userId });
+
     return { ok: true as const, personalWorkspaceId: userRow.personalWorkspaceId };
   });
 
@@ -1254,42 +1262,51 @@ export async function updateAIDataPolicy(
 
 /**
  * N-011: 查询 AI 审计日志（分页）。
+ *
+ * `ai_audit_log` 在 0257 里是 `ENABLE + FORCE ROW LEVEL SECURITY`，所以这两句读
+ * **必须带工作区上下文**：裸 `db` 在 `ailearn_api`（NOBYPASSRLS，生产形状）下恒 0 行，
+ * rows 与 count 双双为空——而设置页写的是"每次外发都留下可追溯的记录，供你回看"
+ * （doc 34 L3，与 L2 同一颗雷：dev 的 API 角色绕过 RLS，所以本地永远是绿的）。
  */
 export async function listAIAuditLog(
   workspaceId: string,
+  userId: string,
   opts: { limit: number; offset: number },
 ): Promise<{ items: AIAuditLogItem[]; total: number }> {
-  const [rows, totalRows] = await Promise.all([
-    db
-      .select({
-        id: aiAuditLog.id,
-        workspaceId: aiAuditLog.workspaceId,
-        userId: aiAuditLog.userId,
-        jobId: aiAuditLog.jobId,
-        provider: aiAuditLog.provider,
-        modelId: aiAuditLog.modelId,
-        operation: aiAuditLog.operation,
-        dataCategories: aiAuditLog.dataCategories,
-        dataSizeBytes: aiAuditLog.dataSizeBytes,
-        costTokens: aiAuditLog.costTokens,
-        durationMs: aiAuditLog.durationMs,
-        status: aiAuditLog.status,
-        errorMessage: aiAuditLog.errorMessage,
-        createdAt: aiAuditLog.createdAt,
-        operatorId: users.id,
-        operatorEmail: users.email,
-      })
-      .from(aiAuditLog)
-      .leftJoin(users, eq(aiAuditLog.userId, users.id))
-      .where(eq(aiAuditLog.workspaceId, workspaceId))
-      .orderBy(desc(aiAuditLog.createdAt))
-      .limit(opts.limit)
-      .offset(opts.offset),
-    db
-      .select({ total: count() })
-      .from(aiAuditLog)
-      .where(eq(aiAuditLog.workspaceId, workspaceId)),
-  ]);
+  const [rows, totalRows] = await withWorkspaceTransaction(
+    { workspaceId, userId },
+    (transaction) => Promise.all([
+      transaction
+        .select({
+          id: aiAuditLog.id,
+          workspaceId: aiAuditLog.workspaceId,
+          userId: aiAuditLog.userId,
+          jobId: aiAuditLog.jobId,
+          provider: aiAuditLog.provider,
+          modelId: aiAuditLog.modelId,
+          operation: aiAuditLog.operation,
+          dataCategories: aiAuditLog.dataCategories,
+          dataSizeBytes: aiAuditLog.dataSizeBytes,
+          costTokens: aiAuditLog.costTokens,
+          durationMs: aiAuditLog.durationMs,
+          status: aiAuditLog.status,
+          errorMessage: aiAuditLog.errorMessage,
+          createdAt: aiAuditLog.createdAt,
+          operatorId: users.id,
+          operatorEmail: users.email,
+        })
+        .from(aiAuditLog)
+        .leftJoin(users, eq(aiAuditLog.userId, users.id))
+        .where(eq(aiAuditLog.workspaceId, workspaceId))
+        .orderBy(desc(aiAuditLog.createdAt))
+        .limit(opts.limit)
+        .offset(opts.offset),
+      transaction
+        .select({ total: count() })
+        .from(aiAuditLog)
+        .where(eq(aiAuditLog.workspaceId, workspaceId)),
+    ]),
+  );
 
   return {
     items: rows.map(({ operatorId, operatorEmail, ...audit }) => ({
@@ -1407,4 +1424,46 @@ export async function revokeAllSessionsForUser(userId: string): Promise<void> {
   await withActorTransaction({ userId }, (tx) =>
     tx.delete(sessions).where(eq(sessions.userId, userId)),
   );
+}
+
+/**
+ * 解散一个协作空间（doc 34 L6 的 ②；实现体是迁移 0276 里那支函数）。
+ *
+ * 为什么把整件事放进一支 `SECURITY DEFINER` 函数而不是在 TS 里循环删：
+ * 库里有 102 张表带 `workspace_id`、只有 13 张真有指向 `workspaces` 的外键，
+ * 逐表清理必须在**同一个事务**里完成并且由 catalog 决定清单——留在 TS 侧就是一段
+ * 会随迁移增长而悄悄漏表的清单（漏一张就是一批没人认领的孤儿行）。
+ * TS 这一层只做三件事：拿会话身份、把函数抛的错误名翻成人能懂的错误码、把逐表计数带回去。
+ */
+export async function dissolveWorkspace(
+  workspaceId: string,
+  actorUserId: string,
+): Promise<{ ok: true; counts: Record<string, number> } | { ok: false; error: string }> {
+  try {
+    const rows = await withActorTransaction({ userId: actorUserId }, (tx) =>
+      tx.execute(sql`
+        SELECT public.ailearn_dissolve_workspace(${workspaceId}::uuid, ${actorUserId}::uuid)
+          AS counts
+      `));
+    const counts = (rows[0] as { counts: Record<string, number> } | undefined)?.counts ?? {};
+    return { ok: true, counts };
+  } catch (err) {
+    // drizzle 会把驱动错误包成 `Failed query: …`，真正的 `RAISE EXCEPTION` 文本在
+    // `err.cause` 上——只读 message 的话三种门卫全会掉进 500（我第一次跑就是这样）。
+    const chain: string[] = [];
+    let cursor: unknown = err;
+    for (let depth = 0; depth < 5 && cursor; depth += 1) {
+      const item = cursor as { message?: unknown; cause?: unknown };
+      if (typeof item.message === "string") chain.push(item.message);
+      cursor = item.cause;
+    }
+    const message = chain.join(" | ");
+    const code = [
+      "workspace_not_found",
+      "cannot_dissolve_personal_workspace",
+      "actor_is_not_active_owner",
+      "actor_has_no_surviving_workspace_for_audit",
+    ].find((name) => message.includes(name));
+    return { ok: false, error: code ?? "dissolve_failed" };
+  }
 }

@@ -3,7 +3,7 @@ import { z } from "zod";
 import { eq } from "drizzle-orm";
 import { db } from "../../db/client.ts";
 import { users, workspaces } from "@ailearn/shared/db-schema/identity";
-import { loginWithPassword, registerWithoutInvite, switchWorkspace, createCollaborativeWorkspace, listUserWorkspaces, joinWorkspaceByInviteToken, leaveWorkspace, JoinWorkspaceError, getAIPrivacySettings, updateAIConsent, updateAIDataPolicy, listAIAuditLog, revokeSession, resetRecoveredUserPassword, SESSION_TTL_MS, updateUserProfile, renameWorkspace, changePassword, revokeAllSessionsForUser, transferWorkspaceOwnership } from "./service.ts";
+import { loginWithPassword, registerWithoutInvite, switchWorkspace, createCollaborativeWorkspace, listUserWorkspaces, joinWorkspaceByInviteToken, leaveWorkspace, JoinWorkspaceError, getAIPrivacySettings, updateAIConsent, updateAIDataPolicy, listAIAuditLog, revokeSession, resetRecoveredUserPassword, SESSION_TTL_MS, updateUserProfile, renameWorkspace, changePassword, revokeAllSessionsForUser, transferWorkspaceOwnership, dissolveWorkspace } from "./service.ts";
 import { parseBody } from "../../lib/validate.ts";
 import { requireSession, requireOwner, isWorkspaceOwner, getRequestCredential } from "./middleware.ts";
 import { clampLimit, clampOffset, parseQuery } from "../../lib/pagination.ts";
@@ -489,7 +489,7 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
       const q = parseQuery(app, auditLogQuerySchema, req.query);
       const limit = clampLimit(q.limit, 50);
       const offset = clampOffset(q.offset);
-      return await listAIAuditLog(req.session.workspaceId, { limit, offset });
+      return await listAIAuditLog(req.session.workspaceId, req.session.userId, { limit, offset });
     },
   );
 
@@ -689,5 +689,40 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
     }
     const csrfToken = setSessionCookies(reply, result.token);
     return { ...result, csrfToken };
-  });
+  
+
+});
+
+  // 解散空间：不可逆，且**这一轮故意不做界面入口**（判据与逐表计数先给出来，
+  // 露不露按钮由看过计数的人决定）。错误码全部如实翻成状态码，不并进 forbidden。
+  app.delete(
+    "/workspaces/:id",
+    { preHandler: [requireSession] },
+    async (req, reply) => {
+      const params = req.params as { id: string };
+      const result = await dissolveWorkspace(params.id, req.session.userId);
+      if (!result.ok) {
+        const status: Record<string, number> = {
+          workspace_not_found: 404,
+          cannot_dissolve_personal_workspace: 409,
+          actor_is_not_active_owner: 403,
+          actor_has_no_surviving_workspace_for_audit: 409,
+        };
+        return reply
+          .code(status[result.error] ?? 500)
+          .send({ error: result.error, message: DISSOLVE_MESSAGES[result.error] });
+      }
+      reply.header("cache-control", "private, no-store");
+      return { dissolved: true, counts: result.counts };
+    },
+  );
+
+  const DISSOLVE_MESSAGES: Record<string, string> = {
+    workspace_not_found: "没有这个空间。",
+    cannot_dissolve_personal_workspace: "个人空间不能解散，它是你回到应用时的落脚点。",
+    actor_is_not_active_owner: "只有这个空间的所有者能解散它。",
+    actor_has_no_surviving_workspace_for_audit: "你还没有可以留存这次记录的个人空间，先建一个再解散。",
+    dissolve_failed: "这次解散没有成功。",
+  };
+
 }

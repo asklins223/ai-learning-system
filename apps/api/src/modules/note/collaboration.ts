@@ -6,7 +6,7 @@ import type { WebSocket as WsSocket, RawData } from "ws";
 import { and, eq } from "drizzle-orm";
 import { noteBlocks, noteDocumentStates, notes } from "@ailearn/shared/db-schema/note";
 import { logger } from "../../lib/logger.ts";
-import { db, withWorkspaceTransaction } from "../../db/client.ts";
+import { withWorkspaceTransaction } from "../../db/client.ts";
 import { decodeToken } from "../identity/service.ts";
 import { isWorkspaceOwner } from "../identity/middleware.ts";
 import {
@@ -71,12 +71,6 @@ function bearerFrom(headers: Headers): string {
   return raw.startsWith("Bearer ") ? raw.slice(7).trim() : "";
 }
 
-function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.byteLength !== b.byteLength) return false;
-  for (let i = 0; i < a.byteLength; i += 1) if (a[i] !== b[i]) return false;
-  return true;
-}
-
 export const noteCollaboration = new Hocuspocus<NoteDocContext>({
   // 决定 6：空闲后落一次整份快照，不写 update log。
   debounce: 2_000,
@@ -94,10 +88,18 @@ export const noteCollaboration = new Hocuspocus<NoteDocContext>({
     const noteId = noteIdFromDocumentName(documentName);
     if (!noteId) throw new Error("bad_document_name");
 
-    const note = await db.query.notes.findFirst({
-      where: eq(notes.id, noteId),
-      columns: { id: true, workspaceId: true, currentVersionId: true, deletedAt: true, shareScope: true },
-    });
+    // 这一句读必须**带上下文**：`notes` 在 0257 里是 `ENABLE + FORCE ROW LEVEL SECURITY`，
+    // 它的 RESTRICTIVE 租户守卫是 `workspace_id = NULLIF(current_setting('app.workspace_id'),'')::uuid`
+    // ——没有"没设上下文就放行"那一支。用裸 `db` 读，在 `ailearn_api`（NOBYPASSRLS，
+    // CI 与生产形状）下恒 0 行，每一篇都抛 `note_not_found`，整条实时协同连不上；
+    // dev 因为 compose 把 API 指到 BYPASSRLS 的 `ailearn` 角色而完全看不出来（doc 34 L2/L37）。
+    const note = await withWorkspaceTransaction(
+      { workspaceId: session.workspaceId, userId: session.userId },
+      (tx) => tx.query.notes.findFirst({
+        where: eq(notes.id, noteId),
+        columns: { id: true, workspaceId: true, currentVersionId: true, deletedAt: true, shareScope: true },
+      }),
+    );
     if (!note || note.workspaceId !== session.workspaceId || note.deletedAt !== null) {
       // 空间不符一律按"不存在"处理：跨空间探测不该从错误信息里得到答案。
       throw new Error("note_not_found");
@@ -155,7 +157,11 @@ export const noteCollaboration = new Hocuspocus<NoteDocContext>({
           ),
           columns: { state: true },
         });
-        if (stored && sameBytes(Uint8Array.from(stored.state), next)) return;
+        // `Buffer.compare` 直接吃两个视图；原来这里是
+        // `sameBytes(Uint8Array.from(stored.state), next)`——`Uint8Array.from` 对
+        // bytea 是**逐元素**拷一整份（不是 `new Uint8Array(buf)` 那种零拷贝视图），
+        // 拷完再用一个手写 JS 循环按字节比。长度不等这一步 `Buffer.compare` 自己就判了。
+        if (stored && Buffer.compare(stored.state, next) === 0) return;
 
         // 落盘与投影全套都交给 `persistNoteDoc`——它是唯一一处"文档写回关系表"的地方：
         // 正文的行、当前版本的快照、标题、更新时间、搜索投影一次过。自动保存以前是
@@ -169,7 +175,7 @@ export const noteCollaboration = new Hocuspocus<NoteDocContext>({
           workspaceId: context.workspaceId,
           noteId: context.noteId,
           userId: context.userId,
-        }, document, versionId);
+        }, document, versionId, next);
       },
     );
   },

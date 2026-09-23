@@ -224,6 +224,12 @@ export const learningObjectiveSurfaceV3Schema = z.strictObject({
       .nullable(),
     practiceTrailCount: z.number().int().min(0),
     lastCanonicalAt: z.string().datetime({ offset: true }).nullable(),
+    /** 已落库的最近一轮结果；详情可据 runId 重开完整报告。 */
+    latestResult: z.strictObject({
+      runId: z.string().uuid(),
+      completedAt: z.string().datetime({ offset: true }),
+      outcome: z.enum(["demonstrated", "partial", "needs_repair", "not_assessable", "practice_completed", "skipped", "declared_unable"]),
+    }).nullable().optional(),
   }),
   lifecycle: z.strictObject({
     status: objectiveSurfaceLifecycleV3Schema,

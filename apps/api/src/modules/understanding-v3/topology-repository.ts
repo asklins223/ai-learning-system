@@ -36,6 +36,7 @@ import {
 import { learningRuns, canonicalLearningEventOutbox, practiceTrailEventOutbox } from "@ailearn/shared/db-schema/learning-runs";
 import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
 import { resolvePrimaryActionV3, type ActionResolverInputV3 } from "../learning-objectives/action-resolver.ts";
+import { readAnswerModePreference } from "../companion-shell/answer-mode-preference.ts";
 import type {
   UnderstandingNodeProjectionV3,
   UnderstandingEdgeProjectionV3,
@@ -523,6 +524,10 @@ export async function buildTopologySnapshotV3(
     : [];
   const successorCardByObjective = new Map(successorCardRows.map((c) => [c.objectiveId, c.cardId]));
 
+  // 账号「作答方式」偏好：整张星图共用一个值，所以在目标循环**外面**读一次
+  // （doc 34 L15：偏好过去只有设置页读，主行动一律硬写 adaptive）。
+  const { preference: answerModePreference } = await readAnswerModePreference(tx, ctx.userId);
+
   for (const objective of objectiveRows) {
     const revision = revisionByObjective.get(objective.objectiveId);
     const origins = originsByObjective.get(objective.objectiveId) ?? [];
@@ -595,11 +600,13 @@ export async function buildTopologySnapshotV3(
       hasActiveCard: cardId !== null,
       cardId,
       activeRun: activeRun ? { runId: activeRun.runId } : null,
+      hasPriorFormalResult: lastCanonicalEventId !== null,
       reviewDue: reviewDue ? { scheduleId: schedule!.scheduleId, generation: schedule!.generation } : null,
       initialReady,
       initialDeferred,
       practiceOnly: exposedObjectives.has(objective.objectiveId),
       practiceReasonCodes: exposedObjectives.has(objective.objectiveId) ? ["exposed"] : [],
+      answerModePreference,
     };
     const primaryAction = resolvePrimaryActionV3(actionInput);
 

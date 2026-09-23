@@ -13,6 +13,7 @@ import {
   listSources,
   getSource,
   updateSource,
+  reparseSource,
   deleteSource,
   createNoteFromSource,
   listNotesBySource,
@@ -34,6 +35,25 @@ export async function sourceRoutes(app: FastifyInstance) {
         body,
       ),
     );
+  });
+
+  // POST /sources/:id/reparse — 重新解析一条来源。
+  // 界面上"打开来源后可以重新解析"这句文案此前没有对应的端点（doc 34 L7）：
+  // job 被判 dead 时只改 `jobs`，`sources.status` 永远停在 `processing`，用户没有出口。
+  // RBAC 与创建同源：入队是空间级写操作，因此只 owner。
+  app.post<{ Params: { id: string } }>("/sources/:id/reparse", { preHandler: [requireOwner] }, async (req, reply) => {
+    const params = uuidParamSchema.safeParse(req.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
+    const result = await withWorkspaceTransaction(
+      { workspaceId: req.session.workspaceId, userId: req.session.userId },
+      (transaction) => reparseSource(transaction, params.data.id, req.session.workspaceId, req.session.userId),
+    );
+    if (!result.ok) {
+      if (result.error === "not_found") return reply.code(404).send({ error: "not_found", message: "资源不存在" });
+      if (result.error === "archived") return reply.code(409).send({ error: "source_archived", message: "已归档的来源不重新解析" });
+      return reply.code(409).send({ error: "reparse_in_flight", message: "这一篇已经有任务在跑" });
+    }
+    return reply.code(202).send({ status: result.status });
   });
 
   // GET /sources — 列表（支持 status 筛选 + cursor/limit 分页）

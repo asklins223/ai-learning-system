@@ -17,9 +17,10 @@
  *   0 3 * * * cd /app && node --import tsx scripts/cleanup-soft-deleted-notes.ts >> /var/log/note-cleanup.log 2>&1
  */
 
-import { and, asc, gt, lt, or, sql } from "drizzle-orm";
-import { db, closeDatabase } from "../db/client.ts";
+import { and, asc, eq, gt, lt, or, sql } from "drizzle-orm";
+import { db, closeDatabase, withWorkspaceTransaction, SYSTEM_USER_ID } from "../db/client.ts";
 import { notes } from "@ailearn/shared/db-schema/note";
+import { workspaces } from "@ailearn/shared/db-schema/identity";
 import { physicalDeleteNote } from "../modules/note/service.ts";
 import { deleteObject } from "../lib/object-storage.ts";
 import { logger } from "../lib/logger.ts";
@@ -50,15 +51,28 @@ function parseArgs(): { dryRun: boolean; retentionDays: number } {
   return { dryRun, retentionDays };
 }
 
-/** 按 (deletedAt, id) 键序取一批过期笔记；返回空数组表示已取尽。 */
+/**
+ * 按 (deletedAt, id) 键序取**一个空间内**一批过期笔记；返回空数组表示这一空间已取尽。
+ *
+ * 为什么按空间而不是全库一把扫：`notes` 是 `ENABLE + FORCE ROW LEVEL SECURITY` 的表，
+ * 它的 RESTRICTIVE 守卫没有"没设上下文就放行"那一支，裸 `db` 扫在生产角色
+ * （`ailearn_api`，NOBYPASSRLS）下恒 0 行——这份 CLI 的上下两半曾经都瞎
+ * （doc 34 L37 症状 A；`maintenance.ts` 那条 6 小时的同型问题已单独修）。
+ * 键集分页的语义一条没改：只是"每个空间各有一条自己的游标"。
+ */
 async function loadStaleNoteBatch(
   cutoff: Date,
   cursor: StaleNoteCursor | null,
+  workspaceId: string,
 ): Promise<StaleNoteRow[]> {
+  const stale = and(
+    sql`${notes.deletedAt} IS NOT NULL`,
+    lt(notes.deletedAt, cutoff),
+    eq(notes.workspaceId, workspaceId),
+  );
   const where = cursor
     ? and(
-        sql`${notes.deletedAt} IS NOT NULL`,
-        lt(notes.deletedAt, cutoff),
+        stale,
         or(
           gt(notes.deletedAt, cursor.deletedAt),
           and(
@@ -67,16 +81,16 @@ async function loadStaleNoteBatch(
           ),
         ),
       )
-    : and(
-        sql`${notes.deletedAt} IS NOT NULL`,
-        lt(notes.deletedAt, cutoff),
-      );
-  const rows = await db
-    .select({ id: notes.id, workspaceId: notes.workspaceId, deletedAt: notes.deletedAt })
-    .from(notes)
-    .where(where)
-    .orderBy(asc(notes.deletedAt), asc(notes.id))
-    .limit(BATCH_SIZE);
+    : stale;
+  const rows = await withWorkspaceTransaction(
+    { workspaceId, userId: SYSTEM_USER_ID },
+    (tx) => tx
+      .select({ id: notes.id, workspaceId: notes.workspaceId, deletedAt: notes.deletedAt })
+      .from(notes)
+      .where(where)
+      .orderBy(asc(notes.deletedAt), asc(notes.id))
+      .limit(BATCH_SIZE),
+  );
   return rows.map((row) => ({
     id: row.id,
     workspaceId: row.workspaceId,
@@ -94,57 +108,66 @@ async function main(): Promise<void> {
   let deleted = 0;
   let imagesCleaned = 0;
   let failed = 0;
-  let cursor: StaleNoteCursor | null = null;
 
-  // keyset 分批：每批最多 BATCH_SIZE 条，边界内存受限；dry-run 同样分批。
-  while (true) {
-    const batch = await loadStaleNoteBatch(cutoff, cursor);
-    if (batch.length === 0) break;
-    total += batch.length;
-    // 推进游标到本批末条（deletedAt,id 键序严格递增，避免重复/遗漏）。
-    const last = batch[batch.length - 1];
-    cursor = { deletedAt: last.deletedAt!, id: last.id };
+  // 逐个空间各跑一条自己的键集游标。`workspaces` 的守卫有 NULL 放行支
+  // （0257 专门为登录/选空间那两条路开的），所以这一句裸枚举是安全的；
+  // 读笔记的每一步都回到带上下文的事务里。
+  const workspaceRows = await db.select({ id: workspaces.id }).from(workspaces);
 
-    if (dryRun) {
-      for (const note of batch) {
-        logger.info({ noteId: note.id, workspaceId: note.workspaceId, deletedAt: note.deletedAt }, "would permanently delete (dry-run)");
+  for (const workspace of workspaceRows) {
+    let cursor: StaleNoteCursor | null = null;
+
+    // keyset 分批：每批最多 BATCH_SIZE 条，边界内存受限；dry-run 同样分批。
+    while (true) {
+      const batch = await loadStaleNoteBatch(cutoff, cursor, workspace.id);
+      if (batch.length === 0) break;
+      total += batch.length;
+      // 推进游标到本批末条（deletedAt,id 键序严格递增，避免重复/遗漏）。
+      const last = batch[batch.length - 1];
+      cursor = { deletedAt: last.deletedAt, id: last.id };
+
+      if (dryRun) {
+        for (const note of batch) {
+          logger.info({ noteId: note.id, workspaceId: note.workspaceId, deletedAt: note.deletedAt }, "would permanently delete (dry-run)");
+        }
+        continue;
       }
-      continue;
-    }
 
-    for (const note of batch) {
-      try {
-        // 在事务内执行物理删除，收集 imageObjectKeys
-        const result = await db.transaction(async (tx) => {
-          return physicalDeleteNote(tx, note.id, note.workspaceId);
-        });
-
-        if (!result) {
-          logger.warn({ noteId: note.id }, "physicalDeleteNote returned null — note may have been already removed");
-          continue;
-        }
-
-        deleted++;
-
-        // 事务已提交，fire-and-forget 清理对象存储中的图片
-        if (result.imageObjectKeys?.length > 0) {
-          const results = await Promise.allSettled(
-            result.imageObjectKeys.map((key) => deleteObject(key)),
+      for (const note of batch) {
+        try {
+          // 在事务内执行物理删除，收集 imageObjectKeys
+          const result = await withWorkspaceTransaction(
+            { workspaceId: note.workspaceId, userId: SYSTEM_USER_ID },
+            (tx) => physicalDeleteNote(tx, note.id, note.workspaceId),
           );
-          const succeeded = results.filter((r) => r.status === "fulfilled").length;
-          const imageFailures = results.filter((r) => r.status === "rejected").length;
-          imagesCleaned += succeeded;
 
-          if (imageFailures > 0) {
-            logger.warn(
-              { noteId: note.id, failed: imageFailures, total: result.imageObjectKeys.length },
-              "some image objects failed to delete after note cleanup",
-            );
+          if (!result) {
+            logger.warn({ noteId: note.id }, "physicalDeleteNote returned null — note may have been already removed");
+            continue;
           }
+
+          deleted++;
+
+          // 事务已提交，再清对象存储里的图片
+          if (result.imageObjectKeys?.length > 0) {
+            const results = await Promise.allSettled(
+              result.imageObjectKeys.map((key) => deleteObject(key)),
+            );
+            const succeeded = results.filter((r) => r.status === "fulfilled").length;
+            const imageFailures = results.filter((r) => r.status === "rejected").length;
+            imagesCleaned += succeeded;
+
+            if (imageFailures > 0) {
+              logger.warn(
+                { noteId: note.id, failed: imageFailures, total: result.imageObjectKeys.length },
+                "some image objects failed to delete after note cleanup",
+              );
+            }
+          }
+        } catch (err) {
+          failed++;
+          logger.error({ err, noteId: note.id }, "failed to physically delete note");
         }
-      } catch (err) {
-        failed++;
-        logger.error({ err, noteId: note.id }, "failed to physically delete note");
       }
     }
   }

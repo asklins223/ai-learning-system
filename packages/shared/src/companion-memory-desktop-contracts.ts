@@ -308,12 +308,15 @@ export function companionPersonaPatchFromProfile(
     readonly presetId?: string | null;
     readonly activeness?: CompanionPersonaActivenessV1;
     readonly boundaries?: CompanionPersonaBoundariesV1;
+    readonly name?: string;
   },
 ): CompanionPersonaPatchV1 {
   return companionPersonaPatchV1Schema.parse({
     revision: profile.revision,
     presetId: change.presetId !== undefined ? change.presetId : profile.presetId,
-    name: profile.name,
+    // 名字以前是"跟着档案原样带回"的：整条写入路径（`PATCH /companion/pet-profile`）
+    // 一直收 `name`，界面却没有任何地方能改它，于是她叫什么只能由预设决定。
+    name: change.name ?? profile.name,
     personalityTags: profile.personalityTags,
     speakingStyle: profile.speakingStyle,
     examples: profile.examples,

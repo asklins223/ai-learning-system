@@ -105,6 +105,10 @@ export const workspaceMembers = pgTable(
   },
   (t) => ({
     pk: uniqueIndex("workspace_members_pk").on(t.workspaceId, t.userId),
+    // 0269（2026-09-22 性能重扫 H3）：登录取活跃空间、切换工作区列举、配额检查，以及
+    // 两个 SECURITY DEFINER 触发函数体内部，都是**只带 user_id** 的读法。`user_id` 在
+    // pk 的第二列用不上，实测是 Seq Scan，且触发器那条把它放到了成员写入路径上。
+    userIdx: index("workspace_members_user_idx").on(t.userId),
     // 0259：角色只有 owner / member 两种（PRODUCT.md:67）。此前是 free-text，
     // 数据库对"把别人写成 owner"一句话都不说——dev 库里真的出现过这种夹具行。
     roleCheck: check("workspace_members_role_check", sql`${t.role} IN ('owner', 'member')`),

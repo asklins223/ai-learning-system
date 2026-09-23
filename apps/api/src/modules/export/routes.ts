@@ -43,10 +43,30 @@ export async function exportRoutes(app: FastifyInstance) {
   app.get<{ Params: { id: string } }>("/export/notes/:id", async (req, reply) => {
     const params = uuidParamSchema.safeParse(req.params);
     if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
-    const markdown = await exportNoteMarkdown(req.params.id, req.session.workspaceId, req.session.userId);
+    const noteId = params.data.id;
+    // 单篇导出与整空间导出是**同一类外发动作**，留痕也必须与动作同事务：
+    // 之前这条只有类型没有写入方（doc 34 L40），于是"谁的哪篇笔记被带走了"在库里查不到。
+    // 404（那篇不存在或不可见）不留痕——动作没发生，记了就是假证据。
+    const markdown = await withWorkspaceTransaction(
+      { workspaceId: req.session.workspaceId, userId: req.session.userId },
+      async (tx) => {
+        const body = await exportNoteMarkdown(noteId, req.session.workspaceId, req.session.userId);
+        if (!body) return null;
+        await recordWorkspaceAudit(tx, {
+          workspaceId: req.session.workspaceId,
+          actorUserId: req.session.userId,
+          action: "export.note",
+          targetKind: "note",
+          targetId: noteId,
+          // 只记字节数，不记正文：审计表不该成为第二个导出渠道。
+          detail: { bytes: Buffer.byteLength(body, "utf8") },
+        });
+        return body;
+      },
+    );
     if (!markdown) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     reply.header("Content-Type", "text/markdown; charset=utf-8");
-    reply.header("Content-Disposition", `attachment; filename="note-${req.params.id}.md"`);
+    reply.header("Content-Disposition", `attachment; filename="note-${noteId}.md"`);
     return markdown;
   });
 }

@@ -85,6 +85,13 @@ export interface EvidenceSealPlanV2 {
     modality: "text";
     supportDescription: null;
   }>;
+  /** 0275：密封时冻结的原文副本，与 snapshotRows 一一对应（同一个 evidenceSnapshotId）。 */
+  quoteCopyRows: Array<{
+    workspaceId: string;
+    evidenceSnapshotId: string;
+    quoteText: string;
+    quoteHash: string;
+  }>;
   eligibilityRows: Array<{
     id: string;
     workspaceId: string;
@@ -206,14 +213,17 @@ export function planEvidenceSnapshotsV2(input: SealEvidenceInput): EvidenceSealP
   const evidence: SealedEvidenceEntryV2[] = [];
   const snapshotRows: EvidenceSealPlanV2["snapshotRows"] = [];
   const eligibilityRows: EvidenceSealPlanV2["eligibilityRows"] = [];
+  const quoteCopyRows: EvidenceSealPlanV2["quoteCopyRows"] = [];
 
   for (const span of spans) {
     const blockContentHash = hashCanonicalV2("block", { content: span.block.content });
     const quote = span.slice;
     const quoteHash = hashCanonicalV2("evidence-quote", { quote });
-    const protectedQuoteRef = `evidence://snapshot/${randomUUID()}`;
-
     const evidenceSnapshotId = randomUUID();
+    // ref 里那个 uuid 必须是**库里真的存在的 evidence_snapshot_id**。以前它是另抽的一个
+    // 随机号（doc 34 L21 §1：指向一个不存在的对象、也没有解析器），
+    // 于是所有"按 ref 取回原文"的设想都只能失败关闭。解析器见 parseProtectedQuoteRefV2。
+    const protectedQuoteRef = `evidence://snapshot/${evidenceSnapshotId}`;
     const evidenceSnapshotHash = computeSealedEvidenceSnapshotHashV2({
       workspaceId,
       sourceSnapshotId,
@@ -252,6 +262,13 @@ export function planEvidenceSnapshotsV2(input: SealEvidenceInput): EvidenceSealP
       eligibilityEpoch: 1,
       status: "usable",
     });
+    quoteCopyRows.push({
+      workspaceId,
+      evidenceSnapshotId,
+      quoteText: quote,
+      quoteHash,
+    });
+
     eligibilityRows.push({
       id: randomUUID(),
       workspaceId,
@@ -277,6 +294,7 @@ export function planEvidenceSnapshotsV2(input: SealEvidenceInput): EvidenceSealP
   }
 
   return {
+    quoteCopyRows,
     sourceContent,
     sourceContentHash,
     snapshotRows,
@@ -298,4 +316,24 @@ export class CardGenerationPipelineErrorV2 extends DomainError {
   constructor(code: string, statusCode: number, message: string) {
     super({ name: "CardGenerationV2ServiceError", code, message, statusCode });
   }
+}
+
+
+/** `protectedQuoteRef` 的唯一格式（0275 / doc 34 L21 §1）。写侧与读侧都从这里走。 */
+export const PROTECTED_QUOTE_REF_PREFIX = "evidence://snapshot/";
+
+const UUID_TEXT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * 解析 protected ref → `evidence_snapshot_id`；格式不对就返回 null，不猜。
+ *
+ * 这条函数是 L21 §1 缺的那一半：合同里"经 protected ref 访问"此前没有实现，
+ * 而 ref 里装的还是一个凭空抽的随机号（不是任何存在的 id）。
+ * 注意：**解得开不等于取不到**——0275 之前的存量行 ref 格式正确却指向不存在的对象，
+ * 所以副本一律按 `evidence_snapshot_id` 查，不按 ref 里那个号查。
+ */
+export function parseProtectedQuoteRefV2(ref: string | null | undefined): string | null {
+  if (typeof ref !== "string" || !ref.startsWith(PROTECTED_QUOTE_REF_PREFIX)) return null;
+  const rest = ref.slice(PROTECTED_QUOTE_REF_PREFIX.length);
+  return UUID_TEXT.test(rest) ? rest : null;
 }

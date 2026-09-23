@@ -26,9 +26,19 @@ import { checkpointNote, createNote } from "../modules/note/service.ts";
 import { documentNameForNote, closeNoteCollaboration, collaborationLoad } from "../modules/note/collaboration.ts";
 import { docFromSnapshot, editFragmentBlockText, projectFragmentBlocks } from "../modules/note/doc-fragment.ts";
 
-const CONN = process.env.DATABASE_URL_API ?? process.env.DATABASE_URL;
+/**
+ * 夹具连接用超级用户那条（`DATABASE_URL`），被测应用连接仍是 `ailearn_api`。
+ *
+ * 这份夹具要往 `users` / `workspaces` / `note_versions` 原生写行，而它**不在事务里设
+ * `app.workspace_id`**——`note_versions` 的 RESTRICTIVE 守卫没有 NULL 分支，受限角色下
+ * 这些写会被拒或被静默过滤成 0 行，症状是"笔记没有快照，本机文档无从起点"+ 7 条
+ * 「等待同步完成」超时（doc 34 §1.2 ②）。被测的那一侧没降级：`closeDatabase`/
+ * `withWorkspaceTransaction` 走 app 自己的池，而 `db/client.ts` 优先读 `DATABASE_URL_API`，
+ * 所以协同通道里的每一次读写仍然在 NOBYPASSRLS 下发生。
+ */
+const CONN = process.env.DATABASE_URL ?? process.env.DATABASE_URL_API;
 if (!CONN) {
-  throw new Error("DATABASE_URL_API 未配置——笔记协同集成测试要求真实 Postgres");
+  throw new Error("DATABASE_URL 未配置——笔记协同集成测试要求真实 Postgres");
 }
 
 const sql = postgres(CONN, { max: 3 });

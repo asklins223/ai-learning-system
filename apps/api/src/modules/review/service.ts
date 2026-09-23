@@ -222,21 +222,11 @@ export async function listReviews(
   const objectiveToCardId = new Map<string, string>();
 
   const objIds = Array.from(objectiveIdSet);
-  if (objIds.length > 0) {
-    const v2Cards = await queryDb.query.learningCardsV2.findMany({
-      where: and(
-        eq(learningCardsV2.workspaceId, workspaceId),
-        eq(learningCardsV2.lifecycle, "active"),
-        inArray(learningCardsV2.objectiveId, objIds),
-      ),
-    });
-    for (const v2card of v2Cards) {
-      objectiveToCardId.set(v2card.objectiveId, v2card.cardId);
-    }
-  }
-
-  const v2CardByCardId = new Map<string, { id: string; title: string }>();
-  const v2ObjByCardId = new Map<string, string>();
+  /**
+   * 一次读，三张表都从这里建。以前同一个谓词在**同一个事务**里查了两遍（相隔十几行，
+   * 第一份的结果还被关在 `if` 块里出不来），于是每个复习列表页多一次往返 + 多把整行
+   * （`learning_cards_v2` 带 `front` jsonb）搬回来一遍——而两遍拿的是完全相同的行。
+   */
   const v2Cards = objIds.length > 0
     ? await queryDb.query.learningCardsV2.findMany({
         where: and(
@@ -246,6 +236,12 @@ export async function listReviews(
         ),
       })
     : [];
+  for (const v2card of v2Cards) {
+    objectiveToCardId.set(v2card.objectiveId, v2card.cardId);
+  }
+
+  const v2CardByCardId = new Map<string, { id: string; title: string }>();
+  const v2ObjByCardId = new Map<string, string>();
   for (const v2card of v2Cards) {
     v2CardByCardId.set(v2card.cardId, {
       id: v2card.cardId,

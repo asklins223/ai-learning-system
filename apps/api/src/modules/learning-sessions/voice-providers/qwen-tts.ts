@@ -297,10 +297,28 @@ function acquireQwenConnection(
 ): Promise<PooledQwenConnection> {
   const key = connectionKey(options);
   const idle = idleConnections.get(key);
-  if (idle && idle.alive) {
+  /**
+   * `alive` 不可信：连接被停进 `idleConnections` 之后，它上一轮任务开始时已经
+   * `socket.removeAllListeners()`，所以**上游主动关闭**这条 socket 时没有任何人把
+   * `alive` 翻成 false——一个已经 CLOSED 的槽位照样被判"可复用"发出去。
+   * 后果不是崩，是最难查的那类：`runTask` 里 readyState 不对就等 `open`，而 `open`
+   * 永远不来，请求一直挂到 30 秒超时才落边缘兜底，同时白占一个全局任务名额和那一整条
+   * 用户队列。复用前看 socket 的真实状态，不看记账位。
+   */
+  if (idle && idle.alive && idle.socket.readyState === WebSocket.OPEN) {
     idleConnections.delete(key);
     clearPoolIdleTimer(idle);
     return Promise.resolve(idle);
+  }
+  if (idle) {
+    // 记账说它活着、socket 说不是：摘掉并关掉，别让死连接继续占着这个身份。
+    idleConnections.delete(key);
+    clearPoolIdleTimer(idle);
+    try {
+      idle.socket.close();
+    } catch {
+      // 已关掉的 socket 再 close 会抛；要的效果已经达成。
+    }
   }
   const WebSocketImpl = options.WebSocketImpl ?? WebSocket;
   const url = wsUrl(options.workspaceId);

@@ -581,15 +581,150 @@ test("P4 followup：partial checkpoint → activate_followup 激活补充任务 
     assert.equal(taskRows[1].intent, "repair");
     assert.equal(taskRows[1].status, "active");
     const variantRows = await scoped(scope, (tx) => tx`
-      SELECT purpose, template_trust_ceiling FROM learning_task_variants
+      SELECT purpose, template_trust_ceiling, rubric_target_ids FROM learning_task_variants
       WHERE task_id = ${taskRows[1].id}
     `);
     assert.equal(variantRows.length, 1);
     assert.equal(variantRows[0].purpose, "practice");
     assert.equal(variantRows[0].template_trust_ceiling, "practice_only");
-    const runRows = await scoped(scope, (tx) => tx`SELECT phase, active_task_id FROM learning_runs WHERE id = ${run.runId}`);
+    // D2（2026-09-23）：补充任务必须与主任务用同一把 rubric。此前
+    // planFollowupTask 调 buildClosure 少传 rubricTargetIdOverride，补充任务
+    // 带的是现造的 `rubric:repair:<hash>`，Critic 输入按冻结快照解析必然落空
+    // → 每次都被 fail closed 成 not_assessable（dev 实测 5/5）。
+    const primaryVariantRows = await scoped(scope, (tx) => tx`
+      SELECT v.rubric_target_ids FROM learning_task_variants v
+      JOIN learning_tasks t ON t.id = v.task_id
+      WHERE t.run_id = ${run.runId} AND t.sequence = 1 AND v.status = 'active'
+    `);
+    assert.deepEqual(
+      [...(variantRows[0].rubric_target_ids as string[])].sort(),
+      [...(primaryVariantRows[0].rubric_target_ids as string[])].sort(),
+      "补充任务的 rubric 目标必须等于主任务的（冻结快照 required unit）",
+    );
+    const runRows = await scoped(scope, (tx) => tx`
+      SELECT phase, active_task_id, revision, runtime_epoch FROM learning_runs WHERE id = ${run.runId}
+    `);
     assert.equal(runRows[0].phase, "active");
     assert.equal(runRows[0].active_task_id, taskRows[1].id);
+    // D1b：补充额度是单槽。把 run 拨回"旧 tick 会写出的那种状态"（checkpoint
+    // 里仍带 supplement:1，但任务已经占到 sequence 2）再点第二次——必须是
+    // 409，不能是撞 learning_tasks_run_sequence_unique 的裸 500。
+    await scoped(scope, (tx) => tx`
+      UPDATE learning_runs
+      SET phase = 'checkpoint',
+          checkpoint = '{"kind":"partial","allowedFollowupIds":["supplement:1"]}'::jsonb
+      WHERE id = ${run.runId}
+    `);
+    await assert.rejects(
+      withWorkspaceTransaction(scope, async (tx) => applyAction(tx, {
+        ...scope,
+        runId: run.runId,
+        runRevision: runRows[0].revision,
+        runtimeEpoch: runRows[0].runtime_epoch,
+        action: { kind: "activate_followup", followupId: "supplement:1" },
+        idempotencyKey: "p4-followup-second-slot-used",
+      })),
+      /已经用过唯一一次补充机会/,
+      "第二次激活必须是明确的 409，不是 23505",
+    );
+    const taskCountAfterSecond = await scoped(scope, (tx) => tx`
+      SELECT count(*)::int AS n FROM learning_tasks WHERE run_id = ${run.runId}
+    `);
+    assert.equal(taskCountAfterSecond[0].n, 2, "被拒的第二次激活不得留下半个任务");
+  } finally {
+    await seeded.cleanup();
+  }
+});
+
+test("P4 followup 单槽：补充任务自己再落 checkpoint 时不再签发 supplement:1", async () => {
+  const seeded = await seed();
+  try {
+    const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
+    const { buildLearningRunAllowedActionsV2 } = await import(
+      "../modules/learning-runs/run-action-availability.ts"
+    );
+    const run = await withWorkspaceTransaction(scope, async (tx) =>
+      createLearningRunForTest(tx, {
+        ...scope,
+        request: {
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
+          goal: "stabilize",
+          idempotencyKey: "it-slot-create",
+        },
+      }),
+    );
+    const submitText = (
+      taskId: string,
+      taskRevision: number,
+      runRevision: number,
+      variant: { variantId: string; revision: number; inputSchemaHash: string },
+      idempotencyKey: string,
+    ) => withWorkspaceTransaction(scope, async (tx) =>
+      submitArtifact(tx, {
+        ...scope,
+        runId: run.runId,
+        taskId,
+        request: {
+          version: 1,
+          variantId: variant.variantId,
+          variantRevision: variant.revision,
+          runRevision,
+          taskRevision,
+          inputSchemaHash: variant.inputSchemaHash,
+          payload: { kind: "text", text: "地球绕太阳一圈大约 365 天。" },
+          idempotencyKey,
+        },
+      }));
+
+    await submitText(
+      run.activeTaskId!,
+      run.activeTask!.revision,
+      run.revision,
+      run.activeTask!.activeVariant,
+      "it-slot-submit-1",
+    );
+    const tick1 = await runLearningRunProcessingTick(`it-worker:${randomUUID()}`, 10);
+    assert.ok(tick1.failed === 0, `tick1 failed=${tick1.failed}`);
+
+    // 正控制：额度没用过时必须照旧签发，否则下面的"变空"只是读不到东西。
+    const cp1 = await withWorkspaceTransaction(scope, async (tx) =>
+      getRunPublicView(tx, { ...scope, runId: run.runId }),
+    );
+    assert.equal(cp1.phase, "checkpoint");
+    assert.deepEqual(cp1.checkpoint?.allowedFollowupIds, ["supplement:1"]);
+    assert.ok(
+      buildLearningRunAllowedActionsV2(cp1).some((a) => a.kind === "activate_followup"),
+      "首次 checkpoint 必须签发补充按钮",
+    );
+
+    const activated = await withWorkspaceTransaction(scope, async (tx) =>
+      applyAction(tx, {
+        ...scope,
+        runId: run.runId,
+        runRevision: cp1.revision,
+        runtimeEpoch: cp1.runtimeEpoch,
+        action: { kind: "activate_followup", followupId: "supplement:1" },
+        idempotencyKey: "it-slot-activate",
+      }),
+    );
+    await submitText(
+      activated.snapshot.activeTaskId!,
+      activated.snapshot.activeTask!.revision,
+      activated.snapshot.revision,
+      activated.snapshot.activeTask!.activeVariant,
+      "it-slot-submit-2",
+    );
+    const tick2 = await runLearningRunProcessingTick(`it-worker:${randomUUID()}`, 10);
+    assert.ok(tick2.failed === 0, `tick2 failed=${tick2.failed}`);
+
+    const cp2 = await withWorkspaceTransaction(scope, async (tx) =>
+      getRunPublicView(tx, { ...scope, runId: run.runId }),
+    );
+    assert.equal(cp2.phase, "checkpoint", "补充任务作答后同样落到 checkpoint");
+    assert.deepEqual(cp2.checkpoint?.allowedFollowupIds, [], "额度已用，不再签发第二次补充");
+    const secondActions = buildLearningRunAllowedActionsV2(cp2).map((a) => a.kind);
+    assert.ok(!secondActions.includes("activate_followup"), "第二次 checkpoint 不得再签发补充按钮");
+    assert.ok(secondActions.includes("end"), "收掉按钮后必须仍留出口，不能把 run 关死");
   } finally {
     await seeded.cleanup();
   }

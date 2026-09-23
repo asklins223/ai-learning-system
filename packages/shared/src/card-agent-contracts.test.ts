@@ -37,6 +37,11 @@ function request(assistant: Record<string, unknown>) {
   };
 }
 
+test("agentTurnRequestSchema: 明确动作请求允许要求工具调用", () => {
+  assert.equal(agentTurnRequestSchema.parse({ ...request({}), toolChoice: "required" }).toolChoice, "required");
+  assert.equal(agentTurnRequestSchema.safeParse({ ...request({}), toolChoice: "none" }).success, false);
+});
+
 test("agentTurnResultSchema: 接受 provider 不透明 reasoning 句柄", () => {
   const parsed = agentTurnResultSchema.parse({
     content: null,

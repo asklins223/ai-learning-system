@@ -340,6 +340,31 @@ export const companionAnswerModePreferencePatchV1Schema = z.object({
 }).strict();
 export type CompanionAnswerModePreferencePatchV1 = z.infer<typeof companionAnswerModePreferencePatchV1Schema>;
 
+/**
+ * 账号「作答方式」偏好 → LearningRun 合同的 `responsePreference`。**唯一一处映射**，
+ * 服务端在生成主行动时调用；调用方不得自己再写一份 switch。
+ *
+ * `silent → structured` 有三处互相独立的背书：落库值就是 `touch_structure`、
+ * 设置页那一档的文案是「静默结构」、产品表
+ * （docs/plans/learning-companion/14-…-multimodal-reconstruction.md 作答模态那一行）
+ * 把 `silent` 定义为「静音结构化 proof」。映射成 `text` 会让「不想出声」变成
+ * 「换一种作答模态去打字」，那是偏好没说的意思。
+ *
+ * `structured` 在 planner 里的既有语义不变（能推出结构时该题只作练习、不产掌握证据，
+ * 见 run-planner 的 `structuredPracticeOnly`）——偏好只决定怎么答，不决定这道题算不算
+ * 验证，所以这里不绕过那条规则。
+ */
+export const answerModeToResponsePreferenceTable = {
+  any: "adaptive",
+  voice: "voice",
+  text: "text",
+  silent: "structured",
+} as const satisfies Record<AnswerModePreferenceV1, string>;
+
+export function answerModeToResponsePreference(preference: AnswerModePreferenceV1) {
+  return answerModeToResponsePreferenceTable[preference];
+}
+
 // ─── 语音音色偏好（设置 → 语音与伴星，账号级跨设备一致）───────────────────
 
 /**

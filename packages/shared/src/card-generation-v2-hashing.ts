@@ -239,6 +239,43 @@ export function computeEvidenceSnapshotHashV2(input: {
 }
 
 /**
+ * 证据预览的落点状态（doc 34 L21 §2）。
+ *
+ * 密封时写下的两个哈希是"这张卡当初对齐的是哪段文字"的唯一凭据：
+ * `block` 域锚住整块内容，`evidence-quote` 域锚住切片。笔记会被就地改写，
+ * 块也可能被删掉（`note/document-state.ts` 的 stale 清理），所以任何"把原文
+ * 切给界面看"的读点都必须先复算这两个域，否则展示的是**现在的**文字，
+ * 而用户以为自己在核对**当初的**依据。与 `evidence-seal-core.ts:211-213` 同一对域。
+ */
+export const EVIDENCE_PREVIEW_SOURCE_STATES_V2 = ["located", "drifted", "missing"] as const;
+export type EvidencePreviewSourceStateV2 =
+  (typeof EVIDENCE_PREVIEW_SOURCE_STATES_V2)[number];
+
+export function classifyEvidencePreviewV2(input: {
+  /** 当前块正文；块行不存在（或证据没有 blockId）时为 null。 */
+  blockContent: string | null;
+  blockContentHash: string | null;
+  quoteHash: string | null;
+  startOffset: number | null;
+  endOffset: number | null;
+}): { state: EvidencePreviewSourceStateV2; quote: string } {
+  if (input.blockContent === null) return { state: "missing", quote: "" };
+  const blockChanged =
+    typeof input.blockContentHash !== "string"
+    || hashCanonicalV2("block", { content: input.blockContent }) !== input.blockContentHash;
+  const start = input.startOffset ?? 0;
+  const end = input.endOffset ?? input.blockContent.length;
+  const spanAddressable = Number.isInteger(start) && Number.isInteger(end)
+    && start >= 0 && end > start && end <= input.blockContent.length;
+  const quote = spanAddressable ? input.blockContent.slice(start, end) : "";
+  const quoteChanged = !spanAddressable
+    || typeof input.quoteHash !== "string"
+    || hashCanonicalV2("evidence-quote", { quote }) !== input.quoteHash;
+  if (blockChanged || quoteChanged) return { state: "drifted", quote };
+  return { state: "located", quote };
+}
+
+/**
  * §14.3 candidateEvidenceSetHash：
  * H("candidate-evidence-set-v2" + sorted(evidenceSnapshotId + evidenceSnapshotHash))
  */

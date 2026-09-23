@@ -9,7 +9,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  createCapabilityConfig,
   learningObjectiveSurfaceV3Schema,
   objectiveListItemV3Schema,
   findPrivatePayloadLeaks,
@@ -82,14 +81,8 @@ function makeListItem(overrides: Partial<ObjectiveListItemV3> = {}): ObjectiveLi
 
 describe("RL-15: capability bundle 永久开启", () => {
   it("learning_objective_system_v3 永久 enabled", () => {
-    const config = createCapabilityConfig({
-      revision: 100,
-      overrides: { learning_objective_system_v3: { status: "enabled" } },
-    });
-    const state = config.states.learning_objective_system_v3;
-    assert.ok(state);
-    assert.equal(state.status, "enabled");
-    // 切流后 Surface 合同不变
+    // bundle 机器已整条删除（doc 34 L34）：这里不再断言它的状态读回来是什么，
+    // 那等于拿手搓夹具测夹具。仍然成立的是这半句——Surface 合同与之无关。
     const surface = makeSurface();
     const parsed = learningObjectiveSurfaceV3Schema.safeParse(surface);
     assert.equal(parsed.success, true);

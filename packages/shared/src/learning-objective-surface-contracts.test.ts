@@ -76,6 +76,18 @@ test("W1-17: valid Surface V3 parses and leaks NOTHING", () => {
   assert.equal(parsed.version, 3);
 });
 
+test("recent completed run is a navigable reference, not an exposed answer", () => {
+  const fixture = surfaceFixture();
+  (fixture.personal as Record<string, unknown>).latestResult = {
+    runId: RUN,
+    completedAt: "2026-08-16T11:00:00.000Z",
+    outcome: "practice_completed",
+  };
+  const parsed = learningObjectiveSurfaceV3Schema.parse(fixture);
+  assert.equal(parsed.personal.latestResult?.runId, RUN);
+  assert.deepEqual(findPrivatePayloadLeaks(parsed), []);
+});
+
 test("W1-17: injecting private payload keys at any depth is rejected by strict schema", () => {
   const inject = (key: string) => {
     const fixture = surfaceFixture();

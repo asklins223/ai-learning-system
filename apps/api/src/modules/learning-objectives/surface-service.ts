@@ -47,9 +47,10 @@ import type {
   KnowledgeFormV2,
   ObjectiveSurfaceLifecycleV3,
 } from "@ailearn/shared";
-import { DomainError } from "@ailearn/shared";
+import { DomainError, learningRunOutcomeSchema } from "@ailearn/shared";
 import { listOriginsByObjective, rowToWire } from "./origin-service.ts";
 import { resolvePrimaryActionV3, type ActionResolverInputV3 } from "./action-resolver.ts";
+import { readAnswerModePreference } from "../companion-shell/answer-mode-preference.ts";
 import { surfaceQueryDurationSeconds, surfaceSlowQueryTotal } from "../../lib/metrics.ts";
 
 export class ObjectiveNotFoundError extends DomainError {
@@ -355,11 +356,30 @@ async function assembleObjectiveSurfaceV3Inner(
       sql`${learningRuns.origin}->>'objectiveId' = ${objectiveId}`,
     ))
     .orderBy(desc(learningRuns.createdAt));
-  const runIds = allRunRows.map((r) => r.runId);
   const activeRunRow = allRunRows.find((r) =>
     (ACTIVE_RUN_PHASES as readonly string[]).includes(r.phase));
   const activeRun = activeRunRow
     ? { runId: activeRunRow.runId, phase: activeRunRow.phase }
+    : null;
+  const latestResultRows = await tx
+    .select({
+      runId: learningRuns.id,
+      outcome: sql<string>`${learningRuns.result}->>'outcome'`,
+      completedAt: learningRuns.updatedAt,
+    })
+    .from(learningRuns)
+    .where(and(
+      eq(learningRuns.workspaceId, ctx.workspaceId),
+      eq(learningRuns.userId, ctx.userId),
+      sql`${learningRuns.origin}->>'objectiveId' = ${objectiveId}`,
+      sql`${learningRuns.result} IS NOT NULL`,
+    ))
+    .orderBy(desc(learningRuns.updatedAt))
+    .limit(1);
+  const lastCompletedRun = latestResultRows[0];
+  const lastOutcome = learningRunOutcomeSchema.safeParse(lastCompletedRun?.outcome);
+  const latestResult = lastCompletedRun && lastOutcome.success
+    ? { runId: lastCompletedRun.runId, completedAt: lastCompletedRun.completedAt.toISOString(), outcome: lastOutcome.data }
     : null;
 
   const [initialValidation, review, exposureInfo] = await Promise.all([
@@ -413,34 +433,61 @@ async function assembleObjectiveSurfaceV3Inner(
   let practiceTrailCount = 0;
   let lastCanonicalAt: string | null = null;
 
-  if (runIds.length > 0) {
-    const [canonicalRows, practiceRows] = await Promise.all([
-      tx
-        .select({ createdAt: canonicalLearningEventOutbox.createdAt })
-        .from(canonicalLearningEventOutbox)
-        .where(and(
-          eq(canonicalLearningEventOutbox.workspaceId, ctx.workspaceId),
-          eq(canonicalLearningEventOutbox.userId, ctx.userId),
-          inArray(canonicalLearningEventOutbox.runId, runIds),
-          eq(canonicalLearningEventOutbox.status, "published"),
-        ))
-        .orderBy(desc(canonicalLearningEventOutbox.createdAt))
-        .limit(1),
-      tx
-        .select({ n: sql<number>`count(*)::int` })
-        .from(practiceTrailEventOutbox)
-        .where(and(
-          eq(practiceTrailEventOutbox.workspaceId, ctx.workspaceId),
-          eq(practiceTrailEventOutbox.userId, ctx.userId),
-          inArray(practiceTrailEventOutbox.runId, runIds),
-          eq(practiceTrailEventOutbox.status, "published"),
-        )),
-    ]);
-    if (canonicalRows[0]) {
-      lastCanonicalAt = canonicalRows[0].createdAt.toISOString();
-    }
-    practiceTrailCount = Number(practiceRows[0]?.n ?? 0);
+  /**
+   * Bug 7 / Bug 10 的继续收口（0269 轮 M32）：以前是把这篇目标**历史上所有** run 的 id
+   * 收成数组，再喂给两个 `inArray`。那个 id 列表随练习次数线性增长，详情页每打开一次就
+   * 重造一次、两条查询各带一遍参数，而结果只要"一个计数 + 一个时间戳"。
+   *
+   * 改成经 `learning_runs` 直接 join：`origin->>'objectiveId'` 有表达式索引（0222），
+   * 两张 outbox 各自有以 run_id 可用开头的索引，join 方向是"这篇目标的少量 run → 探 outbox"。
+   * 两条标量子查询合成**一次**往返。原来的 `runIds.length > 0` 门一起去掉——没有 run 时
+   * 两条子查询自然给 null / 0，与旧路径同结果。
+   */
+  const trailRows = await tx.execute(sql`
+    SELECT
+      (
+        SELECT o.created_at
+        FROM public.canonical_learning_event_outbox o
+        JOIN public.learning_runs cr
+          ON cr.id = o.run_id
+         AND cr.workspace_id = o.workspace_id
+         AND cr.user_id = o.user_id
+        WHERE cr.workspace_id = ${ctx.workspaceId}::uuid
+          AND cr.user_id = ${ctx.userId}::uuid
+          AND cr.origin ->> 'objectiveId' = ${objectiveId}
+          AND o.workspace_id = ${ctx.workspaceId}::uuid
+          AND o.user_id = ${ctx.userId}::uuid
+          AND o.status = 'published'
+        ORDER BY o.created_at DESC
+        LIMIT 1
+      ) AS last_canonical_at,
+      (
+        SELECT count(*)::int
+        FROM public.practice_trail_event_outbox p
+        JOIN public.learning_runs pr
+          ON pr.id = p.run_id
+         AND pr.workspace_id = p.workspace_id
+         AND pr.user_id = p.user_id
+        WHERE pr.workspace_id = ${ctx.workspaceId}::uuid
+          AND pr.user_id = ${ctx.userId}::uuid
+          AND pr.origin ->> 'objectiveId' = ${objectiveId}
+          AND p.workspace_id = ${ctx.workspaceId}::uuid
+          AND p.user_id = ${ctx.userId}::uuid
+          AND p.status = 'published'
+      ) AS practice_count
+  `);
+  const trail = (trailRows[0] ?? {}) as Record<string, unknown>;
+  const lastCanonicalRaw = trail.last_canonical_at;
+  if (lastCanonicalRaw instanceof Date) {
+    lastCanonicalAt = lastCanonicalRaw.toISOString();
+  } else if (typeof lastCanonicalRaw === "string" && lastCanonicalRaw.length > 0) {
+    lastCanonicalAt = new Date(lastCanonicalRaw).toISOString();
   }
+  practiceTrailCount = Number(trail.practice_count ?? 0);
+
+  // 账号「作答方式」偏好：详情页只有这一个目标，就地读一次。这里**不**调用
+  // `getAnswerModePreference`——它会在这条已经开着的事务里再开一个事务。
+  const { preference: answerModePreference } = await readAnswerModePreference(tx, ctx.userId);
 
   const actionInput: ActionResolverInputV3 = {
     objectiveId,
@@ -450,6 +497,7 @@ async function assembleObjectiveSurfaceV3Inner(
     hasActiveCard: Boolean(card),
     cardId: card?.cardId ?? null,
     activeRun,
+    hasPriorFormalResult: lastCanonicalAt !== null,
     reviewDue: review?.status === "due" ? { scheduleId: review.scheduleId, generation: review.generation } : null,
     initialReady: initialValidation?.status === "ready"
       ? { reminderId: initialValidation.reminderId, qualificationNotBefore: initialValidation.qualificationNotBefore ?? new Date(0).toISOString() }
@@ -459,6 +507,7 @@ async function assembleObjectiveSurfaceV3Inner(
       : null,
     practiceOnly: exposureInfo.practiceOnly,
     practiceReasonCodes: exposureInfo.reasonCodes,
+    answerModePreference,
   };
   const primaryAction = resolvePrimaryActionV3(actionInput);
   const personalState = {
@@ -501,6 +550,7 @@ async function assembleObjectiveSurfaceV3Inner(
       review,
       practiceTrailCount,
       lastCanonicalAt,
+      latestResult,
     },
     lifecycle: {
       status: objective.lifecycle as ObjectiveSurfaceLifecycleV3,
@@ -916,6 +966,10 @@ async function batchAssembleObjectiveSurfacesV3(
     : [];
   const exposedObjectives = new Set(exposureRows.map((r) => r.objectiveId));
 
+  // 10.6 账号「作答方式」偏好：**循环外读一次**。列表页几十个目标共用同一个
+  // 值，逐目标读就是 doc 34 L15 批评的那种「接线接成了 N+1」。
+  const { preference: answerModePreference } = await readAnswerModePreference(tx, ctx.userId);
+
   // 11. 装配 Surface（内存组装，不再查 DB）
   const now = new Date();
   const results: LearningObjectiveSurfaceV3[] = [];
@@ -1010,6 +1064,7 @@ async function batchAssembleObjectiveSurfacesV3(
       hasActiveCard: Boolean(card),
       cardId: card?.cardId ?? null,
       activeRun,
+      hasPriorFormalResult: lastCanonicalAt !== null,
       reviewDue: review?.status === "due" ? { scheduleId: review.scheduleId, generation: review.generation } : null,
       initialReady: initialValidation?.status === "ready"
         ? { reminderId: initialValidation.reminderId, qualificationNotBefore: initialValidation.qualificationNotBefore ?? new Date(0).toISOString() }
@@ -1019,6 +1074,7 @@ async function batchAssembleObjectiveSurfacesV3(
         : null,
       practiceOnly: exposedObjectives.has(objectiveId),
       practiceReasonCodes: exposedObjectives.has(objectiveId) ? ["exposed"] : [],
+      answerModePreference,
     };
     const primaryAction = resolvePrimaryActionV3(actionInput);
     const personalState = {

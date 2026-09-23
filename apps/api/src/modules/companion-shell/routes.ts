@@ -27,12 +27,14 @@ import {
 import {
   CompanionStateError,
   createRuntimeFence,
-  getAnswerModePreference,
   getCompanionOverview,
-  setAnswerModePreference,
   transitionOnboarding,
   updateCompanionAccountState,
 } from "./service.ts";
+import {
+  getAnswerModePreference,
+  setAnswerModePreference,
+} from "./answer-mode-preference.ts";
 import { openCompanionAccountEventStream } from "./account-events.ts";
 import { getAuthSurfaceManifestInfo } from "./auth-surface.ts";
 import {

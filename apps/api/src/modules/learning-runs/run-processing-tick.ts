@@ -21,7 +21,7 @@
  * 进程内存构造）。
  */
 
-import { and, eq, inArray, sql, desc } from "drizzle-orm";
+import { and, eq, gte, inArray, sql, desc } from "drizzle-orm";
 import type { StructuredTaskKind } from "./run-structured.ts";
 import { isDeterministicStructuredPayload } from "./run-structured.ts";
 import { uncoveredFacets } from "./run-result-facets.ts";
@@ -429,6 +429,27 @@ interface CommandRow {
   payload: Record<string, unknown>;
 }
 
+/**
+ * §12.5 的补充额度是**单槽**：id 恒为 `supplement:1`，补充任务恒占 sequence 2
+ * （planFollowupTask 写死，且结算侧 H3 只按"至多两个 assessment"收敛）。所以
+ * 用过一次之后绝不能再次签发——2026-09-23 实测：第二次点"继续补充证据"直接撞
+ * learning_tasks_run_sequence_unique，run 侧看到的是一个裸 500。
+ */
+const SUPPLEMENT_FOLLOWUP_ID = "supplement:1";
+
+/** 该 run 还能不能被签发一次补充证据；已用过则返回空数组（按钮消失）。 */
+async function supplementOffer(
+  tx: Parameters<Parameters<typeof withWorkspaceTransaction>[1]>[0],
+  runId: string,
+): Promise<string[]> {
+  const used = await tx
+    .select({ id: learningTasks.id })
+    .from(learningTasks)
+    .where(and(eq(learningTasks.runId, runId), gte(learningTasks.sequence, 2)))
+    .limit(1);
+  return used.length > 0 ? [] : [SUPPLEMENT_FOLLOWUP_ID];
+}
+
 async function processAssessmentCommand(
   tx: Parameters<Parameters<typeof withWorkspaceTransaction>[1]>[0],
   command: CommandRow,
@@ -482,7 +503,7 @@ async function processAssessmentCommand(
         await tx.update(learningRuns)
           .set({
             phase: "checkpoint",
-            checkpoint: { kind: "not_assessable", allowedFollowupIds: ["supplement:1"] },
+            checkpoint: { kind: "not_assessable", allowedFollowupIds: await supplementOffer(tx, command.runId) },
             revision: run.revision + 1,
             updatedAt: at,
           })
@@ -499,6 +520,10 @@ async function processAssessmentCommand(
     return await prepareCriticAssessment(tx, command, assessmentId, run, at);
   } catch (err) {
     if (err instanceof CriticUnavailableError || err instanceof CriticOutputError) {
+      // 与 HTTP 分支（:315）同一条 dev 可观测性：此前只有那条打日志，prepare
+      // 分支静默 fail closed，于是"每题都 not_assessable"在 API 日志里读不出
+      // 任何原因（2026-09-23 定位补充任务的 500 只能去翻 postgres 日志）。
+      process.stderr.write(`[run-tick] critic input fail-closed for assessment=${assessmentId}: ${err.message}\n`);
       await failClosedNotAssessable(tx, command, assessmentId, at);
       return null;
     }
@@ -548,7 +573,7 @@ async function failClosedNotAssessable(
   await tx.update(learningRuns)
     .set({
       phase: "checkpoint",
-      checkpoint: { kind: "not_assessable", allowedFollowupIds: ["supplement:1"] },
+      checkpoint: { kind: "not_assessable", allowedFollowupIds: await supplementOffer(tx, command.runId) },
       revision: sql`revision + 1`,
       updatedAt: at,
     })
@@ -701,7 +726,7 @@ async function finishCriticAssessmentWrite(
     await tx.update(learningRuns)
       .set({
         phase: "checkpoint",
-        checkpoint: { kind: "partial", allowedFollowupIds: ["supplement:1"] },
+        checkpoint: { kind: "partial", allowedFollowupIds: await supplementOffer(tx, command.runId) },
         revision: runRow.revision + 1,
         updatedAt: at,
       })
@@ -1245,7 +1270,7 @@ async function settleCommitRejection(
   await tx.update(learningRuns)
     .set({
       phase: "checkpoint",
-      checkpoint: { kind: "not_assessable", allowedFollowupIds: ["supplement:1"] },
+      checkpoint: { kind: "not_assessable", allowedFollowupIds: await supplementOffer(tx, command.runId) },
       revision: run.revision + 1,
       updatedAt: at,
     })

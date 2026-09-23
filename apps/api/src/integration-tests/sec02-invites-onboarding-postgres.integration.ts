@@ -343,7 +343,14 @@ test("RLS expand-phase policies exist on onboarding_states", async () => {
   }
 });
 
-test("RLS remains disabled in expand phase for both tables (SEC-01 enforce gate)", async () => {
+/**
+ * 这两张表的姿态自 **0257 `sec01_rls_reopen_core_tables`** 起是 ENABLE + FORCE。
+ *
+ * 这条用例原本断言 `false`——那是 0027"expand phase 先关掉"时期的口径，0257 之后
+ * 它一直在红（CI 与 dev 一样，因为姿态是迁移写进库的，不是本地漂移）。
+ * 逐条策略的名字/命令/permissive 由上面那条用例守住，这里只守住"开关别再被关掉"。
+ */
+test("两张表都是 ENABLE + FORCE ROW LEVEL SECURITY（0257 重新收口的姿态）", async () => {
   const rows = await sql<{ relname: string; relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
     SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
     FROM pg_catalog.pg_class AS c
@@ -357,13 +364,13 @@ test("RLS remains disabled in expand phase for both tables (SEC-01 enforce gate)
   for (const row of rows) {
     assert.equal(
       row.relrowsecurity,
-      false,
-      `${row.relname} relrowsecurity must be false in expand phase (SEC-01 enforce gate)`,
+      true,
+      `${row.relname} relrowsecurity must be true since 0257 reopened core tables`,
     );
     assert.equal(
       row.relforcerowsecurity,
-      false,
-      `${row.relname} relforcerowsecurity must be false in expand phase (SEC-01 enforce gate)`,
+      true,
+      `${row.relname} must stay FORCEd, otherwise the table owner bypasses the guards`,
     );
   }
 });

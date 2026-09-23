@@ -22,9 +22,24 @@ import postgres from "postgres";
 import Fastify, { type FastifyInstance, type InjectOptions } from "fastify";
 import sensible from "@fastify/sensible";
 
-const CONN = process.env.DATABASE_URL_API ?? process.env.DATABASE_URL;
+/**
+ * 这份夹具自己的连接必须是**能 `SET LOCAL ROLE` 的那个角色**，不是受限角色。
+ *
+ * 两个理由，缺一不可：
+ * ① 本文件用 RLS 的方式是 `SET LOCAL ROLE ailearn_api`（见 `countDueRowsAsApiRole`），
+ *    而 `ailearn_api` 自己不能 SET ROLE 到任何角色——外层再连受限角色，那几条
+ *    "策略真的在执行"的用例直接就是权限错。
+ * ② 夹具里对 `notes` 的原生写（`:142` 的 share_scope）在没有 `app.workspace_id` 的
+ *    连接上会被 RESTRICTIVE 守卫**静默过滤成 0 行**（`notes` 没有 NULL 分支，见 doc 34 §1.2 ②）。
+ *    写成"优先 DATABASE_URL_API"时，共享那一步等于没发生，后面 9 条 404/changed:true 全是它连累出来的。
+ *
+ * 被测的那一层仍然是生产形状：HTTP 走 app 自己的连接池，而 `db/client.ts` 优先读
+ * `DATABASE_URL_API`（`ailearn_api`，NOBYPASSRLS）。**夹具写 = 超级用户、被测读数 = 受限角色**，
+ * 这两件事不能合并成一条连接串（同 [[reference-dev-rls-blindfold]] ④ 那条判据）。
+ */
+const CONN = process.env.DATABASE_URL ?? process.env.DATABASE_URL_API;
 if (!CONN) {
-  throw new Error("DATABASE_URL_API 未配置——协作空间行为集成测试要求真实 Postgres");
+  throw new Error("DATABASE_URL 未配置——协作空间行为集成测试要求真实 Postgres");
 }
 
 const sql = postgres(CONN, { max: 3 });
@@ -704,4 +719,70 @@ test("搜索索引收全量、发结果按人筛：私有笔记的正文不出�
     0,
     "撤回之后成员的搜索里还有它（或者命中数缓存没按人分键）",
   );
+});
+
+// ─── 转让所有权：owner 的唯一体面出口（doc 34 L6）───────────────────────────
+
+test("转让所有权：member 按不动、owner 交得出，交完原 owner 就能退出这个空间", async () => {
+  // ① 这条端点此前**一行 HTTP 级测试都没有**——service 与路由都写着，没人能按到，
+  //    也没人能证明它按下去会发生什么（L6 批评的正是这种"实现齐、出口空"）。
+  const refused = await appInject("POST", `/workspaces/${wsCollab}/transfer-ownership`, memberToken, {
+    toUserId: userMember,
+  });
+  assert.equal(refused.statusCode, 403, `member 不该能转让：${refused.body}`);
+  const untouched = await sql`SELECT owner_id FROM workspaces WHERE id = ${wsCollab}`;
+  assert.equal(String(untouched[0].owner_id), userOwner, "被拒的转让已经把所有者改写了");
+
+  // ② 真转让。
+  const transferred = await appInject("POST", `/workspaces/${wsCollab}/transfer-ownership`, ownerToken, {
+    toUserId: userMember,
+  });
+  assert.equal(transferred.statusCode, 200, `owner 转让失败：${transferred.body}`);
+  assert.equal(transferred.json().newOwnerUserId, userMember);
+  const afterOwner = await sql`SELECT owner_id FROM workspaces WHERE id = ${wsCollab}`;
+  assert.equal(String(afterOwner[0].owner_id), userMember, "workspaces.owner_id 没跟着走");
+  const roles = await sql`
+    SELECT user_id::text, role FROM workspace_members
+    WHERE workspace_id = ${wsCollab} AND left_at IS NULL
+  `;
+  const roleOf = new Map(roles.map((r) => [String(r.user_id), String(r.role)]));
+  assert.equal(roleOf.get(userMember), "owner", "接手的人没被抬成 owner");
+  assert.equal(roleOf.get(userOwner), "member", "原 owner 没降下来——他还是 owner 就还是退不出去");
+
+  // ③ 这一条才是整件事的目的：**交完之后才退得得掉**。
+  // 先补一件真实账号一定有的东西：个人空间（注册路径 0025 就建了它）。
+  // 这份夹具是裸 INSERT users，没有 personal_workspace_id —— 不补就会拿到
+  // `personal_workspace_missing`，那条红是夹具不成立，不是出口不通。
+  const ownerPersonal = randomUUID();
+  await sql`
+    INSERT INTO workspaces (id, name, owner_id, workspace_type)
+    VALUES (${ownerPersonal}, ${`collab-owner-personal-${tag}`}, ${userOwner}, 'personal')
+  `;
+  // 真实个人空间一定带本人那条成员行——只建 workspaces 行的话，
+  // 退出时"落回个人空间"那一步会因为没成员关系而 500。
+  await sql`INSERT INTO workspace_members (workspace_id, user_id, role)
+    VALUES (${ownerPersonal}, ${userOwner}, 'owner')`;
+  await sql`UPDATE users SET personal_workspace_id = ${ownerPersonal} WHERE id = ${userOwner}`;
+
+  const gone = await appInject("POST", "/auth/leave-workspace", ownerToken, { workspaceId: wsCollab });
+  assert.equal(gone.statusCode, 200, `交出所有权之后仍然退不出去：${gone.body}`);
+  const left = await sql`
+    SELECT left_at FROM workspace_members
+    WHERE workspace_id = ${wsCollab} AND user_id = ${userOwner}
+  `;
+  assert.notEqual(left[0].left_at, null, "200 了但成员行没记退出");
+
+  // ④ 交回去：这份夹具后面的用例（与 teardown）仍按"owner 是 userOwner"的形状写。
+  await sql`
+    UPDATE workspace_members SET left_at = NULL
+    WHERE workspace_id = ${wsCollab} AND user_id = ${userOwner}
+  `;
+  const back = await appInject("POST", `/workspaces/${wsCollab}/transfer-ownership`, memberToken, {
+    toUserId: userOwner,
+  });
+  assert.equal(back.statusCode, 200, `交回去失败，夹具会污染后面的用例：${back.body}`);
+
+  await sql`UPDATE users SET personal_workspace_id = NULL WHERE id = ${userOwner}`;
+  await sql`DELETE FROM workspace_members WHERE workspace_id = ${ownerPersonal}`;
+  await sql`DELETE FROM workspaces WHERE id = ${ownerPersonal}`;
 });

@@ -313,8 +313,18 @@ export async function cardGenerationV2Routes(app: FastifyInstance) {
       stopStream();
       req.log.warn({ err, runId }, "sse: socket error");
     });
-    // Poll for new events
+    /**
+     * in-flight 守卫（0269 轮 M34）。这条端点以前没有它，而隔壁
+     * `companion-conversation/inbox-routes.ts:106-108` 早就为同一个理由加过：
+     * `setInterval` 的回调是 async 的，一次轮询 = 一个完整的工作区事务（BEGIN +
+     * `set_config` 回读 + SELECT + COMMIT）。库一慢、单次超过 2 秒，下一个 tick 就在
+     * 上一次还没结束的时候又开一个事务，同一条连接上的事务开始叠加——正好把 25 个连接的
+     * 共享池往耗尽的方向推。跳过空转的 tick 不丢事件：`lastSeq` 是游标，下一轮照样从这里读。
+     */
+    let pumping = false;
     interval = setInterval(async () => {
+      if (pumping || closed) return;
+      pumping = true;
       try {
         const events = await getGenerationRunEventsV2(ctx, runId, lastSeq);
         for (const e of events) {
@@ -334,6 +344,8 @@ export async function cardGenerationV2Routes(app: FastifyInstance) {
         }
       } catch {
         // Silently skip errors, client will reconnect
+      } finally {
+        pumping = false;
       }
     }, 2000);
     interval?.unref();

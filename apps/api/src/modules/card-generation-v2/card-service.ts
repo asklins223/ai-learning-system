@@ -29,10 +29,10 @@ import {
   learningExposuresV2,
   initialValidationRemindersV2,
   learningObjectiveEvidenceBindingsV2,
-  evidenceSnapshotsV2,
 } from "@ailearn/shared/db-schema/card-generation-v2";
-import { noteVersions, noteBlocks } from "@ailearn/shared/db-schema/note";
+import { noteVersions } from "@ailearn/shared/db-schema/note";
 import { visibleCardsCondition } from "../note/visibility.ts";
+import { loadEvidencePreviewItems } from "./evidence-preview.ts";
 import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
 import { frontLeaksAnswerVerbatimV2 } from "@ailearn/shared/card-generation-v2-pipeline";
 import { cardStrategyV2Schema } from "@ailearn/shared/card-generation-v2-contracts";
@@ -956,43 +956,7 @@ async function loadObjectiveEvidencePreviews(
     ))
     .limit(20);
   const snapshotIds = [...new Set(bindings.map((b) => b.evidenceSnapshotId))];
-  if (snapshotIds.length === 0) return [];
-
-  const snapRows = await tx.select().from(evidenceSnapshotsV2)
-    .where(and(
-      eq(evidenceSnapshotsV2.workspaceId, workspaceId),
-      inArray(evidenceSnapshotsV2.evidenceSnapshotId, snapshotIds),
-    ))
-    .limit(20);
-  if (snapRows.length === 0) return [];
-
-  const blockIds = [...new Set(
-    snapRows.map((r) => r.blockId).filter((b): b is string => Boolean(b)),
-  )];
-  const blockTextById = new Map<string, string>();
-  if (blockIds.length > 0) {
-    const blockRows = await tx.select().from(noteBlocks)
-      .where(and(
-        eq(noteBlocks.workspaceId, workspaceId),
-        inArray(noteBlocks.id, blockIds),
-      ));
-    for (const b of blockRows) blockTextById.set(b.id, b.content);
-  }
-
-  const previews: LearningCardRevealV2["evidencePreviews"] = [];
-  for (const row of snapRows) {
-    const blockText = row.blockId ? blockTextById.get(row.blockId) ?? "" : "";
-    const start = Math.max(0, row.startOffset ?? 0);
-    const end = Math.min(blockText.length, row.endOffset ?? blockText.length);
-    const preview = blockText.slice(start, end).trim();
-    if (!preview) continue;
-    previews.push({
-      evidenceSnapshotId: row.evidenceSnapshotId,
-      preview: preview.slice(0, 2000),
-      sourceLabel: null,
-    });
-  }
-  return previews;
+  return loadEvidencePreviewItems(tx, workspaceId, snapshotIds);
 }
 
 async function deferReminderOnReveal(

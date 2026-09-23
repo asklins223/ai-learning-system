@@ -68,6 +68,10 @@ export const cardGenerationRunsV2 = pgTable(
     wsIdIdx: index("cg_v2_ws_id_idx").on(t.workspaceId, t.id),
     wsNoteIdx: index("cg_v2_ws_note_idx").on(t.workspaceId, t.noteId, t.createdAt),
     wsStatusIdx: index("cg_v2_ws_status_idx").on(t.workspaceId, t.status, t.updatedAt),
+    // 0269（2026-09-22 性能重扫 H8）：上面 4 条全部以 workspace_id 打头，`user_id`
+    // 一条都不在。按笔记收窄的读法还能靠 wsNoteIdx 降候选，真正没人服务的是活动流
+    // 那种"只按 (workspace_id, user_id) 过滤 + 时间范围"的形状（activity 首页会轮询）。
+    wsUserCreatedIdx: index("cg_v2_ws_user_created_idx").on(t.workspaceId, t.userId, t.createdAt),
     statusCheck: check("cg_v2_status_chk", sql`${t.status} IN ('queued','source_sealing','planning','authoring','checking','review_ready','no_cards_recommended','needs_attention','activating','activated','closed_without_activation','failed','cancelled','stale')`),
     epochCheck: check("cg_v2_epoch_chk", sql`${t.cardContentEpoch} >= 1`),
   }),
@@ -95,7 +99,6 @@ export const cardGenerationPlansV2 = pgTable(
     planRevisionUnique: uniqueIndex("cg_v2_plan_revision_idx").on(t.workspaceId, t.planRevisionId),
     // §8.5: (workspace_id, run_id, plan_version) 必须唯一，防止同一 run 下重复 plan version
     planRunVersionUnique: uniqueIndex("cg_v2_plan_run_version_idx").on(t.workspaceId, t.runId, t.planVersion),
-    planRunIdx: index("cg_v2_plan_run_idx").on(t.workspaceId, t.runId, t.planVersion),
     planVersionCheck: check("cg_v2_plan_version_chk", sql`${t.planVersion} >= 1`),
   }),
 );
@@ -154,7 +157,6 @@ export const cardGenerationCandidatesV2 = pgTable(
       t.revision,
     ),
     runIdx: index("cg_v2_cand_run_idx").on(t.workspaceId, t.runId, t.candidateId, t.revision),
-    latestIdx: index("cg_v2_cand_latest_idx").on(t.workspaceId, t.runId, t.candidateId, sql`${t.revision} DESC`),
     qualityCheck: check("cg_v2_cand_quality_chk", sql`${t.qualityState} IN ('authored','checking','passed','failed','dropped')`),
     reviewCheck: check("cg_v2_cand_review_chk", sql`${t.reviewDecision} IN ('undecided','keep','reject','merged')`),
     publishCheck: check("cg_v2_cand_publish_chk", sql`${t.publishState} IN ('unpublished','activating','activated','activation_failed','superseded','expired')`),
@@ -249,7 +251,9 @@ export const learningCardsV2 = pgTable(
     workspaceId: uuid("workspace_id").notNull(),
     cardId: uuid("card_id").notNull(),
     objectiveId: uuid("objective_id").notNull(),
-    noteVersionId: uuid("note_version_id").references(() => noteVersions.id, { onDelete: "restrict" }),
+    // 0274 / doc 34 L17：置空只允许发生在"这张卡已经被退役"之后（physicalDeleteNote 先 archive）。
+    // 单独依赖 SET NULL 会让卡经 `visibleCardsCondition` 的 IS NULL 那一支回到队列。
+    noteVersionId: uuid("note_version_id").references(() => noteVersions.id, { onDelete: "set null" }),
     cardRevision: integer("card_revision").notNull().default(1),
     currentPublicationRevision: integer("current_publication_revision").notNull().default(1),
     lifecycle: text("lifecycle").notNull().default("active"),
@@ -730,6 +734,24 @@ export const evidenceSnapshotsV2 = pgTable(
   (t) => ({
     snapshotUnique: unique("es_v2_snapshot_unique").on(t.evidenceSnapshotId),
     wsSnapshotIdx: index("es_v2_ws_snapshot_idx").on(t.workspaceId, t.evidenceSnapshotId),
+  }),
+);
+
+/** 0275：密封时冻结的证据原文副本（只写一次、只读；doc 34 L21 §1）。 */
+export const evidenceQuoteCopiesV2 = pgTable(
+  "evidence_quote_copies_v2",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    // FK 指向 workspaces 由迁移 0275 建（`schema-isolation-gate` 那道棘轮读的是 pg_constraint，
+    // 不是这里的声明）；这里不 references 是为了不把 identity 拉成 card schema 的依赖。
+    workspaceId: uuid("workspace_id").notNull(),
+    evidenceSnapshotId: uuid("evidence_snapshot_id").notNull(),
+    quoteText: text("quote_text").notNull(),
+    quoteHash: text("quote_hash").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    wsSnapshotUnique: unique("eqc_v2_ws_snapshot_unique").on(t.workspaceId, t.evidenceSnapshotId),
   }),
 );
 

@@ -7,6 +7,8 @@ import {
   adoptWorkspaceContext,
   type ApiTransaction,
 } from "../../db/client.ts";
+import { retireWorkspaceMemoriesOnDeparture } from "../companion-conversation/memory-departure.ts";
+import { recordWorkspaceAudit } from "../audit/service.ts";
 import {
   inviteCodes,
   workspaceMembers,
@@ -595,6 +597,21 @@ export async function removeMember(
             eq(workspaceMembers.userId, targetUserId),
           ),
         );
+
+      // 「谁把这个人移出去的」必须能在库里查到：这条以前只有审计动作类型、没有写入方
+      // （doc 34 L40）。与被移同一事务——回滚了却留下一条"他被移了"是假证据。
+      await recordWorkspaceAudit(tx, {
+        workspaceId,
+        actorUserId: ownerId,
+        action: "workspace.member_removed",
+        targetKind: "user",
+        targetId: targetUserId,
+        detail: { previousRole: target[0].role },
+      });
+
+      // 被移出与自退走同一条收口（doc 34 L38）：两条路都得收掉该空间的记忆，
+      // 少一条就是"谁把这个人移出去的记得住、他在这里的记忆却还在"。
+      await retireWorkspaceMemoriesOnDeparture(tx, { workspaceId, userId: targetUserId });
 
       // Revoke all sessions for this user in this workspace
       await tx

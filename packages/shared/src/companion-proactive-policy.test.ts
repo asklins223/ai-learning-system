@@ -25,9 +25,27 @@ function base(): ProactivePolicyInput {
     msSinceLastShown: null,
     recentShownCount: 0,
     expired: false,
+    // 三位新必填：给默认值而不是省略，是为了让"新加一道门却没传信号"在编译期就现形。
+    spaceMuted: false,
+    quietHours: null,
+    recentDeliveryStates: [],
     now: Date.now(),
   };
 }
+
+test("房间静音排在所有账号级判断之前（doc 34 L10 的那条顺序是刻意的）", () => {
+  assert.equal(evaluateProactivePolicy({
+    ...base(), spaceMuted: true, availability: "dnd", formalAnswerInProgress: true,
+  }).reasonCode, "space_muted");
+  assert.equal(evaluateProactivePolicy({ ...base(), spaceMuted: true }).reasonCode, "space_muted");
+  assert.equal(evaluateProactivePolicy({ ...base(), quietHours: {
+    startLocal: "00:00", endLocal: "23:59", timezone: "UTC",
+  } }).reasonCode, "quiet_hours");
+  assert.equal(evaluateProactivePolicy({
+    ...base(), recentShownCount: POLICY_LIMITS.dedupeWindowLimit,
+  }).reasonCode, "dedupe_recent");
+  assert.equal(evaluateProactivePolicy(base()).reasonCode, "allowed");
+});
 
 test("DND / offline / formal_answer / expired 全部抑制（最高优先级）", () => {
   assert.equal(evaluateProactivePolicy({ ...base(), availability: "dnd" }).allow, false);

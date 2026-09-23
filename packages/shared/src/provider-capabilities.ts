@@ -68,6 +68,7 @@ export interface ChatOptions {
    * 同源，形状取自 AgentTurnRequest.tools）。
    */
   tools?: AgentTurnRequest["tools"];
+  toolChoice?: "auto" | "required";
 }
 
 /** Chat 调用结果 */

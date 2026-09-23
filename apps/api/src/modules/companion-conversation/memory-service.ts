@@ -12,7 +12,8 @@
 import { and, desc, eq, ilike, isNull, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import type { ApiTransaction } from "../../db/client.ts";
-import { assistantMemoryItems } from "@ailearn/shared/db-schema/assistant-memory";
+import { assistantMemoryItems, MEMORY_CONTENT_SIMILARITY_THRESHOLD, MEMORY_SEMANTIC_SIMILARITY_THRESHOLD } from "@ailearn/shared/db-schema/assistant-memory";
+import { closeDeliveriesForMemoryItem } from "./delivery-service.ts";
 
 // 轻微·15（round-4）：LIST 无分页时的防御性上限。
 const MEMORY_LIST_LIMIT = 200;
@@ -59,7 +60,7 @@ export interface MemoryItemV2 {
   updatedAt: string;
 }
 
-/** 简单冲突检测：与新记忆相似度 > 0.85 的活跃记忆归入同一 conflict_group。 */
+/** 简单冲突检测：与新记忆相似度超过共用判据的活跃记忆归入同一 conflict_group。 */
 async function markMemoryConflictIfSimilar(
   executor: ApiTransaction,
   scope: MemoryScope,
@@ -72,7 +73,7 @@ async function markMemoryConflictIfSimilar(
       AND user_id = ${scope.userId}
       AND deleted_at IS NULL
       AND id <> ${memoryId}
-      AND similarity(content, ${content}) > 0.85
+      AND similarity(content, ${content}) > ${MEMORY_CONTENT_SIMILARITY_THRESHOLD}
     LIMIT 1
   `);
   const other = (Array.isArray(rows) ? rows : [])[0]?.id;
@@ -126,6 +127,12 @@ export async function upsertMemory(
     scope?: MemoryScopeV2;
     sourceType?: MemorySourceTypeV2;
     pinned?: boolean;
+    /**
+     * 继承哪一行的跨空间身份（纠正路径用）。不传时：global 行认领自己的 id，其余 NULL。
+     * **必须继承而不是换新 key**——换了 key，其他空间里那几份副本就和这条脱钩，
+     * 0268 的同步触发器再也找不到彼此（doc 34 L9）。
+     */
+    globalKeyFrom?: string | null;
   },
   now: Date = new Date(),
 ): Promise<MemoryItemV2> {
@@ -151,6 +158,11 @@ export async function upsertMemory(
           importance: input.importance ?? existing[0].importance,
           confidence: input.confidence ?? existing[0].confidence,
           scope: input.scope ?? existing[0].scope,
+          // 改成 global 时这一行必须认领自己的 key：0268 的两支同步触发器按
+          // `global_key IS NOT NULL` 挑行，"加入/重新加入空间时补铺"也只挑带 key 的。
+          // 留 NULL 就等于这条 global 记忆哪里都不去（doc 34 L9）。
+          globalKey: existing[0].globalKey
+            ?? ((input.scope ?? existing[0].scope) === "global" ? existing[0].id : null),
           sourceType: input.sourceType ?? existing[0].sourceType,
           pinned: input.pinned ?? existing[0].pinned,
           // 内容变化后需要重新生成 embedding。
@@ -169,7 +181,13 @@ export async function upsertMemory(
       return toContract(updated[0]);
     }
   }
+  // id 在这里先生成而不是交给 `defaultRandom()`：global 记忆的 `global_key` 约定是
+  // "源行认领自己的 id"（与 `ailearn_fanout_global_companion_memory` 同一句话），
+  // 拿不到 id 就写不出这个 key——而没有 key 的 global 行，0268 的触发器永远不认。
+  const memoryId = randomUUID();
+  const memoryScope = input.scope ?? "workspace";
   const inserted = await executor.insert(assistantMemoryItems).values({
+    id: memoryId,
     workspaceId: scope.workspaceId,
     userId: scope.userId,
     kind: input.kind,
@@ -181,7 +199,8 @@ export async function upsertMemory(
     candidate: input.candidate ?? true,
     importance: input.importance ?? (input.userStated ? 0.8 : 0.5),
     confidence: input.confidence ?? 0.5,
-    scope: input.scope ?? "workspace",
+    scope: memoryScope,
+    globalKey: input.globalKeyFrom ?? (memoryScope === "global" ? memoryId : null),
     sourceType: input.sourceType ?? (input.userStated ? "user_stated" : "model_inferred"),
     pinned: input.pinned ?? false,
     embeddingStatus: input.candidate === false ? "pending" : "none",
@@ -224,6 +243,9 @@ export async function confirmMemory(
     .from(assistantMemoryItems)
     .where(eq(assistantMemoryItems.id, memoryItemId))
     .limit(1);
+  // 结账那条候选交付：用户已经对它表过态了（doc 34 L42）。不接这一步，
+  // 活动条里那一行会永远停在 displayed，而 acted 这个终态整库 0 行。
+  await closeDeliveriesForMemoryItem(executor, scope, { memoryItemId, transition: "acted" }, now);
   return toContract(updated[0]);
 }
 
@@ -243,6 +265,10 @@ export async function deleteMemory(
       isNull(assistantMemoryItems.deletedAt),
     ))
     .returning({ id: assistantMemoryItems.id });
+  if (updated.length > 0) {
+    // 删掉候选也算对它表了态：那条交付不能继续排着（`correctMemory` 走这里，一起结账）。
+    await closeDeliveriesForMemoryItem(executor, scope, { memoryItemId, transition: "dismissed" }, now);
+  }
   return updated.length > 0;
 }
 
@@ -322,7 +348,8 @@ export async function restoreMemory(
   return updated[0] ? toContract(updated[0]) : null;
 }
 
-/** 忽略：气泡内 30 天不重复弹出；管理页仍可见。 */
+/** 忽略：写 `dismissed_at`，并把那条候选交付结账成 `dismissed`（doc 34 L42）。
+ * 到活动条的下一次拉取就不再含它；`expires_at` 那道 30 天窗口只是兜底，不是这条判据。 */
 export async function dismissMemory(
   executor: ApiTransaction,
   scope: MemoryScope,
@@ -338,6 +365,29 @@ export async function dismissMemory(
       isNull(assistantMemoryItems.deletedAt),
     ))
     .returning();
+  if (updated[0]) {
+    await closeDeliveriesForMemoryItem(executor, scope, { memoryItemId, transition: "dismissed" }, now);
+    // 反方向那一半（doc 34 L14）：worker 那条只在"新向量刚落库"时比对，
+    // 而"她刚刚忽略的这条"对应的**老**候选可能早就有向量了，永远等不到那次比对。
+    // 判据表达式来自共享的 semanticTwinPredicateSql，这里不重写阈值。
+    await executor.execute(sql`
+      UPDATE assistant_memory_items m
+         SET dismissed_at = now(), updated_at = now()
+        FROM assistant_memory_embeddings av
+       WHERE av.memory_id = ${memoryItemId}
+         AND m.workspace_id = ${scope.workspaceId}
+         AND m.user_id = ${scope.userId}
+         AND m.id <> ${memoryItemId}
+         AND m.dismissed_at IS NULL
+         AND m.deleted_at IS NULL
+         AND m.embedding_status = 'ready'
+         AND EXISTS (
+           SELECT 1 FROM assistant_memory_embeddings mv
+           WHERE mv.memory_id = m.id
+             AND 1 - (mv.embedding <=> av.embedding) > ${MEMORY_SEMANTIC_SIMILARITY_THRESHOLD}
+         )
+    `);
+  }
   return updated[0] ? toContract(updated[0]) : null;
 }
 
@@ -351,6 +401,13 @@ export async function correctMemory(
 ): Promise<MemoryItemV2 | null> {
   const existing = await getMemory(executor, scope, memoryItemId);
   if (!existing) return null;
+  // 跨空间身份要在删除之前取出来：删完再问就只有一行 `deleted_at` 不为空的旧行了，
+  // 而契约里没有这一位（它是库内的对齐键，不是给用户看的内容）。
+  const [priorKey] = await executor
+    .select({ globalKey: assistantMemoryItems.globalKey })
+    .from(assistantMemoryItems)
+    .where(eq(assistantMemoryItems.id, memoryItemId))
+    .limit(1);
   await deleteMemory(executor, scope, memoryItemId, now);
   const inserted = await upsertMemory(executor, scope, {
     kind: existing.kind,
@@ -362,6 +419,7 @@ export async function correctMemory(
     importance: existing.importance,
     confidence: existing.confidence,
     scope: existing.scope,
+    globalKeyFrom: priorKey?.globalKey ?? null,
     sourceType: existing.sourceType,
   }, now);
   return inserted;

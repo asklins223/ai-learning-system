@@ -90,6 +90,7 @@ export function searchDocumentsVisibleSql(): string {
                  JOIN public.note_versions objective_version ON objective_version.id = objective_card.note_version_id
                  JOIN public.notes objective_note ON objective_note.id = objective_version.note_id
                  WHERE objective_card.objective_id = search_document.object_id
+                   AND objective_note.deleted_at IS NULL
                    AND ${noteVisibleSqlText("objective_note", "v.viewer")})
     )))`;
 }
@@ -103,6 +104,11 @@ export function searchDocumentsVisibleSql(): string {
  *
  * 没有来源笔记的卡（手动建立的目标卡等，`note_version_id IS NULL`）不受这条约束：
  * 它没有可追溯的私有来源。
+ *
+ * **来源笔记在回收站里，等于这条派生关系断了**（L16）：软删的笔记不该继续被
+ * 它的卡服务，所以这里除了可见性还判 `deleted_at IS NULL`。判据写成派生的、
+ * 不给卡写状态，是因为恢复只有 30 天窗口内一条路——把卡"归档"再放回需要第二套状态机，
+ * 而那套状态机一旦漏写，卡就永久丢了。派生判据自愈：笔记恢复，卡跟着回来。
  *
  * 判据仍然只写一次：这里是把上面那句 `visibleNotesCondition` 原样嵌进相关子查询，
  * 所以"笔记可见性规则"改了这里自动跟上，不存在第二套会互相矛盾的口径。
@@ -119,7 +125,9 @@ export function visibleCardsCondition(
     isNull(cardNoteVersionId),
     exists(
       sql`(SELECT 1 FROM ${noteVersions} JOIN ${notes} ON ${notes.id} = ${noteVersions.noteId}
-           WHERE ${noteVersions.id} = ${cardNoteVersionId} AND ${visibleNotesCondition(userId)})`,
+           WHERE ${noteVersions.id} = ${cardNoteVersionId}
+             AND ${notes.deletedAt} IS NULL
+             AND ${visibleNotesCondition(userId)})`,
     ),
   ) as SQL;
 }
@@ -154,6 +162,7 @@ export function visibleObjectivesCondition(
            JOIN ${noteVersions} ON ${noteVersions.id} = ${learningCardsV2.noteVersionId}
            JOIN ${notes} ON ${notes.id} = ${noteVersions.noteId}
            WHERE ${learningCardsV2.objectiveId} = ${objectiveId}
+             AND ${notes.deletedAt} IS NULL
              AND ${visibleNotesCondition(userId)})`,
     ),
   ) as SQL;

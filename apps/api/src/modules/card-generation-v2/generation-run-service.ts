@@ -34,6 +34,7 @@ import {
   sanitizeEventPayloadV2,
   CardGenerationV2ServiceError,
   checkSourceOutdated,
+  computeSourceOutdatedForRunsV2,
   insertEvent,
   readGenerationProgressV2,
   serializeRunPublic,
@@ -473,7 +474,9 @@ export async function listActiveGenerationRunsV2(ctx: RunContext) {
       ))
       .orderBy(desc(cardGenerationRunsV2.updatedAt))
       .limit(20);
-    return Promise.all(rows.map((row) => serializeRunPublic(row, tx)));
+    // 一批评判据一次算完（2 次往返），不再逐行把各自的源笔记全文搬回来。
+    const outdatedByRunId = await computeSourceOutdatedForRunsV2(tx, rows);
+    return rows.map((row) => serializeRunPublic(row, tx, null, outdatedByRunId.get(row.id) ?? false));
   });
 }
 
@@ -537,19 +540,25 @@ export async function getGenerationRunCandidatesV2(ctx: RunContext, runId: strin
       .limit(1);
     if (runRows.length === 0) return null;
 
-    const all = await tx.select().from(cardGenerationCandidatesV2)
+    // 只要每个候选的**最新修订**。以前是把这一个 run 的全部修订行整体 `select()` 回来
+    // （每行 5 个 jsonb，含题面与答案侧字段），再在 TS 里用 Set 去重——传输量随重写次数
+    // 线性放大，而屏幕上永远只用得到最新那一版。改成在 SQL 侧筛"不存在比自己更新的同
+    // 候选修订"：等价性在 dev 库上逐行对过（两种写法行数一致、差集为空），相关子查询
+    // 的探测键正好是 `cg_v2_cand_run_idx (workspace_id, run_id, candidate_id, revision)`
+    // 的全部列——0272 之后这张表上只有这一棵候选索引（原先那棵只把 revision 写成 DESC 的
+    // `cg_v2_cand_latest_idx` 与它逐字节同形，普通 btree 反扫即可，已删）。
+    const latest = await tx.select().from(cardGenerationCandidatesV2)
       .where(and(
         eq(cardGenerationCandidatesV2.runId, runId),
         eq(cardGenerationCandidatesV2.workspaceId, ctx.workspaceId),
-      ))
-      .orderBy(desc(cardGenerationCandidatesV2.revision));
-
-    const seen = new Set<string>();
-    const latest = all.filter((c) => {
-      if (seen.has(c.candidateId)) return false;
-      seen.add(c.candidateId);
-      return true;
-    });
+        sql`NOT EXISTS (
+          SELECT 1 FROM public.card_generation_candidates_v2 newer
+          WHERE newer.workspace_id = ${cardGenerationCandidatesV2.workspaceId}
+            AND newer.run_id = ${cardGenerationCandidatesV2.runId}
+            AND newer.candidate_id = ${cardGenerationCandidatesV2.candidateId}
+            AND newer.revision > ${cardGenerationCandidatesV2.revision}
+        )`,
+      ));
     const candidates = latest.map(serializeCandidatePublic);
 
     const planRows = await tx.select({ result: cardGenerationPlansV2.result }).from(cardGenerationPlansV2)

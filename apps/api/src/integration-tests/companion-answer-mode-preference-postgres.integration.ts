@@ -16,7 +16,7 @@ import postgres from "postgres";
 import {
   getAnswerModePreference,
   setAnswerModePreference,
-} from "../modules/companion-shell/service.ts";
+} from "../modules/companion-shell/answer-mode-preference.ts";
 import { closeDatabase } from "../db/client.ts";
 
 const databaseUrl = process.env.DATABASE_URL_API ?? process.env.DATABASE_URL;

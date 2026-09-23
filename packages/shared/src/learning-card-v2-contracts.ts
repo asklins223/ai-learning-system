@@ -193,8 +193,12 @@ export const learningCardRevealV2Schema = z
       .array(
         z.strictObject({
           evidenceSnapshotId: z.string().uuid(),
-          preview: z.string().min(1).max(2000),
+          preview: z.string().max(2000),
           sourceLabel: z.string().min(1).max(300).nullable(),
+          sourceState: z.enum(["located", "drifted", "missing"]),
+          // 0275 之后才有值：密封时冻住的原文。null 有两种来源（存量证据 / 副本行缺失），
+          // 界面必须把它当成"这段没被冻住"而不是"没有原文"。
+          originalPreview: z.string().max(2000).nullable(),
         }),
       )
       .max(20),

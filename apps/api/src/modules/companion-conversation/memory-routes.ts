@@ -10,7 +10,7 @@
  * POST   /companion/memory/:id/unpin          — 取消固定（pin 为置 true，非 toggle）
  * POST   /companion/memory/:id/archive        — 归档
  * POST   /companion/memory/:id/restore        — 恢复
- * POST   /companion/memory/:id/dismiss        — 忽略（30 天不弹）
+ * POST   /companion/memory/:id/dismiss        — 忽略（写 dismissed_at，并把那条候选交付结账成 dismissed）
  * POST   /companion/memory/:id/correct        — 纠正（旧记忆 soft delete + 新候选）
  * DELETE /companion/memory/:id                — 删除记忆
  * DELETE /companion/memory                    — 一键清空（二次确认由前端保证）

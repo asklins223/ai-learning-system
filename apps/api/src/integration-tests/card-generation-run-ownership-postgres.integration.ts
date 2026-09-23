@@ -22,8 +22,15 @@ import { assembleObjectiveSurfaceV3, listObjectiveSurfacesV3 } from "../modules/
 import { reindexWorkspaceSearch, search } from "../modules/search/service.ts";
 import { CardGenerationV2ServiceError } from "../modules/card-generation-v2/helpers.ts";
 
-const CONN = process.env.DATABASE_URL_API ?? process.env.DATABASE_URL;
-if (!CONN) throw new Error("DATABASE_URL_API 未配置——生成批次归属集成测试要求真实 Postgres");
+/**
+ * 夹具连接用超级用户那条：这份套件往 `users`/`workspaces`/`notes`/`note_versions` 原生写行
+ * 且不带 `app.workspace_id`，受限角色下会被 `note_versions` 的 RESTRICTIVE 守卫拒掉
+ * （或被静默过滤成 0 行），症状是"共享之后这张卡仍然看不见""IS NULL 那一支没写对"——
+ * 全是夹具没落地，不是判据写错（doc 34 §1.2 ②）。被测侧不变：service 走 app 自己的池，
+ * 而 `db/client.ts` 优先读 `DATABASE_URL_API`，所以仍然在 NOBYPASSRLS 下。
+ */
+const CONN = process.env.DATABASE_URL ?? process.env.DATABASE_URL_API;
+if (!CONN) throw new Error("DATABASE_URL 未配置——生成批次归属集成测试要求真实 Postgres");
 
 const sql = postgres(CONN, { max: 2 });
 const tag = randomUUID().slice(0, 8);

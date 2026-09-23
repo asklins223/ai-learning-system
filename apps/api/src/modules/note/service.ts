@@ -5,6 +5,7 @@ import { deriveNoteTitle, noteDocBlocksFromRows, projectFragmentBlocks, setNoteT
 import { type ApiTransaction } from "../../db/client.ts";
 import { notes, noteVersions, noteBlocks, noteImageAssets } from "@ailearn/shared/db-schema/note";
 import { searchDocuments } from "@ailearn/shared/db-schema/search";
+import { learningCardsV2, learningObjectivesV2 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { computeContentHash } from "./content-hash.ts";
 import { upsertSearchDocument, type NoteSearchDocument } from "./search-projection.ts";
 import { logger } from "../../lib/logger.ts";
@@ -882,8 +883,48 @@ export async function physicalDeleteNote(
       .where(eq(noteVersions.noteId, noteId));
     const versionIds = versionRows.map((v) => v.id);
 
-    // 原物理删除的历史卡片级联清理已整体移除。V2 卡片/客观对象的清理由各自模块负责。
-    // 以下仅保留 note 自身的级联（image asset 收集与 note 删除）。
+    /**
+     * L17（用户口径：卡留着但退役）：删这篇笔记之前，先把**由它的版本产出的卡与目标**退役。
+     *
+     * 顺序是硬的，不是风格：外键 `learning_cards_v2.note_version_id` 自 0274 起是 SET NULL，
+     * 而 `visibleCardsCondition` 的第一支是 `note_version_id IS NULL`（"没有可追溯来源的卡
+     * 不受这条约束"）。先断线后退役 = 那张卡在笔记消失后**回到复习队列**；
+     * 先退役后断线 = 它 lifecycle 已经不是 active，队列与卡列表两条判据都进不来。
+     * 卡的正文与发布版本、她练过的 exposure 全部保留（"留着"那半句话）。
+     *
+     * 目标一起退役：一个目标最多一张 active 卡（`lc_v2_ws_obj_active_idx` 是部分唯一索引），
+     * 所以这里不存在"连带打死另一篇来源的活卡"；epoch 前移与 archiveCardV2 同形。
+     */
+    if (versionIds.length > 0) {
+      const retiredCards = await tx
+        .update(learningCardsV2)
+        .set({ lifecycle: "archived", updatedAt: new Date() })
+        .where(and(
+          inArray(learningCardsV2.noteVersionId, versionIds),
+          eq(learningCardsV2.lifecycle, "active"),
+        ))
+        .returning({ objectiveId: learningCardsV2.objectiveId });
+      const objectiveIds = [...new Set(retiredCards.map((c) => c.objectiveId))];
+      if (objectiveIds.length > 0) {
+        await tx
+          .update(learningObjectivesV2)
+          .set({
+            lifecycle: "archived",
+            lifecycleEpoch: sql`${learningObjectivesV2.lifecycleEpoch} + 1`,
+            updatedAt: new Date(),
+          })
+          .where(and(
+            inArray(learningObjectivesV2.objectiveId, objectiveIds),
+            eq(learningObjectivesV2.lifecycle, "active"),
+          ));
+      }
+      if (retiredCards.length > 0) {
+        logger.info(
+          { noteId, retiredCards: retiredCards.length },
+          "cards retired before physical note deletion (doc 34 L17)",
+        );
+      }
+    }
 
     // 收集图片资产与旧版 Markdown object key。Typed asset 可能被同一
     // workspace 的其他笔记版本复用，必须在级联删除后重新检查引用，

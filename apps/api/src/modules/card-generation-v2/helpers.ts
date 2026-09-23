@@ -2,7 +2,7 @@
  * Card Generation V2 — shared helpers and serialization（方案 20 §17）。
  */
 
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import type { ApiTransaction } from "../../db/client.ts";
 import {
@@ -206,13 +206,106 @@ export async function readGenerationProgressV2(
   return progress;
 }
 
+/**
+ * 一批 run 的"源正文是否过时"——与 `checkSourceOutdated` **同一判据**，但把每行 2 次
+ * 往返压成"每个 (空间, 用户) 一次笔记读 + 全批一次 block 读"。
+ *
+ * 逐行版在列表端点上的代价：每个 run 都要把源笔记的**全部 block 正文**搬回来重算一次
+ * hash，而一批 run 往往共用同一篇笔记——20 行就是 20 次整篇读。这里把要重算的版本去重，
+ * 一次读全，再按版本比对。
+ *
+ * 可见性仍按**每一行自己的 userId** 判（照抄逐行版 :107-109 的理由）：这一位回答的是
+ * "这篇相对**这次生成**过不过时"，不能借列表调用方的身份放开别人私有笔记的编辑节奏。
+ */
+export async function computeSourceOutdatedForRunsV2(
+  tx: ApiTransaction,
+  rows: ReadonlyArray<Pick<
+    typeof cardGenerationRunsV2.$inferSelect,
+    "id" | "workspaceId" | "userId" | "noteId" | "noteVersionId" | "sourceContentHash"
+  >>,
+): Promise<Map<string, boolean>> {
+  const outdatedByRunId = new Map<string, boolean>();
+  if (rows.length === 0) return outdatedByRunId;
+
+  // ① 每个 (空间, 用户) 一次笔记读，取这些笔记的 current_version_id。
+  const currentVersionByNote = new Map<string, string | null>();
+  const noteIdsByOwner = new Map<string, { workspaceId: string; userId: string; noteIds: Set<string> }>();
+  for (const row of rows) {
+    const key = `${row.workspaceId}|${row.userId}`;
+    const group = noteIdsByOwner.get(key) ?? { workspaceId: row.workspaceId, userId: row.userId, noteIds: new Set<string>() };
+    group.noteIds.add(row.noteId);
+    noteIdsByOwner.set(key, group);
+  }
+  for (const group of noteIdsByOwner.values()) {
+    const noteRows = await tx.query.notes.findMany({
+      where: and(
+        eq(notes.workspaceId, group.workspaceId),
+        inArray(notes.id, [...group.noteIds]),
+        visibleNotesCondition(group.userId),
+      ),
+      columns: { id: true, currentVersionId: true },
+    });
+    for (const note of noteRows) {
+      currentVersionByNote.set(`${group.workspaceId}|${group.userId}|${note.id}`, note.currentVersionId);
+    }
+  }
+
+  // ② 只有"版本 id 没变"的 run 才需要重算 hash（版本变了的那位在 ① 就判完了）。
+  const versionsToHash = new Set<string>();
+  for (const row of rows) {
+    const currentVersionId = currentVersionByNote.get(`${row.workspaceId}|${row.userId}|${row.noteId}`);
+    if (row.noteVersionId && currentVersionId === row.noteVersionId) versionsToHash.add(row.noteVersionId);
+  }
+  const hashByVersionId = new Map<string, string>();
+  if (versionsToHash.size > 0) {
+    const blockRows = await tx.query.noteBlocks.findMany({
+      where: inArray(noteBlocks.versionId, [...versionsToHash]),
+      orderBy: (b, { asc }) => [asc(b.ordinal)],
+      columns: { versionId: true, content: true },
+    });
+    // 全局按 ordinal 升序，所以每个版本在自己的桶里也保持 ordinal 升序——与逐行版
+    // "单版本 order by ordinal" 拿到的是同一个字符串序列。
+    const contentsByVersionId = new Map<string, string[]>();
+    for (const block of blockRows) {
+      const bucket = contentsByVersionId.get(block.versionId) ?? [];
+      bucket.push(block.content);
+      contentsByVersionId.set(block.versionId, bucket);
+    }
+    for (const [versionId, contents] of contentsByVersionId) {
+      hashByVersionId.set(
+        versionId,
+        hashCanonicalV2("card-generation-v2/source-content", { blockContents: contents.join("\n") }),
+      );
+    }
+  }
+
+  for (const row of rows) {
+    const currentVersionId = currentVersionByNote.get(`${row.workspaceId}|${row.userId}|${row.noteId}`);
+    if (!currentVersionId) {
+      outdatedByRunId.set(row.id, false);
+      continue;
+    }
+    if (currentVersionId !== row.noteVersionId) {
+      outdatedByRunId.set(row.id, true);
+      continue;
+    }
+    outdatedByRunId.set(row.id, hashByVersionId.get(row.noteVersionId) !== row.sourceContentHash);
+  }
+  return outdatedByRunId;
+}
+
 export async function serializeRunPublic(
   row: typeof cardGenerationRunsV2.$inferSelect,
   tx?: ApiTransaction,
   progress: CardGenerationProgressV1 | null = null,
+  // 批量算好的判据（见 `computeSourceOutdatedForRunsV2`）。给了就不再逐行查——列表端点
+  // 靠它把 2N 次往返收成 2 次；不传时行为与逐行版完全一致。
+  sourceOutdatedOverride?: boolean,
 ) {
   let sourceOutdated = false;
-  if (tx) {
+  if (sourceOutdatedOverride !== undefined) {
+    sourceOutdated = sourceOutdatedOverride;
+  } else if (tx) {
     try {
       // 查看者取 run 自己的主人：这一位是"这篇相对**这次生成**过不过时"，而 run 的
       // 读侧本来就按人列（批次 4.5 之后在制/最近一批也是按人的），所以两者是同一个人。

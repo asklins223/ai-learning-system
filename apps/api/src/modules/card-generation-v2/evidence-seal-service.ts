@@ -12,6 +12,7 @@ import type { ApiTransaction } from "../../db/client.ts";
 import {
   evidenceSnapshotsV2,
   evidenceEligibilityStatesV2,
+  evidenceQuoteCopiesV2,
 } from "@ailearn/shared/db-schema/card-generation-v2";
 import {
   filterBlocksBySourceScope,
@@ -56,6 +57,11 @@ export async function sealEvidenceSnapshotsV2(
 
   if (plan.snapshotRows.length > 0) {
     await tx.insert(evidenceSnapshotsV2).values(plan.snapshotRows).onConflictDoNothing();
+  }
+  // 0275 / doc 34 L21 §1：同一次密封把原文副本也写进去（只写一次；重复密封 DO NOTHING，
+  // 绝不用后来的文本覆盖已经冻住的那一份）。
+  if (plan.quoteCopyRows.length > 0) {
+    await tx.insert(evidenceQuoteCopiesV2).values(plan.quoteCopyRows).onConflictDoNothing();
   }
   if (plan.eligibilityRows.length > 0) {
     await tx.insert(evidenceEligibilityStatesV2).values(plan.eligibilityRows).onConflictDoNothing();

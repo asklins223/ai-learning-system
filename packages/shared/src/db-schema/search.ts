@@ -24,6 +24,5 @@ export const searchDocuments = pgTable(
 
     bodyTrgmIdx: index("search_documents_body_trgm_idx").using("gin", sql`${t.body} gin_trgm_ops`),
     titleTrgmIdx: index("search_documents_title_trgm_idx").using("gin", sql`${t.title} gin_trgm_ops`),
-    workspaceBodyTrgmIdx: index("search_documents_workspace_body_trgm_idx").using("gin", sql`${t.body} gin_trgm_ops`).where(sql`${t.workspaceId} is not null`),
-    workspaceTitleTrgmIdx: index("search_documents_workspace_title_trgm_idx").using("gin", sql`${t.title} gin_trgm_ops`).where(sql`${t.workspaceId} is not null`),}),
+  }),
 );

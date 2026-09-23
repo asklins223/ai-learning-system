@@ -185,6 +185,8 @@ export const agentTurnRequestSchema = z.object({
     description: z.string(),
     parameters: z.record(z.unknown()),
   })).default([]),
+  /** 明确动作请求可要求本步至少调用一个已授权工具。 */
+  toolChoice: z.enum(["auto", "required"]).optional(),
   /** 最大输出 token */
   maxTokens: z.number().int().positive(),
   /** 温度 */

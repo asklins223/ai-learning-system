@@ -153,12 +153,16 @@ export async function persistNoteDoc(
   scope: NoteDocReadScope,
   doc: NoteDoc,
   versionId: string,
+  // 调用方已经编码过的那一份（协同落盘就是：它先要为"内容有没有变"编码一次）。不给才
+  // 在 `saveNoteDoc` 的默认参里现编——那是整文档级的 `Y.encodeStateAsUpdate`，同一趟
+  // 落盘里编两次纯属白烧主线程（0269 轮 M3）。
+  state?: Uint8Array,
 ): Promise<{ blocks: ProjectedNoteBlock[]; versionId: string }> {
   const { workspaceId, noteId } = scope;
   const projected = projectFragmentBlocks(doc);
   const plain = projected.map(({ ordinal: _ordinal, ...block }) => block);
 
-  await saveNoteDoc(tx, { workspaceId, noteId }, doc);
+  await saveNoteDoc(tx, { workspaceId, noteId }, doc, state);
   await projectBlocksIntoVersion(tx, workspaceId, versionId, projected);
 
   const meta = readNoteTitle(doc);
@@ -401,12 +405,29 @@ export async function projectBlocksIntoVersion(
   if (toInsert.length > 0) {
     await tx.insert(noteBlocks).values(toInsert);
   }
-  for (const update of toUpdate) {
-    await tx.update(noteBlocks).set({
-      type: update.type,
-      content: update.content,
-      imageAssetId: update.imageAssetId,
-      sourceRef: update.sourceRef,
-    }).where(eq(noteBlocks.id, update.id));
+  if (toUpdate.length > 0) {
+    /**
+     * 一条语句改完。以前这里是**每个改动块一条 UPDATE**：一次粘贴进长文就是几百次串行
+     * 往返，而每条都要再触发一次 `note_blocks_sealed_guard`（它按行回查 `note_versions`），
+     * 正好落在这条链最热的位置——自动保存。上面的插入与删除分支早就是批量的，只有
+     * 更新这一支没有跟上。
+     *
+     * 为什么用 `insert .. on conflict do update` 而不是手写 `UPDATE .. FROM (VALUES ..)`：
+     * 这批 `values` 与上面插入分支是**同一批对象**，交给 Drizzle 序列化 jsonb 与 NULL，
+     * 存储形状与逐行版完全一致。裸 SQL 里 `'null'::jsonb` 与 SQL `NULL` 是两回事，
+     * `source_ref` 这一列不值得在这里赌一次口径变化。
+     */
+    await tx
+      .insert(noteBlocks)
+      .values(toUpdate)
+      .onConflictDoUpdate({
+        target: noteBlocks.id,
+        set: {
+          type: sql`excluded.type`,
+          content: sql`excluded.content`,
+          imageAssetId: sql`excluded.image_asset_id`,
+          sourceRef: sql`excluded.source_ref`,
+        },
+      });
   }
 }

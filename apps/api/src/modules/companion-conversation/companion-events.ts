@@ -30,6 +30,9 @@ const SLOTS_PER_USER = 10;
 // 后续 poll（2.5s）与 replay flush 续读，validate 已确保窗口连续（窗口计数校验），
 // LIMIT 仅约束每连接每 tick 的内存/DB 体积，不丢事件（超出的下轮续读）。
 const COMPANION_EVENT_BATCH = 500;
+/** durable 兜底轮询的基准与封顶（空闲时指数退避，见 `pollDelayMs` 处注释）。 */
+const SSE_POLL_BASE_MS = 2_500;
+const SSE_POLL_MAX_MS = 30_000;
 const conversationSlots = new Map<string, number>();
 const userSlots = new Map<string, number>();
 
@@ -553,6 +556,16 @@ export async function openCompanionEventStream(args: {
   let slotReleased = false;
   let closed = false;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * durable 兜底轮询的当前间隔（L2）。以前是写死的 `setInterval(…, 2_500)`：一条流只要
+   * 开着，每 2.5 秒就必然开一个完整的工作区事务（BEGIN + `set_config` 回读 + SELECT +
+   * COMMIT），**和这条会话有没有在动无关**。伴星连续会话是常驻的，用户挂着窗口发呆时
+   * 它也在按 0.4 qps/连接地敲库，而上限是每用户 10 条连接。
+   * 改成空闲时指数退避、一到事件立刻回到基准值——语义与 `learning-runs/run-routes.ts:634`
+   * 那条早已退避的兄弟实现一致，NOTIFY 仍然是即时唤醒主路径，退避只会推迟"通知丢失"的
+   * 兜底回收，不影响正常投递。
+   */
+  let pollDelayMs = SSE_POLL_BASE_MS;
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let unsubscribe: (() => void) | null = null;
   const releaseSlotOnce = (): void => {
@@ -632,6 +645,11 @@ export async function openCompanionEventStream(args: {
     pumping = true;
     try {
       const events = await loadCompanionEvents(args.conversationId, args.workspaceId, args.userId, cursor);
+      // 一到事件就把兜底拉回基准，空转则指数退到封顶（30s）。放在这里而不是调用方，
+      // 是因为 NOTIFY 唤醒也走同一个 pump：那一次真的读到了东西，同样该把下一拍拉快。
+      pollDelayMs = events.length > 0
+        ? SSE_POLL_BASE_MS
+        : Math.min(pollDelayMs * 2, SSE_POLL_MAX_MS);
       if (events.length > 0) {
         // F10（round-5）+ R#6-4：live 阶段窗口连续性校验——seq 严格自增。
         // 除校验首个事件必须恰为 cursor+1 外，还断言批内相邻事件 seq 严格 +1，
@@ -691,16 +709,25 @@ export async function openCompanionEventStream(args: {
         cursor = Number(event.seq);
       }
       replay = [];
-      // live：NOTIFY wake + 2.5s durable poll + 15s heartbeat。
+      // live：NOTIFY wake + durable 兜底 poll（2.5s 起、空闲指数退到 30s）+ 15s heartbeat。
       // NOTIFY 是即时唤醒主路径，poll 仅作兜底（防通知丢失/重启间隙），
       // 频率从 1s 降至 2.5s 以减少长连接群体的持续 DB 背景负载
       // （每用户最多 10 连接，1s 轮询峰值 10 qps/用户）。
       unsubscribe = subscribeCompanionEvents(args.conversationId, () => {
         if (!closed) void pump();
       });
-      pollTimer = setInterval(() => {
-        if (!closed) void pump();
-      }, 2_500);
+      // 自排程而不是 setInterval：间隔要随空闲长度变（见 pollDelayMs）。Node 里
+      // clearInterval/clearTimeout 是同一个清理入口，dispose 里那句照旧有效。
+      const schedulePoll = (): void => {
+        pollTimer = setTimeout(() => {
+          pollTimer = null;
+          if (closed) return;
+          void pump().finally(() => {
+            if (!closed) schedulePoll();
+          });
+        }, pollDelayMs);
+      };
+      schedulePoll();
       heartbeatTimer = setInterval(() => {
         if (!closed && args.writer.write(`: heartbeat ${Date.now()}\n\n`) === false) dispose();
       }, 15_000);

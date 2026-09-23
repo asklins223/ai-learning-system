@@ -114,7 +114,6 @@ export const noteVersions = pgTable(
     sealedReason: text("sealed_reason"),
   },
   (t) => ({
-    noteIdx: index("note_versions_note_idx").on(t.noteId, t.versionNo),
     uniqueNoteVersion: uniqueIndex("note_versions_unique_idx").on(t.noteId, t.versionNo),
     contentHashIdx: index("note_versions_content_hash_idx").on(t.noteId, t.contentHash),
     // 2026-08-12（schema 完整性审计）：0044:19 租户安全复合唯一此前未声明

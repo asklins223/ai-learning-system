@@ -11,7 +11,8 @@
  *   5.6. initial validation deferred 且无练习入口 → wait_for_initial_validation（§7.5）；
  *   6. 其余 → create_run 或 none。
  */
-import type { LearningObjectivePrimaryActionV3 } from "@ailearn/shared";
+import type { AnswerModePreferenceV1, LearningObjectivePrimaryActionV3 } from "@ailearn/shared";
+import { answerModeToResponsePreference } from "@ailearn/shared";
 
 export interface ActionResolverInputV3 {
   objectiveId: string;
@@ -21,6 +22,8 @@ export interface ActionResolverInputV3 {
   hasActiveCard: boolean;
   cardId: string | null;
   activeRun: { runId: string } | null;
+  /** A published formal result already exists for this objective. */
+  hasPriorFormalResult: boolean;
   reviewDue: { scheduleId: string; generation: number } | null;
   initialReady: { reminderId: string; qualificationNotBefore: string } | null;
   /** initial validation 存在但 deferred（未到资格时间）→ wait_for_initial_validation。 */
@@ -28,15 +31,26 @@ export interface ActionResolverInputV3 {
   /** Reveal/Exposure 后由服务端决定（§7.4）；客户端不得自判。 */
   practiceOnly: boolean;
   practiceReasonCodes: string[];
+  /**
+   * 账号「作答方式」偏好（`any` = 未设置）。必填：这条偏好过去只在设置页显示，
+   * 主行动里 `responsePreference` 一律硬写 `adaptive`（doc 34 L15）——用户选了
+   * 「语音」，开出来的 Run 仍然是文字优先。
+   * 装配层在**逐个目标的循环之外**读一次（`readAnswerModePreference`），把值传进来。
+   */
+  answerModePreference: AnswerModePreferenceV1;
 }
 
-function cardStart(objectiveId: string, cardId: string) {
+function cardStart(
+  objectiveId: string,
+  cardId: string,
+  answerModePreference: AnswerModePreferenceV1,
+) {
   return {
     version: 2 as const,
     originV2: { kind: "card" as const, cardId, objectiveId },
     goal: "stabilize" as const,
     requestedTimeBudgetSeconds: 180,
-    responsePreference: "adaptive" as const,
+    responsePreference: answerModeToResponsePreference(answerModePreference),
   };
 }
 
@@ -82,7 +96,7 @@ export function resolvePrimaryActionV3(
         },
         goal: "stabilize",
         requestedTimeBudgetSeconds: 180,
-        responsePreference: "adaptive",
+        responsePreference: answerModeToResponsePreference(input.answerModePreference),
       },
     };
   }
@@ -91,8 +105,8 @@ export function resolvePrimaryActionV3(
     return {
       kind: "create_run",
       objectiveId,
-      label: "开始首次验证",
-      start: cardStart(objectiveId, input.cardId),
+      label: input.hasPriorFormalResult ? "再做一次正式挑战" : "开始首次验证",
+      start: cardStart(objectiveId, input.cardId, input.answerModePreference),
     };
   }
   // §7.4 第 6 条：Reveal 之后仍然可练（2026-09-20 实走复盘 #9 修正了这条的
@@ -113,7 +127,7 @@ export function resolvePrimaryActionV3(
       objectiveId,
       reasonCodes: input.practiceReasonCodes.length > 0 ? input.practiceReasonCodes : ["exposed"],
       label: "带着参考答案练一下",
-      start: cardStart(objectiveId, input.cardId),
+      start: cardStart(objectiveId, input.cardId, input.answerModePreference),
       formalValidationNotBefore: input.initialDeferred?.qualificationNotBefore ?? null,
     };
   }
@@ -130,7 +144,7 @@ export function resolvePrimaryActionV3(
       kind: "create_run",
       objectiveId,
       label: "开始学习",
-      start: cardStart(objectiveId, input.cardId),
+      start: cardStart(objectiveId, input.cardId, input.answerModePreference),
     };
   }
   if (input.lifecycle === "active") {

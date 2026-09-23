@@ -18,6 +18,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { parseBody } from "../../lib/validate.ts";
 import { Readable } from "node:stream";
+import { requireAiConsent } from "../identity/ai-consent-gate.ts";
 import { requireSession } from "../identity/middleware.ts";
 import { CompanionConversationError } from "../companion-conversation/turn-service.ts";
 import { setCompanionSegmentWarmHook } from "../companion-conversation/companion-events.ts";
@@ -207,7 +208,7 @@ export async function voiceRoutes(app: FastifyInstance) {
   // P6 §13 POST /voice/tts/stream：句子级流式 TTS（chunked 透传，边收边播）。
   // 每稳定句一条独立流；generation/segmentId/ordinal 由客户端维持；打断时
   // 客户端 abort HTTP（上游连接中断）并递增 audio fence。
-  app.post("/voice/tts/stream", { preHandler: [requireSession] }, async (req, reply) => {
+  app.post("/voice/tts/stream", { preHandler: [requireSession, requireAiConsent] }, async (req, reply) => {
     if (rejectDisabledCompanionVoice(reply, "COMPANION_STREAMING_VOICE_V1_ENABLED")) return;
     if (!rateLimitVoice(reply, req.id, `${req.session.workspaceId}:${req.session.userId}:tts`, COMPANION_RATE_LIMITS.ttsPerMinute.limit, COMPANION_RATE_LIMITS.ttsPerMinute.windowMs)) return;
     const parsed = companionTtsStreamRequestV1Schema.safeParse(req.body ?? {});
@@ -404,7 +405,7 @@ export async function voiceRoutes(app: FastifyInstance) {
 
   // Companion branch（§11.3）：请求含 conversationId/runId/...（strict ref）时，重读
   // voice.segment.ready 事件验证后合成；普通朗读请求直接走固定 profile。
-  app.post("/voice/tts", { preHandler: [requireSession] }, async (req, reply) => {
+  app.post("/voice/tts", { preHandler: [requireSession, requireAiConsent] }, async (req, reply) => {
     const raw = (req.body ?? {}) as Record<string, unknown>;
     if (typeof raw === "object" && raw !== null && "conversationId" in raw) {
       if (rejectDisabledCompanionVoice(reply, "COMPANION_VOICE_DIALOGUE_V1_ENABLED")) return;
@@ -548,7 +549,7 @@ export async function voiceRoutes(app: FastifyInstance) {
   // POST /voice/transcribe：ASR（救火 6b——multipart 音频上传 → SiliconFlow 识别）。
   // 请求：multipart/form-data，字段 file=<音频>（mp3/wav/m4a；SenseVoice 支持）。
   // 响应：{ text, asrProvider, asrModel }（逐字 transcript；ASR 失败 → 4xx/5xx fail closed）。
-  app.post("/voice/transcribe", { preHandler: [requireSession] }, async (req, reply) => {
+  app.post("/voice/transcribe", { preHandler: [requireSession, requireAiConsent] }, async (req, reply) => {
     if (!rateLimitVoice(reply, req.id, `${req.session.workspaceId}:${req.session.userId}:asr`, COMPANION_RATE_LIMITS.asrPerMinute.limit, COMPANION_RATE_LIMITS.asrPerMinute.windowMs)) return;
     if (!rateLimitVoice(reply, req.id, `${req.session.workspaceId}:${req.session.userId}:asr:hour`, COMPANION_RATE_LIMITS.asrPerHour.limit, COMPANION_RATE_LIMITS.asrPerHour.windowMs)) return;
     let part;

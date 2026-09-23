@@ -511,13 +511,8 @@ describe("getGenerationRunCandidatesV2", () => {
     assert.equal(result, null);
   });
 
-  it("deduplicates to latest revision per candidateId", async () => {
-    const candidates = [
-      { ...makeBaseCandidateRow(), candidateId: "c1", revision: 2 },
-      { ...makeBaseCandidateRow(), candidateId: "c1", revision: 1 },
-      { ...makeBaseCandidateRow(), candidateId: "c2", revision: 3 },
-      { ...makeBaseCandidateRow(), candidateId: "c2", revision: 2 },
-    ];
+  it("把「每个候选只取最新修订」下推给 SQL，不把全部修订搬回内存再筛", async () => {
+    let candidatesFilter: unknown = null;
 
     setupTx({
       select: () => ({
@@ -532,11 +527,15 @@ describe("getGenerationRunCandidatesV2", () => {
           if (table === cardGenerationPlansV2) {
             return { where: () => ({ limit: async () => [] }) };
           }
-          // candidates query
+          // candidates query：新形状是 `select().from().where(...)`，没有 orderBy 层。
           return {
-            where: () => ({
-              orderBy: () => candidates, // return all, ordered by revision desc
-            }),
+            where: (filter: unknown) => {
+              candidatesFilter = filter;
+              return [
+                { ...makeBaseCandidateRow(), candidateId: "c1", revision: 2 },
+                { ...makeBaseCandidateRow(), candidateId: "c2", revision: 3 },
+              ];
+            },
           };
         },
       }),
@@ -547,10 +546,29 @@ describe("getGenerationRunCandidatesV2", () => {
       RUN_ID,
     );
     assert.ok(result);
-    // Should only have the latest revision per candidateId
-    assert.equal(result!.candidates.length, 2);
-    assert.equal(result!.candidates[0].candidateId, "c1"); // revision 2 first (ordered by desc)
-    assert.equal(result!.candidates[0].revision, 2);
+
+    /**
+     * 判据钉在**发给数据库的 SQL 文本**上：把那段 `NOT EXISTS` 删掉这条就红。
+     *
+     * 为什么不再断言"去重结果对不对"（这条测试以前干的是这个）：去重现在由 Postgres
+     * 执行，mock 只会把 service 原样收到的行交回去——那样的断言无论实现对不对都永远
+     * 绿，是假保证。真正的端到端去重要靠 postgres 集成测（见本轮交付说明的欠账清单）。
+     */
+    const collectSqlText = (node: unknown, depth = 0): string => {
+      if (node === null || node === undefined || depth > 12) return "";
+      if (typeof node === "string") return node;
+      if (Array.isArray(node)) return node.map((n) => collectSqlText(n, depth + 1)).join(" ");
+      if (typeof node === "object") {
+        const record = node as Record<string, unknown>;
+        if ("queryChunks" in record) return collectSqlText(record.queryChunks, depth + 1);
+        if ("value" in record) return collectSqlText(record.value, depth + 1);
+      }
+      return "";
+    };
+    const sqlText = collectSqlText(candidatesFilter);
+    assert.match(sqlText, /NOT EXISTS/);
+    assert.match(sqlText, /card_generation_candidates_v2 newer/);
+    assert.match(sqlText, /newer\.revision >/);
     assert.equal(result!.candidates[1].candidateId, "c2");
     assert.equal(result!.candidates[1].revision, 3);
   });
@@ -590,7 +608,7 @@ describe("getGenerationRunCandidatesV2", () => {
           if (table === cardGenerationPlansV2) {
             return { where: () => ({ limit: async () => [{ result: planResult }] }) };
           }
-          return { where: () => ({ orderBy: () => candidates }) };
+          return { where: () => candidates };
         },
       }),
     });
@@ -635,7 +653,7 @@ describe("getGenerationRunCandidatesV2", () => {
           if (table === cardGenerationPlansV2) {
             return { where: () => ({ limit: async () => [{ result: planResult }] }) };
           }
-          return { where: () => ({ orderBy: () => candidates }) };
+          return { where: () => candidates };
         },
       }),
     });
@@ -671,9 +689,7 @@ describe("getGenerationRunCandidatesV2", () => {
             return { where: () => ({ limit: async () => [{ result: planResult }] }) };
           }
           return {
-            where: () => ({
-              orderBy: () => [makeBaseCandidateRow()],
-            }),
+            where: () => [makeBaseCandidateRow()],
           };
         },
       }),

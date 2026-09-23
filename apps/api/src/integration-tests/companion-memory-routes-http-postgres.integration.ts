@@ -159,6 +159,44 @@ test("候选确认：includeCandidates=false 前后的可见性变化", async ()
     true,
   );
 
+  // 候选交付是怎么到用户眼前的：worker 写一行 `memory_candidate`，桌面按
+  // **payload_ref.kind='memory_item'**（不是 kind 那一列）出文案、把卡片亮成"待处理"。
+  // 确认必须给它结账（doc 34 L42）：`acted` 这个终态在整库里此前 0 行。
+  //
+  // 夹具与断言都走**这条已经用着的连接 + `set_config`**，和生产 `deliver()` 同一形状。
+  // 别在这里另开第二条 postgres.js 池：那样会让这份文件挂起，而且挂得毫无现场可查
+  // （进程在 pg_stat_activity 里完全不存在），第一反应很容易误判成"并行会话在抢锁"。
+  const seqRow = await sql`
+    SELECT COALESCE(MAX(inbox_sequence), 0) + 1 AS n FROM assistant_deliveries
+    WHERE workspace_id = ${workspaceId} AND user_id = ${userA}`;
+  const seq = Number(seqRow[0]?.n ?? 1);
+  const ownDeliveryId = randomUUID();
+  const otherDeliveryId = randomUUID();
+  const seedDelivery = (id: string, memoryItemId: string, offset: number) => sql.begin(async (tx) => {
+    await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true),
+                        set_config('app.user_id', ${userA}, true)`;
+    await tx`
+      INSERT INTO assistant_deliveries
+        (id, assistant_session_id, workspace_id, user_id, inbox_sequence, dedupe_key,
+         state, kind, payload_ref, display_lease, expires_at)
+      VALUES (${id}, NULL, ${workspaceId}, ${userA}, ${seq + offset}, ${`l42-${id}`},
+              'displayed', 'memory_candidate',
+              ${sql.json({ kind: "memory_item", memoryItemId, contentPreview: "候选内容" })},
+              ${sql.json({ leaseToken: "lease-l42", deviceSessionId: "dev-l42",
+                expiresAt: new Date(Date.now() + 600_000).toISOString() })},
+              now() + interval '30 days')
+    `;
+  });
+  const readDelivery = (id: string) => sql.begin(async (tx) => {
+    await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true),
+                        set_config('app.user_id', ${userA}, true)`;
+    return await tx`SELECT state, display_lease FROM assistant_deliveries WHERE id = ${id}`;
+  });
+  await seedDelivery(ownDeliveryId, candidateId, 0);
+  // 第二条指向**别的**记忆：它是"只结这一条"的对照。没有它，谓词写成"这个人所有候选交付"
+  // 也能让断言全绿（这一族在本会话里已经抓过不止一次）。
+  await seedDelivery(otherDeliveryId, randomUUID(), 1);
+
   const confirmed = await app.inject(req(tokenA, "POST", `/companion/memory/${candidateId}/confirm`));
   assert.equal(confirmed.statusCode, 200);
   const afterConfirm = await app.inject(req(tokenA, "GET", "/companion/memory"));
@@ -167,6 +205,18 @@ test("候选确认：includeCandidates=false 前后的可见性变化", async ()
     true,
     "确认后必须出现在默认列表",
   );
+
+  const [own] = await readDelivery(ownDeliveryId);
+  assert.equal(own?.state, "acted", "确认之后那条候选交付必须结账成 acted");
+  assert.equal(own?.display_lease, null, "终态不留展示租约（与设备 ACK 同一形状）");
+  const [other] = await readDelivery(otherDeliveryId);
+  assert.equal(other?.state, "displayed", "只许结掉指向这条记忆的那一份");
+
+  // 已终态的不被后来的忽略改写：确认在前、忽略在后，用户第一次表态就算数。
+  const ignored = await app.inject(req(tokenA, "POST", `/companion/memory/${candidateId}/dismiss`));
+  assert.equal(ignored.statusCode, 200);
+  const [afterDismiss] = await readDelivery(ownDeliveryId);
+  assert.equal(afterDismiss?.state, "acted", "已经 acted 的交付不能被随后的忽略改写");
 });
 
 test("pin / unpin / archive / restore / dismiss 状态迁移都可往返", async () => {

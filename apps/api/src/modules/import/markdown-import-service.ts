@@ -351,7 +351,14 @@ export async function importMarkdownNotes(
     .where(
       and(
         eq(noteVersions.workspaceId, workspaceId),
-        sql`content_json->>'importId' = ${importId}`,
+        // 0269 之前的 0164 给这一列建的是 `gin (content_json jsonb_ops)`，而 jsonb_ops
+        // 的 GIN 只索引 `@> ? ?| ?&`——`->>` 等值**从来进不了这个索引**（实测该 GIN
+        // `idx_scan = 0`，本查询一直在按 workspace 扫版本并把每行的 content_json 从
+        // TOAST 里取出来比对）。改成 `@>` 同一个判据、可被现有 GIN 接手。
+        // 等价性：importId 只有一个写入口（:192 `contentJson.importId = importId`，
+        // 类型是 `string`），落库必然是 JSON 字符串，所以 `@> {"importId": $1}` 与
+        // `->>'importId' = $1` 对全部现存行同解；且 importId 为空时根本不走这里（:319）。
+        sql`content_json @> jsonb_build_object('importId', ${importId})`,
       ),
     );
 

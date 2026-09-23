@@ -22,7 +22,7 @@ const uuid = z.string().uuid();
  *
  * 以前它们是两份清单（`COMPANION_AGENT_TOOL_DEFINITIONS` 与
  * `companionAgentToolArgumentSchemas`），靠人记得同步。漏一条的后果不是编译期报错，
- * 而是 `validateCompanionAgentToolArguments` 落到 "unknown tool argument schema"——
+ * 而是 `validateCompanionAgentToolArguments` 落到"这个工具的参数要求没有登记"——
  * 她看得见这个工具、也会去调、每一调必败。上一批新加的 3 个提醒工具就是这么
  * 上线即坏的（没人调用，所以没人看见）。现在两者出自同一个 `tool()` 调用，
  * 少传第二个参数是类型错误。
@@ -65,7 +65,7 @@ const REGISTERED_TOOLS: readonly RegisteredTool[] = [
   tool("companion_search_notes", "按关键词搜用户的笔记标题与正文，返回笔记 id/标题/时间。用户问「我之前记过什么」或要跳到某篇笔记时先用它。", "read", false, { type: "object", properties: { query: { type: "string", minLength: 1, maxLength: 120 }, limit: { type: "integer", minimum: 1, maximum: 10 } }, required: ["query"], additionalProperties: false }, z.object({ query: z.string().min(1).max(120), limit: z.number().int().min(1).max(10).optional() }).strict()),
   tool("companion_read_note", "读出一篇笔记的正文内容（截断到几千字）。要引用、总结或核对用户写过什么时必须先读，不要凭标题猜内容。", "read", false, { type: "object", properties: { noteId: { type: "string", format: "uuid" } }, required: ["noteId"], additionalProperties: false }, z.object({ noteId: uuid }).strict()),
   tool("companion_open_note", "跳到用户的一篇笔记（在应用里打开它）。", "read", false, { type: "object", properties: { noteId: { type: "string", format: "uuid" } }, required: ["noteId"], additionalProperties: false }, z.object({ noteId: uuid }).strict()),
-  tool("companion_open_page", "跳到应用里的某个页面。用户说「打开复习」「去看看星图」时调用。", "read", false, { type: "object", properties: { page: { type: "string", enum: ["home", "today", "review", "star_map", "conversation", "source", "settings"] } }, required: ["page"], additionalProperties: false }, z.object({ page: z.enum(["home", "today", "review", "star_map", "conversation", "source", "settings"]) }).strict()),
+  tool("companion_open_page", "跳到应用里的某个页面。用户说「打开复习」「去看看星图」时调用；「书架」「资料库」「来源」都对应 source 页面。", "read", false, { type: "object", properties: { page: { type: "string", enum: ["home", "today", "review", "star_map", "conversation", "source", "settings"] } }, required: ["page"], additionalProperties: false }, z.object({ page: z.enum(["home", "today", "review", "star_map", "conversation", "source", "settings"]) }).strict()),
   tool("companion_get_learning_stats", "读取学习数据统计：今天/本周学了多久、到期复习数、活跃卡片数、笔记数等（与首页同一口径）。**只在用户问自己学了多久/进度如何时调用**；她跟你打招呼、闲聊、或只是接着上一个话题时不要调，也不要把这些数字主动报给用户。", "read", false, emptyParameters, emptyArguments),
   tool("companion_list_task_queue", "列出当前学习运行里排着的任务（含进度和第几步）。用户问「我接下来要做什么」「还有什么任务」时调用。", "read", false, emptyParameters, emptyArguments),
   tool("companion_list_due_reviews", "列出到期（或快到期）的复习卡，带卡片标题和到期时间。用户问「有什么要复习的」时调用。", "read", false, { type: "object", properties: { limit: { type: "integer", minimum: 1, maximum: 20 } }, additionalProperties: false }, z.object({ limit: z.number().int().min(1).max(20).optional() }).strict()),
@@ -114,7 +114,7 @@ const REGISTERED_TOOLS: readonly RegisteredTool[] = [
   // 只是本机显示，一个字节都不出境。所以图片外发关着时，"给我看那张图"仍然做得成——
   // 这一句必须写进描述，否则她会把自己"看不了图"的限制误套到"给你看"上，
   // 明明能办的事也回答"我看不了"。
-  tool("companion_show_image", "把用户自己库里的某张图显示到对话里（只在本机显示，不发给任何模型，也不需要图片外发开关）。用户说「把那张图给我看」「那张截图长什么样」时调用；用 noteId 配合第几张（position 从 1 起）或直接给 assetId。", "read", false, { type: "object", properties: { noteId: { type: "string", format: "uuid" }, assetId: { type: "string", format: "uuid" }, position: { type: "integer", minimum: 1, maximum: 20 } }, additionalProperties: false }, z.object({ noteId: uuid.optional(), assetId: uuid.optional(), position: z.number().int().min(1).max(20).optional() }).strict()),
+  tool("companion_show_image", "把用户自己库里的图片显示在伴星身旁和对话中（只在本机显示，不发给模型，不需要图片外发开关）。自然地说想看看某文章的插图也属于展示请求。若只知道文章简称或标题，先用 companion_search_notes 找到真实 noteId，再用 noteId 与 position（从 1 起）或 assetId 展示；不可凭旧对话猜图片归属。", "read", false, { type: "object", properties: { noteId: { type: "string", format: "uuid" }, assetId: { type: "string", format: "uuid" }, position: { type: "integer", minimum: 1, maximum: 20 } }, additionalProperties: false }, z.object({ noteId: uuid.optional(), assetId: uuid.optional(), position: z.number().int().min(1).max(20).optional() }).strict()),
 ];
 
 export const COMPANION_AGENT_TOOL_DEFINITIONS: readonly CompanionAgentToolDefinitionV1[] =
@@ -161,9 +161,14 @@ export function validateCompanionAgentToolArguments(
   args: unknown,
 ): { success: true; data: Record<string, unknown> } | { success: false; reason: string } {
   const schema = ARGUMENT_SCHEMAS.get(toolName);
-  if (!schema) return { success: false, reason: "unknown tool argument schema" };
+  // 这两句会原样进 `agent.tool` 的 `safeSummary`，也就是**用户看的那一行**（执行过程里失败
+  // 那步的小字），同一份又回给模型当工具报错。以前这里写的是
+  // "tool arguments failed schema validation" —— 字段名叫 safe，内容却是排查日志用的英文
+  // 机器话，界面上就成了「正在看到期复习 ｜ tool arguments failed schema validation ｜ 失败」。
+  // 只在这一处定义，改这里两边一起变。
+  if (!schema) return { success: false, reason: "这个工具的参数要求没有登记，这一步没有执行" };
   const parsed = schema.safeParse(args);
   return parsed.success
     ? { success: true, data: parsed.data }
-    : { success: false, reason: "tool arguments failed schema validation" };
+    : { success: false, reason: "这一步要填的内容没有对上，没有执行" };
 }
