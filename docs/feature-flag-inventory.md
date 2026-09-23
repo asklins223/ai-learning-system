@@ -95,7 +95,7 @@ manifest 许可门禁（`commercialReleaseAllowed`）控制，不需要服务端
 
 | Flag | 端 | 默认 | 作用 |
 | --- | --- | --- | --- |
-| `VITE_HOME_SCENE_VARIANT` | desktop-client renderer | v1（dev 的 `.env.development` 为 v2） | 首页场景变体；`v2` 启用「魔法伴星小屋」（`home-v2.ts` 读取，构建期常量，非运行时开关） |
+| ~~`VITE_HOME_SCENE_VARIANT`~~ | — | **不存在** | 2026-09-22 校正：全仓无任何读取点（只有 `apps/desktop-client/package.json:19` 的截图脚本给它赋值），`apps/desktop-client` 下也没有 `.env.development`；`HomeV2Provider` 在 `App.tsx:145` 无条件挂载。原先这一行的"home-v2.ts 读取 / dev 为 v2"两条都是假的。 |
 
 ---
 
@@ -116,7 +116,20 @@ manifest 许可门禁（`commercialReleaseAllowed`）控制，不需要服务端
 ## 七、本地调试建议
 
 1. **能力开关**：dev 栈已在 `docker-compose.dev.yml` 默认开启（除 streaming voice）；
-   prod 栈全部 `false` fail-closed，需要时用部署侧环境变量显式打开，**不要改 compose**。
+   **prod 栈不是"全部 false fail-closed"——这句话是错的，2026-09-22 按 `docker-compose.yml` 逐条数过改在这里**：
+   它是**混合姿态**，两件事分开看：
+   - **默认关**（能力类 4 支）：`LEARNING_RUN_ENABLED`、`CARD_GENERATION_V2_ENABLED`、
+     `COMPANION_VOICE_DIALOGUE_V1_ENABLED`、`COMPANION_STREAMING_VOICE_V1_ENABLED`；
+     另有 `CARD_GENERATION_V2_LLM`、`TRUST_PROXY`、`AI_ALLOW_DOCKER_DESKTOP_SYNTHETIC_DNS`
+     三支属于运行/安全参数而不是能力开关。全文件合计 `:-true` 13 支、`:-false` 7 支。
+   - **默认开**（能力类 11 支，全为 `${...:-true}`）：`COMPANION_DIALOGUE_V1_ENABLED`、
+     `COMPANION_JOURNEY_V2`、`COMPANION_BRIDGE_V2`、`COMPANION_MEMORY_VECTOR_V1`、
+     `COMPANION_MEMORY_EXTRACTOR_V1`、`COMPANION_MEMORY_STAR_MAP_V1`、`COMPANION_PET_PROFILE_V1`、
+     `COMPANION_THOUGHTS_V1`、`COMPANION_PROACTIVE_PERSONALIZED_V1`、`COMPANION_SUMMARIZER_V1`、
+     `COMPANION_DAILY_SUMMARY_V1`。
+     （另有两支非能力开关也默认 true：`AI_REQUIRE_CONFIGURED_PROVIDER`、`AUTH_COOKIE_SECURE`。）
+   所以"生产上伴星是关着的"这个判断不成立；要按现状做决定，请以 compose 的字面默认值为准，
+   并把"prod 应当全 fail-closed"当成一次**待做的收敛决定**，而不是已经实现的合同。
 2. **旧功能开关**：保留但收敛到 compose 一处维护；能合并的尽量合并。
 3. **测试/调试开关**：只出现在测试命令或 `.env.test`，不进 `docker-compose.dev.yml`。
 4. **Provider 配置**：统一走 `AI_PLATFORMS_CONFIG`，不要再为每个 provider 拆散开关。
