@@ -418,30 +418,52 @@ describe("search projection drift", () => {
                   { objectId: "note-stale", title: "Old note", body: "old body" },
                   { objectId: "note-ghost", title: "Ghost", body: "ghost" },
                 ];
-              default:
+              case 2:
                 return [
                   { objectId: "source-stale", title: "Old source" },
                   { objectId: "source-ghost", title: "Ghost source" },
                 ];
+              default:
+                // 审计 F15：目标这一表也从这里读第二遍（索引侧）。
+                return [
+                  { objectId: "objective-stale", title: "Old objective label" },
+                  { objectId: "objective-ghost", title: "Ghost objective" },
+                ];
             }
           },
         },
+        // 目标标题要与写入侧同一句（`objectiveSearchTitle`），所以检测侧要读当前修订。
+        learningObjectivesV2: {
+          findMany: async () => [
+            { objectiveId: "objective-stale", currentObjectiveRevisionId: "revision-stale" },
+            { objectiveId: "objective-missing", currentObjectiveRevisionId: "revision-missing" },
+          ],
+        },
       },
+      select: () => ({
+        from: () => ({
+          where: async () => [
+            { objectiveId: "objective-stale", conceptLabel: "Current objective label", publicSummary: "" },
+          ],
+        }),
+      }),
     } as any;
 
     const result = await detectSearchDrift(executor, WORKSPACE_ID);
 
-    assert.equal(indexedQuery, 2);
-    // Drift 只对比当前纳入索引的 note / source 实体。
-    assert.deepEqual(result.expected, { note: 2, source: 2 });
-    assert.deepEqual(result.actual, { note: 2, source: 2 });
+    assert.equal(indexedQuery, 3);
+    // Drift 对比当前纳入索引的 note / source / objective 三张业务表。
+    assert.deepEqual(result.expected, { note: 2, source: 2, objective: 2 });
+    assert.deepEqual(result.actual, { note: 2, source: 2, objective: 2 });
     assert.deepEqual(result.ghosts, [
       { objectType: "note", objectId: "note-ghost" },
       { objectType: "source", objectId: "source-ghost" },
+      { objectType: "objective", objectId: "objective-ghost" },
     ]);
     assert.deepEqual(result.missing, [
       { objectType: "note", objectId: "note-missing" },
       { objectType: "source", objectId: "source-missing" },
+      { objectType: "objective", objectId: "objective-missing" },
     ]);
     assert.deepEqual(result.staleTitles, [
       {
@@ -456,6 +478,12 @@ describe("search projection drift", () => {
         indexedTitle: "Old source",
         actualTitle: "Current source",
       },
+      {
+        objectType: "objective",
+        objectId: "objective-stale",
+        indexedTitle: "Old objective label",
+        actualTitle: "Current objective label",
+      },
     ]);
     assert.deepEqual(result.staleBodies, [{ objectType: "note", objectId: "note-stale" }]);
     assert.equal(result.hasDrift, true);
@@ -468,6 +496,7 @@ describe("search projection drift", () => {
       query: {
         notes: { findMany: async () => [] },
         sources: { findMany: async () => [] },
+        learningObjectivesV2: { findMany: async () => [] },
         noteBlocks: { findMany: async () => { forbiddenQueries += 1; return []; } },
         searchDocuments: {
           findMany: async () => {
@@ -476,21 +505,22 @@ describe("search projection drift", () => {
           },
         },
       },
+      select: () => ({ from: () => ({ where: async () => [] }) }),
     } as any;
 
     const result = await detectSearchDrift(executor, WORKSPACE_ID);
 
-    assert.equal(indexedQuery, 2);
+    assert.equal(indexedQuery, 3);
     assert.equal(forbiddenQueries, 0);
     assert.deepEqual(result, {
-      expected: { note: 0, source: 0 },
-      actual: { note: 0, source: 0 },
+      expected: { note: 0, source: 0, objective: 0 },
+      actual: { note: 0, source: 0, objective: 0 },
       ghosts: [],
       missing: [],
       staleTitles: [],
       staleBodies: [],
       hasDrift: false,
-      capped: { note: false, source: false },
+      capped: { note: false, source: false, objective: false },
     });
   });
 });

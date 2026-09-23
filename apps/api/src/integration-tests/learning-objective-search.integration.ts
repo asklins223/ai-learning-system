@@ -120,3 +120,80 @@ test("CS-03: reindex 写入 objective 文档且可被搜索命中、无私有载
     assert.ok(item.href.startsWith("/learning-objectives/"), "objective 命中 href 必须直达档案");
   }
 });
+
+/**
+ * 审计 F15：漂移检测原来只读 note/source，目标这一表在检测里一个数都看不见——
+ * 演示空间"17 条目标、0 条 objective 文档"当时就报不出来。这条把判据钉在真库上：
+ * 缺一条目标文档要报 `missing`，多一条无主的要报 `ghosts`，重建后两边都收敛。
+ */
+test("F15: 目标搜索文档的缺失与幽灵都能被检测出来，重建后收敛", async () => {
+  const { detectSearchDrift } = await import("../modules/search/service.ts");
+
+  // 先保证起点是干净的：reindex 一次。
+  await withWorkspaceTransaction(
+    { workspaceId: FIXTURE_WORKSPACE, userId: SYSTEM_USER },
+    (tx) => reindexWorkspaceSearch(tx, FIXTURE_WORKSPACE),
+  );
+
+  const [victim] = await withWorkspaceTransaction(
+    { workspaceId: FIXTURE_WORKSPACE, userId: SYSTEM_USER },
+    (tx) =>
+      tx
+        .select({ objectiveId: learningObjectivesV2.objectiveId })
+        .from(learningObjectivesV2)
+        .where(eq(learningObjectivesV2.workspaceId, FIXTURE_WORKSPACE))
+        .limit(1),
+  );
+  const ghostId = "00000000-0000-4000-8000-00000000f15f";
+
+  // 制造两处漂移：一条目标文档被删掉，一条无主文档留在索引里。
+  await withWorkspaceTransaction(
+    { workspaceId: FIXTURE_WORKSPACE, userId: SYSTEM_USER },
+    async (tx) => {
+      await tx
+        .delete(searchDocuments)
+        .where(and(
+          eq(searchDocuments.workspaceId, FIXTURE_WORKSPACE),
+          eq(searchDocuments.objectType, "objective"),
+          eq(searchDocuments.objectId, victim.objectiveId),
+        ));
+      await tx.insert(searchDocuments).values({
+        workspaceId: FIXTURE_WORKSPACE,
+        objectType: "objective",
+        objectId: ghostId,
+        title: "已经被删掉的目标",
+        body: "幽灵",
+        metadata: {},
+        indexedAt: new Date(),
+      });
+    },
+  );
+
+  const drift = await withWorkspaceTransaction(
+    { workspaceId: FIXTURE_WORKSPACE, userId: SYSTEM_USER },
+    (tx) => detectSearchDrift(tx, FIXTURE_WORKSPACE),
+  );
+  assert.ok(
+    drift.missing.some((item) => item.objectType === "objective" && item.objectId === victim.objectiveId),
+    "被删掉索引的那条目标必须报 missing：" + JSON.stringify(drift.missing),
+  );
+  assert.ok(
+    drift.ghosts.some((item) => item.objectType === "objective" && item.objectId === ghostId),
+    "无主的目标文档必须报 ghosts：" + JSON.stringify(drift.ghosts),
+  );
+  assert.equal(drift.expected.objective, drift.actual.objective, "两侧口径必须同源（缺一条 = 差 1）");
+  assert.ok(drift.expected.objective >= 3, "夹具工作区至少 3 条目标，实际 " + drift.expected.objective);
+
+  // 重建：缺失被补齐，幽灵被清理。
+  await withWorkspaceTransaction(
+    { workspaceId: FIXTURE_WORKSPACE, userId: SYSTEM_USER },
+    (tx) => reindexWorkspaceSearch(tx, FIXTURE_WORKSPACE),
+  );
+  const after = await withWorkspaceTransaction(
+    { workspaceId: FIXTURE_WORKSPACE, userId: SYSTEM_USER },
+    (tx) => detectSearchDrift(tx, FIXTURE_WORKSPACE),
+  );
+  assert.equal(after.missing.filter((item) => item.objectType === "objective").length, 0);
+  assert.equal(after.ghosts.filter((item) => item.objectType === "objective").length, 0);
+  assert.equal(after.expected.objective, after.actual.objective);
+});

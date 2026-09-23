@@ -116,8 +116,11 @@ const OBJECTIVE_SYSTEM_LEVEL_READS: Record<string, number> = {
   "modules/learning-objectives/origin-migration.ts": 1,
   "modules/learning-objectives/history-route-service.ts": 2,
   // 搜索索引是全空间共用的一份，按某个人裁会把他的视角烧进共用数据（见 notes 那条
-  // 同样的理由）；目标这一侧的出口按同一套口径判。
-  "modules/search/service.ts": 1,
+  // 同样的理由）；目标这一侧的出口按同一套口径判。三处都在索引维护这条线上，读的都是
+  // 同一个对象集合：reindex 的目标行（`learningObjectivesV2`）、它当前修订的标题
+  // （`learningObjectiveRevisionsV2`），以及 drift 侧同形状的两次读取 + 清理幽灵目标
+  // 文档的那条 DELETE（审计 F15 把检测补到目标这一表之后）。
+  "modules/search/service.ts": 3,
   // `checkExportSize` 的体积保险丝，刻意取超集。
   "modules/export/service.ts": 2,
   // 游标行：只取 createdAt / id 定位分页，不返回任何文字。

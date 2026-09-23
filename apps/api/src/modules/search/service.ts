@@ -45,8 +45,23 @@ const reindexTopOrder: Record<string, any> = (() => {
   return {
     notes: (fields: any) => [desc(fields.updatedAt), asc(fields.id)],
     sources: (fields: any) => [desc(fields.updatedAt), asc(fields.id)],
+    // 审计 F15：目标也要"同一上限 + 同一确定排序"。原来只有 updatedAt，同一次的
+    // 两个读取（reindex 与 drift）在并列行上可能取到不同窗口，判据会自己制造漂移。
+    objectives: (fields: any) => [desc(fields.updatedAt), asc(fields.objectiveId)],
   };
 })();
+
+/**
+ * 目标搜索文档的标题（审计 F15）。
+ *
+ * 写入侧（reindex）与判据侧（drift 的"过期标题"）必须用同一句：两边公式一分叉，
+ * 每次检测都会报 stale、auto-fix 反复重建，而界面上看到的是"索引老过期"。
+ */
+function objectiveSearchTitle(
+  revision: { conceptLabel?: string | null; publicSummary?: string | null } | undefined,
+): string {
+  return revision?.conceptLabel ?? revision?.publicSummary?.slice(0, 80) ?? "未命名目标";
+}
 
 // N#8-1: 进程内记录"该工作区上一次 reindex 是否因单表行数上限被截断"。当域名表真实超过
 // REINDEX_MAX_ROWS_PER_TABLE 时，reindex 必然只索引确定前 LIMIT 子集，drift 也不会读超线实体，
@@ -488,8 +503,18 @@ export async function reindexWorkspaceSearch(
     const objectiveRows = await executor.query.learningObjectivesV2.findMany({
       where: eq(learningObjectivesV2.workspaceId, workspaceId),
       limit: REINDEX_MAX_ROWS_PER_TABLE,
-      orderBy: desc(learningObjectivesV2.updatedAt),
+      orderBy: reindexTopOrder.objectives(learningObjectivesV2),
     });
+    // 审计 F15：目标这一表也会撞上限（原来只统计 note/source），截断标记必须一致，
+    // 否则 auto-fix 会在"超线目标不在索引里"这种既定截断上反复重建。
+    if (objectiveRows.length >= REINDEX_MAX_ROWS_PER_TABLE) {
+      wasCapped = true;
+      lastReindexCapped.set(workspaceId, true);
+      logger.warn(
+        { workspaceId, limit: REINDEX_MAX_ROWS_PER_TABLE, objectiveCount: objectiveRows.length },
+        "reindexWorkspaceSearch 达到单表行数上限（objective），投影可能不完整",
+      );
+    }
     const revisionIds = objectiveRows
       .map((o) => o.currentObjectiveRevisionId)
       .filter((id): id is string => Boolean(id));
@@ -545,7 +570,7 @@ export async function reindexWorkspaceSearch(
       ];
       return {
         id: objective.objectiveId,
-        title: revision?.conceptLabel ?? revision?.publicSummary.slice(0, 80) ?? "未命名目标",
+        title: objectiveSearchTitle(revision),
         body: [
           revision?.publicSummary ?? "",
           ...noteTitles,
@@ -675,6 +700,14 @@ export async function reindexWorkspaceSearch(
                   AND domain_source.status <> ${SourceStatus.ARCHIVED}
               )
             )
+            OR (
+              search_document.object_type = 'objective'
+              AND NOT EXISTS (
+                SELECT 1 FROM learning_objectives_v2 AS domain_objective
+                WHERE domain_objective.objective_id = search_document.object_id
+                  AND domain_objective.workspace_id = ${workspaceId}
+              )
+            )
           )
       `);
   } catch (err) {
@@ -704,11 +737,14 @@ export interface SearchDriftResult {
   expected: {
     note: number;
     source: number;
+    /** 审计 F15：目标本来就能被 reindex 写成搜索文档，检测侧原来完全没读它。 */
+    objective: number;
   };
   /** 搜索索引实际对象数 */
   actual: {
     note: number;
     source: number;
+    objective: number;
   };
   /** 幽灵文档 ID（索引中有但业务表中不存在） */
   ghosts: { objectType: string; objectId: string }[];
@@ -723,7 +759,7 @@ export interface SearchDriftResult {
   /** N#8-1: 各顶层业务域表读是否命中行数上限（截断）。实体超过确定截断线时两侧都不会读取，
    *  属既定截断而非漂移；auto-fix 据此避免反复重索引。
    *  两侧命中读取上限时不报告窗口外的缺失，避免把既定截断误判为漂移。 */
-  capped: Record<"note" | "source", boolean>;
+  capped: Record<"note" | "source" | "objective", boolean>;
 }
 
 export async function detectSearchDrift(
@@ -736,8 +772,8 @@ export async function detectSearchDrift(
 
   // PERF-07: Parallelize queries across entity types.
   // Previously 12 serial DB round-trips; now a small parallel batch.
-  // ── Batch 1: notes + sources 业务表与索引查询 ──
-  const [noteRows, indexedNotes, sourceRows, indexedSources] = await Promise.all([
+  // ── Batch 1: notes + sources + objectives 业务表与索引查询 ──
+  const [noteRows, indexedNotes, sourceRows, indexedSources, objectiveRows, indexedObjectives] = await Promise.all([
     // 1a. Notes business table (CONC-03: exclude soft-deleted)
     // N#8-1: 与 reindex 用同一上限 + 同一确定排序，读取同一确定截断子集，避免把超线实体误判 missing。
     executor.query.notes.findMany({
@@ -767,6 +803,22 @@ export async function detectSearchDrift(
       limit: REINDEX_MAX_ROWS_PER_TABLE,
       orderBy: [desc(searchDocuments.indexedAt), asc(searchDocuments.objectId)],
     }),
+    // 1e. Objectives business table（审计 F15：与 reindex 同一上限、同一确定排序、
+    //     同一集合——目标的搜索文档本来就能被 reindex 写出来，检测侧却完全没读它，
+    //     于是"17 条目标 0 条索引"在检测里一个数都看不见。带上当前修订，用来算标题。）
+    executor.query.learningObjectivesV2.findMany({
+      where: eq(learningObjectivesV2.workspaceId, workspaceId),
+      columns: { objectiveId: true, currentObjectiveRevisionId: true },
+      limit: REINDEX_MAX_ROWS_PER_TABLE,
+      orderBy: reindexTopOrder.objectives(learningObjectivesV2),
+    }),
+    // 1f. Objectives index
+    executor.query.searchDocuments.findMany({
+      where: and(eq(searchDocuments.workspaceId, workspaceId), eq(searchDocuments.objectType, "objective")),
+      columns: { objectId: true, title: true },
+      limit: REINDEX_MAX_ROWS_PER_TABLE,
+      orderBy: [desc(searchDocuments.indexedAt), asc(searchDocuments.objectId)],
+    }),
   ]);
 
   // N#8-1: 记录各顶层业务域表读是否命中行数上限（截断）。截断意味着域名表真实超过
@@ -775,9 +827,10 @@ export async function detectSearchDrift(
   //  - ghost 对"索引有而业务读窗口无"的实体不再报告（超线实体可能仍合法存在于业务表中，
   //    只是未进入当前确定窗口，把它们当 ghost 会误报），并记告警。
   // 这样 auto-fix 只在真实漂移时触发，截断场景不反复重索引。
-  const capped: Record<"note" | "source", boolean> = {
+  const capped: Record<"note" | "source" | "objective", boolean> = {
     note: noteRows.length >= REINDEX_MAX_ROWS_PER_TABLE,
     source: sourceRows.length >= REINDEX_MAX_ROWS_PER_TABLE,
+    objective: objectiveRows.length >= REINDEX_MAX_ROWS_PER_TABLE,
   };
 
   // Process notes drift
@@ -824,6 +877,47 @@ export async function detectSearchDrift(
     }
   }
 
+  // Process objectives drift（审计 F15）。判据与写入侧同一句 `objectiveSearchTitle`，
+  // 集合与 reindex 的目标那一段同一口径（全量目标行，上限同为 REINDEX_MAX_ROWS_PER_TABLE）。
+  const objectiveRevisionIds = objectiveRows
+    .map((objective) => objective.currentObjectiveRevisionId)
+    .filter((id): id is string => Boolean(id));
+  const objectiveRevisionRows = objectiveRevisionIds.length > 0
+    ? await executor
+        .select({
+          objectiveId: learningObjectiveRevisionsV2.objectiveId,
+          conceptLabel: learningObjectiveRevisionsV2.conceptLabel,
+          publicSummary: learningObjectiveRevisionsV2.publicSummary,
+        })
+        .from(learningObjectiveRevisionsV2)
+        .where(and(
+          eq(learningObjectiveRevisionsV2.workspaceId, workspaceId),
+          inArray(learningObjectiveRevisionsV2.objectiveRevisionId, objectiveRevisionIds),
+        ))
+    : [];
+  const objectiveRevisionById = new Map(
+    objectiveRevisionRows.map((revision) => [revision.objectiveId, revision]),
+  );
+  const objectiveIds = new Set(objectiveRows.map((objective) => objective.objectiveId));
+  const indexedObjectiveIds = new Set(indexedObjectives.map((document) => document.objectId));
+  for (const document of indexedObjectives) {
+    if (!objectiveIds.has(document.objectId)) {
+      if (!capped.objective) {
+        ghosts.push({ objectType: "objective", objectId: document.objectId });
+      }
+    } else {
+      const actualTitle = objectiveSearchTitle(objectiveRevisionById.get(document.objectId));
+      if (actualTitle !== document.title) {
+        staleTitles.push({ objectType: "objective", objectId: document.objectId, indexedTitle: document.title, actualTitle });
+      }
+    }
+  }
+  for (const id of objectiveIds) {
+    if (!indexedObjectiveIds.has(id)) {
+      missing.push({ objectType: "objective", objectId: id });
+    }
+  }
+
   // ── Batch 2: stale body detection (depends on noteRows) ──
   const currentVersionIds = noteRows.flatMap((note) =>
     note.currentVersionId ? [note.currentVersionId] : [],
@@ -865,10 +959,12 @@ export async function detectSearchDrift(
   const expected = {
     note: noteIds.size,
     source: sourceIds.size,
+    objective: objectiveIds.size,
   };
   const actual = {
     note: indexedNotes.length,
     source: indexedSources.length,
+    objective: indexedObjectives.length,
   };
 
   return {

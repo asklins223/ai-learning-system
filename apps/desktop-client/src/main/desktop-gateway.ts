@@ -1449,12 +1449,18 @@ export class DesktopGateway {
     const payload = (result.body ?? {}) as Record<string, unknown>;
     const count = (value: unknown): number | undefined =>
       Array.isArray(value) ? value.length : typeof value === "number" ? value : undefined;
+    // 「内容过期」= 标题过期 + 正文过期。只数标题会让"正文过期但标题没变"的漂移
+    // 在界面上显示成 `发现漂移：缺失 0、幽灵 0、内容过期 0`——三个 0 配一句"发现漂移"，
+    // 用户只能当它坏了（审计 F15 现场读到的就是这三个数）。两类过期都算进来，
+    // hasDrift 与这几个计数才是同一件事。
+    const staleTitles = count(payload.staleTitles) ?? 0;
+    const staleBodies = count(payload.staleBodies) ?? 0;
     const parsed = searchDriftResultV1Schema.safeParse({
       version: 1,
       hasDrift: payload.hasDrift,
       ghosts: count(payload.ghosts),
       missing: count(payload.missing),
-      stale: count(payload.staleTitles),
+      stale: staleTitles + staleBodies,
     });
     if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
     return parsed.data;
