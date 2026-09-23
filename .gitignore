@@ -117,6 +117,9 @@ tokens.txt
 **/tmp-*.mts
 **/tmp-*.ts
 **/tmp-*.py
+# 同类的反向命名一次性脚本（如 `see2-tmp.mjs`），同样只是本地工具
+**/*-tmp.mjs
+**/*-tmp.mts
 # 客观题流程的本地截图/状态目录
 apps/desktop-client/.objflow-caps/
 # B4 落地实测的过程截图目录（单张 1–4.3MB），与 cardgen-verify/graph-verify 同类
@@ -127,3 +130,4 @@ apps/desktop-client/scripts/b4-landing-live/
 # 界面验证证据截图与交互原型（本地保留）
 apps/desktop-client/outputs/
 apps/desktop-client/prototypes/
+.env.bak*

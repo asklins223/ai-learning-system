@@ -446,10 +446,14 @@ jobs:
         working-directory: apps/api
         run: npm run db:migrate
 
+      # 2026-09-22（doc 34 L31）：`db-commit-port.integration.ts` 已经不存在了
+      # ——仓库里没有任何测试再覆盖"commit port"这件事，那行引用只会让整个
+      # `fresh-migrations` job 红在"文件找不到"上，而不是红在真实断言上。
+      # 要恢复这道检查得先把测试写回来；这里是删掉死引用，不是把检查降级。
       # 2026-08-11（测试质量修复）：db-commit-port/db-migrations 原以 .test.ts
       # 命名被默认测试拾取，但单元 job 的 DATABASE_URL 指向不可达 DB（127.0.0.1:1）
       # 导致永远静默 skip。改名 .integration.ts 后在此（真实 postgres 服务）接入。
-      - name: Verify commit port + migration idempotence against real PostgreSQL
+      - name: Verify migration state against real PostgreSQL
         working-directory: apps/api
         env:
           NODE_ENV: test
@@ -457,7 +461,6 @@ jobs:
         run: |
           set -o pipefail
           node --import tsx --test --test-concurrency=1 \
-            src/integration-tests/db-commit-port.integration.ts \
             src/integration-tests/db-migrations.integration.ts \
             2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/commit-port-migrations.tap"
 
@@ -498,7 +501,9 @@ jobs:
         working-directory: apps/api
         env:
           NODE_ENV: test
-          CONTENT_HASH_TEST_DATABASE_URL: ${{ env.DATABASE_URL_API }}
+          # 夹具自己写的池要能不带 `app.workspace_id` 往 notes/note_versions 落行
+          # （那些表的 RESTRICTIVE 守卫没有 NULL 分支）；被测侧仍是 DATABASE_URL_API。
+          CONTENT_HASH_TEST_DATABASE_URL: ${{ env.DATABASE_URL }}
         run: |
           set -o pipefail
           node --import tsx --test src/integration-tests/content-hash-consistency-postgres.integration.ts \
@@ -508,7 +513,9 @@ jobs:
         working-directory: apps/api
         env:
           NODE_ENV: test
-          SEC02_TEST_DATABASE_URL: ${{ env.DATABASE_URL_API }}
+          # 夹具要原生删 workspaces/users 去证明级联；受限角色下这些 DELETE 会被策略
+          # 过滤成 0 行，级联永远不会发生（姿态本身由上面几条读 pg_catalog 的用例守，与角色无关）。
+          SEC02_TEST_DATABASE_URL: ${{ env.DATABASE_URL }}
         run: |
           set -o pipefail
           node --import tsx --test src/integration-tests/sec02-invites-onboarding-postgres.integration.ts \
@@ -518,7 +525,9 @@ jobs:
         working-directory: apps/api
         env:
           NODE_ENV: test
-          NOTE_VERSION_RESTORE_TEST_DATABASE_URL: ${{ env.DATABASE_URL_API }}
+          # 同上：这份夹具原生写 notes/note_versions/note_blocks，且全文件没有任何
+          # RLS 意图（0 处 set_config / SET LOCAL ROLE），给它受限角色只会让夹具静默落空。
+          NOTE_VERSION_RESTORE_TEST_DATABASE_URL: ${{ env.DATABASE_URL }}
         run: |
           set -o pipefail
           node --import tsx --test src/integration-tests/note-version-restore-postgres.integration.ts \
@@ -543,6 +552,9 @@ jobs:
       # 单调/组合外键/RLS 换角色才测得出来），以及 WS 通道的鉴权（只读连接收到
       # Authenticated("readonly")、上送被否定且不落库、被拒的理由不泄露笔记存在性、
       # 关停刷 debounce 窗口）。两份此前都没有接入 CI——不接就等于不存在。
+      # 第三、四份（note-trash-card-serving / note-purge-soft-deleted）钉的是 doc 34
+      # L16/L17：软删的来源笔记要把它的卡从队列与卡列表一起收掉、恢复又要一起回来；
+      # 以及 30 天清除**真的删得掉东西**（生成过卡的那一篇今天删不掉，如实钉住）。
       - name: Verify note document state and collaboration authorization behaviour
         working-directory: apps/api
         env:
@@ -556,6 +568,13 @@ jobs:
             src/integration-tests/note-collaboration-postgres.integration.ts \
             src/integration-tests/learning-objective-search.integration.ts \
             src/integration-tests/card-generation-run-ownership-postgres.integration.ts \
+            src/integration-tests/note-trash-card-serving-postgres.integration.ts \
+            src/integration-tests/note-purge-soft-deleted-postgres.integration.ts \
+            src/integration-tests/stats-pending-review-equals-queue-postgres.integration.ts \
+            src/integration-tests/workspace-departure-memory-retirement-postgres.integration.ts \
+            src/integration-tests/evidence-quote-copy-retrieval-postgres.integration.ts \
+            src/integration-tests/workspace-dissolve-postgres.integration.ts \
+            src/integration-tests/workspace-dissolve-route-postgres.integration.ts \
             2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/note-collaboration.tap"
 
       # 空间隔离 schema 棘轮：把当前"带 workspace_id 但缺外键 / 缺 RLS"的表如实登记为

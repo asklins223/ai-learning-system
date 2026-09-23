@@ -736,6 +736,40 @@ BEGIN
       TO ailearn_worker;
   END IF;
 
+  -- 0267：跨空间记忆铺开。`companion-memory-extractor` 在提升一条 global 记忆时
+  -- 显式 SELECT 这一支，所以 worker 必须有 EXECUTE。
+  --
+  -- 这一条曾经漏过：0267 自己 GRANT 了，但本文件上面那句
+  -- `REVOKE ALL PRIVILEGES ON ALL FUNCTIONS ... FROM PUBLIC, ailearn_api, ailearn_worker`
+  -- 会把迁移里的授权整个抹掉，只在**本文件重新 GRANT 过的**才活下来。而下面那份
+  -- "预期权限"清单只抓**多出来的**授权、抓不到**缺失的**，所以 role-bootstrap 不报、
+  -- 调用方又把它 catch 成一行 warn——症状是"另一个空间怎么不记得"，查无实据（doc 34 L8）。
+  IF to_regprocedure('public.ailearn_fanout_global_companion_memory(uuid)') IS NOT NULL THEN
+    REVOKE ALL ON FUNCTION public.ailearn_fanout_global_companion_memory(uuid)
+      FROM PUBLIC, ailearn_api;
+    GRANT EXECUTE ON FUNCTION public.ailearn_fanout_global_companion_memory(uuid)
+      TO ailearn_worker;
+  END IF;
+
+  -- 0273：成员退出/被移出时收掉该空间的记忆（doc 34 L38）。调用方是 ailearn_api
+  -- （leave / removeMember 两条路），函数本身 SECURITY DEFINER 才能越过
+  -- "app.user_id 必须等于行的 user_id" 那条策略——否则 owner 移人时恒匹配 0 行。
+  -- 0276：解散协作空间（doc 34 L6 的 ②）。逐表清理由函数内部按 catalog 生成清单完成，
+  -- 必须是 SECURITY DEFINER；发起者只有 ailearn_api（路由层已经判过 owner/个人空间两道门卫）。
+  IF to_regprocedure('public.ailearn_dissolve_workspace(uuid,uuid)') IS NOT NULL THEN
+    REVOKE ALL ON FUNCTION public.ailearn_dissolve_workspace(uuid, uuid)
+      FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION public.ailearn_dissolve_workspace(uuid, uuid)
+      TO ailearn_api;
+  END IF;
+
+  IF to_regprocedure('public.ailearn_retire_workspace_memories_on_departure(uuid,uuid)') IS NOT NULL THEN
+    REVOKE ALL ON FUNCTION public.ailearn_retire_workspace_memories_on_departure(uuid, uuid)
+      FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION public.ailearn_retire_workspace_memories_on_departure(uuid, uuid)
+      TO ailearn_api;
+  END IF;
+
   -- 0174：pgvector 距离函数（记忆向量检索由 worker 执行；api 检索也需调用）。
   -- vector 和 halfvec 签名均需授权。
   IF to_regprocedure('public.cosine_distance(vector,vector)') IS NOT NULL THEN
@@ -1272,6 +1306,13 @@ BEGIN
       to_regprocedure('public.ailearn_reclaim_orphaned_companion_runs()')
     AND p.oid IS DISTINCT FROM
       to_regprocedure('public.ailearn_fire_due_companion_reminders(integer)')
+    -- 0267：跨空间记忆铺开（与上面那条 GRANT 成对，两份清单一起改）。
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_fanout_global_companion_memory(uuid)')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_retire_workspace_memories_on_departure(uuid,uuid)')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_dissolve_workspace(uuid,uuid)')
     AND p.oid IS DISTINCT FROM
       to_regprocedure('public.cosine_distance(vector,vector)')
     AND p.oid IS DISTINCT FROM
@@ -1334,6 +1375,63 @@ BEGIN
     );
   IF mismatch IS NOT NULL THEN
     RAISE EXCEPTION 'API has unexpected function EXECUTE privileges: %', mismatch;
+  END IF;
+END
+$$;
+
+-- 反向断言：**该有的授权不能缺**（doc 34 L8 的复发防线）。
+--
+-- 上面那两份"预期权限"清单只抓**多出来的** EXECUTE——它防的是权限外溢，防不了权限丢失。
+-- 而"丢授权"恰恰是本文件自己造出来的风险：顶部那句 `REVOKE ALL PRIVILEGES ON ALL FUNCTIONS`
+-- 会把迁移里的 `GRANT EXECUTE` 一并清掉，只有在本文件重新授过的才活下来。
+-- 漏一支的后果不是启动失败，而是**某条业务功能静默 permission denied**——
+-- 如果调用方还 catch 成日志（0267 那支正是如此），就变成"用户说她不记得了，可查无实据"。
+--
+-- 这份清单只列**应用代码显式 SELECT/PERFORM 的**函数（触发器函数不算：触发执行不查
+-- session 用户的 EXECUTE）。新增一支这样的函数时，三处要一起改：迁移的 GRANT、
+-- 上面的 GRANT 块、这里的一行。
+DO $$
+DECLARE
+  missing text;
+BEGIN
+  SELECT string_agg(required.fn, ', ' ORDER BY required.fn)
+    INTO missing
+    FROM (VALUES
+      ('ailearn_worker', 'ailearn_claim_jobs(integer,integer,integer)'),
+      ('ailearn_worker', 'ailearn_reap_stale_jobs(integer,integer)'),
+      ('ailearn_worker', 'ailearn_renew_job_lease(uuid,uuid,text)'),
+      ('ailearn_worker', 'ailearn_finish_job(uuid,uuid,text)'),
+      ('ailearn_worker', 'ailearn_fail_job(uuid,uuid,text,text,integer)'),
+      ('ailearn_worker', 'ailearn_enqueue_companion_thoughts()'),
+      ('ailearn_worker', 'ailearn_reclaim_orphaned_companion_runs()'),
+      ('ailearn_worker', 'ailearn_fire_due_companion_reminders(integer)'),
+      ('ailearn_worker', 'ailearn_enqueue_companion_daily_summaries()'),
+      ('ailearn_worker', 'ailearn_run_companion_memory_maintenance()'),
+      ('ailearn_worker', 'ailearn_reclaim_stale_companion_proposals()'),
+      ('ailearn_worker', 'ailearn_fanout_global_companion_memory(uuid)'),
+      ('ailearn_api', 'ailearn_retire_workspace_memories_on_departure(uuid,uuid)'),
+      ('ailearn_api', 'ailearn_dissolve_workspace(uuid,uuid)'),
+      ('ailearn_api', 'ailearn_find_resumable_companion_journey(uuid,uuid)'),
+      ('ailearn_api', 'ailearn_claim_run_processing(text,integer,integer,timestamp with time zone)'),
+      ('ailearn_api', 'ailearn_mark_run_processing_processed(uuid,text,timestamp with time zone)'),
+      ('ailearn_api', 'ailearn_expire_pending_voice_artifacts(integer)'),
+      ('ailearn_api', 'ailearn_purge_companion_stream_events_ttl(integer)'),
+      ('ailearn_api', 'ailearn_purge_expired_proactive_deliveries(integer)'),
+      ('ailearn_api', 'ailearn_purge_old_ai_audit_log(integer,integer)'),
+      ('ailearn_api', 'ailearn_purge_companion_audit_ttl(integer,integer)'),
+      ('ailearn_api', 'ailearn_purge_invitation_ledger_ttl(integer,integer)'),
+      ('ailearn_api', 'ailearn_purge_tutor_nonces_ttl(integer,integer)')
+    ) AS required(role, fn)
+    -- 函数还不存在（首次 bootstrap、迁移尚未跑到）时不该报错：与本文件其余检查
+    -- 一致的 `to_regprocedure IS NOT NULL` 口径。
+    WHERE to_regprocedure('public.' || required.fn) IS NOT NULL
+      AND NOT has_function_privilege(
+        required.role, to_regprocedure('public.' || required.fn), 'EXECUTE');
+
+  IF missing IS NOT NULL THEN
+    RAISE EXCEPTION
+      'Required function EXECUTE grants are missing (%). REVOKE ALL ON ALL FUNCTIONS above wipes migration grants; re-grant each one in this file.',
+      missing;
   END IF;
 END
 $$;
