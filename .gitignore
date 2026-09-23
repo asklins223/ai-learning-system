@@ -116,10 +116,17 @@ tokens.txt
 **/tmp-*.mjs
 **/tmp-*.mts
 **/tmp-*.ts
+**/tmp-*.tsx
 **/tmp-*.py
 # 同类的反向命名一次性脚本（如 `see2-tmp.mjs`），同样只是本地工具
 **/*-tmp.mjs
 **/*-tmp.mts
+# `__scratch*` 是同一类现场：为某一次排查临时铺的用例，用完即弃
+**/__scratch*
+# 2026-09-23 登录页「内框」的一次性排查脚本（文件头自述「临时验证脚本」，
+# 用法行写的还是 tmp- 名字）。同目录的 `*-probe.mjs` / `*-probe.mts` 是常驻
+# 工具，所以这里只挡这一份，不按名字通配。
+apps/desktop-client/scripts/gate-focus-ring-probe.mjs
 # 客观题流程的本地截图/状态目录
 apps/desktop-client/.objflow-caps/
 # B4 落地实测的过程截图目录（单张 1–4.3MB），与 cardgen-verify/graph-verify 同类
