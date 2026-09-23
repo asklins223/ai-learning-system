@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { DesktopSourceListItem } from "@ailearn/shared/desktop-surface-contracts";
+import type {
+  DesktopSourceCreateRequest,
+  DesktopSourceDuplicateV1,
+  DesktopSourceListItem,
+} from "@ailearn/shared/desktop-surface-contracts";
 import { useRoomStore } from "../../app/room-store";
 import { SpaceSharingNotice } from "../space-sharing-notice";
 import { createRequestMeta, gatewayErrorMessage, unwrapGatewayResult } from "../../app/desktop-client";
@@ -460,6 +464,15 @@ function CaptureStrip({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+  /**
+   * 命中"同一篇"时的提示（审计 F33）：带着那一次想采的请求，用户点"仍然再采一次"
+   * 就带 `force` 重发；点"打开已有来源"就跳到既有那份（不重复建、也不重复花钱解析）。
+   */
+  const [duplicate, setDuplicate] = useState<{
+    readonly existing: DesktopSourceDuplicateV1;
+    readonly request: DesktopSourceCreateRequest;
+    readonly description: string;
+  } | null>(null);
 
   const bytes = captureBytes(content);
   const overLimit = bytes > MAX_CAPTURE_BYTES;
@@ -526,13 +539,46 @@ function CaptureStrip({
     setBusy(true);
     setError(null);
     try {
+      const request = mode === "url"
+        ? { url: trimmedUrl, ...(title.trim() ? { title: title.trim() } : {}) }
+        : { content: trimmedContent, ...(title.trim() ? { title: title.trim() } : {}) };
       const response = await window.ailearn.source.create({
         meta: createRequestMeta(epochRef.current),
-        request: mode === "url"
-          ? { url: trimmedUrl, ...(title.trim() ? { title: title.trim() } : {}) }
-          : { content: trimmedContent, ...(title.trim() ? { title: title.trim() } : {}) },
+        request,
       });
       const created = unwrapGatewayResult(response);
+      // 审计 F33：同一个网址第二次采集默认不建新条目。提示摆在采集栏里（就近），
+      // 两条路都是显式动作：打开原来那份，或者明确说"再采一次"。
+      if (created.duplicateOf) {
+        setDuplicate({
+          existing: created.duplicateOf,
+          request: { ...request, force: true },
+          description: mode === "url" ? trimmedUrl : `这段文本（${formatCaptureSize(captureBytes(trimmedContent))}）`,
+        });
+        return;
+      }
+      setDuplicate(null);
+      reset();
+      await onCaptured(created.source.id, created.source.title);
+    } catch (submitError) {
+      setError(gatewayErrorMessage(submitError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 用户明确说"再采一次"：带 `force` 重发那一次请求（其余字段原样）。 */
+  const submitDuplicate = async () => {
+    if (!duplicate || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await window.ailearn.source.create({
+        meta: createRequestMeta(epochRef.current),
+        request: duplicate.request,
+      });
+      const created = unwrapGatewayResult(response);
+      setDuplicate(null);
       reset();
       await onCaptured(created.source.id, created.source.title);
     } catch (submitError) {
@@ -598,6 +644,41 @@ function CaptureStrip({
           />
 
           {error ? <p className="capture-error" role="alert">{error}</p> : null}
+
+          {/* 审计 F33：同一个网址第二次采集——默认不建新条目，先把这件事说出来。
+              两条路都是显式动作，"打开已有"是默认那一条。 */}
+          {duplicate ? (
+            <div className="capture-duplicate" role="status">
+              <p>
+                这份材料在 {formatRelative(new Date(duplicate.existing.createdAt).toISOString())} 就采过了
+                ——《{duplicate.existing.title}》。
+              </p>
+              <p className="small">{duplicate.description}</p>
+              <div className="capture-form__actions">
+                <button
+                  type="button"
+                  className="button primary"
+                  disabled={busy}
+                  onClick={() => {
+                    const target = duplicate.existing;
+                    setDuplicate(null);
+                    reset();
+                    void onCaptured(target.sourceId, target.title);
+                  }}
+                >
+                  打开已有来源
+                </button>
+                <button
+                  type="button"
+                  className="button"
+                  disabled={busy}
+                  onClick={() => { void submitDuplicate(); }}
+                >
+                  仍然再采一次
+                </button>
+              </div>
+            </div>
+          ) : null}
 
           <div className="capture-form__actions">
             <button type="submit" className="button primary" disabled={busy}>{busy ? "正在采集…" : "开始解析"}</button>

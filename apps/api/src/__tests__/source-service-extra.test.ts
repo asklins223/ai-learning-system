@@ -6,6 +6,8 @@ import { noteBlocks, notes, noteVersions, sources } from "@ailearn/shared/db-sch
 import {
   createNoteFromSource,
   deriveSourceTitle,
+  findDuplicateSource,
+  normalizeSourceUrl,
   createSource,
   deleteSource,
   getSource,
@@ -67,7 +69,7 @@ describe("source creation and reads", () => {
       metadata: { language: "en" },
     });
 
-    assert.deepEqual(result, { source, segments: [] });
+    assert.deepEqual(result, { source, segments: [], duplicateOf: null });
     assert.equal(inserted[0]!.table, sources);
     assert.deepEqual(inserted[0]!.value.metadata, {
       language: "en",
@@ -685,5 +687,103 @@ describe("自动标题的截断（审计 F34）", () => {
     const title = deriveSourceTitle({ url });
     assert.equal(title.length, 61, "URL 按预算切 + 省略号");
     assert.ok(title.endsWith("…"));
+  });
+});
+
+describe("同网址查重（审计 F33）", () => {
+  it("规范化：剥掉跟踪参数、片段与结尾斜杠，参数顺序无关", () => {
+    const base = "https://www.bilibili.com/opus/123";
+    expectSame(base, "https://www.bilibili.com/opus/123?spm_id_from=333.1387.0.0");
+    expectSame(base, "https://www.bilibili.com/opus/123/");
+    expectSame(base, "https://www.bilibili.com/opus/123#reply");
+    expectSame(base, "https://WWW.Bilibili.com/opus/123");
+    expectSame(base, "https://www.bilibili.com/opus/123?utm_source=x&utm_campaign=y");
+    function expectSame(a: string, b: string) {
+      assert.equal(normalizeSourceUrl(a), normalizeSourceUrl(b), `${a} 与 ${b} 应当算同一篇`);
+    }
+  });
+
+  it("规范化：业务参数与路径是身份，不许被抹掉", () => {
+    assert.notEqual(
+      normalizeSourceUrl("https://example.test/watch?v=aaa"),
+      normalizeSourceUrl("https://example.test/watch?v=bbb"),
+    );
+    assert.notEqual(
+      normalizeSourceUrl("https://example.test/a"),
+      normalizeSourceUrl("https://example.test/b"),
+    );
+    // 参数顺序归一（同一组参数换个顺序不该算两份）。
+    assert.equal(
+      normalizeSourceUrl("https://example.test/x?a=1&b=2"),
+      normalizeSourceUrl("https://example.test/x?b=2&a=1"),
+    );
+  });
+
+  it("匹配到就带出既有那份的身份（桩按查询形状只回未归档的行）", async () => {
+    // 真实查询在 SQL 里就排除了归档（`ne(sources.status, ARCHIVED)`），所以桩只回
+    // 未归档的行——桩喂进归档行会让这条用例测到产品不会发生的事。
+    const liveRow = {
+      id: "s2",
+      title: "还在的那篇",
+      createdAt: new Date("2026-09-17T00:00:00Z"),
+      status: SourceStatus.READY,
+      origin: "https://example.test/hit?utm_source=x",
+      metadata: {},
+    };
+    const executor = {
+      select: () => ({ from: () => ({ where: () => ({ limit: async () => [liveRow] }) }) }),
+    } as any;
+
+    const hit = await findDuplicateSource(executor, WORKSPACE_ID, "https://example.test/hit");
+    assert.equal(hit?.sourceId, "s2");
+    assert.equal(hit?.title, "还在的那篇");
+    assert.equal(hit?.createdAt, "2026-09-17T00:00:00.000Z", "回执要说清是哪一天采过");
+
+    // 没有匹配就是 null（不是"随便挑一条"）。
+    const empty = {
+      select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }),
+    } as any;
+    assert.equal(await findDuplicateSource(empty, WORKSPACE_ID, "https://example.test/none"), null);
+  });
+
+  it("createSource 命中重复时不新建：返回既有那份 + duplicateOf；force 才真的建", async () => {
+    const inserted: Array<{ table: unknown; value: any }> = [];
+    const existingDetail = {
+      source: { id: "existing-1", workspaceId: WORKSPACE_ID, type: "url", title: "原来那份", status: SourceStatus.READY },
+      segments: [],
+    };
+    const executor = {
+      execute: async () => undefined,
+      select: () => ({
+        from: (table: unknown) => ({
+          where: () => Object.assign(
+            async () => (table === sources
+              ? [{ id: "existing-1", title: "原来那份", createdAt: new Date("2026-09-17T00:00:00Z"), status: SourceStatus.READY, origin: "https://example.test/same", metadata: {} }]
+              : []),
+            { limit: async () => (table === sources
+              ? [{ id: "existing-1", title: "原来那份", createdAt: new Date("2026-09-17T00:00:00Z"), status: SourceStatus.READY, origin: "https://example.test/same", metadata: {} }]
+              : []) },
+          ),
+        }),
+      }),
+      insert: (table: unknown) => ({
+        values: (value: any) => {
+          inserted.push({ table, value });
+          return { returning: async () => [{ id: "new-1", title: value.title, status: SourceStatus.DRAFT }] };
+        },
+      }),
+      query: {
+        sources: { findFirst: async () => existingDetail.source },
+        sourceSegments: { findMany: async () => [] },
+      },
+    } as any;
+
+    const hit = await createSource(executor, WORKSPACE_ID, USER_ID, {
+      type: "url",
+      url: "https://example.test/same?spm_id_from=x",
+    });
+    assert.equal((hit as any).duplicateOf?.sourceId, "existing-1");
+    assert.equal((hit as any).source.id, "existing-1");
+    assert.equal(inserted.length, 0, "命中重复时不许建任何行（来源与 job 都不许）");
   });
 });

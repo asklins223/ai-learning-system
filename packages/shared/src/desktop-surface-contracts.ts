@@ -64,6 +64,27 @@ export const desktopSourceDetailSchema = z.object({
 export type DesktopSourceDetail = z.infer<typeof desktopSourceDetailSchema>;
 
 /**
+ * 采集时命中的"同一篇"（审计 F33）。
+ *
+ * 非空的 `duplicateOf` 表示这一次**没有新建**，返回的是既有那份的详情：
+ * 同一个网址在两次采集里长得常常不一样（`spm_id_from`、`utm_*`、参数顺序、结尾斜杠），
+ * 规范化后相同就提示"这份材料已在 X 采过"，默认打开既有条目。
+ */
+export const desktopSourceDuplicateV1Schema = z.object({
+  sourceId: uuid,
+  title: z.string(),
+  createdAt: isoTimestamp,
+  status: z.string(),
+}).passthrough();
+export type DesktopSourceDuplicateV1 = z.infer<typeof desktopSourceDuplicateV1Schema>;
+
+/** 采集回执：详情 + 是否命中重复（`null` = 真的新建了一份）。 */
+export const desktopSourceCreateResultV1Schema = desktopSourceDetailSchema.extend({
+  duplicateOf: desktopSourceDuplicateV1Schema.nullable(),
+});
+export type DesktopSourceCreateResultV1 = z.infer<typeof desktopSourceCreateResultV1Schema>;
+
+/**
  * What the client sends to capture a new source.
  *
  * `type` and `title` are optional because the API detects both: an omitted type
@@ -77,6 +98,11 @@ export const desktopSourceCreateRequestSchema = z
     title: z.string().max(500).optional(),
     content: z.string().optional(),
     url: z.string().url().optional(),
+    /**
+     * 审计 F33：同一个网址默认查重、不建新条目；用户明确说"再采一次"时带这个
+     * 标志重发，服务端才真的再建一份。
+     */
+    force: z.boolean().optional(),
   })
   .refine(
     (value) => Boolean(value.url?.trim() || value.content?.trim()),

@@ -822,6 +822,11 @@
 
 .hud-surface .capture-error { margin: 0; color: #f6c3b2; font-size: 10px; line-height: 1.55; }
 .hud-surface .capture-ok { margin: 12px 0 0; color: #f0e2bd; font-size: 10px; line-height: 1.55; }
+/* 审计 F33：同网址重复采集的提示。它不是错误（材料还在，只是已经有一份了），
+   所以用纸色而不是错误红；两条动作各占一行，默认那条是主按钮。 */
+.hud-surface .capture-duplicate { margin: 10px 0 0; padding: 10px 11px; border-radius: 12px; background: rgba(255, 247, 226, 0.14); }
+.hud-surface .capture-duplicate p { margin: 0; }
+.hud-surface .capture-duplicate .capture-form__actions { margin-top: 9px; }
 .hud-surface .capture-locked { margin: 9px 0 0; color: #d7ddcf; font-size: 10px; line-height: 1.55; }
 
 .hud-surface .search-line button { flex: 0 0 auto; }

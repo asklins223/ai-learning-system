@@ -117,6 +117,7 @@ import {
   desktopSourceNotesPageSchema,
   desktopSourceUpdateRequestSchema,
   desktopSourceNoteResultSchema,
+  desktopSourceCreateResultV1Schema,
   desktopSourceArchiveResultSchema,
   desktopSourceRestoreResultSchema,
   desktopSourceReparseResultSchema,
@@ -2195,7 +2196,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
       throw new DesktopGatewayFailure("forbidden", "never");
     }
     return gateway.createSource(input.request, input.meta.requestId);
-  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, desktopSourceDetailSchema);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, desktopSourceCreateResultV1Schema);
 
   installHandler(DESKTOP_IPC_CHANNELS.sourceGet, sourceGetInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "source.detail");

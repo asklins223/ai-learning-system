@@ -31,8 +31,11 @@ const MODULE_CONTRACTS: ModuleContract[] = [
   // handlers 8 → 9 / services 8 → 9：审计 F08 补上 POST /sources/:id/restore
   // （归档的逆操作）。它同样自己开 `withWorkspaceTransaction` 并带上
   // (workspaceId, userId)，服务端那侧 `restoreSource` 也以 `executor: ApiTransaction`
-  // 开头，所以另外两条断言一起过——这里只是把数量对上，不是放宽判据。
-  { name: "source", handlers: 9, services: 9 },
+  // 开头，所以另外两条断言一起过。
+  // services 9 → 10：审计 F33 的 `findDuplicateSource(executor, …)` 也是
+  // `export async function (executor: ApiTransaction, …)` 形状（`normalizeSourceUrl`
+  // 是同步纯函数，不计入这条"每个导出服务都显式收事务执行器"的口径）。
+  { name: "source", handlers: 9, services: 10 },
   // v0.6 新增 /search/drift 与 /search/auto-fix 后：4 路由 / 4 服务
   { name: "search", handlers: 4, services: 4 },
 ];

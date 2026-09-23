@@ -6,6 +6,7 @@ import { extractCandidateLinks } from "@ailearn/shared/desktop-ipc-contracts";
 import { useRoomStore } from "../app/room-store";
 import { createRequestMeta, gatewayErrorMessage, unwrapGatewayResult } from "../app/desktop-client";
 import { resolveSceneMotionMode } from "../scene/scene-motion";
+import { formatRelative } from "./surfaces/surface-data";
 import {
   MAX_CAPTURE_BYTES,
   MAX_DROP_FILES,
@@ -121,7 +122,7 @@ type PromptPhase =
   | { kind: "checking" }
   | { kind: "ready"; capture: "allowed" | "denied" }
   | { kind: "importing" }
-  | { kind: "done"; title: string }
+  | { kind: "done"; title: string; /** 审计 F33：命中同网址的既有条目，这次没有新建。 */ duplicate: boolean }
   | { kind: "failed"; message: string };
 
 export function ClipboardLinkPrompt({ url, onClose }: { readonly url: string; readonly onClose: (seen: boolean) => void }) {
@@ -200,7 +201,7 @@ export function ClipboardLinkPrompt({ url, onClose }: { readonly url: string; re
       });
       const created = unwrapGatewayResult(response);
       dispatchSourceCaptured(created.source.id, created.source.title);
-      setPhase({ kind: "done", title: created.source.title });
+      setPhase({ kind: "done", title: created.source.title, duplicate: Boolean(created.duplicateOf) });
     } catch (error) {
       setPhase({ kind: "failed", message: gatewayErrorMessage(error) });
     }
@@ -230,13 +231,17 @@ export function ClipboardLinkPrompt({ url, onClose }: { readonly url: string; re
         >
           <X size={17} aria-hidden="true" />
         </button>
-        <h2 id="source-intake-title">{phase.kind === "done" ? "已经收下啦" : "收进来源库吗？"}</h2>
+        <h2 id="source-intake-title">{phase.kind === "done" ? (phase.duplicate ? "这份已经有啦" : "已经收下啦") : "收进来源库吗？"}</h2>
         <p className="source-intake-dialog__url" aria-label={`链接地址：${url}`}>
           <strong>{hostOf(url)}</strong>
           <small>{url}</small>
         </p>
         {phase.kind === "done" ? (
-          <p className="source-intake-dialog__hint" role="status">《{phase.title}》正在解析，解析完会出现在来源库里。</p>
+          <p className="source-intake-dialog__hint" role="status">
+            {phase.duplicate
+              ? `这份材料之前已经采过（《${phase.title}》），没有再建一份；打开的是原来那一篇。`
+              : `《${phase.title}》正在解析，解析完会出现在来源库里。`}
+          </p>
         ) : (
           <p className="source-intake-dialog__hint">由后台抓取正文并解析，和采集栏里填链接走的是同一条路。</p>
         )}
@@ -375,7 +380,14 @@ export function GlobalDropOverlay() {
             });
             const detail = unwrapGatewayResult(response);
             created = { sourceId: detail.source.id, title: detail.source.title };
-            outcomes.push({ name: task.name, ok: true, message: "已收下，正在解析。" });
+            outcomes.push({
+              name: task.name,
+              ok: true,
+              // 审计 F33：同一个网址不重复建——如实说"已经有一份了"，而不是假装刚收下。
+              message: detail.duplicateOf
+                ? `已经在 ${formatRelative(detail.duplicateOf.createdAt)} 采过，没有重复建一份。`
+                : "已收下，正在解析。",
+            });
           } catch (error) {
             outcomes.push({ name: task.name, ok: false, message: gatewayErrorMessage(error) });
           }

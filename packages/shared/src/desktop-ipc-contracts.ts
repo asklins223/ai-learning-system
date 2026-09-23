@@ -142,6 +142,7 @@ import {
   type DesktopSourceArchiveResult,
   type DesktopSourceReparseResult,
   type DesktopSourceRestoreResult,
+  type DesktopSourceCreateResultV1,
   desktopNoteListPageSchema,
   type DesktopNoteCreateRequest,
   type DesktopNoteMutationResult,
@@ -1928,7 +1929,11 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
   };
   readonly source: {
     list(input: { meta: RequestMetaV1; cursor?: string; limit?: number; status?: string }): Promise<GatewayResultV1<z.infer<typeof desktopSourceListPageSchema>>>;
-    create(input: { meta: RequestMetaV1; request: DesktopSourceCreateRequest }): Promise<GatewayResultV1<z.infer<typeof desktopSourceDetailSchema>>>;
+    /**
+     * 采集一份来源（审计 F33）：命中同网址的既有条目时**不新建**，返回既有那份的详情
+     * 并带 `duplicateOf`；`request.force` 是用户明确说"再采一次"。
+     */
+    create(input: { meta: RequestMetaV1; request: DesktopSourceCreateRequest }): Promise<GatewayResultV1<DesktopSourceCreateResultV1>>;
     get(input: { meta: RequestMetaV1; sourceId: Uuid }): Promise<GatewayResultV1<z.infer<typeof desktopSourceDetailSchema>>>;
     listNotes(input: { meta: RequestMetaV1; sourceId: Uuid }): Promise<GatewayResultV1<z.infer<typeof desktopSourceNotesPageSchema>>>;
     update(input: { meta: RequestMetaV1; sourceId: Uuid; request: DesktopSourceUpdateRequest }): Promise<GatewayResultV1<z.infer<typeof desktopSourceDetailSchema>>>;

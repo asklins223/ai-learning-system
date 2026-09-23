@@ -135,6 +135,89 @@ export function deriveSourceTitle(input: { url?: string | null; content?: string
   return `${window.trimEnd()}…`;
 }
 
+/**
+ * 链接的规范化形式（审计 F33）。
+ *
+ * 同一个网址在两次采集里常常长得不一样：追踪参数（`spm_id_from`、`utm_*`、
+ * `fbclid` …）、参数顺序、结尾斜杠、`#` 片段。演示库里就躺着两条 bilibili 链接，
+ * 带与不带 `spm_id_from` 各一条，各自长成一篇笔记和一叠卡——用户没有机会知道。
+ *
+ * 只归一"语义上同一篇文章"的那些差异：保留路径与业务参数（`?p=2`、`?v=xxx` 这类
+ * 是内容身份），丢掉跟踪参数、片段、大小写不同的主机名与结尾斜杠。
+ */
+const TRACKING_PARAM_PATTERN = /^(utm_.*|spm_.*|fbclid|gclid|msclkid|yclid|igshid|vd_source|share_source|share_medium|share_plat|share_tag|ref_src|ref_url|from_source|si)$/i;
+
+export function normalizeSourceUrl(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return "";
+  try {
+    const url = new URL(trimmed);
+    url.hash = "";
+    for (const key of [...url.searchParams.keys()]) {
+      if (TRACKING_PARAM_PATTERN.test(key)) url.searchParams.delete(key);
+    }
+    url.searchParams.sort();
+    const query = url.searchParams.toString();
+    const path = url.pathname.replace(/\/+$/, "");
+    return `${url.protocol}//${url.host.toLowerCase()}${path}${query ? `?${query}` : ""}`;
+  } catch {
+    // 不是合法 URL 的字符串（比如粘贴的裸域名）按原样比较：宁可漏报，不可误判成"同一篇"。
+    return trimmed;
+  }
+}
+
+export interface DuplicateSourceHit {
+  sourceId: string;
+  title: string;
+  createdAt: string;
+  status: string;
+}
+
+/**
+ * 这个工作区里有没有"同一篇文章"（审计 F33）。
+ *
+ * 网址存在 `metadata.url` 或 `origin` 里（表上没有独立列），所以按工作区把未归档的
+ * 行读出来逐条比较规范化形式——个人空间的来源规模远在千条以内，一次批量读足够；
+ * 用 SQL 里拼规范化规则会把这些规则复制成两份，反而更难对齐。
+ * 归档的不算重复：那是用户已经放下的东西，重采一份是正常操作。
+ */
+export async function findDuplicateSource(
+  executor: ApiTransaction,
+  workspaceId: string,
+  rawUrl: string,
+): Promise<DuplicateSourceHit | null> {
+  const target = normalizeSourceUrl(rawUrl);
+  if (!target) return null;
+  const rows = await executor
+    .select({
+      id: sources.id,
+      title: sources.title,
+      createdAt: sources.createdAt,
+      status: sources.status,
+      origin: sources.origin,
+      metadata: sources.metadata,
+    })
+    .from(sources)
+    .where(and(eq(sources.workspaceId, workspaceId), ne(sources.status, SourceStatus.ARCHIVED)))
+    .limit(1000);
+  for (const row of rows) {
+    const metadata = (row.metadata ?? {}) as { url?: unknown };
+    const candidate = [
+      typeof metadata.url === "string" ? metadata.url : "",
+      row.origin ?? "",
+    ].find((value) => value.trim().length > 0);
+    if (candidate && normalizeSourceUrl(candidate) === target) {
+      return {
+        sourceId: row.id,
+        title: row.title,
+        createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : String(row.createdAt),
+        status: row.status,
+      };
+    }
+  }
+  return null;
+}
+
 export async function createSource(
   executor: ApiTransaction,
   workspaceId: string,
@@ -153,6 +236,19 @@ export async function createSource(
   if (input.url) metadata.url = input.url;
   // 标记 type 来源，供 Worker 判断是否可修正
   metadata.typeSource = input.type ? "manual" : "auto";
+
+  // 审计 F33：同一个网址的第二次采集默认**不建新条目**——先问用户要不要用原来那份。
+  // 演示库里的两条 bilibili 链接（带与不带 `spm_id_from`）各自长成一篇笔记和一叠卡，
+  // 用户没有任何机会知道它们其实是同一篇。命中时返回既有那份的详情并带 `duplicateOf`，
+  // 由界面提示"已在 X 采过"；用户明确说"再采一次"时带 `force` 回来才真的新建。
+  const captureUrl = input.url?.trim() || (detectedType === "url" ? input.content?.trim() : undefined);
+  if (!input.force && captureUrl) {
+    const duplicate = await findDuplicateSource(executor, workspaceId, captureUrl);
+    if (duplicate) {
+      const existing = await getSource(executor, duplicate.sourceId, workspaceId);
+      if (existing) return { ...existing, duplicateOf: duplicate };
+    }
+  }
 
   // R-016: source 创建和 job 入队在同一事务内，避免入队失败留下永不解析的 DRAFT
   const source = await (async (tx: ApiTransaction) => {
@@ -220,7 +316,8 @@ export async function createSource(
     return row;
   })(executor);
 
-  return getSource(executor, source.id, workspaceId);
+  const detail = await getSource(executor, source.id, workspaceId);
+  return detail ? { ...detail, duplicateOf: null } : detail;
 }
 
 export async function listSources(
