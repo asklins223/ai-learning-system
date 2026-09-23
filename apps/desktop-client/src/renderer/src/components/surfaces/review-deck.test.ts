@@ -31,6 +31,7 @@ function item(overrides: Partial<ReviewItem> = {}): ReviewItem {
     scheduleGeneration: 1,
     dueAt: "2026-09-16T12:00:00.000Z",
     startability: { kind: "ready" },
+    formalValidationBlocked: null,
     ...overrides,
   };
 }
@@ -132,6 +133,7 @@ describe("reviewReasonFacts", () => {
     expect(facts).toEqual({
       ready: true,
       blockedReason: null,
+      formalValidationBlocked: null,
       overdue: "已超过 3 天",
       relatedCards: 2,
       affectedObjectives: 1,
@@ -140,6 +142,28 @@ describe("reviewReasonFacts", () => {
     });
     expect(reviewReasonSentence(facts)).toBe("已超过 3 天 · 同一理解目标还有 1 张到期卡 · 已经排到第 3 轮，所以它排在队首。");
     expect(reviewReasonTag(facts)).toEqual({ label: "排在最前", tone: "red" });
+  });
+
+  /**
+   * 审计 F28：到期、能开始，但评分点缺冻结证据——正式验证判不出结论。
+   * 理由条必须说清"只能当练习、不会改变复习安排"，否则用户做完一切却
+   * 发现排程没动，只会以为是自己答得不好。
+   */
+  it("says a formally unassessable card is practice only, not a queue position", () => {
+    const facts = reviewReasonFacts(
+      item({
+        dueAt: "2026-09-13T12:00:00.000Z",
+        formalValidationBlocked: { reason: "evidence_gap", missingRubricUnitIds: ["u1", "u2"] },
+      }),
+      1,
+      NOW,
+    );
+
+    expect(facts.formalValidationBlocked).toContain("2 个评分点缺原文证据");
+    const sentence = reviewReasonSentence(facts);
+    expect(sentence).toContain("补答补不上");
+    expect(sentence).toContain("不会改变复习安排");
+    expect(sentence).not.toContain("队首");
   });
 
   it("names the seat of a card the reader stepped to instead of claiming the head", () => {

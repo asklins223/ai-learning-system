@@ -50,7 +50,7 @@
 .desktop-app.hud-surface:is([data-theme="night"], [data-theme="dark"]) .learning-run-focus__body { background-image: linear-gradient(rgba(21, 44, 50, .05), rgba(21, 44, 50, .2)), url("/assets/objective-flow/focus-study-desk-night-v1.png"); }
 .desktop-app.hud-surface:is([data-theme="night"], [data-theme="dark"]) .task-surface--validation:has(.learning-run-result-board) { background-image: url("/assets/objective-flow/result-arrival-night-v1.png"); }
 .desktop-app.hud-surface:is([data-theme="night"], [data-theme="dark"]) .learning-run-arrival { background-image: linear-gradient(90deg, rgba(18, 43, 46, .78), rgba(18, 43, 46, .47) 56%, rgba(18, 43, 46, .08)), url("/assets/objective-flow/result-arrival-night-v1.png"); }
-.desktop-app.hud-surface:is([data-theme="night"], [data-theme="dark"]) .learning-run-ceremony { background-image: linear-gradient(rgba(242, 229, 168, .08), rgba(18, 43, 46, .16)), url("/assets/objective-flow/result-arrival-night-v1.png"); }
+.desktop-app.hud-surface:is([data-theme="night"], [data-theme="dark"]) .learning-run-ceremony { background-image: linear-gradient(rgba(12, 28, 44, .76), rgba(16, 32, 47, .88)), url("/assets/objective-flow/result-arrival-night-v1.png"); }
 
 /* Shared, truthful status vocabulary. */
 .hud-surface .objective-mode-badge,
@@ -651,26 +651,47 @@
 .hud-surface .learning-run-result-board[data-acknowledgement="active"] .learning-run-arrival__seal { animation: objective-seal-press 420ms var(--quest-ease-out) both; }
 .hud-surface .learning-run-result-board[data-acknowledgement="idle"] .learning-run-arrival__seal { animation: none; }
 
-/* The one-time success ceremony. Any click/key/Esc exits immediately in React. */
-.hud-surface .learning-run-ceremony { position: absolute; z-index: 80; inset: 0; display: grid; place-items: center; overflow: hidden; color: var(--quest-ink); border-radius: 34px; background: linear-gradient(rgba(242, 229, 168, 0.17), rgba(45, 87, 59, 0.18)), url("/assets/objective-flow/result-arrival-v1.png") center / cover; cursor: pointer; animation: quest-ceremony-in 260ms var(--quest-ease-out) both; }
-.hud-surface .learning-run-ceremony::before { position: absolute; inset: 0; content: ""; background: radial-gradient(circle at center, rgba(255, 244, 190, 0.12) 5%, rgba(37, 74, 53, 0.42) 100%); pointer-events: none; }
-.hud-surface .learning-run-ceremony__glow { position: absolute; width: min(64vw, 680px); aspect-ratio: 1; border-radius: 50%; background: rgba(255, 226, 126, 0.52); filter: blur(15px); transform: scale(0.35); animation: quest-ceremony-glow 1350ms var(--quest-ease-out) both; }
-.hud-surface .learning-run-ceremony__content { position: relative; z-index: 2; display: grid; width: min(620px, calc(100% - 36px)); justify-items: center; gap: 10px; padding: 30px; border: 5px solid rgba(255, 253, 236, 0.95); border-radius: 29px 35px 27px 33px; background: rgba(255, 249, 225, 0.97); box-shadow: 10px 12px 0 rgba(49, 87, 60, 0.2), 0 24px 55px rgba(37, 74, 53, 0.24); text-align: center; }
-.hud-surface .learning-run-ceremony__stamp { display: inline-grid; width: 112px; height: 112px; place-items: center; color: #6d3d24; border: 8px double #9d5632; border-radius: 50%; background: #f7dda1; box-shadow: 0 12px 30px rgba(29, 48, 36, 0.28); font: 750 24px/1.1 "Noto Serif SC Variable", "Songti SC", serif; transform: scale(1.35) rotate(-8deg); animation: quest-stamp 620ms 160ms var(--quest-ease-out) both; }
-.hud-surface .learning-run-ceremony h2 { margin: 7px 0 0; font: 700 clamp(28px, 4vw, 48px)/1.3 "Noto Serif SC Variable", "Songti SC", serif; animation: quest-copy-in 500ms 430ms var(--quest-ease-out) both; }
-.hud-surface .learning-run-ceremony p { max-width: 48ch; margin: 0; color: #655646; font-size: 14px; line-height: 1.65; animation: quest-copy-in 500ms 530ms var(--quest-ease-out) both; }
-.hud-surface .learning-run-ceremony small { margin-top: 10px; color: #766c5c; font-size: 12px; animation: quest-copy-in 500ms 650ms var(--quest-ease-out) both; }
-.hud-surface .learning-run-ceremony__leaf { position: absolute; z-index: 1; width: 28px; height: 54px; border-radius: 85% 12% 85% 12%; background: var(--quest-butter); opacity: 0; }
-.hud-surface .learning-run-ceremony__leaf--one { left: 18%; top: 20%; animation: quest-leaf-one 1100ms 220ms var(--quest-ease-out) both; }
-.hud-surface .learning-run-ceremony__leaf--two { right: 17%; top: 25%; background: var(--quest-water); animation: quest-leaf-two 1150ms 300ms var(--quest-ease-out) both; }
-.hud-surface .learning-run-ceremony__leaf--three { left: 28%; bottom: 15%; background: var(--quest-clay); animation: quest-leaf-three 1050ms 380ms var(--quest-ease-out) both; }
-@keyframes quest-ceremony-in { from { opacity: 0; } to { opacity: 1; } }
-@keyframes quest-ceremony-glow { from { opacity: 0; transform: scale(0.35); } to { opacity: 1; transform: scale(1); } }
-@keyframes quest-stamp { from { opacity: 0; transform: scale(1.35) rotate(-8deg); } to { opacity: 1; transform: scale(1) rotate(-3deg); } }
-@keyframes quest-copy-in { from { opacity: 0; transform: translateY(13px); } to { opacity: 1; transform: translateY(0); } }
-@keyframes quest-leaf-one { from { opacity: 0; transform: translate(-24px, 48px) rotate(-35deg); } to { opacity: 0.78; transform: translate(0, 0) rotate(18deg); } }
-@keyframes quest-leaf-two { from { opacity: 0; transform: translate(32px, 44px) rotate(38deg); } to { opacity: 0.78; transform: translate(0, 0) rotate(-14deg); } }
-@keyframes quest-leaf-three { from { opacity: 0; transform: translate(-20px, 42px) rotate(-28deg); } to { opacity: 0.72; transform: translate(0, 0) rotate(26deg); } }
+/* A viewport-wide, one-time arrival: twin paper-confetti cannons echo the supplied
+   reference. The Companion is above this layer; HUD controls step out until the
+   result sheet is visible again. Historical results never mount this overlay. */
+.desktop-app.hud-surface:has(> .learning-run-ceremony) :is(.hud-rail, .room-control, .home-v2-compact-nav, .return-home) { opacity: 0; pointer-events: none; }
+.hud-surface .learning-run-ceremony { position: fixed; z-index: 31; inset: 0; display: grid; place-items: center; overflow: hidden; color: #44382f; background-color: #183d43; background-image: linear-gradient(rgba(19, 48, 52, .76), rgba(18, 34, 49, .9)), url("/assets/objective-flow/result-arrival-v1.png"); background-position: center; background-size: cover; animation: quest-ceremony-stage 3000ms both; }
+.hud-surface .learning-run-ceremony__aurora { position: absolute; inset: 0; background: radial-gradient(ellipse 46% 54% at 22% 18%, rgba(255, 216, 117, .32), transparent 75%), radial-gradient(ellipse 42% 42% at 78% 82%, rgba(243, 140, 151, .24), transparent 75%), radial-gradient(ellipse 54% 58% at 54% 46%, rgba(114, 206, 202, .2), transparent 75%); animation: quest-ceremony-breathe 2400ms ease-in-out both; pointer-events: none; }
+.hud-surface .learning-run-ceremony__confetti { position: absolute; z-index: 2; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.hud-surface .learning-run-ceremony__orbit { position: absolute; z-index: 1; width: min(65vw, 720px); aspect-ratio: 1; border: 2px solid rgba(255, 233, 167, .36); border-radius: 50%; pointer-events: none; animation: quest-ceremony-orbit 1300ms 160ms var(--quest-ease-out) both; }
+.hud-surface .learning-run-ceremony__orbit--two { width: min(83vw, 930px); border-color: rgba(255, 249, 226, .18); animation-delay: 320ms; }
+.hud-surface .learning-run-ceremony__content { position: relative; z-index: 3; display: grid; width: min(650px, calc(100vw - 350px)); max-height: calc(100vh - 98px); align-content: center; justify-items: center; gap: 10px; margin-right: min(16vw, 205px); overflow-y: auto; padding: clamp(20px, 3vw, 34px) clamp(20px, 4vw, 48px); border: 5px solid #fff7db; border-radius: 34px 40px 31px 37px / 38px 32px 41px 34px; background: #fff8e5; box-shadow: 0 8px 0 rgba(84, 124, 95, .7), 0 30px 80px rgba(8, 30, 31, .38); text-align: center; animation: quest-ceremony-card 580ms 180ms var(--quest-ease-out) both; }
+.hud-surface .learning-run-ceremony__stamp { display: grid; width: 108px; height: 108px; place-content: center; justify-items: center; gap: 2px; color: #683f2d; border: 7px double #a45f43; border-radius: 50%; background: #f9dc8c; box-shadow: 0 7px 0 #d9b36a, 0 14px 28px rgba(62, 43, 29, .2); font: 800 23px/1.1 "Noto Serif SC Variable", "Songti SC", serif; animation: quest-ceremony-stamp 660ms 540ms var(--quest-ease-out) both; }
+.hud-surface .learning-run-ceremony__eyebrow { color: #3d715c; font-size: 12px; font-weight: 900; letter-spacing: .16em; animation: quest-ceremony-copy 420ms 690ms var(--quest-ease-out) both; }
+.hud-surface .learning-run-ceremony h2 { margin: 0; font: 800 clamp(27px, 3.2vw, 45px)/1.24 "Noto Serif SC Variable", "Songti SC", serif; text-wrap: balance; animation: quest-ceremony-copy 440ms 770ms var(--quest-ease-out) both; }
+.hud-surface .learning-run-ceremony p { display: -webkit-box; max-width: 44ch; margin: 0; overflow: hidden; color: #665444; font-size: 15px; line-height: 1.6; -webkit-box-orient: vertical; -webkit-line-clamp: 3; animation: quest-ceremony-copy 440ms 860ms var(--quest-ease-out) both; }
+.hud-surface .learning-run-ceremony__companion { max-width: 50ch; margin-top: 6px; padding: 10px 15px; color: #315d47; border: 1px solid #b8d5bf; border-radius: 19px 23px 18px 22px; background: #eaf5e7; font-size: 14px; font-weight: 650; line-height: 1.5; animation: quest-ceremony-copy 430ms 1080ms var(--quest-ease-out) both; }
+.hud-surface .learning-run-ceremony__companion span { display: inline-block; margin-right: 8px; color: #6c8964; font-size: 12px; font-weight: 900; }
+.hud-surface .learning-run-ceremony__skip { position: absolute; z-index: 4; left: 22px; bottom: 20px; min-width: 190px; min-height: 44px; padding: 10px 17px; color: #fff9e8; border: 1px solid rgba(255, 251, 230, .55); border-radius: 999px; background: rgba(25, 46, 43, .75); font-size: 13px; font-weight: 800; cursor: pointer; }
+.hud-surface .learning-run-ceremony__skip:focus-visible { outline: 3px solid #ffe18a; outline-offset: 3px; }
+@keyframes quest-ceremony-stage { 0% { opacity: 0; } 8%, 86% { opacity: 1; } 100% { opacity: 0; } }
+@keyframes quest-ceremony-breathe { from { opacity: .45; transform: scale(.92); } to { opacity: 1; transform: scale(1.08); } }
+@keyframes quest-ceremony-orbit { from { opacity: 0; transform: scale(.72) rotate(-20deg); } to { opacity: 1; transform: scale(1) rotate(10deg); } }
+@keyframes quest-ceremony-card { from { opacity: 0; transform: translateY(35px) rotate(-2deg); } to { opacity: 1; transform: translateY(0) rotate(-.4deg); } }
+@keyframes quest-ceremony-stamp { from { opacity: 0; transform: scale(1.55) rotate(-20deg); } 65% { opacity: 1; transform: scale(.94) rotate(4deg); } to { opacity: 1; transform: scale(1) rotate(-5deg); } }
+@keyframes quest-ceremony-copy { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+@media (max-width: 900px) { .hud-surface .learning-run-ceremony__content { width: min(560px, calc(100vw - 46px)); margin-right: 0; } }
+@media (max-width: 760px), (max-height: 510px) {
+  .hud-surface .learning-run-ceremony__content { width: min(600px, calc(100vw - 28px)); max-height: calc(100vh - 63px); gap: 5px; padding: 11px 18px; }
+  .hud-surface .learning-run-ceremony__stamp { width: 65px; height: 65px; gap: 0; border-width: 4px; font-size: 16px; }
+  .hud-surface .learning-run-ceremony__stamp svg { width: 17px; height: 17px; }
+  .hud-surface .learning-run-ceremony h2 { font-size: clamp(22px, 4vw, 30px); }
+  .hud-surface .learning-run-ceremony p { font-size: 14px; -webkit-line-clamp: 2; }
+  .hud-surface .learning-run-ceremony__companion { display: -webkit-box; max-width: 100%; margin-top: 0; overflow: hidden; padding: 5px 10px; font-size: 12px; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+  .hud-surface .learning-run-ceremony__skip { left: 9px; bottom: 7px; min-height: 44px; }
+}
+@media (max-height: 260px) {
+  .hud-surface .learning-run-ceremony__content { max-height: calc(100vh - 55px); padding: 7px 12px; border-width: 3px; }
+  .hud-surface .learning-run-ceremony__stamp,
+  .hud-surface .learning-run-ceremony__companion { display: none; }
+  .hud-surface .learning-run-ceremony h2 { font-size: 20px; }
+  .hud-surface .learning-run-ceremony p { -webkit-line-clamp: 1; }
+}
 
 /* Dialogs and processing remain legible at every scale. */
 .hud-surface .learning-run-assessing__wait { margin-left: auto; font-size: 12px; font-weight: 800; }
@@ -860,12 +881,13 @@
   .hud-surface .learning-run-dock__row--act > .button.primary { min-height: 46px; }
 }
 
-/* Lite keeps acknowledgment but removes travel; off/reduced is static. */
-.desktop-app[data-motion-mode="lite"] .learning-run-ceremony { animation-duration: 160ms; }
-.desktop-app[data-motion-mode="lite"] .learning-run-ceremony__glow { animation-duration: 380ms; }
-.desktop-app[data-motion-mode="lite"] .learning-run-ceremony__stamp { animation-duration: 280ms; animation-delay: 40ms; }
-.desktop-app[data-motion-mode="lite"] .learning-run-ceremony :is(h2, p, small) { animation-duration: 220ms; animation-delay: 90ms; }
-.desktop-app[data-motion-mode="lite"] .learning-run-ceremony__leaf { display: none; }
+/* Lite keeps the acknowledgment but skips particles and long travel. */
+.desktop-app[data-motion-mode="lite"] .learning-run-ceremony { animation-duration: 700ms; }
+.desktop-app[data-motion-mode="lite"] .learning-run-ceremony__aurora { animation-duration: 450ms; }
+.desktop-app[data-motion-mode="lite"] .learning-run-ceremony__orbit { display: none; }
+.desktop-app[data-motion-mode="lite"] .learning-run-ceremony__content { animation-duration: 240ms; animation-delay: 30ms; }
+.desktop-app[data-motion-mode="lite"] .learning-run-ceremony__stamp { animation-duration: 260ms; animation-delay: 80ms; }
+.desktop-app[data-motion-mode="lite"] .learning-run-ceremony :is(.learning-run-ceremony__eyebrow, h2, p, .learning-run-ceremony__companion) { animation-duration: 200ms; animation-delay: 150ms; }
 .desktop-app[data-motion-mode="lite"] .learning-run-discovery__card.is-revealed { animation-duration: 220ms; }
 .desktop-app[data-motion-mode="off"] .learning-run-ceremony *,
 .desktop-app[data-motion-mode="off"] .learning-run-ceremony,
@@ -887,3 +909,19 @@
 .hud-surface .queue-reason > p,
 .hud-surface .queue-reason__order,
 .hud-surface .queue-reason__order button { font-size: 12px; line-height: 1.55; }
+
+/* A learning card's thinking strategy is the primary identity, distinct from answer input. */
+.hud-surface .objective-card-type { display: inline-flex; min-height: 36px; align-items: center; gap: 9px; padding: 5px 13px; color: #214d3b; border: 2px solid #397459; border-radius: 13px 17px 14px 16px; background: #f6e5a4; box-shadow: 0 3px 0 rgba(52, 75, 44, 0.16); white-space: nowrap; }
+.hud-surface .objective-card-type > span { font-size: 12px; font-weight: 800; opacity: .75; }
+.hud-surface .objective-card-type > strong { font: 850 16px/1.2 "Noto Serif SC Variable", "Songti SC", serif; }
+.hud-surface .objective-card-type[data-empty="true"] { color: #62594e; border-color: #b4ad97; background: #ece6d2; }
+.hud-surface .objective-card-type--row { min-height: 27px; gap: 5px; padding: 2px 8px; border-width: 1px; box-shadow: none; }
+.hud-surface .objective-card-type--row > strong { font-size: 13px; }
+.hud-surface .objective-card-type--brief { min-height: 40px; border-color: #fff8d7; background: #f6dd91; }
+.hud-surface .objective-card-type--brief > strong { font-size: 18px; }
+.hud-surface .objective-brief__mission > .objective-brief__type-help { color: #3b644d; font-size: 13px; font-weight: 650; }
+@media (max-width: 800px), (max-height: 500px) {
+  .hud-surface .objective-card-type { min-height: 30px; padding: 3px 8px; }
+  .hud-surface .objective-card-type > strong { font-size: 14px; }
+  .hud-surface .objective-card-type--row > strong { font-size: 12px; }
+}

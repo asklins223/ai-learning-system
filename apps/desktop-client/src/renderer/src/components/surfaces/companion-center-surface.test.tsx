@@ -3,12 +3,15 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { GatewayResultV1, SessionContextV1 } from "@ailearn/shared/desktop-ipc-contracts";
 import type {
+  CompanionActivityDeliveryV1,
+  CompanionActivityTimelineV1,
   CompanionDailyMonthV1,
   CompanionDailySummaryV1,
   CompanionHistoryItemV1,
   CompanionMemoryItemV1,
   CompanionMemoryStarMapV2,
   CompanionPersonaV1,
+  CompanionPersonaProfileV1,
 } from "@ailearn/shared/companion-memory-desktop-contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -128,6 +131,17 @@ function persona(): CompanionPersonaV1 {
   return { version: 1, profile: null, presets: [], activePreset: null };
 }
 
+function personaProfile(): CompanionPersonaProfileV1 {
+  return {
+    id: "99999999-9999-4999-8999-999999999999", workspaceId: WORKSPACE_ID,
+    userId: "55555555-5555-4555-8555-555555555555", presetId: null,
+    name: "小星", personalityTags: ["温柔"], speakingStyle: "简洁", examples: [],
+    activeness: "moderate", boundaries: { allowPlayful: true }, revision: 1,
+    familiarity: 0, interactionCount: 0, lastActiveAt: null,
+    createdAt: UPDATED_AT, updatedAt: UPDATED_AT,
+  };
+}
+
 /** 日记页要能渲染出日期导航，前提是这一天的记录读得回来（默认 mock 是「读不到」）。 */
 function dailySummary(overrides: Partial<CompanionDailySummaryV1> = {}): CompanionDailySummaryV1 {
   return {
@@ -179,6 +193,21 @@ function historyItem(): CompanionHistoryItemV1 {
   };
 }
 
+function delivery(index: number): CompanionActivityDeliveryV1 {
+  return {
+    version: 1,
+    deliveryId: `88888888-8888-4888-8888-88888888888${index}`,
+    inboxSequence: index,
+    state: "queued",
+    kind: "memory_candidate",
+    label: `待确认记忆 ${index}`,
+    target: { kind: "memory", memoryId: MEMORY_ID },
+    expired: false,
+    createdAt: `2026-09-2${index}T08:00:00.000Z`,
+    expiresAt: "2026-10-01T08:00:00.000Z",
+  };
+}
+
 function installApi() {
   const api = {
     auth: { getState: vi.fn(async () => ok(session())) },
@@ -191,12 +220,25 @@ function installApi() {
         starMap: vi.fn(async () => ok(starMap())),
         list: vi.fn(async () => ok({ version: 2, items: [memoryItem()] })),
         create: vi.fn(async (): Promise<GatewayResultV1<CompanionMemoryItemV1>> => ok(memoryItem())),
+        confirm: vi.fn(async () => ok(memoryItem())),
+        remove: vi.fn(async () => ok({ version: 1, ok: true })),
+        clear: vi.fn(async () => ok({ deletedCount: 1 })),
       },
-      persona: { get: vi.fn(async () => ok(persona())) },
-      history: { list: vi.fn(async () => ok({ version: 1, items: [historyItem()], nextCursor: null })) },
+      persona: {
+        get: vi.fn(async () => ok(persona())),
+        patch: vi.fn(async () => ok({ version: 1, profile: personaProfile() })),
+      },
+      history: {
+        list: vi.fn(async () => ok({ version: 1, items: [historyItem()], nextCursor: null })),
+        clear: vi.fn(async () => ok({ deletedCount: 1 })),
+      },
+      data: { deleteAudit: vi.fn(async () => ok({ deletedCount: 1 })) },
       learningContext: { get: vi.fn(async () => { throw new Error("learning context unavailable"); }) },
       journey: { bootstrap: vi.fn(async () => { throw new Error("journey unavailable"); }) },
-      activity: { timeline: vi.fn(async () => { throw new Error("activity unavailable"); }) },
+      activity: {
+        timeline: vi.fn(async (): Promise<GatewayResultV1<CompanionActivityTimelineV1>> => { throw new Error("activity unavailable"); }),
+        ack: vi.fn(async () => ok({ ...delivery(1), state: "dismissed" as const })),
+      },
       // 默认是"读不到"，各用例再 mockResolvedValue 成自己的形状。
       // 这里必须把返回类型标出来：不标的话 `async () => { throw }` 推成
       // `Promise<never>`，第一个 mockResolvedValue 就把 mock 钉死在那个对象上。
@@ -288,15 +330,56 @@ function renderCompanionCenter() {
 }
 
 describe("the companion center reads the shell's companion session", () => {
-  it("renders the persisted memory graph instead of throwing on an unprovided context", async () => {
-    installApi();
+  it("shows a real diary excerpt and at most two pending items on the overview", async () => {
+    const api = installApi();
+    api.companion.daily.get.mockResolvedValue(ok(dailySummary()));
+    api.companion.activity.timeline.mockResolvedValue(ok({ version: 1, items: [delivery(1), delivery(2), delivery(3)], nextCursor: 3, serverTime: UPDATED_AT }));
     renderCompanionCenter();
 
-    // 记忆列表与星图索引都必须来自服务端确认的记录（候选不进图，见 universe 用例）。
-    // 同一条记忆会同时出现在左侧列表和右侧星图索引里，所以这里读的是集合。
-    expect((await screen.findAllByText("我更喜欢从例子开始理解概念")).length).toBeGreaterThan(0);
-    const index = screen.getByRole("listbox", { name: "星图等价节点索引" });
+    expect(await screen.findByText("原文摘录")).toBeTruthy();
+    expect(screen.getByText(/晚上十点他说想慢慢来/)).toBeTruthy();
+    expect(await screen.findByText("待确认记忆 3")).toBeTruthy();
+    expect(screen.getByText("待确认记忆 2")).toBeTruthy();
+    expect(screen.queryByText("待确认记忆 1")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /读完整篇/ }));
+    expect(screen.getByRole("tab", { name: "日记" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("keeps failed and unavailable overview sections distinct", async () => {
+    const api = installApi();
+    api.companion.daily.get.mockResolvedValue(ok(dailySummary({ status: "failed", blocks: [], failureReason: "model_unavailable" })));
+    renderCompanionCenter();
+    expect(await screen.findByText("这一天她没能写下来。")).toBeTruthy();
+    expect(screen.getByText("动态暂时读不到。")).toBeTruthy();
+    expect(screen.getByText("可以先从这道例题入手。")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /查看原因/ }));
+    expect(await screen.findByText(/她试了几次没写出来/)).toBeTruthy();
+  });
+
+  it("reports empty overview sections without fabricated counts", async () => {
+    const api = installApi();
+    api.companion.daily.get.mockResolvedValue(ok(dailySummary({ status: "not_generated", blocks: [], generatedAt: null })));
+    api.companion.history.list.mockResolvedValue(ok({ version: 1, items: [], nextCursor: null }));
+    api.companion.activity.timeline.mockResolvedValue(ok({ version: 1, items: [], nextCursor: 0, serverTime: UPDATED_AT }));
+    renderCompanionCenter();
+    expect(await screen.findByText(/这里还没有日记/)).toBeTruthy();
+    expect(screen.getByText("目前没有待回应的事。")).toBeTruthy();
+    expect(screen.getByText("你们还没有留下对话。")).toBeTruthy();
+    expect(document.querySelector(".companion-overview__pending")?.textContent).not.toMatch(/0 件/);
+  });
+  it("opens on the companion desk and loads the star map only when requested", async () => {
+    const api = installApi();
+    renderCompanionCenter();
+    expect(await screen.findByRole("heading", { name: /在这里/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "和她聊聊" })).toBeTruthy();
+    expect(api.companion.memory.starMap).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("tab", { name: "记忆" }));
+    expect(await screen.findByRole("button", { name: /我更喜欢从例子开始理解概念/ })).toBeTruthy();
+    expect(api.companion.memory.starMap).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "查看关联星图" }));
+    const index = await screen.findByRole("listbox", { name: "星图等价节点索引" });
     expect(index.textContent).toContain("牛顿第二定律笔记");
+    expect(api.companion.memory.starMap).toHaveBeenCalledTimes(1);
     expect(screen.queryByText("伴星中心暂时不可用")).toBeNull();
   });
 
@@ -312,10 +395,35 @@ describe("the companion center reads the shell's companion session", () => {
     await screen.findByText("可以先从这道例题入手。");
   });
 
+  it("preserves the memory list search and selection after exploring the star map", async () => {
+    installApi();
+    renderCompanionCenter();
+    fireEvent.click(await screen.findByRole("tab", { name: "记忆" }));
+    const row = await screen.findByRole("button", { name: /我更喜欢从例子开始理解概念/ });
+    fireEvent.click(row);
+    fireEvent.change(screen.getByLabelText("筛选记忆列表"), { target: { value: "例子" } });
+    fireEvent.click(screen.getByRole("button", { name: "查看关联星图" }));
+    await screen.findByRole("listbox", { name: "星图等价节点索引" });
+    fireEvent.click(screen.getByRole("button", { name: "返回记忆列表" }));
+    expect((screen.getByLabelText("筛选记忆列表") as HTMLInputElement).value).toBe("例子");
+    expect(screen.getByRole("button", { name: /我更喜欢从例子开始理解概念/ }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("lands memory and message deep links in their new sections", async () => {
+    installApi();
+    useRoomStore.setState({ companionCenterTarget: { tab: "memory", focusMemoryId: MEMORY_ID } });
+    renderCompanionCenter();
+    expect((await screen.findByRole("button", { name: /我更喜欢从例子开始理解概念/ })).getAttribute("aria-pressed")).toBe("true");
+    useRoomStore.getState().setCompanionCenterTarget({ tab: "dialogue", focusMessageId: MESSAGE_ID });
+    expect(await screen.findByRole("article")).toBeTruthy();
+    await waitFor(() => expect(document.activeElement?.id).toBe(`companion-message-${MESSAGE_ID}`));
+  });
+
   it("scopes destructive confirmation to the selected memory", async () => {
     const api = installApi();
     api.companion.memory.list.mockResolvedValue(ok({ version: 2, items: [memoryItem(), secondMemoryItem()] }));
     renderCompanionCenter();
+    fireEvent.click(await screen.findByRole("tab", { name: "记忆" }));
 
     const first = await screen.findByRole("button", { name: /我更喜欢从例子开始理解概念/ });
     fireEvent.click(first);
@@ -325,6 +433,50 @@ describe("the companion center reads the shell's companion session", () => {
     fireEvent.click(screen.getByRole("button", { name: /这个月完成力学复习/ }));
     expect(screen.queryByRole("button", { name: "确认删除" })).toBeNull();
     expect(screen.getByRole("button", { name: "删除" })).toBeTruthy();
+  });
+
+  it("confirms a candidate and deletes only the selected memory after confirmation", async () => {
+    const api = installApi();
+    const candidate = { ...memoryItem(), candidate: true, userConfirmed: false, pinned: false, sourceType: "model_inferred" as const };
+    api.companion.memory.list.mockResolvedValueOnce(ok({ version: 2, items: [candidate] }));
+    api.companion.memory.list.mockResolvedValue(ok({ version: 2, items: [memoryItem()] }));
+    renderCompanionCenter();
+    fireEvent.click(await screen.findByRole("tab", { name: "记忆" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认写入" }));
+    await waitFor(() => expect(api.companion.memory.confirm).toHaveBeenCalledWith(expect.objectContaining({ memoryId: MEMORY_ID })));
+    fireEvent.click(await screen.findByRole("button", { name: "删除" }));
+    expect(api.companion.memory.remove).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+    await waitFor(() => expect(api.companion.memory.remove).toHaveBeenCalledWith(expect.objectContaining({ memoryId: MEMORY_ID })));
+  });
+
+  it("saves a persona name and scopes data clearing to one confirmed category", async () => {
+    const api = installApi();
+    api.companion.persona.get.mockResolvedValue(ok({ version: 1, profile: personaProfile(), presets: [], activePreset: null }));
+    renderCompanionCenter();
+    fireEvent.click(await screen.findByRole("tab", { name: "设置" }));
+    fireEvent.change(await screen.findByLabelText("她叫什么"), { target: { value: "新名字" } });
+    fireEvent.click(screen.getByRole("button", { name: "改名" }));
+    await waitFor(() => expect(api.companion.persona.patch).toHaveBeenCalledWith(expect.objectContaining({ request: expect.objectContaining({ name: "新名字" }) })));
+    fireEvent.click(screen.getByRole("button", { name: "数据与隐私" }));
+    const clearButtons = screen.getAllByRole("button", { name: "清除" });
+    fireEvent.click(clearButtons[0]);
+    expect(api.companion.memory.clear).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "确认清除" }));
+    await waitFor(() => expect(api.companion.memory.clear).toHaveBeenCalledTimes(1));
+    expect(api.companion.history.clear).not.toHaveBeenCalled();
+    expect(api.companion.data.deleteAudit).not.toHaveBeenCalled();
+  });
+
+  it("processes pending activity only in the activity section", async () => {
+    const api = installApi();
+    api.companion.activity.timeline.mockResolvedValue(ok({ version: 1, items: [delivery(1)], nextCursor: 1, serverTime: UPDATED_AT }));
+    renderCompanionCenter();
+    expect(await screen.findByText("待确认记忆 1")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "忽略" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /查看动态/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "忽略" }));
+    await waitFor(() => expect(api.companion.activity.ack).toHaveBeenCalledWith(expect.objectContaining({ request: expect.objectContaining({ deliveryId: delivery(1).deliveryId, transition: "dismissed" }) })));
   });
 
   /**
@@ -497,6 +649,7 @@ describe("the companion center reads the shell's companion session", () => {
   it("leads the memory card with its text and collapses meta into one line", async () => {
     installApi();
     renderCompanionCenter();
+    fireEvent.click(await screen.findByRole("tab", { name: "记忆" }));
 
     const card = await screen.findByRole("button", { name: /我更喜欢从例子开始理解概念/ });
     const body = card.querySelector("strong");
@@ -521,6 +674,8 @@ describe("the companion center reads the shell's companion session", () => {
     const api = installApi();
     api.companion.memory.starMap.mockResolvedValue(ok(starMapWithOrphan()));
     renderCompanionCenter();
+    fireEvent.click(await screen.findByRole("tab", { name: "记忆" }));
+    fireEvent.click(screen.getByRole("button", { name: "查看关联星图" }));
 
     const index = await screen.findByRole("listbox", { name: "星图等价节点索引" });
     const rows = [...index.querySelectorAll('button[role="option"]')];
@@ -630,22 +785,17 @@ describe("the companion center reads the shell's companion session", () => {
     expect(document.querySelectorAll('.companion-inline-form button[data-busy="true"]')).toHaveLength(1);
   });
 
-  /**
-   * B6（评审 P17）：换页以前是硬切。入场动画挂在面板上，而 React 默认**复用**同一个
-   * DOM 节点（只改 id），动画就不会重放——所以面板必须按页签换身份。
-   * 这条钉的是那个 `key`，不是 CSS。
-   */
-  it("hands the stage panel to a fresh node when the tab changes, so the entrance replays", async () => {
+  it("keeps tab panels associated with the active navigation tab", async () => {
     installApi();
     renderCompanionCenter();
     fireEvent.click(await screen.findByRole("tab", { name: "对话" }));
-    const first = document.querySelector(".companion-stage .companion-tab-panel");
+    const first = document.querySelector("#companion-panel-dialogue");
     expect(first).toBeTruthy();
 
     fireEvent.click(screen.getByRole("tab", { name: "动态" }));
     await screen.findByRole("heading", { name: "动态", level: 3 });
-    const second = document.querySelector(".companion-stage .companion-tab-panel");
+    const second = document.querySelector("#companion-panel-activity");
     expect(second).not.toBe(first);
+    expect(screen.getByRole("tab", { name: "动态" }).getAttribute("aria-controls")).toBe(second?.id);
   });
 });
-

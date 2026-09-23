@@ -47,6 +47,20 @@ export function reviewStartabilityLabel(item: ReviewItem): string {
   return labels[item.startability.reason];
 }
 
+/**
+ * 审计 F28：这张卡到期了，但它的正式验证**现在判不出结论**——评分点还缺冻结
+ * 原文证据，结算闸会 fail closed。它与「冷却中」不是同一件事：冷却等一会儿就
+ * 变了，这个缺口靠等和靠用户补充都不会变。所以这句话必须说清"不是你答得不好"，
+ * 并给出真正能推进的那一步（回到目标补证据），而不是再劝用户做一次。
+ */
+export function reviewFormalValidationBlockedLabel(item: ReviewItem): string | null {
+  if (!item.formalValidationBlocked) return null;
+  const count = item.formalValidationBlocked.missingRubricUnitIds.length;
+  return count > 0
+    ? `这次判不出结论：这条目标还有 ${count} 个评分点缺原文证据，补答补不上`
+    : "这次判不出结论：这条目标的评分点读不出可比对的原文证据";
+}
+
 /** "第 3 张 / 共 128 张" — the deck's own position line, against the server total. */
 export function reviewDeckPosition(index: number, total: number): string {
   return `第 ${index + 1} 张 / 共 ${total} 张`;
@@ -78,6 +92,11 @@ export function reviewOverdueLabel(dueAt: string, now: number): string {
 export type ReviewReasonFacts = {
   readonly ready: boolean;
   readonly blockedReason: string | null;
+  /**
+   * 审计 F28：这张卡能开始，但正式验证判不出结论（评分点缺冻结证据）。
+   * 非 null 时理由条必须说明"做这张只能当练习"，否则用户会以为做完会推进排程。
+   */
+  readonly formalValidationBlocked: string | null;
   readonly overdue: string;
   /**
    * 已载入队列里属于同一个理解目标的到期卡数（含当前这张）。它回答的是
@@ -101,6 +120,7 @@ export function reviewReasonFacts(
   return {
     ready: item.startability.kind === "ready",
     blockedReason: item.startability.kind === "ready" ? null : reviewBlockedReason(item.startability.reason),
+    formalValidationBlocked: reviewFormalValidationBlockedLabel(item),
     overdue: reviewOverdueLabel(item.dueAt, now),
     relatedCards,
     affectedObjectives,
@@ -118,6 +138,11 @@ export function reviewReasonFacts(
 export function reviewReasonSentence(facts: ReviewReasonFacts): string {
   if (!facts.ready) {
     return `${facts.blockedReason}：服务端还没有把它排到可以开始的位置，队列先把它留在这里。`;
+  }
+  // 审计 F28：到期、可以开始，但正式验证判不出结论。这句话必须排在"排在第几位"
+  // 前面——否则用户读完理由条只知道该做哪张，不知道做完也不会推进排程。
+  if (facts.formalValidationBlocked) {
+    return `${facts.overdue}，${facts.formalValidationBlocked}。做这张只能当练习，不会改变复习安排。`;
   }
   const parts = [facts.overdue];
   if (facts.relatedCards > 1) parts.push(`同一理解目标还有 ${facts.relatedCards - 1} 张到期卡`);

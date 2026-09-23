@@ -136,17 +136,28 @@ export function HomeProjectionProvider({ children }: { children: ReactNode }) {
     setState((current) => beginProjectionRefresh(current, scopeRef.current));
     const load = async () => {
       if (!window.ailearn) throw new Error("unavailable");
-      const sessionResponse = await window.ailearn.auth.getState({ meta: createRequestMeta() });
-      const session = unwrapGatewayResult(sessionResponse);
-      if (session.status !== "authenticated" || !session.workspace) {
-        if (generation === requestGenerationRef.current) {
-          scopeRef.current = null;
-          setState({ projection: null, loading: false, failure: "请先登录后再读取学习空间。" });
+      const knownScope = scopeRef.current;
+      /**
+       * 同代刷新不重读会话：伴星投递这类失效说的是"这份投影旧了"，账号与空间都没
+       * 变——上一次已经确认过的 (workspaceId, epoch) 就是答案。每来一条就 /auth/me
+       * 一次，请求数会随事件条数线性增长（F01 的 1047 次/小时里有这一份）。
+       */
+      let requestScope: ProjectionWorkspaceScope | null;
+      if (knownScope && signal.workspaceEpoch === knownScope.workspaceEpoch) {
+        requestScope = knownScope;
+      } else {
+        const sessionResponse = await window.ailearn.auth.getState({ meta: createRequestMeta() });
+        const session = unwrapGatewayResult(sessionResponse);
+        if (session.status !== "authenticated" || !session.workspace) {
+          if (generation === requestGenerationRef.current) {
+            scopeRef.current = null;
+            setState({ projection: null, loading: false, failure: "请先登录后再读取学习空间。" });
+          }
+          return;
         }
-        return;
+        requestScope = scopeFromSession(session);
       }
 
-      const requestScope = scopeFromSession(session);
       if (!requestScope || generation !== requestGenerationRef.current) return;
       const previousScope = scopeRef.current;
       if (!sameProjectionScope(previousScope, requestScope)) {

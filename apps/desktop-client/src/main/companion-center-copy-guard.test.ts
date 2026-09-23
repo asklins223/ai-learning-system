@@ -24,7 +24,9 @@ const read = (relative: string): string => {
   return readFileSync(path as string, "utf8");
 };
 
-const surface = read("src/renderer/src/components/surfaces/companion-center-surface.tsx");
+// 2026-09-23：伴星中心拆成概述/面板两片，这句说明跟着「人格」面板搬到了
+// `companion-center-panels.tsx`。守卫按设计跟着文案走，不跟着文件名。
+const surface = read("src/renderer/src/components/surfaces/companion-center-panels.tsx");
 const activenessLine = surface
   .split("\n")
   .find((text: string) => text.includes("<h4>活跃度</h4>")) ?? "";

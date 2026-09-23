@@ -34,6 +34,7 @@ function listItem(overrides: Record<string, unknown> = {}) {
     conceptLabel: "惯性与质量",
     publicSummary: "质量是惯性大小的唯一量度。",
     knowledgeForm: "fact",
+    cardStrategy: "why",
     lifecycle: "active",
     freshness: "fresh",
     primaryNoteTitle: "物理笔记",
@@ -91,6 +92,13 @@ afterEach(() => {
 });
 
 describe("列表焦点卡的主行动", () => {
+  it("地图焦点明确显示当前学习卡的思考卡型", async () => {
+    installApi([listItem()]);
+    stubRoom();
+    render(<ObjectiveLibrarySurface />);
+    await waitFor(() => expect(document.querySelector(".objective-expedition__focus .objective-card-type")?.textContent).toContain("卡型机制解释"));
+  });
+
   it("远征册可用明确关闭入口和 Esc 退回地图", async () => {
     installApi([listItem()]);
     stubRoom();

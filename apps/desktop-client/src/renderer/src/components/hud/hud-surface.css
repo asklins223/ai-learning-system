@@ -122,21 +122,37 @@
   .desktop-app.hud-surface .content > * { animation: none; }
 }
 
-/* Loading / empty / failure paper shared by every page body. These states are
-   always rendered *inside* a mockup paper (the source index, the search desk, a
-   settings card), so the mockup's `.pinboard` card must not paint a second panel
-   inside it — the state reads as a quiet block on the paper it belongs to.
-   `HudState` keeps the standalone card for pages that have no paper yet. */
-.hud-surface .surface-data-state {
+/* Loading / empty / failure paper shared by every page body. When the state is
+   rendered *inside* a mockup paper (the source index, the search desk, a
+   settings card), the mockup's `.pinboard` card must not paint a second panel
+   inside it, so the panel comes off here.
+   Two page bodies have no paper to sit on: `.content` when a page renders the
+   state as its whole body (the empty note library, source detail, a LearningRun
+   with no run), and the crash shell. Those keep the panel — see the paper rule
+   below for which paper they get. The ink and the type scale are the same on
+   both, so they stay unconditional (`--hud-soft` measures 5.61:1 on cream). */
+.hud-surface .surface-data-state:not(.content > *, .render-error-boundary--shell > *) {
   padding: 0;
   border: 0;
   border-radius: 0;
   background: transparent;
   box-shadow: none;
-  color: var(--hud-soft);
 }
+.hud-surface .surface-data-state { color: var(--hud-soft); }
 .hud-surface .surface-data-state svg { opacity: 0.55; }
 .hud-surface .surface-data-state .title { font-size: 17px; }
+
+/* 整页正文那两种形态自己就是那张纸，所以底色必须和同页正文一致：实测
+   `.source-index` / `.notebook` / `.search-desk` / `.day-route` 六张纸里五张都是
+   cream rgb(255,242,207)，只有母本的 `.pinboard` 是 tan #c49b6d——那正是它读起来
+   "和其他页面不一样"的唯一原因。边框、圆角、阴影不用重写：hud-pages.css:153
+   那条把 `.pinboard` 和这些纸面列在了一起，实测逐字相同。
+   高光写法取自 `.approved-state`（理解书房的独立状态卡，approved-surfaces.css:145），
+   它是全站唯一一处专为"没有纸可落的状态"写的纸面。 */
+.hud-surface .content > .surface-data-state,
+.hud-surface .render-error-boundary--shell > .surface-data-state {
+  background: radial-gradient(circle at 15% 0, rgba(255, 255, 255, 0.64), transparent 36%), var(--hud-cream);
+}
 .hud-surface .surface-data-state__spin { animation: hud-spin 1100ms linear infinite; }
 
 @keyframes hud-spin {
@@ -866,6 +882,7 @@
   transition: transform 140ms var(--hud-ease-out), box-shadow 140ms ease, background-color 140ms ease;
 }
 .hud-surface .search-command button.tag:hover:not(:disabled) { transform: translateY(-1px); }
+.hud-surface .search-command button.tag:active:not(:disabled) { transform: scale(0.96); transition-duration: 110ms; }
 .hud-surface .search-command button.tag[aria-pressed="true"] { outline: 2px solid rgba(175, 82, 44, 0.62); outline-offset: 1px; }
 .hud-surface .search-command button.tag:disabled { opacity: 0.55; cursor: not-allowed; }
 
@@ -1170,6 +1187,7 @@
   transition: background-color 150ms ease, transform 150ms var(--hud-ease-out);
 }
 .hud-surface .settings-ledger__row:hover:not(:disabled):not([aria-current="true"]) { background: rgba(255, 255, 255, 0.62); transform: translateX(2px); }
+.hud-surface .settings-ledger__row:active:not(:disabled):not([aria-current="true"]) { transform: scale(0.985); transition-duration: 110ms; }
 .hud-surface .settings-ledger__row[aria-current="true"] { background: var(--hud-butter); cursor: default; }
 .hud-surface .settings-ledger__row:disabled { cursor: default; opacity: 0.72; }
 /* 与身份印章、空间印章同一个绿：同一枚字母泥印在一页里不该有三种底色。 */
@@ -1186,6 +1204,25 @@
 }
 .hud-surface .settings-ledger__row b { display: block; font: 650 12px/1.3 "Noto Serif SC Variable", "Songti SC", serif; }
 .hud-surface .settings-ledger__row small { display: block; margin-top: 2px; color: var(--hud-soft); font-size: 9px; }
+/* 解散确认是那一行的第二张纸，落在行下面并跨满整行，不是行右侧那一列里的控件。
+   `.settings-ledger__item` 是 `minmax(0, 1fr) auto` 两列；确认面板待在 auto 列时，
+   那一列按 max-content 展开成一句完整警告的宽度，第一列被压成 0px，空间名和印章
+   就从行的底色里溢出来、和面板叠在一起。跨列的解法同 `.settings-invite-receipt > div`。 */
+.hud-surface .settings-ledger__dissolve-panel {
+  display: grid;
+  gap: 8px;
+  grid-column: 1 / -1;
+  padding: 11px 12px;
+  border: 1px solid rgba(175, 82, 44, 0.34);
+  border-radius: 14px 18px 13px 16px;
+  background: #f3e0d6;
+}
+/* 警告字走这一页的说明字号，颜色跟着确认纸面走（同 `settings-inline-state` 的 error 档）。 */
+.hud-surface .settings-ledger__dissolve-panel .settings-group__note { margin: 0; color: #7d3a20; }
+.hud-surface .settings-ledger__dissolve-actions { display: flex; gap: 6px; }
+/* 入口和「退出」是同一档行内动作：不补这一条，它会按 `.button` 本体的 38px 把行撑开。 */
+.hud-surface .settings-ledger__dissolve-trigger { min-height: 0; padding: 0 11px; font-size: 10px; }
+.hud-surface .settings-ledger__dissolve-trigger:disabled { cursor: default; opacity: 0.72; }
 
 /* Visual theme picker (appearance): the two plates the reader actually stands on. */
 .hud-surface .settings-themes { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; margin-top: 11px; }
@@ -1233,11 +1270,13 @@
   .hud-surface .settings-ledger__row,
   .hud-surface .settings-theme { transition: none; }
   .hud-surface .settings-ledger__row:hover:not(:disabled):not([aria-current="true"]),
+  .hud-surface .settings-ledger__row:active:not(:disabled):not([aria-current="true"]),
   .hud-surface .settings-theme:hover { transform: none; }
 }
 .task-surface[data-motion-mode="off"] .settings-ledger__row,
 .task-surface[data-motion-mode="off"] .settings-theme { transition: none; }
 .task-surface[data-motion-mode="off"] .settings-ledger__row:hover:not(:disabled):not([aria-current="true"]),
+.task-surface[data-motion-mode="off"] .settings-ledger__row:active:not(:disabled):not([aria-current="true"]),
 .task-surface[data-motion-mode="off"] .settings-theme:hover { transform: none; }
 
 /* Control block (companion, account, members): a head and the field it owns. */
@@ -1524,7 +1563,8 @@
   .hud-surface .settings-row { gap: 8px; padding: 8px 9px; }
   .hud-surface .settings-row b { font-size: 11px; }
   .hud-surface .settings-row small { font-size: 9px; }
-  .hud-surface .settings-ledger__leave { padding: 0 9px; font-size: 9px; }
+  .hud-surface .settings-ledger__leave,
+  .hud-surface .settings-ledger__dissolve-trigger { padding: 0 9px; font-size: 9px; }
 }
 
 /* Loading and failure replace the cards with a single surface so the directory
@@ -1693,6 +1733,7 @@
 }
 
 .hud-surface .note-links button:hover { background: rgba(255, 250, 238, 0.92); transform: translateY(-1px); }
+.hud-surface .note-links button:active:not(:disabled) { transform: scale(0.97); transition-duration: 110ms; }
 .hud-surface .note-links button:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
 
 /* A note with no version is listed but not openable: it says so through the
@@ -1704,7 +1745,8 @@
 
 @media (prefers-reduced-motion: reduce) {
   .hud-surface .note-links button { transition: none; }
-  .hud-surface .note-links button:hover { transform: none; }
+  .hud-surface .note-links button:hover,
+  .hud-surface .note-links button:active { transform: none; }
 }
 
 .hud-surface .folio-page { overflow: auto; }
@@ -2131,6 +2173,22 @@
   font-weight: 700;
 }
 
+/* 空态里的明示条：上面那套 rgba(255,246,234,.8) 的浅色字是为暗底色写的，
+   落在整页正文那张 cream 纸上实测只有 1.04:1——等于没印。这里换成纸面浅底
+   + `--hud-ink`（实测 13.65:1），强调字用母本已有的 #973d20（实测 6.28:1）。
+   `max-width` 是必需的而不是修饰：状态块是 `place-content: center` 的网格，
+   列宽按 max-content 取，不封顶这一条就永远拿不到折行宽度。 */
+.hud-surface .surface-data-state .space-sharing-notice {
+  max-width: 46em;
+  color: var(--hud-ink);
+  background: rgba(255, 250, 235, 0.62);
+  border-left-color: rgba(151, 61, 32, 0.55);
+}
+
+.hud-surface .surface-data-state .space-sharing-notice b {
+  color: #973d20;
+}
+
 .hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger):not(.room-control-space) svg {
   animation: hud-slot-icon-in 240ms var(--hud-ease-out) backwards;
 }
@@ -2511,283 +2569,32 @@
   .hud-surface .notebook { overflow-x: hidden; }
 }
 
-/* Companion centre V3.1 — 无界记忆星图 + 深色玻璃工作台。
-   页 20 与页 19 同一机制：canvas 全出血铺满整窗，记忆星图不再是有界卡片，
-   没有任何自绘底色——透出 observatory 夜景；星体沿用理解星图的深夜三色
-   （青/金/薄荷）。全部浮层仪表与卡片采用「带奶白外边框的深色玻璃」配方，
-   与 mockup 页 08 的 .companion-room 面板同一族：深夜蓝半透明 +
-   backdrop-filter + 奶白外框 + 内嵌白描边，卡片是白玻璃浮层。
-   布局网格（全出血）：
-   ┌ task-title 薄荷章 ┊ 标题+搜索+筛选玻璃盘 (map-hud) ┈┈┈ room 岛 ┐
-   │ 工作台玻璃   ┊ ┄┄┄┄┄┄┄┄ 星 空（无界） ┄┄┄┄┄┄┄ 节点索引玻璃 │
-   │ (左悬浮)     ┊ ┄┄┄┄┄┄┄┄ 星 空 ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┈┈┈┈┈┈ │
-   └ 返回书房 ┊ 图例 ┉┉┉┉┉┉┉┉┉┉┉┉ 选中条/缩放控件 ┈ 伴星右座 ┘ */
+/* 伴星中心：此处仅保留各分区共用控件样式；页面外壳见 companion-center.css。 */
 
-/* 版心全出血。座位让位规则已在文件头部用 :not(.page-20) 豁免。 */
-.hud-surface.page-20 .content,
-.hud-surface.nav-collapsed.page-20 .content {
-  left: 0;
-  right: 0;
-  top: 0;
-  bottom: 0;
-  overflow: hidden;
-}
 
-.hud-surface .companion-center {
-  /* 这块是"嵌在伴星中心里的那份星图"的调色板，**不是** `.universe-page` 那份的副本。
-     原来注释写着"与 .hud-surface .universe-page 同值"，逐个算过计算值之后不成立：
-     16 个共享变量里 8 个不同（同一块 `universe-canvas-controls` 在星图页是奶油纸
-     `rgb(255,242,207)`，在这里是深夜玻璃 `rgba(11,33,48,.9)`；四条 alpha 还各自漂了
-     2–6 个百分点，比如 `--universe-edge` 0.84 对 0.78）。两份都是有意为之的变体，
-     差别在"整页星图"和"卡片里嵌的小星图"，所以谁也别去"对齐"谁。 */
-  --universe-envelope-a: rgba(121, 206, 220, 0.19);
-  --universe-envelope-b: rgba(233, 198, 111, 0.1);
-  --universe-label: #fff3df;
-  --universe-label-muted: rgba(214, 235, 235, 0.88);
-  --universe-label-backdrop: rgba(8, 24, 39, 0.96);
-  --universe-edge: rgba(121, 206, 220, 0.78);
-  --universe-edge-glow: #79cedc;
-  --universe-source: #e9c66f;
-  --universe-note: #8fc7a7;
-  --universe-card: #ffe4a3;
-  --universe-key-point: #79cedc;
-  --universe-orbit: rgba(121, 206, 220, 0.34);
-  --universe-evidence-track: rgba(121, 206, 220, 0.2);
-  --universe-selected: #ffe4a3;
-  --universe-state-active: #79cedc;
-  --universe-state-pinned: #ffe4a3;
-  --universe-state-candidate: #a89782;
-  --universe-state-linked: #8fc7a7;
-  --universe-state-orphaned: #df7657;
-  --universe-state-misunderstood: #df7657;
-  --universe-state-due: #e9c66f;
-  --universe-state-understood: #8fc7a7;
-  --universe-state-reviewed: #9fc28a;
-  --universe-state-seen: #79cedc;
-  --universe-state-unseen: #a89782;
-  /* 缩放控件（canvas 根内）的落位：让开伴星右座条带。 */
-  --companion-seat-strip-right: 300px;
-  --companion-universe-bar-bottom: 22px;
-  --universe-shell-right: var(--companion-seat-strip-right);
-  --universe-bar-bottom: var(--companion-universe-bar-bottom);
-  /* 工作台落位是布局变量：标题玻璃盘、图例的左缘随它一起算，永不脱节。 */
-  --companion-bench-left: 96px;
-  --companion-bench-gap: 20px;
-  --companion-bench-w: clamp(300px, 26vw, 372px);
-  /* 面板内容的可读宽度上限。B1 之后右区在 1440 下只有 652px，这条不再是约束；
-     它管的是窗口更宽的时候（bench-w 是 clamp，2560 下右区会到 ~1700px）。
-     B3（评审 P9）：原来 860px 对全角中文远超上限——实测日记 13px 时一行 63 个汉字，
-     按 40-48 字收，14px × 46 ≈ 644px。 */
-  --companion-content-measure: 644px;
-  /* 深色玻璃公共配方（mockup .companion-room 同族）。
-     B3（评审 P10）：soft / faint 原来在深玻璃上实测 4.25 / 4.32:1，全线卡在 AA 之下——
-     不是某处写错，是这两档 token 本身定低了，所以每一处用它都刚好差一点点。 */
-  --companion-glass-ink: #ecf2e9;
-  --companion-glass-soft: #c3d6da;
-  --companion-glass-faint: #a5bcc2;
-  --companion-plate-border: 3px solid rgba(255, 252, 235, 0.62);
-  --companion-plate-shadow: 0 18px 38px rgba(1, 12, 25, 0.42), inset 0 0 0 2px rgba(255, 255, 255, 0.05);
-  --companion-glass: rgba(11, 33, 48, 0.85);
-  --companion-glass-blur: blur(20px) saturate(1.18);
-  --companion-card-glass: rgba(255, 255, 255, 0.07);
-  --companion-card-border: 1.5px solid rgba(255, 252, 235, 0.3);
-  --companion-card-shadow: 0 6px 18px rgba(1, 12, 25, 0.3);
-  /* 圆角档位。B4 一度把它们全拍平成对称的 8/12/16，用户 2026-09-22 看真机判
-     「按钮和卡片都太方，没跟项目风格」——那次改反了方向。项目的卡片语言本来就是
-     **宽松的不对称**：HUD 面板 26px 30px 24px 28px、历史条目 17px 20px 17px 6px
-     （带指向角）、home-v2 的卡片 4px 20px 5px 5px；控件才用胶囊与正圆
-     （999px 与 50% 在 home-v2 各出现 6 次与 5 次）。P15 真正的问题不是「不对称」，
-     而是「四档之外还有六处各自手写的值」——现在全部收进下面这一族。 */
-  --companion-radius-chip: 11px 14px 10px 13px;
-  --companion-radius-card: 14px 18px 13px 16px;
-  --companion-radius-plate: 19px 24px 17px 21px;
-  /* 最大的两层容器（工作台、右区舞台）：与 .companion-hud__panel 同一族。 */
-  --companion-radius-shell: 26px 30px 24px 28px;
-  /* 控件档：按钮、页签、下拉、搜索框。44px 高的东西用 8-14px 圆角读起来就是方盒。 */
-  --companion-radius-control: 999px;
-  /* 间距刻度（4 的倍数）：一档一个角色，不再逐处手写 px。 */
-  --companion-gap-inline: 5px;
-  --companion-gap-row: 8px;
-  --companion-gap-block: 12px;
-  --companion-pad-card: 12px 14px;
-  --companion-pad-row: 10px 12px;
-  --companion-pad-panel: 14px 16px 18px;
-  /* 工作台三条横向带（标题、页签、面板）共用的左右内缩：三者对齐到同一条竖线。 */
-  --companion-pad-panel-inline: 16px;
-  --companion-pad-veil: 24px;
-  /* 字号刻度：micro 只用于元信息（时间戳 / 计数 / 单位），body 是正文与控件。
-     B3（评审 P8）：这一档原本 micro 11 / body 12，实测六个页签里出现最多的字号
-     全是 11px——也就是把「元信息尺寸」当成了正文用。1440×810 的桌面上 11px 中文
-     约 1.4mm 字高，读起来要一直凑近。整体上抬一档，并把 leading 收成 token。 */
-  --companion-font-micro: 12px;
-  --companion-font-body: 14px;
-  --companion-font-title: 15px;
-  --companion-font-section: 17px;
-  --companion-font-panel: 18px;
-  --companion-font-page: 24px;
-  --companion-leading: 1.6;
-  /* 动效只有两档。B6（评审 P17）实测伴星段并存 130 / 140 / 160 三档微反馈时长，
-     差别看不出来，只是让每条规则各写各的。微反馈统一走 140ms（现有 9 处就是它，
-     不为凑整数把 16 处一起挪），结构变化走 240ms。缓动本来就只有一个
-     `--hud-ease-out`（18 处），不动。
-     这两个 token 定义在 `.companion-center` 上，**中心之外读不到**：读不到时不是
-     退回 140ms，而是整条 transition 变成 `all 0s`（hover 从此瞬变，源码看不出来）。
-     所以全 HUD 共用的规则（`.chip` / `button.source-sheet` / `.editor-tools` 那几条）
-     继续写 140ms 字面值。实机口径见 tmp-cc-b6.mjs 的「token 作用域」那条断言。 */
-  --companion-motion-micro: 140ms;
-  --companion-motion-structure: 240ms;
-  /* 浮层堆叠序：从星空到菜单一路向上，同区不取等值，避免靠 DOM 顺序决胜。 */
-  --companion-z-bench: 30;
-  --companion-z-legend: 31;
-  --companion-z-index: 32;
-  --companion-z-hud: 33;
-  --companion-z-selection: 34;
-  --companion-z-veil: 35;
-  --companion-z-menu: 40;
-  --companion-z-compact: 42;
-  position: absolute;
-  inset: 0;
-  min-width: 0;
-  min-height: 0;
-  color: var(--companion-glass-ink);
-}
 
-.hud-surface .companion-compact-mode { display: none; }
 
-.hud-surface .companion-map-canvas {
-  position: absolute;
-  inset: 0;
-  min-width: 0;
-  min-height: 0;
-}
 
-/* ── 状态遮罩（载入 / 失败 / 空筛选）：一张居中深色玻璃卡 ── */
-.hud-surface .companion-map-veil {
-  position: absolute;
-  inset: 0;
-  z-index: var(--companion-z-veil);
-  display: grid;
-  place-items: center;
-  padding: var(--companion-pad-veil);
-  pointer-events: none;
-}
 
-.hud-surface .companion-map-veil .companion-section-state {
-  pointer-events: auto;
-  max-width: min(420px, 84%);
-  padding: 22px 26px;
-  border: var(--companion-plate-border);
-  border-radius: var(--companion-radius-plate);
-  background: var(--companion-glass);
-  backdrop-filter: var(--companion-glass-blur);
-  -webkit-backdrop-filter: var(--companion-glass-blur);
-  box-shadow: var(--companion-plate-shadow);
-  color: var(--companion-glass-ink);
-  min-height: 0;
-}
 
-/* ══ 左侧悬浮工作台：深色玻璃 folio ══════════════════════════════════ */
-.hud-surface .companion-workbench {
-  position: absolute;
-  z-index: var(--companion-z-bench);
-  left: var(--companion-bench-left);
-  top: 100px;
-  bottom: 82px;
-  width: var(--companion-bench-w);
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
-  overflow: hidden;
-  border: 4px solid rgba(255, 252, 235, 0.7);
-  border-radius: var(--companion-radius-shell);
-  box-shadow: var(--companion-plate-shadow);
-  background: var(--companion-glass);
-  backdrop-filter: var(--companion-glass-blur);
-  -webkit-backdrop-filter: var(--companion-glass-blur);
-}
 
-.hud-surface .companion-workbench-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--companion-gap-block);
-  padding: var(--companion-gap-block) var(--companion-gap-block) var(--companion-gap-row);
-  padding-inline: var(--companion-pad-panel-inline);
-}
 
-.hud-surface .companion-workbench-header h2 {
-  margin: 0;
-  font: 680 var(--companion-font-page)/1.2 "Noto Serif SC Variable", "Songti SC", serif;
-  color: #fff3df;
-}
 
-.hud-surface .companion-workbench-header p {
-  margin: var(--companion-gap-inline) 0 0;
-  color: var(--companion-glass-soft);
-  font-size: var(--companion-font-micro);
-  line-height: 1.55;
-}
 
-.hud-surface .companion-icon-button {
-  display: grid;
-  flex: 0 0 auto;
-  width: 44px;
-  height: 44px;
-  place-items: center;
-  border: 1.5px solid rgba(255, 252, 235, 0.3);
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--companion-glass-soft);
-  cursor: pointer;
-  transition: background-color var(--companion-motion-micro) var(--hud-ease-out), color var(--companion-motion-micro) var(--hud-ease-out);
-}
 
-.hud-surface .companion-icon-button:hover { background: rgba(255, 255, 255, 0.16); color: #fff3df; }
+
+
+
+
 
 /* 分区页签：夜纸小圆签，选中黄油底（mockup memory-tabs 同款）。
    轨道上限 96px 而不是 1fr：工作台在资料分区会扩成整页主体，1fr 会把一枚
    两字页签拉到 170px 宽；给上限后窄工作台仍填满、宽工作台按内容收拢，
    而分隔线继续横贯整条工作台。 */
-.hud-surface .companion-tabs {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 96px));
-  gap: var(--companion-gap-inline);
-  padding: 0 var(--companion-pad-panel-inline) var(--companion-gap-row);
-  border-bottom: 1px solid rgba(255, 252, 235, 0.14);
-}
 
-.hud-surface .companion-tabs button {
-  min-width: 0;
-  min-height: 44px;
-  border: 0;
-  border-radius: var(--companion-radius-control);
-  background: transparent;
-  color: var(--companion-glass-soft);
-  font-size: var(--companion-font-body);
-  /* B3 把 body 抬到 14px 之后实测六个页签全部折成两行（「记 忆」「对 话」）：
-     372px 工作台里六等分只有 ~52px，两字 28px + 基础按钮的左右 12px 内边距刚好溢出。
-     页签是两字标签，不该参与折行；收窄内边距而不是缩字号。 */
-  padding-inline: var(--companion-gap-row);
-  white-space: nowrap;
-  cursor: pointer;
-  transition: background-color var(--companion-motion-micro) var(--hud-ease-out), color var(--companion-motion-micro) var(--hud-ease-out), box-shadow var(--companion-motion-micro) var(--hud-ease-out);
-}
 
-.hud-surface .companion-tabs button:hover { background: rgba(255, 255, 255, 0.08); color: #fff3df; }
 
-.hud-surface .companion-tabs button.is-active {
-  background: var(--hud-butter, #f3d678);
-  color: #49382b;
-  box-shadow: inset 0 0 0 1px rgba(96, 60, 35, 0.15), 0 5px 11px rgba(1, 12, 25, 0.35);
-}
 
-.hud-surface .companion-tab-panel {
-  min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding: var(--companion-pad-panel);
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 252, 235, 0.28) transparent;
-}
 
 /* ── 工作台内控件（深色玻璃上的白玻璃浮层） ── */
 .hud-surface .companion-panel-stack { display: grid; align-content: start; gap: var(--companion-gap-block); }
@@ -2814,10 +2621,8 @@
 .hud-surface .companion-panel-heading p { margin: var(--companion-gap-inline) 0 0; color: var(--companion-glass-soft); font-size: var(--companion-font-micro); line-height: 1.55; }
 
 /* 基础按钮：白玻璃小签。primary/danger 叠加变体。 */
-.hud-surface .companion-workbench button,
 .hud-surface .companion-stage button,
-.hud-surface .companion-map-veil button,
-.hud-surface .companion-map-selection button {
+.hud-surface .companion-map-selection button{
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2833,9 +2638,13 @@
   transition: background-color var(--companion-motion-micro) var(--hud-ease-out), border-color var(--companion-motion-micro) var(--hud-ease-out), transform var(--companion-motion-micro) var(--hud-ease-out), box-shadow var(--companion-motion-micro) var(--hud-ease-out);
 }
 
-.hud-surface .companion-workbench button.primary,
-.hud-surface .companion-stage button.primary,
-.hud-surface .companion-map-veil button.primary {
+.hud-surface .companion-stage button:not(:disabled):active,
+.hud-surface .companion-map-selection button:not(:disabled):active{
+  transform: scale(0.96);
+  transition-duration: 110ms;
+}
+
+.hud-surface .companion-stage button.primary{
   border-color: #ffd9a4;
   background: linear-gradient(165deg, #f8b072, #eb8747);
   color: #40230f;
@@ -2845,44 +2654,41 @@
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .hud-surface .companion-workbench button.primary:not(:disabled):hover,
-  .hud-surface .companion-stage button.primary:not(:disabled):hover {
+  .hud-surface .companion-stage button.primary:not(:disabled):hover{
     background: linear-gradient(165deg, #ffbd82, #f39a58);
     transform: translateY(-1px);
   }
 }
 
-.hud-surface .companion-workbench button.danger,
-.hud-surface .companion-stage button.danger {
+.hud-surface .companion-stage button.primary:not(:disabled):active{
+  background: linear-gradient(165deg, #f2a869, #e2813f);
+  transform: scale(0.97);
+}
+
+.hud-surface .companion-stage button.danger{
   border-color: rgba(223, 118, 87, 0.55);
   background: rgba(223, 118, 87, 0.18);
   color: #f4b7a2;
 }
 
-.hud-surface .companion-workbench button.danger-quiet,
-.hud-surface .companion-stage button.danger-quiet {
+.hud-surface .companion-stage button.danger-quiet{
   border-color: rgba(223, 118, 87, 0.35);
   background: transparent;
   color: #f4b7a2;
 }
 
-.hud-surface .companion-workbench button:disabled,
-.hud-surface .companion-stage button:disabled,
-.hud-surface .companion-map-veil button:disabled {
+.hud-surface .companion-stage button:disabled{
   cursor: not-allowed;
   opacity: 0.42;
   transform: none;
   box-shadow: none;
 }
 
-.hud-surface .companion-workbench button svg,
-.hud-surface .companion-stage button svg { flex: 0 0 auto; }
+.hud-surface .companion-stage button svg{ flex: 0 0 auto; }
 
 /* 输入类：夜纸上的白玻璃槽。 */
-.hud-surface .companion-workbench input,
 .hud-surface .companion-stage input,
-.hud-surface .companion-workbench textarea,
-.hud-surface .companion-stage textarea {
+.hud-surface .companion-stage textarea{
   min-height: 44px;
   border: 1.5px solid rgba(255, 252, 235, 0.25);
   border-radius: var(--companion-radius-chip);
@@ -2892,26 +2698,18 @@
   font-size: var(--companion-font-body);
 }
 
-.hud-surface .companion-workbench textarea,
-.hud-surface .companion-stage textarea { line-height: 1.55; resize: vertical; }
-.hud-surface .companion-workbench input::placeholder,
+.hud-surface .companion-stage textarea{ line-height: 1.55; resize: vertical; }
 .hud-surface .companion-stage input::placeholder,
-.hud-surface .companion-workbench textarea::placeholder,
-.hud-surface .companion-stage textarea::placeholder { color: var(--companion-glass-faint); }
+.hud-surface .companion-stage textarea::placeholder{ color: var(--companion-glass-faint); }
 
-.hud-surface .companion-workbench button:focus-visible,
 .hud-surface .companion-stage button:focus-visible,
-.hud-surface .companion-workbench input:focus-visible,
 .hud-surface .companion-stage input:focus-visible,
-.hud-surface .companion-workbench textarea:focus-visible,
 .hud-surface .companion-stage textarea:focus-visible,
-.hud-surface .companion-map-veil button:focus-visible,
-.hud-surface .companion-map-hud button:focus-visible,
 .hud-surface .companion-map-index button:focus-visible,
 .hud-surface .companion-map-selection button:focus-visible,
 .hud-surface .companion-search input:focus-visible,
 .hud-surface .companion-search button:focus-visible,
-.hud-surface .companion-select__menu:focus-visible {
+.hud-surface .companion-select__menu:focus-visible{
   outline: 3px solid var(--focus);
   outline-offset: 3px;
 }
@@ -2990,7 +2788,6 @@
   font-weight: 700;
   letter-spacing: 0.04em;
 }
-.hud-surface .companion-map-hud .companion-filter-group .companion-search { flex: 1 1 200px; min-width: 170px; }
 
 /* ── 白玻璃便签卡：手动添加 / 纠错 / 记忆详情 / 动态 / 投递 / 日记 ──────
    同一角色（面板里的一张卡）共用一档内边距、一档圆角、一档组内间隙。 */
@@ -3248,9 +3045,6 @@
   line-height: 1.55;
 }
 /* 面板标题与提示条永远横跨整行，不能掉进多列网格的某一格里。 */
-.hud-surface .companion-tab-panel > .companion-panel-stack > .companion-panel-heading,
-.hud-surface .companion-tab-panel > .companion-panel-stack > .companion-error,
-.hud-surface .companion-tab-panel > .companion-panel-stack > .companion-notice { grid-column: 1 / -1; }
 /* 危险区沿用分组卡形状，只用描边色声明自己是危险区。 */
 .hud-surface .companion-danger-zone { border-color: rgba(223, 118, 87, 0.4); background: rgba(223, 118, 87, 0.06); }
 
@@ -3423,29 +3217,7 @@
 
 /* 标题 + 搜索 + 筛选：顶部玻璃盘，左缘随工作台宽度联动。
    --companion-bench-left 同时喂给工作台与本盘，窄屏只改一处。 */
-.hud-surface .companion-map-hud {
-  position: absolute;
-  z-index: var(--companion-z-hud);
-  top: var(--companion-gap-block);
-  left: calc(var(--companion-bench-left) + var(--companion-bench-w) + var(--companion-bench-gap));
-  right: var(--companion-seat-strip-right);
-  display: flex;
-  flex-direction: column;
-  gap: var(--companion-gap-row);
-  padding: var(--companion-pad-card);
-  border: var(--companion-plate-border);
-  border-radius: var(--companion-radius-plate);
-  background: var(--companion-glass);
-  backdrop-filter: var(--companion-glass-blur);
-  -webkit-backdrop-filter: var(--companion-glass-blur);
-  box-shadow: var(--companion-plate-shadow);
-  color: var(--companion-glass-ink);
-}
 
-.hud-surface .companion-map-headline { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--companion-gap-row) var(--companion-gap-block); }
-.hud-surface .companion-map-headline h2 { margin: 0; font: 680 var(--companion-font-panel)/1.25 "Noto Serif SC Variable", "Songti SC", serif; color: #fff3df; }
-.hud-surface .companion-map-headline > span { flex: 0 0 auto; color: #e9c66f; font-size: var(--companion-font-micro); font-weight: 700; }
-.hud-surface .companion-map-headline p { flex-basis: 100%; margin: 0; color: var(--companion-glass-soft); font-size: var(--companion-font-micro); line-height: 1.55; }
 
 /* 星图工具条沿用 .companion-filter-group：搜索占满剩余行宽。 */
 
@@ -3612,14 +3384,7 @@
 /* 工作台横向扩展后，面板内容统一收在一条可读宽度里、并靠左对齐：
    曾经只有对话与日记两个分区各自写了 `width: min(100%, 860px)`，
    动态 / 人格 / 数据三个分区于是被摊到 1000px 宽。 */
-.hud-surface .companion-tab-panel > .companion-panel-stack {
-  max-width: var(--companion-content-measure);
-}
 
-.hud-surface .companion-center[data-active-tab="activity"] .companion-tab-panel > .companion-panel-stack {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  align-items: start;
-}
 
 /* 「最近动态」是收件箱，不是与「继续学习」并列的第三类状态：
    它满幅排在下面，历史项收进折叠组后不再把两列撑成参差高度。 */
@@ -3655,8 +3420,7 @@
     --companion-seat-strip-right: 280px;
   }
   .hud-surface .companion-map-index { right: 25px; width: 200px; }
-  .hud-surface .companion-map-headline p { display: none; }
-}
+  }
 
 @media (max-width: 940px) {
   .hud-surface .companion-center {
@@ -3675,8 +3439,7 @@
   }
   .hud-surface .companion-map-index { right: 20px; width: 190px; max-height: min(calc(100% - 210px), 380px); }
   .hud-surface .companion-map-legend { max-width: calc(100% - 420px); }
-  .hud-surface .companion-workbench-header p { display: none; }
-}
+  }
 
 @media (max-width: 760px), (max-height: 480px) {
   .hud-surface .companion-center {
@@ -3691,61 +3454,8 @@
        工作台与星图盘都从它下面另起一条，不再压住它的描边。 */
     --companion-compact-top: 74px;
   }
-  .hud-surface .companion-compact-mode {
-    position: absolute;
-    z-index: var(--companion-z-compact);
-    top: 10px;
-    left: var(--companion-bench-left);
-    right: var(--companion-seat-strip-right);
-    display: flex;
-    min-height: 52px;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--companion-gap-row);
-    padding: 4px var(--companion-gap-inline) 4px var(--companion-gap-block);
-    border: var(--companion-plate-border);
-    border-radius: var(--companion-radius-card);
-    background: var(--companion-glass);
-    backdrop-filter: var(--companion-glass-blur);
-    -webkit-backdrop-filter: var(--companion-glass-blur);
-    box-shadow: var(--companion-plate-shadow);
-  }
-  .hud-surface .companion-compact-mode strong { min-width: 0; color: #fff3df; font: 650 var(--companion-font-title)/1.2 "Noto Serif SC Variable", "Songti SC", serif; }
-  .hud-surface .companion-compact-mode > div { display: flex; gap: var(--companion-gap-inline); }
-  /* 视图切换是紧凑模式里唯一的顶层导航，触控目标与其他按钮同档（44px）。 */
-  .hud-surface .companion-compact-mode button {
-    display: inline-flex;
-    min-width: 44px;
-    min-height: 44px;
-    align-items: center;
-    justify-content: center;
-    gap: var(--companion-gap-inline);
-    border: 0;
-    border-radius: var(--companion-radius-chip);
-    padding: var(--companion-gap-inline) var(--companion-gap-row);
-    background: transparent;
-    color: var(--companion-glass-soft);
-    font-size: var(--companion-font-body);
-    cursor: pointer;
-  }
-  .hud-surface .companion-compact-mode button[aria-pressed="true"] { background: var(--hud-butter, #f3d678); color: #49382b; }
-  .hud-surface .companion-compact-mode button:disabled { cursor: not-allowed; opacity: 0.4; }
-  .hud-surface .companion-workbench,
-  .hud-surface .companion-center:not([data-active-tab="memory"]) .companion-workbench {
-    left: var(--companion-bench-left);
-    right: var(--companion-seat-strip-right);
-    top: var(--companion-compact-top);
-    bottom: var(--companion-universe-bar-bottom);
-    width: auto;
-    border-radius: var(--companion-radius-plate);
-  }
-  .hud-surface .companion-workbench-header { align-items: center; padding: var(--companion-gap-row) var(--companion-gap-block) var(--companion-gap-inline); }
-  .hud-surface .companion-workbench-header h2 { font-size: var(--companion-font-panel); }
-  .hud-surface .companion-workbench-header p { display: none; }
-  .hud-surface .companion-tabs { padding: 0 var(--companion-gap-row) var(--companion-gap-inline); }
-  .hud-surface .companion-tabs button { min-height: 44px; padding: var(--companion-gap-inline) 2px; font-size: var(--companion-font-micro); }
-  .hud-surface .companion-tab-panel { padding: var(--companion-gap-row) 9px var(--companion-gap-block); }
-  .hud-surface .companion-panel-stack { gap: var(--companion-gap-row); }
+        /* 视图切换是紧凑模式里唯一的顶层导航，触控目标与其他按钮同档（44px）。 */
+                      .hud-surface .companion-panel-stack { gap: var(--companion-gap-row); }
   .hud-surface .companion-panel-heading { display: grid; }
   .hud-surface .companion-heading-actions { justify-content: flex-start; }
   .hud-surface .companion-panel-heading p,
@@ -3757,26 +3467,8 @@
   .hud-surface .companion-data-groups > section > h4 { font-size: var(--companion-font-title); }
   .hud-surface .companion-persona-groups > section,
   .hud-surface .companion-data-groups > section { padding: var(--companion-gap-row); }
-  .hud-surface .companion-center[data-compact-view="content"] .companion-map-canvas,
-  .hud-surface .companion-center[data-compact-view="content"] .companion-map-hud,
-  .hud-surface .companion-center[data-compact-view="content"] .companion-map-legend,
-  .hud-surface .companion-center[data-compact-view="content"] .companion-map-index,
-  .hud-surface .companion-center[data-compact-view="content"] .companion-map-selection,
-  .hud-surface .companion-center[data-compact-view="map"] .companion-workbench {
-    visibility: hidden;
-    pointer-events: none;
-  }
-  /* 紧凑下星图 chrome 与工作台共用同一条左右边界，二者由视图切换二选一。 */
-  .hud-surface .companion-map-hud {
-    top: var(--companion-compact-top);
-    left: var(--companion-bench-left);
-    right: var(--companion-seat-strip-right);
-    padding: var(--companion-gap-row);
-    gap: var(--companion-gap-row);
-  }
-  .hud-surface .companion-map-headline h2 { font-size: var(--companion-font-title); }
-  .hud-surface .companion-map-headline p { display: none; }
-  .hud-surface .companion-map-legend { display: none; }
+    /* 紧凑下星图 chrome 与工作台共用同一条左右边界，二者由视图切换二选一。 */
+        .hud-surface .companion-map-legend { display: none; }
   .hud-surface .companion-map-index {
     top: auto;
     left: var(--companion-bench-left);
@@ -3798,30 +3490,26 @@
     padding: var(--companion-gap-row) 9px;
   }
   .hud-surface .companion-map-selection > span { display: none; }
-  .hud-surface .companion-center[data-active-tab="activity"] .companion-tab-panel > .companion-panel-stack,
   .hud-surface .companion-center[data-active-tab="persona"] .companion-persona-groups,
-  .hud-surface .companion-center[data-active-tab="data"] .companion-data-groups,
-  .hud-surface .companion-center[data-active-tab="data"] .companion-danger-zone .companion-data-actions { grid-template-columns: minmax(0, 1fr); }
+.hud-surface .companion-center[data-active-tab="data"] .companion-data-groups,
+.hud-surface .companion-center[data-active-tab="data"] .companion-danger-zone .companion-data-actions{ grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (prefers-reduced-transparency: reduce) {
-  .hud-surface .companion-workbench,
-  .hud-surface .companion-map-hud,
   .hud-surface .companion-map-legend,
-  .hud-surface .companion-map-index,
-  .hud-surface .companion-map-selection,
-  .hud-surface .companion-map-veil .companion-section-state,
-  .hud-surface .companion-select__menu,
-  .hud-surface .companion-compact-mode { background: #0d2739; backdrop-filter: none; -webkit-backdrop-filter: none; }
+.hud-surface .companion-map-index,
+.hud-surface .companion-map-selection,
+.hud-surface .companion-select__menu{ background: #0d2739; backdrop-filter: none; -webkit-backdrop-filter: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .hud-surface .companion-center button,
   .hud-surface .companion-select__trigger svg { transition-duration: 0.01ms; }
-  .hud-surface .companion-workbench button:hover,
   .hud-surface .companion-stage button:hover,
-  .hud-surface .companion-map-veil button:hover,
-  .hud-surface .companion-map-selection button:hover { transform: none; }
+  .hud-surface .companion-stage button:active,
+  .hud-surface .companion-stage button.primary:active,
+.hud-surface .companion-map-selection button:hover,
+.hud-surface .companion-map-selection button:active{ transform: none; }
 }
 /* ---------------------------------------------------------------------------
  * Note editor (mockup 09): the mockup's decorative toolbar becomes the real
@@ -5693,80 +5381,9 @@
   .hud-surface .reveal-slip { transition: none; }
 }
 
-/* Generation settings: the knobs the run contract accepts, on the reading page
-   that starts the run. */
-.hud-surface .generation-options {
-  display: grid;
-  gap: 8px;
-  margin: 16px 0 0;
-  padding: 14px 16px;
-  border: 2px dashed var(--hud-line-strong);
-  border-radius: 15px 19px 14px 17px;
-  background: rgba(255, 250, 237, 0.6);
-}
-
-.hud-surface .generation-options legend {
-  padding: 0 6px;
-  color: #5b735d;
-  font-size: 9px;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-}
-
-.hud-surface .generation-options__row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-}
-
-.hud-surface .generation-options__label {
-  min-width: 56px;
-  color: var(--hud-soft);
-  font-size: 10px;
-  font-weight: 750;
-}
-
-.hud-surface .chip {
-  padding: 4px 10px;
-  color: var(--hud-soft);
-  border: 1px solid var(--hud-line-strong);
-  border-radius: 12px 15px 11px 14px;
-  background: transparent;
-  font: 700 10px "Noto Sans SC Variable", sans-serif;
-  cursor: pointer;
-  transition: background-color 140ms var(--hud-ease-out), color 140ms var(--hud-ease-out);
-}
-
-.hud-surface .chip:hover { color: var(--hud-ink); background: rgba(230, 214, 184, 0.5); }
-.hud-surface .chip.on { color: #3e2d22; background: var(--hud-mint); border-color: rgba(91, 115, 93, 0.5); }
-.hud-surface .chip:disabled { cursor: not-allowed; opacity: 0.6; }
-.hud-surface .chip:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
-
-.hud-surface .generation-options > .small { margin: 0; color: var(--hud-soft); }
-
-@media (prefers-reduced-motion: reduce) {
-  .hud-surface .chip { transition: none; }
-}
-
 /* A note longer than the reading window says so on the paper instead of
    rendering ten thousand blocks in one paint. */
 .hud-surface .reading-body .reading-more { justify-content: center; padding: 8px 0 4px; }
-
-/* The optional note attached to a feedback-carrying regeneration. */
-.hud-surface .generation-options__note {
-  flex: 1 1 220px;
-  min-width: 0;
-  padding: 4px 9px;
-  color: var(--hud-ink);
-  border: 1px solid var(--hud-line-strong);
-  border-radius: 10px 13px 10px 12px;
-  background: rgba(255, 255, 255, 0.6);
-  font: 11px "Noto Sans SC Variable", sans-serif;
-  outline: none;
-}
-
-.hud-surface .generation-options__note:focus { border-color: #af522c; }
 
 /* ===========================================================================
  * Note paper (pages 08/09): pinned chrome, one scrolling body, and the ruling.
@@ -6164,22 +5781,6 @@
   color: #9fc0d8;
 }
 
-.hud-surface .space-sharing-notice {
-  margin: 8px 0 0;
-  padding: 7px 10px;
-  border-left: 3px solid rgba(255, 231, 178, 0.55);
-  border-radius: 0 10px 10px 0;
-  background: rgba(255, 247, 220, 0.09);
-  color: rgba(255, 246, 234, 0.8);
-  font-size: 10px;
-  line-height: 1.55;
-}
-
-.hud-surface .space-sharing-notice b {
-  color: #fff1a8;
-  font-weight: 700;
-}
-
 /* ===========================================================================
  * B0 右上灵动岛：折叠态回收槽位宽度
  * docs/plans/learning-companion/30-companion-center-ui-review-2026-09-21.md §4
@@ -6373,69 +5974,12 @@
  * ======================================================================== */
 
 /* 工作台原来的第三行网格位被这个包装层接管；面板/摘要填它。 */
-.hud-surface .companion-bench-panel {
-  min-height: 0;
-  display: grid;
-  grid-template-rows: minmax(0, 1fr);
-}
-.hud-surface .companion-bench-panel > .companion-tab-panel { height: 100%; }
 
 /* 右区：与左栏同一条上下基线，左缘由左栏的变量派生，永不脱节。
    表面语言与工作台同一套（B2 会把两者一起收成一个 token）。 */
-.hud-surface .companion-stage {
-  position: absolute;
-  z-index: var(--companion-z-bench);
-  top: 100px;
-  bottom: 82px;
-  left: calc(var(--companion-bench-left) + var(--companion-bench-w) + var(--companion-bench-gap));
-  right: var(--companion-seat-strip-right);
-  overflow: hidden;
-  border: 4px solid rgba(255, 252, 235, 0.7);
-  border-radius: var(--companion-radius-shell);
-  box-shadow: var(--companion-plate-shadow);
-  background: var(--companion-glass);
-  backdrop-filter: var(--companion-glass-blur);
-  -webkit-backdrop-filter: var(--companion-glass-blur);
-}
-.hud-surface .companion-stage > .companion-tab-panel { height: 100%; }
 
 /* 左栏在非记忆页签的「伴星此刻」。它是跳转入口，不是只读表格，
    所以整行可点、右侧给出当前值。 */
-.hud-surface .companion-glance {
-  display: grid;
-  align-content: start;
-  min-height: 0;
-  gap: var(--companion-gap-block);
-  overflow-y: auto;
-  padding: var(--companion-pad-panel);
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 252, 235, 0.28) transparent;
-}
-.hud-surface .companion-glance-head h3 { margin: 0; color: var(--companion-glass-ink); font: 750 var(--companion-font-panel)/1.3 "Noto Serif SC Variable", "Songti SC", serif; }
-.hud-surface .companion-glance-head p { margin: 4px 0 0; color: var(--companion-glass-soft); font-size: var(--companion-font-micro); line-height: 1.5; }
-.hud-surface .companion-glance-list { display: grid; gap: var(--companion-gap-row); }
-.hud-surface .companion-glance-list > button {
-  display: flex;
-  min-height: 44px;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--companion-gap-block);
-  padding: var(--companion-pad-row);
-  border: var(--companion-card-border);
-  border-radius: var(--companion-radius-card);
-  background: var(--companion-card-glass);
-  box-shadow: var(--companion-card-shadow);
-  color: var(--companion-glass-soft);
-  font-size: var(--companion-font-body);
-  text-align: left;
-  cursor: pointer;
-  transition:
-    background-color var(--companion-motion-micro) var(--hud-ease-out),
-    color var(--companion-motion-micro) var(--hud-ease-out);
-}
-.hud-surface .companion-glance-list > button:hover { background: rgba(255, 255, 255, 0.1); color: #fff3df; }
-.hud-surface .companion-glance-list > button > span { min-width: 0; }
-.hud-surface .companion-glance-list > button > b { color: var(--companion-glass-ink); font-weight: 700; white-space: nowrap; }
 
 /* B1 收尾：右区只有 652px，原来按 1044px 排的三栏网格被压成 ~204px 一栏。
    实测（1440×810 截图）：人格预设描述折到 4 行、活跃度与边界两栏下半截全空；
@@ -6503,21 +6047,6 @@
    `border: 1.5px solid transparent`（为了选中态不跳动而留的空壳）。B4 重写这一族
    规则时已就地改成 `border: 0` + 选中态 inset 环，不再需要末尾覆盖块。 */
 
-/* P3 的最后一块奶油纸：`.task-title` 是全局 HUD 页壳发的标题盘（HudPage.tsx:23），
-   伴星中心自己整套是深玻璃，于是同一屏出现两种盘子。这里只把伴星中心这一页的
-   标题盘收成「夜空的上一行字」，不动其它页——别的页背景是浅色纸，撤盘会掉对比。
-   用 :has 而不是页码类：页码是 mockup 编号，会随页面重排漂移。 */
-.hud-surface:has(.companion-center) .task-title {
-  border: 0;
-  background: transparent;
-  box-shadow: none;
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  padding: 0;
-}
-.hud-surface:has(.companion-center) .task-title h1 { color: #fff3df; text-shadow: 0 2px 10px rgba(1, 12, 25, 0.65); }
-.hud-surface:has(.companion-center) .task-title p { color: rgba(214, 235, 235, 0.86); }
-
 /* B2 补正：上一条只改了 `--universe-surface`，实测缩放条仍然是 `rgb(255,242,207)`。
    真源在另一族别名上——`understanding-universe.css:2170` 给的是
    `background: var(--universe-ac-plate)`，而 `--universe-ac-plate: var(--hud-cream)`
@@ -6556,8 +6085,6 @@
 
 /* ② 记忆卡行用的是 chip 圆角、而它是卡不是签；「伴星此刻」行用卡圆角但正文色走了
      soft。两边收成同一张卡。 */
-.hud-surface .companion-center .companion-glance-list > button { color: var(--companion-glass-ink); }
-.hud-surface .companion-center .companion-glance-list > button > span { color: var(--companion-glass-soft); }
 
 /* ===========================================================================
  * 日记的日期筛选改用聊天记录那张月历（2026-09-22 用户指定）
@@ -6682,9 +6209,6 @@
 
 /* 换页以前是硬切：实测整个伴星中心只有 1 个元素带入场动画。
    旧内容不做退场——那要两套 DOM 同时挂着，代价比这 240ms 的观感大。 */
-.hud-surface .companion-tab-panel {
-  animation: companion-panel-in var(--companion-motion-structure) var(--hud-ease-out) backwards;
-}
 
 @keyframes companion-panel-in {
   from { opacity: 0; transform: translateY(-6px); }
@@ -6722,9 +6246,8 @@
 @media (prefers-reduced-motion: reduce) {
   /* 这三条是新加的，不走 `--motion-scale` 那类间接量——变量一旦没解析成功，
      整条声明会静默失效（B0/B5 各栽过一次），这里直接写死关掉的动画。 */
-  .hud-surface .companion-tab-panel,
   .hud-surface .companion-notice,
-  .hud-surface .companion-center button[data-busy="true"]::before { animation: none; }
+.hud-surface .companion-center button[data-busy="true"]::before{ animation: none; }
 }
 
 /* ══ B7（评审 §7）：小尺寸下把高度还给内容区、把页签点得动 ══════════════
@@ -6739,96 +6262,10 @@
 /* 页签：窄屏改成横向可滑的 chip 条，每颗保底 44×44。滚动条藏掉但保留滚动，
    因为六颗 × 44 在 252px 的工作台里本来就装不下——装不下就该能滑，不该压扁。 */
 @media (max-width: 1100px) {
-  .hud-surface .companion-tabs {
-    display: flex;
-    overflow-x: auto;
-    overscroll-behavior-x: contain;
-    scrollbar-width: none;
-  }
-  .hud-surface .companion-tabs::-webkit-scrollbar { display: none; }
-  .hud-surface .companion-tabs button { flex: 0 0 auto; min-width: 44px; padding-inline: 12px; }
-}
-
-/* 工作台的高度预算跟着视口收：100/82 是给顶栏岛和底栏留的，它们在矮视口里
-   并没有变高，留同样的绝对值是让内容区按比例变没。 */
-@media (max-height: 700px) {
-  .hud-surface .companion-workbench { top: 76px; bottom: 58px; }
-}
-@media (max-height: 560px) {
-  .hud-surface .companion-workbench { top: 64px; bottom: 46px; }
-}
-
-/* 面板自己的 chrome：说明句在矮视口里是第一个该让位的（它复述页签已经说过的事），
-   筛选条折行是第二个——折一行就是白丢 44px 列表高度。 */
-@media (max-height: 660px) {
-  /* 标题带里 h3 说的是页签已经说过的事（「伴星记忆」/ 页签「记忆」），
-     两个动作按钮是入口、不能动，所以这一行矮下来只能靠 h3 让位。 */
-  .hud-surface .companion-panel-heading h3,
-  .hud-surface .companion-panel-heading p { display: none; }
-  .hud-surface .companion-workbench-header p { display: none; }
-  /* 只收面板里那条筛选条。**不能写成全局的 `.companion-filter-group`**：
-     星图 chrome 用的是同一个类，第一版这么写把「全部固定状态 / 全部实体」两颗下拉
-     顶出盘子右缘 82px 与 186px（盘子是 overflow:visible，控件直接飘到星空上）。 */
-  .hud-surface .companion-tab-panel .companion-filter-group { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
-  .hud-surface .companion-tab-panel .companion-filter-group::-webkit-scrollbar { display: none; }
-  .hud-surface .companion-tab-panel .companion-filter-group > span { display: none; }
-  .hud-surface .companion-tab-panel .companion-filter-group .companion-select { flex: 0 0 auto; }
-  /* 标题带里的两个按钮在 244px 宽的列里会折成两行（96px），折一行就又是白丢的 44px：
-     收成一行、装不下就横向滑。h3 已经不在了，这一行就是这一屏的工具条——
-     它在网格里原本被钉在第 2 列（「标题在左、动作在右」那条给的 `grid-column: 2`），
-     所以既要跨回整行、又要左对齐，否则看起来像悬空的半截。 */
-  .hud-surface .companion-panel-heading > :is(.companion-heading-actions, button) { grid-column: 1 / -1; justify-self: start; }
-  .hud-surface .companion-heading-actions { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
-  .hud-surface .companion-heading-actions::-webkit-scrollbar { display: none; }
-  .hud-surface .companion-heading-actions > button { flex: 0 0 auto; }
-  /* 工作台标题带里的名字在矮视口里用紧凑档那一号字（紧凑分支本来就是这么做的，
-     这里只是把同一件事扩展到「窗口矮但宽度没到 760」的情况）：78 → 56，
-     实测正好补上 900×560 那第二张卡差的 6px。 */
-  .hud-surface .companion-workbench-header { padding-block: var(--companion-gap-row) var(--companion-gap-inline); }
-  .hud-surface .companion-workbench-header h2 { font-size: var(--companion-font-panel); }
-  /* 列表至少留两张卡的高度：chrome 一旦长回来，被挤的是它自己，不是「看不见的那一屏」。 */
-  .hud-surface .companion-record-list { min-height: 152px; }
-}
-
-/* 紧凑模式的「资料」视图：底部那 58px 是留给星图缩放条的，而这一视图里星图
-   chrome 整块隐藏（`data-compact-view="content"`）——留着就是白占 58px，
-   实测正好是一张记忆卡加一条间距。 */
-@media (max-width: 760px), (max-height: 480px) {
-  .hud-surface .companion-center[data-compact-view="content"] {
-    --companion-universe-bar-bottom: 10px;
-    --companion-compact-top: 68px;
-  }
-  /* 紧凑档的列有 480px 宽（非紧凑的工作台只有 244-279，硬并一行会挤到看不清筛选值），
-     所以只在这里把「搜索 + 筛选」并成一行：chrome 从 132 降到 88，实测正好换回
-     一张完整记忆卡（卡片 67px 高，改前这一档能看见的完整卡是 0）。 */
-  .hud-surface .companion-center[data-active-tab="memory"] .companion-panel-stack {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-  .hud-surface .companion-center[data-active-tab="memory"] .companion-panel-heading,
-  .hud-surface .companion-center[data-active-tab="memory"] .companion-record-list {
-    grid-column: 1 / -1;
-  }
-  .hud-surface .companion-center[data-active-tab="memory"] .companion-search { grid-column: 1; grid-row: 2; }
-  .hud-surface .companion-center[data-active-tab="memory"] .companion-filter-group { grid-column: 2; grid-row: 2; }
-  .hud-surface .companion-center[data-active-tab="memory"] .companion-record-list { grid-row: 3; }
-}
+      }
 
 /* ── 补全 hover↔按压这一对（本文件末尾追加，照 §第六波补控件按压的同一形状）
    `scripts/tmp-hud-press-pair.mjs` 实测这 9 个基只有 hover 抬升、按下去 transform 不动。
    数值照母本 `.button`：`scale(.96)` 与 `transition-duration:110ms` 成对（DESIGN.md
    「抬手与按压是一对」）。过渡本身不用另补——computed `transitionProperty` 逐个量过，
    能渲染到的三个都已经带 transform。 */
-.hud-surface :is(
-    .search-command button.tag,
-    .settings-ledger__row,
-    .note-links button,
-    .companion-workbench button,
-    .companion-workbench button.primary,
-    .companion-stage button,
-    .companion-stage button.primary,
-    .companion-map-veil button,
-    .companion-map-selection button
-  ):active:not(:disabled) {
-  transform: scale(0.96);
-  transition-duration: 110ms;
-}

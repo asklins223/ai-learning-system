@@ -40,6 +40,7 @@ function detail(overrides: Record<string, unknown> = {}) {
       conceptLabel: "惯性与质量",
       publicSummary: "质量是惯性大小的唯一量度。",
       knowledgeForm: "fact",
+      cardStrategy: "why",
       lifecycle: "active",
       freshness: "fresh",
       presentation: { cardId: null, cardRevision: null, publicationRevision: null },
@@ -93,6 +94,14 @@ afterEach(() => {
 });
 
 describe("详情页的主行动块", () => {
+  it("挑战简报清楚区分学习卡型和作答方式", async () => {
+    installApi(detail());
+    stubRoom();
+    render(<ObjectiveDetailSurface />);
+    await waitFor(() => expect(document.querySelector(".objective-brief__flags .objective-card-type")?.textContent).toContain("学习卡型机制解释"));
+    expect(document.querySelector(".objective-brief__type-help")?.textContent).toContain("可选择文字或口述；随卡客观题用于练习");
+  });
+
   it("那个动词只出现一次——标题不再和按钮抢同一个词", async () => {
     installApi(detail());
     stubRoom();

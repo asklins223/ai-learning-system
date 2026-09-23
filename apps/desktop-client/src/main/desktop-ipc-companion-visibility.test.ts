@@ -138,7 +138,7 @@ async function settle(times = 12): Promise<void> {
   for (let i = 0; i < times; i += 1) await Promise.resolve();
 }
 
-async function setup(options: { fakeTimers?: boolean } = {}) {
+async function setup(options: { fakeTimers?: boolean; disabledCompanion?: boolean } = {}) {
   if (options.fakeTimers) vi.useFakeTimers();
   vi.resetModules();
   electronMock.handlers.clear();
@@ -156,7 +156,11 @@ async function setup(options: { fakeTimers?: boolean } = {}) {
   const named: Record<string, unknown> = {
     getDeploymentConfig: () => undefined,
     getSession: async () => session,
-    getCompanionAccountOverview: async () => overview,
+    getCompanionAccountOverview: async () => (
+      options.disabledCompanion
+        ? { ...overview, account: { ...overview.account, globalEnabled: false } }
+        : overview
+    ),
     renewCompanionRuntimeFence: renewFence,
     watchCompanionAccountEvents: async (epoch: number) => {
       accountEpochCalls.push(epoch);
@@ -202,11 +206,13 @@ async function setup(options: { fakeTimers?: boolean } = {}) {
     meta: { ...meta, workspaceEpoch: 9 },
     topic: { kind: "runtime" },
   });
-  for (let attempt = 0; inboxCursorCalls.length === 0 && attempt < 40; attempt += 1) {
-    if (options.fakeTimers) await vi.advanceTimersByTimeAsync(5);
-    else await new Promise((resolve) => setTimeout(resolve, 5));
+  if (!options.disabledCompanion) {
+    for (let attempt = 0; inboxCursorCalls.length === 0 && attempt < 40; attempt += 1) {
+      if (options.fakeTimers) await vi.advanceTimersByTimeAsync(5);
+      else await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(inboxCursorCalls.length, "伴星常连接尚未建立").toBeGreaterThan(0);
   }
-  expect(inboxCursorCalls.length, "伴星常连接尚未建立").toBeGreaterThan(0);
   await settle();
 
   return {
@@ -219,6 +225,9 @@ async function setup(options: { fakeTimers?: boolean } = {}) {
     accountEpochCalls,
     inboxCursorCalls,
     renewFence,
+    invalidations: () => window.send.mock.calls
+      .map((call) => call?.[1] as { data?: { kind?: string } } | undefined)
+      .filter((payload) => payload?.data?.kind === "snapshot_invalidated").length,
     deliver: async (inboxSequence: number) => {
       pushDelivery?.({ inboxSequence });
       await settle();
@@ -298,5 +307,24 @@ describe("伴星常连接跟随窗口可见性（M16）", () => {
     expect(s.stopAccount).not.toHaveBeenCalled();
     expect(s.stopInbox).not.toHaveBeenCalled();
     electronMock.state.supported = true;
+  });
+
+  /**
+   * F01 的第二因素：账号级关闭时生命周期不建任何连接，于是"已经在跑"的早退判据
+   * 永远不成立——每读一次会话就重发一条 snapshot_invalidated。门禁把它当会话失效、
+   * 再读一次会话，就成了自己喂自己的循环（实机 1047 次 /auth/me 里的一份）。
+   * 关闭是按空间纪元下结论的，同一个纪元只报一次。
+   */
+  it("账号级关闭：同一个空间纪元只报一次 snapshot_invalidated", async () => {
+    const s = await setup({ disabledCompanion: true });
+    // 第一趟 authGetState 跑在 runtime 订阅之前，事件本来就没有收件人；订阅之后再
+    // 读一次会话，才是"门禁复核"的形状。
+    expect(s.invalidations()).toBe(0);
+
+    const again = await s.call(DESKTOP_IPC_CHANNELS.authGetState, { meta });
+    expect(again.ok).toBe(true);
+    await settle();
+
+    expect(s.invalidations(), "同一个空间纪元重复读会话不该再报一次失效").toBe(0);
   });
 });

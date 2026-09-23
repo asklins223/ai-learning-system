@@ -285,7 +285,7 @@ export const HUD_PAGES: Readonly<Record<HudPageId, HudPageDefinition>> = {
     id: "companion",
     number: "20",
     title: "伴星中心",
-    subtitle: "目录栏、共同记录与记忆星轨同时可见",
+    subtitle: "她的日记、对话和记忆都在这张书桌上",
     plate: "observatory",
     companion: {
       mode: "ambient", seat: "right", framing: "bust", interaction: "on-demand", proactive: "silent", draggable: false,

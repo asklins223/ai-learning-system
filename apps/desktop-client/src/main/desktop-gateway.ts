@@ -4613,7 +4613,11 @@ export class DesktopGateway {
   private async getLearningRunV2<T>(
     expectedRunId: string,
     path: string,
-    schema: z.ZodType<T & { runId: string; snapshotId: string }>,
+    // 输入侧写 `unknown`：带 `.default()` 的 schema 输入比输出宽（字段可省），
+    // 若这里沿用默认的 `Input = Output`，T 会被推断到输入侧，调用方的返回类型
+    // 就变成"字段可有可无"，与解析后的真实形状不符（审计 F28 的 checkpointReason
+    // 就是这么把桌面端 typecheck 顶红的）。解析结果只以输出侧为准。
+    schema: z.ZodType<T & { runId: string; snapshotId: string }, z.ZodTypeDef, unknown>,
     requestId?: string,
   ): Promise<T & { runId: string; snapshotId: string }> {
     await this.ensureConnected(requestId);

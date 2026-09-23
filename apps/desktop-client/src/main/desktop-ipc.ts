@@ -1103,6 +1103,16 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
   let companionRuntimeFenceTimer: ReturnType<typeof setInterval> | null = null;
   let companionLifecycleGeneration = 0;
   let companionLifecycleWorkspaceEpoch = 0;
+  /**
+   * 已经就"账号级关闭"下过结论的空间纪元。
+   *
+   * 关闭时不建任何连接，`stopCompanionAccountEvents` 就一直是 null，上面那道
+   * "已经在跑"的早退判据因此永远不成立——而 `authGetState` 每次读会话都会再调一次
+   * 生命周期，于是每读一次会话就重发一条 `snapshot_invalidated`；门禁把它当成会话
+   * 失效 → 再读会话 → 再发一条，自己喂自己，永远不停（F01 的第二因素）。关闭是**按
+   * 空间纪元**得出的结论，同一个纪元只报一次。
+   */
+  let companionLifecycleDisabledEpoch = 0;
   const windowLifecycleBound = new WeakSet<BrowserWindow>();
 
   const clearSubscriptionsForWindow = (window: BrowserWindow): void => {
@@ -1180,6 +1190,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     companionInboxBroadcastSeq = 0;
     companionLifecycleGeneration += 1;
     companionLifecycleWorkspaceEpoch = 0;
+    companionLifecycleDisabledEpoch = 0;
     companionStreamContext = null;
     companionStreamsPaused = false;
     stopCompanionAccountEvents?.();
@@ -1294,7 +1305,8 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
       stopCompanionLifecycle();
       return;
     }
-    if (companionLifecycleWorkspaceEpoch === workspaceEpoch && stopCompanionAccountEvents) return;
+    if (companionLifecycleWorkspaceEpoch === workspaceEpoch
+      && (stopCompanionAccountEvents || companionLifecycleDisabledEpoch === workspaceEpoch)) return;
     stopCompanionLifecycle();
     const generation = companionLifecycleGeneration;
     companionLifecycleWorkspaceEpoch = workspaceEpoch;
@@ -1302,6 +1314,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
       const overview = await gateway.getCompanionAccountOverview();
       if (generation !== companionLifecycleGeneration || workspaceEpoch !== activeWorkspaceEpoch) return;
       if (!overview.account.globalEnabled) {
+        companionLifecycleDisabledEpoch = workspaceEpoch;
         emit("runtime", { kind: "snapshot_invalidated", scope: "runtime" }, workspaceEpoch);
         return;
       }
@@ -2285,8 +2298,12 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     requireM2Route(contract, "room.home");
     assertEpoch(input.meta, activeWorkspaceEpoch);
     const account = await gateway.patchCompanionAccountState(input.request, input.meta.requestId);
-    if (account.globalEnabled) void startCompanionLifecycle(activeWorkspaceEpoch);
-    else stopCompanionLifecycle();
+    if (account.globalEnabled) {
+      // 刚被重新打开：上面记的"这个纪元已关闭"要作废，否则这一趟会被当成已经
+      // 处理过，两条常连接再也不会建起来。
+      companionLifecycleDisabledEpoch = 0;
+      void startCompanionLifecycle(activeWorkspaceEpoch);
+    } else stopCompanionLifecycle();
     emit("runtime", { kind: "snapshot_invalidated", scope: "runtime" }, activeWorkspaceEpoch);
     return account;
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, companionAccountStateV1Schema);

@@ -76,6 +76,7 @@ import { formatObjectiveDay } from "./objective-state-copy";
 import { ObjectiveProgressBand } from "./ObjectiveProgressBand";
 import { progressSegmentForOutcome } from "./objective-progress-band";
 import { VoiceTeachbackEditor } from "./run-voice-input";
+import { LearningRunCeremony } from "./LearningRunCeremony";
 import { microphoneAvailabilityCopy, probeMicrophone, type MicrophoneAvailability } from "../voice-capability";
 import { companionResultFeedbackAllowed, learningDiscoveryCard, learningRunFeedback } from "./objective-quest-presentation";
 
@@ -171,68 +172,6 @@ const verdictLabels: Record<string, string> = {
  * 同位置同颜色——用户分不清自己到底做成了什么。
  */
 const SEALLESS_OUTCOMES: ReadonlySet<LearningRunOutcome> = new Set(["skipped", "declared_unable"]);
-
-function LearningRunCeremony({
-  active,
-  headline,
-  achievement,
-  onFinish,
-}: {
-  readonly active: boolean;
-  readonly headline: string;
-  readonly achievement: string;
-  readonly onFinish: () => void;
-}) {
-  const motionMode = useRoomStore((state) => state.motionMode);
-  const reducedMotion = useRoomStore((state) => state.reducedMotion);
-  const [visible, setVisible] = useState(false);
-
-  useEffect(() => {
-    if (!active) {
-      setVisible(false);
-      return;
-    }
-    if (motionMode === "off" || reducedMotion) {
-      setVisible(false);
-      onFinish();
-      return;
-    }
-    setVisible(true);
-    const duration = motionMode === "lite" ? 700 : 2_600;
-    const finish = () => {
-      setVisible(false);
-      onFinish();
-    };
-    const timer = window.setTimeout(finish, duration);
-    const skip = () => finish();
-    window.addEventListener("pointerdown", skip, { once: true });
-    window.addEventListener("keydown", skip, { once: true });
-    return () => {
-      window.clearTimeout(timer);
-      window.removeEventListener("pointerdown", skip);
-      window.removeEventListener("keydown", skip);
-    };
-  }, [active, motionMode, onFinish, reducedMotion]);
-
-  if (!visible) return null;
-  return (
-    <div className="learning-run-ceremony" role="status" aria-live="polite" aria-label={`${headline}。${achievement}`}>
-      <div className="learning-run-ceremony__glow" aria-hidden="true" />
-      <i className="learning-run-ceremony__leaf learning-run-ceremony__leaf--one" aria-hidden="true" />
-      <i className="learning-run-ceremony__leaf learning-run-ceremony__leaf--two" aria-hidden="true" />
-      <i className="learning-run-ceremony__leaf learning-run-ceremony__leaf--three" aria-hidden="true" />
-      <div className="learning-run-ceremony__content">
-        <div className="learning-run-ceremony__stamp" aria-hidden="true">
-          <Sparkles size={20} />
-          <strong>过关</strong>
-        </div>
-        <h2>{headline}</h2>
-        <p>{achievement}</p>
-        <small>点击或按任意键跳过</small>
-      </div>
-    </div>
-  );
-}
 
 /**
  * 这次真说清了些什么——只从逐条判定里数，不看 demonstratedFacets。后者是理解
@@ -1476,6 +1415,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   const resultAcknowledgementEligibleRef = useRef(false);
   const acknowledgedResultKeyRef = useRef<string | null>(null);
   const resultSpeechRef = useRef<CompanionSpeechHandle | null>(null);
+  const pendingResultFeedbackRef = useRef<{ line: string; moment: "confirm" | "encourage" } | null>(null);
   const draftWriteGenerationRef = useRef(0);
   const epochRef = useRef<number | undefined>(undefined);
   const taskKeyRef = useRef<string | null>(null);
@@ -1497,6 +1437,23 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   const finishResultCeremony = useCallback(() => {
     setResultAcknowledgementActive(false);
   }, []);
+  const playPendingResultFeedback = useCallback(() => {
+    const cue = pendingResultFeedbackRef.current;
+    pendingResultFeedbackRef.current = null;
+    if (!cue || !companionFeedbackAllowed) return;
+    setCompanionMoment(cue.moment);
+    resultSpeechRef.current?.stop();
+    // The voice is requested in the same result-frame as the visual arrival.
+    // The shared audio host will speak only when unlocked, visible and unmuted.
+    resultSpeechRef.current = speakCompanionLine(cue.line);
+    if (cue.moment === "confirm") {
+      window.dispatchEvent(new CustomEvent("ailearn:home-v2-sound", { detail: { kind: "success" } }));
+    }
+  }, [companionFeedbackAllowed, setCompanionMoment]);
+
+  useEffect(() => {
+    if (resultState.kind === "result" && !resultAcknowledgementActive) playPendingResultFeedback();
+  }, [playPendingResultFeedback, resultAcknowledgementActive, resultState]);
 
   useEffect(() => {
     onPageChange(showResult ? "result" : "assessment");
@@ -1538,6 +1495,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
 
   useEffect(() => {
     if (companionFeedbackAllowed) return;
+    pendingResultFeedbackRef.current = null;
     resultSpeechRef.current?.stop();
     resultSpeechRef.current = null;
     setCompanionMoment("idle");
@@ -1555,6 +1513,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
     confirmationReturnFocusRef.current = null;
     resultAcknowledgementEligibleRef.current = false;
     acknowledgedResultKeyRef.current = null;
+    pendingResultFeedbackRef.current = null;
     resultSpeechRef.current?.stop();
     resultSpeechRef.current = null;
     snapshotRequestGenerationRef.current += 1;
@@ -1619,13 +1578,14 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
           : activeTask && snapshot.phase === "active"
             ? `task:${activeTask.taskId}:${activeTask.revision}:${activeTask.activeVariant.variantId}:${activeTask.activeVariant.revision}`
             : `phase:${snapshot.phase}`;
+    if (resultState.kind === "result" && resultAcknowledgementActive) return;
     if (focusKeyRef.current === focusKey || !primaryHeadingRef.current) return;
     const frame = window.requestAnimationFrame(() => {
       focusKeyRef.current = focusKey;
       primaryHeadingRef.current?.focus({ preventScroll: true });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [resultQueryFailure, resultState, snapshot]);
+  }, [resultAcknowledgementActive, resultQueryFailure, resultState, snapshot]);
 
   useEffect(() => {
     if (!recovery) return;
@@ -1773,6 +1733,8 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
     setLoading(true);
     void loadSnapshot()
       .catch((error) => {
+        // eslint-disable-next-line no-console
+        console.log("SCRATCH-LOADFAIL", error);
         if (!active) return;
         setFailure({ message: gatewayErrorMessage(error), retryable: error instanceof RendererGatewayError && error.retry !== "never" });
       })
@@ -2027,10 +1989,12 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
         acknowledgedResultKeyRef.current = resultKey;
         setResultAcknowledgementActive(playsFullCeremony);
         if (companionFeedbackAllowed && hasPositiveCompanionFeedback) {
-          setCompanionMoment(playsFullCeremony ? "confirm" : "encourage");
-          resultSpeechRef.current?.stop();
-          resultSpeechRef.current = speakCompanionLine(companionResultLine(value.result, snapshot?.target.publicSummary ?? "这条理解目标", resultKey));
+          pendingResultFeedbackRef.current = {
+            moment: playsFullCeremony ? "confirm" : "encourage",
+            line: companionResultLine(value.result, snapshot?.target.publicSummary ?? "这条理解目标", resultKey),
+          };
         } else {
+          pendingResultFeedbackRef.current = null;
           resultSpeechRef.current?.stop();
           resultSpeechRef.current = null;
           setCompanionMoment("idle");
@@ -2039,11 +2003,13 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
         // skipped / declared_unable / repair and restored terminal results are
         // deliberately neutral and never reuse the success presentation.
         setResultAcknowledgementActive(false);
+        pendingResultFeedbackRef.current = null;
         setCompanionMoment("idle");
       }
     } else {
       setResultState({ kind: "terminal", value });
       setResultAcknowledgementActive(false);
+      pendingResultFeedbackRef.current = null;
       setCompanionMoment("idle");
     }
     if (!requestIsCurrent()) return true;
@@ -2464,6 +2430,12 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
     ?? checkpointActions.find((action) => action.kind === "finish_without_commit")
     ?? null;
   const checkpointUnassessable = checkpointActions.some((action) => action.kind === "finish_without_commit");
+  /**
+   * 审计 F28：`not_assessable` 有两种完全不同的原因。系统侧缺冻结证据时，服务端
+   * 已经不再签发 `activate_followup`（补回答补不上），这里再把它说明白——否则
+   * 用户读到的仍然是"我答得不够好"，而正确的心智模型是"这条目标现在判不了"。
+   */
+  const checkpointEvidenceGap = snapshot.checkpointReason === "no_frozen_evidence";
   const quickActions: LearningRunAllowedActionV2[] = [];
   if (switchAction) quickActions.push(switchAction);
   if (phaseAction) quickActions.push(phaseAction);
@@ -2537,8 +2509,8 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
       <div ref={primaryContentRef} className="learning-run-primary-content" aria-hidden={pendingAction || pendingHintAction ? true : undefined}>
       {result || terminal ? (
         <>
-        {result && feedback ? <LearningRunCeremony active={resultAcknowledgementActive} headline={feedback.headline} achievement={feedback.achievement} onFinish={finishResultCeremony} /> : null}
-        <section className="learning-run-result-board" data-outcome={result ? result.outcome : "no_result"} data-tone={feedback?.tone ?? "neutral"} data-acknowledgement={resultAcknowledgementActive ? "active" : "idle"}>
+        {result && feedback ? <LearningRunCeremony active={resultAcknowledgementActive} headline={feedback.headline} achievement={feedback.achievement} companionLine={companionFeedbackAllowed ? companionFeedbackLine : null} onStart={playPendingResultFeedback} onFinish={finishResultCeremony} /> : null}
+        <section className="learning-run-result-board" inert={resultAcknowledgementActive || undefined} data-outcome={result ? result.outcome : "no_result"} data-tone={feedback?.tone ?? "neutral"} data-acknowledgement={resultAcknowledgementActive ? "active" : "idle"}>
           <header className="learning-run-arrival">
             <div className="learning-run-arrival__topline">
               <span>{result?.outcome === "practice_completed" ? "练习旅程完成" : "本次挑战记录"}</span>
@@ -2793,12 +2765,18 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
               */
               <div role="status">
                 <strong className="title">
-                  {checkpointUnassessable ? "这次没有形成可记录的结论" : "这次只证明了一部分"}
+                  {checkpointEvidenceGap
+                    ? "这条还不能正式验证：缺原文证据"
+                    : checkpointUnassessable
+                      ? "这次没有形成可记录的结论"
+                      : "这次只证明了一部分"}
                 </strong>
                 <p className="small">
-                  {checkpointUnassessable
-                    ? "题目已经交上去了，但这一次判不出结论。你可以继续补充证据，或者结束这一轮——结束不会改变复习安排。"
-                    : "还有几处没被证明。你可以继续补充证据，或者就此结束这一轮。"}
+                  {checkpointEvidenceGap
+                    ? "这次判不出结论不是因为你答得不够好：这条目标的评分点还缺系统侧的原文证据，再补一段回答也补不上。可以结束这一轮，回到目标去看还缺什么。"
+                    : checkpointUnassessable
+                      ? "题目已经交上去了，但这一次判不出结论。你可以继续补充证据，或者结束这一轮——结束不会改变复习安排。"
+                      : "还有几处没被证明。你可以继续补充证据，或者就此结束这一轮。"}
                 </p>
                 {failure ? <p className="small" role="alert">{failure.message}</p> : null}
               </div>

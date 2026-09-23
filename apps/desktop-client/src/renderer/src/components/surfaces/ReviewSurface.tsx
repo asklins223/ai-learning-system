@@ -38,6 +38,7 @@ import {
   reviewReasonTag,
   reviewSequenceAfter,
   reviewStartabilityLabel,
+  reviewFormalValidationBlockedLabel,
   reviewWindowStart,
   uniqueReviewItems,
   type ReviewItem,
@@ -338,8 +339,18 @@ export function ReviewSurface() {
       const seat = seatRef.current >= 0
         ? queue.items[Math.min(seatRef.current, queue.items.length - 1)]
         : null;
+      /**
+       * 审计 F28：队首那张如果是「正式验证缺冻结证据」的条目，它的结算必然
+       * fail closed——用户做完一切、排程也不动。默认落点要跳过这种条目，
+       * 否则主操作又把人引到那条注定无效的路上；它仍留在队列里，只是不当
+       * 默认落点（`?? queue.items[0]` 兜底：整条队列都有缺口时才落到它）。
+       */
+      const firstCompletable = queue.items
+        .slice(0, REVIEW_WINDOW_SIZE)
+        .find((item) => item.startability.kind === "ready" && item.formalValidationBlocked === null);
       return seat?.reviewId
-        ?? queue.items.slice(0, REVIEW_WINDOW_SIZE).find((item) => item.startability.kind === "ready")?.reviewId
+        ?? firstCompletable?.reviewId
+        ?? queue.items.find((item) => item.startability.kind === "ready")?.reviewId
         ?? queue.items[0].reviewId;
     });
   }, [queue]);
@@ -920,6 +931,8 @@ export function ReviewSurface() {
               const isFront = item.reviewId === front?.reviewId;
               const surface = objectives[item.objectiveId] ?? null;
               const stateLabel = item.startability.kind === "ready" ? null : reviewStartabilityLabel(item);
+              // 审计 F28：只有当前这张需要印缺口说明；后面的卡在它成为当前卡时再印。
+              const evidenceGapLabel = isFront ? reviewFormalValidationBlockedLabel(item) : null;
               return (
                 /* 一行里每张卡只挂一次，换卡只改整行的居中位移：React 不重建节点，
                    滑动过程里没有重新挂载，也没有第二份 id 抢标签。 */
@@ -940,6 +953,25 @@ export function ReviewSurface() {
                     </div>
                     <h2 id={isFront ? "review-deck-question" : undefined}>{questionOf(item)}</h2>
                     <p className="sub">{originOf(item)}</p>
+                    {/* 审计 F28：这张到期卡的正式验证现在判不出结论（评分点缺冻结
+                        证据）。它必须印在卡面上、紧挨着主按钮——理由条在旁边的纸上，
+                        而用户是看着这颗按钮决定要不要投入时间的。 */}
+                    {isFront && evidenceGapLabel ? (
+                      <p className="small deck-card__evidence-gap" role="status">
+                        {evidenceGapLabel}
+                        <button
+                          type="button"
+                          className="text-action text-action--strong"
+                          disabled={busy}
+                          onClick={() => {
+                            setActiveObjectiveId(item.objectiveId);
+                            invoke("open-objective");
+                          }}
+                        >
+                          去看这条目标还缺什么
+                        </button>
+                      </p>
+                    ) : null}
                   </div>
                   {isFront ? (
                     <>

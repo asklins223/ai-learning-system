@@ -31,6 +31,7 @@ function listItem(overrides: Record<string, unknown> = {}) {
     conceptLabel: "惯性与质量",
     publicSummary: "质量是惯性大小的唯一量度。",
     knowledgeForm: "fact",
+    cardStrategy: "why",
     lifecycle: "active",
     freshness: "fresh",
     primaryNoteTitle: "物理笔记",

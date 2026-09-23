@@ -483,14 +483,18 @@ export function NoteLibrarySurface() {
         ? `回收站里有 ${trashTotal} 篇被删除的笔记，可以随时恢复。`
         : "新建一篇空笔记直接开始写，或者从来源详情里带着证据开始。"}
       action={(
-        <div className="actions">
-          {createButton(true)}
-          {/* 写下来也一样是放进共享空间：这一步必须说清楚。 */}
+        <>
+          <div className="actions">
+            {createButton(true)}
+            {trashTotal > 0 ? (
+              <button type="button" className="button" onClick={openTrash}>打开回收站</button>
+            ) : null}
+          </div>
+          {/* 写下来也一样是放进共享空间：这一步必须说清楚。它是按钮行下面自己的
+              一段说明，不是按钮行的第三个成员——挤在 `.actions` 那条 flex 行里，
+              它就和按钮并排、且拿不到折行宽度。 */}
           <SpaceSharingNotice testId="note-share-notice" />
-          {trashTotal > 0 ? (
-            <button type="button" className="button" onClick={openTrash}>打开回收站</button>
-          ) : null}
-        </div>
+        </>
       )}
     />
   );

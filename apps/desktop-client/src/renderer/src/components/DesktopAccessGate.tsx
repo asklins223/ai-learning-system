@@ -148,6 +148,12 @@ const GATE_STAGES = {
   loadWorkspaces: "正在读取可用的学习空间",
 } as const;
 
+/**
+ * 一趟 bootstrap 的最长等待。超过它还没结论，spinner 就必须换成能点的重试：
+ * 无限转圈看起来像"还在努力"，实际是把唯一的出路也藏了起来（F01 验收要求）。
+ */
+const BOOTSTRAP_DEADLINE_MS = 12_000;
+
 function desktopApi(): AILearnDesktopApiM2 | null {
   const value = (window as unknown as { ailearn?: AILearnDesktopApiM2 }).ailearn;
   if (!value || typeof value !== "object") return null;
@@ -782,6 +788,10 @@ export function DesktopAccessGate({
   };
   const generationRef = useRef(0);
   const forceConnectionRef = useRef(false);
+  /** 这一趟 bootstrap 是不是"静默复核"：视图已经是 ready，复核期间不换视图。 */
+  const silentReverifyRef = useRef(false);
+  /** 是否有一趟 bootstrap 在飞：同一个账号+空间+epoch 的复核靠它合并成一趟。 */
+  const bootstrapFlightRef = useRef(false);
   const connectionFlightRef = useRef<Promise<unknown> | null>(null);
   const readyBoundaryRef = useRef<string | null>(null);
   /** 上一次发布给顶栏胶囊的空间身份；只在真的变了时写 store，避免每次 ready 都刷一遍订阅者。 */
@@ -847,16 +857,25 @@ export function DesktopAccessGate({
     }
   }, [roomRevealed, view.phase]);
 
-  const requestBootstrap = useCallback((forceConnection = false) => {
+  const requestBootstrap = useCallback((forceConnection = false, reverify = false) => {
+    // 静默复核只对"已经在跑的房间"成立；视图不是 ready 时，该走的还是门禁视图那条路。
+    const silent = reverify && viewPhaseRef.current === "ready";
+    // 同代合并：同一个账号+空间+epoch 只允许一趟复核在飞。伴星投递、可见性恢复、
+    // 空间事件可能在同一瞬间各来一条，不合并就是各起一趟 bootstrap——每趟一条
+    // /auth/me，而它们对当前边界说的是同一句话。
+    if (silent && bootstrapFlightRef.current) return;
     generationRef.current += 1;
     forceConnectionRef.current = forceConnectionRef.current || forceConnection;
+    silentReverifyRef.current = silent;
     setFormFailure(null);
-    setView({
-      phase: "loading",
-      title: forceConnection ? "正在重新连接" : "正在刷新状态",
-      detail: "连接恢复后会自动继续。",
-      stage: forceConnection ? GATE_STAGES.reconnect : GATE_STAGES.refresh,
-    });
+    if (!silent) {
+      setView({
+        phase: "loading",
+        title: forceConnection ? "正在重新连接" : "正在刷新状态",
+        detail: "连接恢复后会自动继续。",
+        stage: forceConnection ? GATE_STAGES.reconnect : GATE_STAGES.refresh,
+      });
+    }
     setRefreshRevision((revision) => revision + 1);
   }, []);
 
@@ -874,12 +893,20 @@ export function DesktopAccessGate({
 
   const invalidateReadyGate = useCallback((code?: GateInvalidationCode) => {
     if (viewPhaseRef.current !== "ready") return;
+    // 没有错误码的失效（runtime 的 snapshot_invalidated）先做一次静默复核：同一个
+    // 账号+空间+epoch 复核通过时视图、房间视图状态与焦点都不动，真的换了边界才在
+    // apply 里收口。以前这里无条件清空工作区并重建，于是任何一条运行时事件都能把
+    // 用户正在看的页面推倒重来（F01）。
+    if (code === undefined) {
+      requestBootstrap(false, true);
+      return;
+    }
     onWorkspaceBoundaryReset?.();
     readyBoundaryRef.current = null;
-    if (["auth_required", "api_untrusted", "configuration_error", "unsupported_contract"].includes(code ?? "")) {
+    if (["auth_required", "api_untrusted", "configuration_error", "unsupported_contract"].includes(code)) {
       lastTrustedSessionRef.current = null;
     }
-    requestBootstrap(code === undefined);
+    requestBootstrap(false);
   }, [onWorkspaceBoundaryReset, requestBootstrap]);
 
   useEffect(() => subscribeGateInvalidation((code) => invalidateReadyGate(code)), [invalidateReadyGate]);
@@ -901,16 +928,23 @@ export function DesktopAccessGate({
     const generation = ++generationRef.current;
     let waitTimer: number | undefined;
     let runtimeSubscription: RequiredRuntimeSubscription | null = null;
+    const silentReverify = silentReverifyRef.current;
+    silentReverifyRef.current = false;
+    bootstrapFlightRef.current = true;
     const isCurrent = () => generationRef.current === generation;
     const apply = (next: GateView) => {
       if (!isCurrent()) return;
+      // 静默复核只报结论、不报过程：房间还在屏幕上，不该因为后台复核走到了哪一步
+      // 就闪一次 spinner。
+      if (silentReverify && next.phase === "loading" && viewPhaseRef.current === "ready") return;
       if (next.phase === "ready") {
         const nextBoundary = [
           next.session.user.userId,
           next.session.workspace.workspaceId,
           next.session.workspaceEpoch,
         ].join(":");
-        if (readyBoundaryRef.current !== null && readyBoundaryRef.current !== nextBoundary) {
+        const boundaryChanged = readyBoundaryRef.current !== null && readyBoundaryRef.current !== nextBoundary;
+        if (boundaryChanged) {
           onWorkspaceBoundaryReset?.();
         }
         readyBoundaryRef.current = nextBoundary;
@@ -945,6 +979,9 @@ export function DesktopAccessGate({
         // 会话重新成立，上一次退出留下的那句话就用完了。不清的话它会在下一次
         // 完全不同的场合（比如会话到期）再冒出来。
         clearAccountSignOutNotice();
+        // 静默复核落在同一个边界上：视图不落地。整棵房间因此不卸载，页面、滚动
+        // 位置与焦点都留在原处；上面这些发布语句已经把这趟读到的会话对齐了。
+        if (silentReverify && !boundaryChanged && viewPhaseRef.current === "ready") return;
       }
       setView(next);
     };
@@ -975,7 +1012,10 @@ export function DesktopAccessGate({
         try {
           const subscription = await establishRequiredRuntimeSubscription(api, createRequestMeta(), (event) => {
             if (!isCurrent() || viewPhaseRef.current !== "ready") return;
-            if (event.data.kind === "connection_changed" && event.data.state.kind !== "ready") {
+            if (event.data.kind === "connection_changed") {
+              // 连接恢复（ready）不是会话失效：房间已经在跑，再校验一次不会让任何
+              // 东西变新，只会白拆一次页面。
+              if (event.data.state.kind === "ready") return;
               const decision = decideRuntimeGate(event.data.state);
               if (decision.kind === "blocked") {
                 onWorkspaceBoundaryReset?.();
@@ -995,7 +1035,14 @@ export function DesktopAccessGate({
                     });
                 return;
               }
+              // 还在连接/核验：交给一次静默复核收口——成功就什么都不动，失败会落到
+              // blocked。它不是"页面该重来"的理由。
+              invalidateReadyGate();
+              return;
             }
+            // 伴星投递（companion_activity_changed）这类局部事件由伴星小屋与首页投影
+            // 自己消费；门禁只对显式的 snapshot_invalidated 复核会话。
+            if (event.data.kind !== "snapshot_invalidated") return;
             invalidateReadyGate();
           });
           if (!isCurrent()) {
@@ -1161,9 +1208,30 @@ export function DesktopAccessGate({
       }
     };
 
-    void bootstrap();
+    void bootstrap().finally(() => {
+      // 一趟落地（成功、失败或被更新的一趟取代）就放掉在飞标记：下一个失效事件
+      // 才有资格再起一趟。
+      if (isCurrent()) bootstrapFlightRef.current = false;
+    });
+    // 有限等待：卡在 spinner 上超过时限就换成能点的重试。静默复核没有 spinner，
+    // 它只放掉在飞标记，让后面的失效事件还能重来。
+    const deadlineTimer = window.setTimeout(() => {
+      if (!isCurrent()) return;
+      bootstrapFlightRef.current = false;
+      if (viewPhaseRef.current !== "loading") return;
+      apply({
+        phase: "blocked",
+        title: "状态同步超时",
+        detail: "学习服务一直没有回应。可以重试；已经读到的内容不会丢失。",
+        retryAction: "bootstrap",
+      });
+      // 这一趟等不到结论了：把它的后续落地一并作废，免得迟到的"正在…"再把
+      // spinner 放回屏幕上。
+      generationRef.current += 1;
+    }, BOOTSTRAP_DEADLINE_MS);
     return () => {
       if (waitTimer !== undefined) window.clearTimeout(waitTimer);
+      window.clearTimeout(deadlineTimer);
       runtimeSubscription?.close();
     };
   }, [connectOnce, invalidateReadyGate, onWorkspaceBoundaryReset, refreshRevision, requestBootstrap, takeWorkspaceNotice]);
@@ -1217,7 +1285,8 @@ export function DesktopAccessGate({
   useEffect(() => {
     if (view.phase !== "ready") return;
     const onVisibilityChange = () => {
-      if (document.visibilityState === "visible") requestBootstrap();
+      // 回到窗口只是复核一次：同一个账号+空间+epoch 复核通过时页面不该被推倒重来。
+      if (document.visibilityState === "visible") requestBootstrap(false, true);
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => document.removeEventListener("visibilitychange", onVisibilityChange);

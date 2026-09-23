@@ -196,15 +196,21 @@ describe("NotebookSurface · 学习卡生成状态同步", () => {
     expect(state.startCalls).toBe(0);
   });
 
-  it("没有 run 时入口是生成学习卡，start 成功后带 runId 跳转工作台", async () => {
+  it("没有 run 时入口先开方案页，确认后 start 带 runId 跳转工作台", async () => {
     const { gateway, state } = stubGateway(null);
     useRoomStore.setState({ activeNoteRef: { noteId: NOTE_ID, noteVersionId: VERSION_ID } });
-    const { getByText } = render(<NotebookSurface />);
+    const { getByText, queryByRole } = render(<NotebookSurface />);
 
-    const entry = await waitFor(() => getByText("生成学习卡"));
+    // 入口本身不再直接建任务：先开方案页（生成用哪套目标/策略由人确认）。
+    const entry = await waitFor(() => getByText("规划学习卡"));
     expect(gateway.subscriptions.subscribe).not.toHaveBeenCalled();
+    expect(queryByRole("dialog")).toBeNull();
 
     fireEvent.click(entry);
+    const start = await waitFor(() => getByText("开始生成"));
+    expect(state.startCalls).toBe(0);
+
+    fireEvent.click(start);
     await waitFor(() => expect(useRoomStore.getState().surface).toBe("card-generation"));
     expect(useRoomStore.getState().activeCardGenerationRunId).toBe(RUN_ID);
     expect(state.startCalls).toBe(1);
@@ -213,11 +219,14 @@ describe("NotebookSurface · 学习卡生成状态同步", () => {
   it("被服务端拒绝后重读状态：入口翻到真实阶段，不再反复撞同一个拒绝", async () => {
     const { state } = stubGateway(null, [], { startRejects: true });
     useRoomStore.setState({ activeNoteRef: { noteId: NOTE_ID, noteVersionId: VERSION_ID } });
-    const { getByText, getByRole, getByTitle } = render(<NotebookSurface />);
+    const { getByText, getAllByRole, getByTitle } = render(<NotebookSurface />);
 
-    fireEvent.click(await waitFor(() => getByText("生成学习卡")));
+    fireEvent.click(await waitFor(() => getByText("规划学习卡")));
+    fireEvent.click(await waitFor(() => getByText("开始生成")));
 
-    await waitFor(() => expect(getByRole("alert")).toBeTruthy());
+    // 拒绝留在方案页里说，同时投影重读：入口翻到这篇笔记真实的阶段。
+    // 同一句会落在两处（方案页页脚 + 纸面），所以按复数查。
+    await waitFor(() => expect(getAllByRole("alert").length).toBeGreaterThan(0));
     const entry = await waitFor(() => getByTitle("这次生成在后台进行，来回翻看不会打断它"));
     expect(entry.textContent).toContain("审核学习卡");
     expect(state.startCalls).toBe(1);

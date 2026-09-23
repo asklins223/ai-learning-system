@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { LoaderCircle, RefreshCw, Sparkles } from "lucide-react";
 import type { CapabilityProjectionV1 } from "@ailearn/shared/desktop-ipc-contracts";
 import type {
@@ -309,6 +310,11 @@ export function NotebookSurface() {
   const [options, setOptions] = useState<GenerationOptions>(persistedGenerationOptions);
   const [showAllBlocks, setShowAllBlocks] = useState(false);
   const [optionsOpen, setOptionsOpen] = useState(false);
+  const generationTriggerRef = useRef<HTMLButtonElement>(null);
+  const closeGenerationSetup = () => {
+    generationTriggerRef.current?.focus();
+    setOptionsOpen(false);
+  };
   const [feedbackReasons, setFeedbackReasons] = useState<readonly DesktopCardGenerationFeedbackReasonV2[]>([]);
   const [feedbackNote, setFeedbackNote] = useState("");
   const [versions, setVersions] = useState<readonly DesktopNoteVersionItem[] | null>(null);
@@ -720,6 +726,7 @@ export function NotebookSurface() {
       setActiveCardGenerationRunId(accepted.runId);
       setFeedbackReasons([]);
       setFeedbackNote("");
+      setOptionsOpen(false);
       invoke("open-card-generation");
     } catch (error) {
       setGenerationFailure(gatewayErrorMessage(error));
@@ -952,13 +959,14 @@ export function NotebookSurface() {
   ) : (
     <button
       type="button"
+      ref={generationTriggerRef}
       className="button primary"
-      disabled={!generationEnabled || dirty || startingGeneration}
-      title={generationReason ?? "用已经存好的整篇版本生成学习卡"}
-      onClick={() => void startGeneration()}
+      disabled={!generationEnabled || startingGeneration}
+      title={generationReason ?? "查看本次学习卡生成方案"}
+      onClick={() => setOptionsOpen(true)}
     >
       <Sparkles size={15} aria-hidden="true" />
-      {startingGeneration ? "正在创建生成任务…" : "生成学习卡"}
+      {startingGeneration ? "正在创建生成任务…" : "规划学习卡"}
     </button>
   );
 
@@ -983,11 +991,11 @@ export function NotebookSurface() {
   // the paper is the scroll container's child, so the buttons stay reachable on
   // a note longer than one screen.
   /**
-   * 版本历史 + 生成设置两个面板。此前只有阅读页能拉开它们，编辑页里同样的 state
-   * （`historyOpen` / `optionsOpen`）就在同一个组件中，却没有任何入口（复盘 #15）。
+   * 版本历史仍在笔记纸面，生成方案独立成全屏确认页。
+   * 阅读与编辑模式都可开启这两处内容（复盘 #15）。
    * 恢复历史版本在草稿未提交时仍然被按钮自己的 `dirty` 判断挡住。
    */
-  const historyAndOptionsPapers = (
+  const historyPaper = (
     <>
       {historyOpen ? (
         <section className="version-history" aria-label="笔记版本历史">
@@ -1036,11 +1044,30 @@ export function NotebookSurface() {
           ) : null}
         </section>
       ) : null}
-      {/* The knobs the run contract accepts, so a generation is not silently
-          fixed to one goal, one depth, one limit and two of seven strategies. */}
-      {optionsOpen && generationEnabled ? (
+    </>
+  );
+
+  // The run contract's knobs live in a full-screen planning sheet so both
+  // reading and editing mode can reach the same deliberate start step.
+  const generationSetup = optionsOpen && generationEnabled ? createPortal(
+        <div className="generation-setup-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeGenerationSetup(); }}>
+        <section className="generation-setup" role="dialog" aria-modal="true" aria-labelledby="generation-setup-title" onKeyDown={(event) => {
+          if (event.key === "Escape") { event.stopPropagation(); closeGenerationSetup(); }
+          if (event.key !== "Tab") return;
+          const controls = [...event.currentTarget.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled)")];
+          const first = controls[0];
+          const last = controls.at(-1);
+          if (event.shiftKey && document.activeElement === first && last) { event.preventDefault(); last.focus(); }
+          else if (!event.shiftKey && document.activeElement === last && first) { event.preventDefault(); first.focus(); }
+        }}>
+        <header className="generation-setup__header">
+          <span className="generation-setup__eyebrow">从笔记到一叠新卡</span>
+          <h2 id="generation-setup-title">安排这次出题</h2>
+          <p>从已保存的整篇笔记出发。先选你想练的方向，生成后再逐张审核。</p>
+          <button autoFocus type="button" className="generation-setup__close" aria-label="关闭生成方案" onClick={closeGenerationSetup}>×</button>
+        </header>
         <fieldset className="generation-options">
-          <legend>这次生成怎么出题</legend>
+          <legend>生成方案</legend>
           <div className="generation-options__row">
             <span className="generation-options__label">学习目标</span>
             {LEARNING_GOALS.map((item) => (
@@ -1084,7 +1111,7 @@ export function NotebookSurface() {
             ))}
           </div>
           <div className="generation-options__row">
-            <span className="generation-options__label">题型</span>
+            <span className="generation-options__label">学习卡型</span>
             {STRATEGIES.map((item) => {
               const on = options.preferredStrategies.includes(item.value);
               return (
@@ -1112,8 +1139,7 @@ export function NotebookSurface() {
           {/* 让勾选成为筛选。顺序由 planner-service.allocateStrategies 按适配度定，
               与勾选顺序无关——这里说清，是因为默认值就是全勾选。 */}
           <p className="small">
-            已默认全选：每张卡用哪种题型由系统按笔记内容决定。取消某种即不要它，
-            但每种知识只有少数几种题型问得自然，系统会在这些范围内挑。
+            这些是每张卡的思考策略，不是作答按钮。默认允许全部七种；取消某种后，系统便不会采用它。
           </p>
           {feedbackTarget ? (
             <>
@@ -1166,9 +1192,17 @@ export function NotebookSurface() {
               : ""}
           </p>
         </fieldset>
-      ) : null}
-    </>
-  );
+        <footer className="generation-setup__footer">
+          <p role={generationFailure ? "alert" : undefined}>{generationFailure ? `任务未开始：${generationFailure}` : dirty ? "请先保存当前改动，再从已保存版本开始生成。" : "生成在后台进行；候选写好后由你逐张决定。"}</p>
+          <div>
+            <button type="button" className="generation-setup__cancel" onClick={closeGenerationSetup}>再想想</button>
+            <button type="button" className="generation-setup__start" disabled={dirty || startingGeneration || !generationEnabled} onClick={() => void startGeneration()}><Sparkles size={17} aria-hidden="true" />{startingGeneration ? "正在创建任务…" : "开始生成"}</button>
+          </div>
+        </footer>
+        </section>
+        </div>,
+        document.body,
+      ) : null;
 
   /**
    * 归属那一位状态 + 那一个动作。编辑态与阅读态共用同一段：只读成员永远进不了
@@ -1265,13 +1299,13 @@ export function NotebookSurface() {
       {generationReason ? <p className="small notebook-note">{generationReason}</p> : null}
       {generationFailure ? <p className="small notebook-note" role="alert">{generationFailure}</p> : null}
       {generationLiveNote}
-      {historyAndOptionsPapers}
+      {historyPaper}
     </>
   ) : null;
 
   /**
    * 「版本历史」「生成设置」两个开关。阅读页与编辑页共用同一对：面板已经在同一
-   * 个组件里了（`historyAndOptionsPapers`），此前只有阅读页摆出按钮，编辑态摸不到
+   * 个组件里了；此前只有阅读页摆出按钮，编辑态摸不到
    * （复盘 #15）。
    */
   const versionAndOptionsToggles = note ? (
@@ -1288,17 +1322,6 @@ export function NotebookSurface() {
       >
         版本历史
       </button>
-      {generationEnabled && !noteGeneration ? (
-        <button
-          type="button"
-          className="button"
-          aria-expanded={optionsOpen}
-          title={`生成设置 · 本次：${generationOptionSummary(options)}`}
-          onClick={() => setOptionsOpen((open) => !open)}
-        >
-          生成设置
-        </button>
-      ) : null}
     </>
   ) : null;
 
@@ -1457,7 +1480,7 @@ export function NotebookSurface() {
       {generationReason ? <p className="small notebook-note">{generationReason}</p> : null}
       {generationFailure ? <p className="small notebook-note" role="alert">{generationFailure}</p> : null}
       {generationLiveNote}
-      {historyAndOptionsPapers}
+      {historyPaper}
     </div>
   ) : null;
 
@@ -1514,6 +1537,7 @@ export function NotebookSurface() {
           ) : null}
         </article>
       </HudPage>
+      {generationSetup}
     </>
   );
 }

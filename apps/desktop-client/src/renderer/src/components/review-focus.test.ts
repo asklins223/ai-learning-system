@@ -52,6 +52,7 @@ describe("review return focus", () => {
       objectiveId,
       dueAt: "2026-08-23T00:00:00.000Z",
       startability: { kind: "ready" as const },
+      formalValidationBlocked: null,
     };
     expect(matchesReviewTarget(item, { scheduleId, objectiveId })).toBe(true);
     expect(matchesReviewTarget(item, { scheduleId, objectiveId: "00000000-0000-4000-8000-000000000006" })).toBe(false);

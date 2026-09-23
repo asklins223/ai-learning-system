@@ -165,28 +165,35 @@ export function CompanionHomeProjectionProvider({ children }: { readonly childre
     const generation = ++requestGenerationRef.current;
     const load = async () => {
       if (!window.ailearn) throw new Error("unavailable");
-      const sessionResponse = await window.ailearn.auth.getState({ meta: createRequestMeta() });
-      const session = unwrapGatewayResult(sessionResponse);
-      if (session.status !== "authenticated" || !session.workspace) {
-        if (generation === requestGenerationRef.current) {
-          scopeRef.current = null;
-          profileWriteGenerationRef.current += 1;
-          profileSavingRef.current = false;
-          setState({
-            projection: null,
-            loading: false,
-            failure: "请先登录后再读取伴星小屋。",
-            profileSaving: false,
-            profileFailure: null,
-          });
+      const knownScope = scopeRef.current;
+      // 同代刷新不重读会话（同 home-projection）：伴星投递只说明这份投影旧了，
+      // 账号与空间都没变，/auth/me 不该随事件条数增长。
+      let requestScope: ProjectionWorkspaceScope;
+      if (knownScope && invalidation.workspaceEpoch === knownScope.workspaceEpoch) {
+        requestScope = knownScope;
+      } else {
+        const sessionResponse = await window.ailearn.auth.getState({ meta: createRequestMeta() });
+        const session = unwrapGatewayResult(sessionResponse);
+        if (session.status !== "authenticated" || !session.workspace) {
+          if (generation === requestGenerationRef.current) {
+            scopeRef.current = null;
+            profileWriteGenerationRef.current += 1;
+            profileSavingRef.current = false;
+            setState({
+              projection: null,
+              loading: false,
+              failure: "请先登录后再读取伴星小屋。",
+              profileSaving: false,
+              profileFailure: null,
+            });
+          }
+          return;
         }
-        return;
+        requestScope = {
+          workspaceId: session.workspace.workspaceId,
+          workspaceEpoch: session.workspaceEpoch,
+        } satisfies ProjectionWorkspaceScope;
       }
-
-      const requestScope = {
-        workspaceId: session.workspace.workspaceId,
-        workspaceEpoch: session.workspaceEpoch,
-      } satisfies ProjectionWorkspaceScope;
       if (generation !== requestGenerationRef.current) return;
       const previousScope = scopeRef.current;
       if (!sameProjectionScope(previousScope, requestScope)) {

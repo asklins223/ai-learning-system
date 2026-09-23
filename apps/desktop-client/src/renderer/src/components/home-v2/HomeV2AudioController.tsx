@@ -22,7 +22,7 @@ import type {
   CompanionVoiceSpeakSegmentRequestV2,
 } from "@ailearn/shared/companion-voice-contracts";
 
-type HomeV2SoundKind = "page" | "footstep" | "magic";
+type HomeV2SoundKind = "page" | "footstep" | "magic" | "success";
 
 export type HomeV2VoiceRequest = {
   readonly text: string;
@@ -71,6 +71,7 @@ export const HOME_V2_AUDIO_TUNING = Object.freeze({
     shimmerGain: 0.012,
     seconds: 0.3,
   }),
+  success: Object.freeze({ notesHz: [660, 880, 990] as const, gain: 0.022, noteSeconds: 0.27, intervalSeconds: 0.1 }),
   voice: Object.freeze({
     cooldownMs: 6_000,
     failureBackoffMs: 60_000,
@@ -168,6 +169,26 @@ function playNoiseTap(
 function playTransient(graph: HomeV2AudioGraph, kind: HomeV2SoundKind): void {
   const { context } = graph;
   const now = context.currentTime;
+
+  if (kind === "success") {
+    // A short, soft three-note arrival cue; the evidence and Companion line
+    // carry the meaning, so this remains optional and never blocks results.
+    const tuning = HOME_V2_AUDIO_TUNING.success;
+    tuning.notesHz.forEach((frequency, index) => {
+      const start = now + index * tuning.intervalSeconds;
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.value = frequency;
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.linearRampToValueAtTime(tuning.gain, start + 0.025);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + tuning.noteSeconds);
+      oscillator.connect(gain).connect(context.destination);
+      oscillator.start(start);
+      oscillator.stop(start + tuning.noteSeconds + 0.01);
+    });
+    return;
+  }
 
   if (kind === "page") {
     // Paper is broadband air: a filtered noise burst with a fast decay.
@@ -510,7 +531,8 @@ export function HomeV2AudioController() {
     const play = (event: Event) => {
       const kind = (event as CustomEvent<{ kind?: HomeV2SoundKind }>).detail?.kind;
       const graph = graphRef.current;
-      if (!graph || !audibleRef.current || !kind) return;
+      const allowed = kind === "success" ? userInitiatedAudibleRef.current : audibleRef.current;
+      if (!graph || !allowed || !kind) return;
       playTransient(graph, kind);
     };
     window.addEventListener("ailearn:home-v2-sound", play);

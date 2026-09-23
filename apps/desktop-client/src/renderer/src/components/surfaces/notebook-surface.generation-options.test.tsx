@@ -103,9 +103,9 @@ afterEach(() => {
 });
 
 async function openSettings() {
-  const toggle = await waitFor(() => screen.getByRole("button", { name: "生成设置" }));
+  const toggle = await waitFor(() => screen.getByRole("button", { name: "规划学习卡" }));
   fireEvent.click(toggle);
-  await waitFor(() => expect(screen.getByText(/这次生成怎么出题/)).toBeTruthy());
+  await waitFor(() => expect(screen.getByRole("dialog", { name: "安排这次出题" })).toBeTruthy());
 }
 
 describe("NotebookSurface · 生成参数与反馈重生成", () => {
@@ -121,7 +121,8 @@ describe("NotebookSurface · 生成参数与反馈重生成", () => {
     // 默认全选题型（= 交给 planner 按知识形态分配），点一下即取消该题型。
     fireEvent.click(screen.getByRole("button", { name: "对比辨析" }));
 
-    fireEvent.click(screen.getByRole("button", { name: /生成学习卡/ }));
+    expect(screen.getByText(/这些是每张卡的思考策略/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "开始生成" }));
     await waitFor(() => expect(state.startRequests).toHaveLength(1));
     expect(state.startRequests[0]).toMatchObject({
       learningGoal: "apply",
@@ -130,9 +131,7 @@ describe("NotebookSurface · 生成参数与反馈重生成", () => {
     });
     expect((state.startRequests[0] as { preferredStrategies: string[] }).preferredStrategies)
       .toEqual(["recall", "cloze", "sequence", "why", "boundary", "application"]);
-    // 题型说明必须可见：勾选现在是筛选，不解释会被当成优先级。
-    expect(screen.getByText(/由系统按笔记内容决定/).textContent)
-      .toContain("少数几种题型问得自然");
+    // 方案确认后，请求保留选定的卡型集合。
   });
 
   it("上次生成已结束时，选原因即按反馈重生成并带上 previousRunId", async () => {
@@ -146,7 +145,7 @@ describe("NotebookSurface · 生成参数与反馈重生成", () => {
     fireEvent.click(screen.getByRole("button", { name: "卡片太多" }));
     fireEvent.change(screen.getByLabelText("重新生成的补充说明"), { target: { value: "最多 5 张" } });
 
-    fireEvent.click(screen.getByRole("button", { name: /生成学习卡/ }));
+    fireEvent.click(screen.getByRole("button", { name: "开始生成" }));
     await waitFor(() => expect(state.startRequests).toHaveLength(1));
     expect(state.startRequests[0]).toMatchObject({
       feedbackContext: {
@@ -167,8 +166,8 @@ describe("NotebookSurface · 生成参数与反馈重生成", () => {
     render(<NotebookSurface />);
     await waitFor(() => expect(document.querySelector('.notebook[data-mode="edit"]')).toBeTruthy());
 
-    fireEvent.click(screen.getByRole("button", { name: "生成设置" }));
-    await waitFor(() => expect(screen.getByText(/这次生成怎么出题/)).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "规划学习卡" }));
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "安排这次出题" })).toBeTruthy());
 
     fireEvent.click(screen.getByRole("button", { name: "版本历史" }));
     await waitFor(() => expect(screen.getByLabelText("笔记版本历史")).toBeTruthy());
@@ -184,7 +183,7 @@ describe("NotebookSurface · 生成参数与反馈重生成", () => {
     expect(screen.queryByText(/针对上次/)).toBeNull();
     expect(screen.queryByRole("button", { name: "卡片太多" })).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: /生成学习卡/ }));
+    fireEvent.click(screen.getByRole("button", { name: "开始生成" }));
     await waitFor(() => expect(state.startRequests).toHaveLength(1));
     expect((state.startRequests[0] as { feedbackContext?: unknown }).feedbackContext).toBeUndefined();
   });

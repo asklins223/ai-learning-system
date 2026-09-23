@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   learningRunPublicSnapshotV2Schema,
   learningRunResultV2Schema,
@@ -164,6 +164,12 @@ function renderResult(rubricLength = 12, resultPayload?: unknown, onExit = vi.fn
   return onExit;
 }
 
+beforeEach(() => {
+  // jsdom intentionally has no rendering context; the DOM/flow tests still
+  // verify the global overlay without requiring a native canvas package.
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+});
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -174,9 +180,14 @@ describe("LearningRunSurface · 新结果过关演出", () => {
   it("新完成的正式 demonstrated 播放一次，可按 Esc 立即跳过", async () => {
     renderResult(2, resultWithRubric(2), vi.fn(), assessingSnapshot());
     await waitFor(() => expect(document.querySelector(".learning-run-ceremony")).not.toBeNull());
+    expect(document.querySelector(".learning-run-ceremony")?.parentElement).toBe(document.body);
+    expect(document.querySelector(".learning-run-ceremony__confetti")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "跳过庆祝，查看完整反馈" })).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "跳过庆祝，查看完整反馈" }));
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() => expect(document.querySelector(".learning-run-ceremony")).toBeNull());
     expect(document.querySelector(".learning-run-result-board")).not.toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("heading", { name: "这一关，你真的说明白了" })));
   });
 
   it("历史 demonstrated 与新完成的 practice_completed 都不播放正式过关", async () => {
@@ -201,6 +212,34 @@ describe("LearningRunSurface · 新结果过关演出", () => {
     renderResult(2, resultWithRubric(2), vi.fn(), assessingSnapshot());
     await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
     expect(document.querySelector(".learning-run-ceremony")).toBeNull();
+  });
+
+  it("轻量模式仍给出短暂过关提示，但不创建彩纸画布", async () => {
+    useRoomStore.setState({ motionMode: "lite" });
+    renderResult(2, resultWithRubric(2), vi.fn(), assessingSnapshot());
+    await waitFor(() => expect(document.querySelector('.learning-run-ceremony[data-motion="lite"]')).not.toBeNull());
+    expect(document.querySelector(".learning-run-ceremony__confetti")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "跳过庆祝，查看完整反馈" }));
+    await waitFor(() => expect(document.querySelector(".learning-run-ceremony")).toBeNull());
+  });
+
+  it("演出中途切到关闭动效会立刻收场，不留下遮罩", async () => {
+    renderResult(2, resultWithRubric(2), vi.fn(), assessingSnapshot());
+    await waitFor(() => expect(document.querySelector(".learning-run-ceremony")).not.toBeNull());
+    act(() => useRoomStore.setState({ motionMode: "off" }));
+    await waitFor(() => expect(document.querySelector(".learning-run-ceremony")).toBeNull());
+  });
+
+  it("静音时仍呈现真实学习成功，但演出中没有伴星口吻", async () => {
+    const sound = vi.fn();
+    window.addEventListener("ailearn:home-v2-sound", sound);
+    useRoomStore.setState({ masterMuted: true });
+    renderResult(2, resultWithRubric(2), vi.fn(), assessingSnapshot());
+    await waitFor(() => expect(document.querySelector(".learning-run-ceremony")).not.toBeNull());
+    expect(document.querySelector(".learning-run-ceremony__companion")).toBeNull();
+    expect(document.querySelector(".learning-run-ceremony")?.textContent).toContain("正式挑战 · 掌握完成");
+    expect(sound).not.toHaveBeenCalled();
+    window.removeEventListener("ailearn:home-v2-sound", sound);
   });
 });
 

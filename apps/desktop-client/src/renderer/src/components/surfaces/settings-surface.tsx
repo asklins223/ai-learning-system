@@ -1462,6 +1462,7 @@ export function SettingsSurface() {
                 const busy = switching === workspace.workspaceId;
                 const canLeave = !workspace.isPersonal && workspace.role !== "owner";
                 const canDissolve = !workspace.isPersonal && workspace.role === "owner";
+                const dissolveNoteId = `settings-dissolve-note-${workspace.workspaceId}`;
                 return (
                   <div key={workspace.workspaceId} className="settings-ledger__item">
                     <button
@@ -1494,17 +1495,22 @@ export function SettingsSurface() {
                       </button>
                     ) : null}
                     {canDissolve ? (
-                      <div className="settings-ledger__dissolve">
-                        {dissolvePending === workspace.workspaceId ? (
-                          <div role="group" aria-label={`解散 ${workspace.name} 的确认`}>
-                            <label className="field">
-                              <span>{`这个空间会连同其中的笔记、卡片与排程一起消失。输入空间名「${workspace.name}」以确认。`}</span>
-                              <input
-                                value={dissolveConfirmText}
-                                onChange={(event) => setDissolveConfirmText(event.target.value)}
-                                placeholder="输入空间名"
-                              />
-                            </label>
+                      dissolvePending === workspace.workspaceId ? (
+                        <div
+                          className="settings-ledger__dissolve-panel"
+                          role="group"
+                          aria-label={`解散 ${workspace.name} 的确认`}
+                        >
+                          <p className="settings-group__note" id={dissolveNoteId}>{`这个空间会连同其中的笔记、卡片与排程一起消失。输入空间名「${workspace.name}」以确认。`}</p>
+                          <div className="hud-field">
+                            <input
+                              aria-labelledby={dissolveNoteId}
+                              value={dissolveConfirmText}
+                              onChange={(event) => setDissolveConfirmText(event.target.value)}
+                              placeholder="输入空间名"
+                            />
+                          </div>
+                          <div className="settings-ledger__dissolve-actions">
                             <button
                               type="button"
                               className="button danger"
@@ -1524,21 +1530,21 @@ export function SettingsSurface() {
                               取消
                             </button>
                           </div>
-                        ) : (
-                          <button
-                            type="button"
-                            className="button danger settings-ledger__dissolve-trigger"
-                            aria-label={`解散 ${workspace.name}`}
-                            disabled={profileBusy !== null || switching !== null}
-                            onClick={() => {
-                              setDissolvePending(workspace.workspaceId);
-                              setDissolveConfirmText("");
-                            }}
-                          >
-                            解散空间
-                          </button>
-                        )}
-                      </div>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className="button danger settings-ledger__dissolve-trigger"
+                          aria-label={`解散 ${workspace.name}`}
+                          disabled={profileBusy !== null || switching !== null}
+                          onClick={() => {
+                            setDissolvePending(workspace.workspaceId);
+                            setDissolveConfirmText("");
+                          }}
+                        >
+                          解散空间
+                        </button>
+                      )
                     ) : null}
                   </div>
                 );

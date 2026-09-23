@@ -1,0 +1,188 @@
+/* Card generation and review: warm paper, mint felt, and an honest card reveal. */
+.hud-surface .card-generation-board {
+  padding: clamp(18px, 2.8vw, 42px);
+  color: #284739;
+  background: radial-gradient(circle at 87% 10%, #e7d698 0 8%, transparent 8.2%), linear-gradient(150deg, #b8d1ab, #8fb59b 57%, #6d9d85);
+  border-color: #fff9e8;
+}
+.hud-surface .card-generation-board__header { align-items: flex-start; }
+.hud-surface .card-generation-board__header h2 { max-width: 25ch; margin: 11px 0 8px; color: #234837; font: 760 clamp(26px, 2.7vw, 42px)/1.26 "Noto Serif SC Variable", "Songti SC", serif; }
+.hud-surface .card-generation-board__header p { max-width: 70ch; color: #315a45; font-size: 14px; line-height: 1.6; }
+.hud-surface .card-generation-board__sync { flex: none; min-height: 42px; }
+.hud-surface .card-generation-progress { margin-top: 24px; padding: clamp(18px, 2.5vw, 30px); border: 3px solid #fff9e7; border-radius: 22px 29px 24px 31px; background: #fff8e8; box-shadow: 0 12px 0 rgba(48, 84, 64, .12), 0 21px 33px rgba(24, 54, 41, .15); }
+.hud-surface .card-generation-progress__eyebrow { color: #9b5d34; font-size: 12px; font-weight: 800; }
+.hud-surface .card-generation-progress__name { color: #234837; font: 760 clamp(20px, 2vw, 30px)/1.35 "Noto Serif SC Variable", "Songti SC", serif; }
+.hud-surface .card-generation-progress__meta { color: #5d6955; font-size: 13px; line-height: 1.55; }
+.hud-surface .card-generation-progress__gauge { display: grid; min-width: 105px; place-items: center; padding: 14px; border: 2px dashed #b4845a; border-radius: 50%; background: #f7e8af; }
+.hud-surface .card-generation-progress__percent { color: #365f47; font-size: clamp(30px, 3vw, 44px); }
+.hud-surface .card-generation-progress__percent-caption { color: #6b6146; font-size: 11px; }
+.hud-surface .card-generation-progress__steps { margin-top: 19px; gap: 8px; }
+.hud-surface .card-generation-progress__step { min-width: 0; }
+.hud-surface .card-generation-progress__label { color: #425844; font-size: 13px; font-weight: 750; }
+.hud-surface .card-generation-progress__state { color: #665f4f; font-size: 11px; }
+.hud-surface .card-generation-progress__step.is-current .card-generation-progress__label { color: #b45f3c; }
+.hud-surface .card-generation-progress__step.is-current .card-generation-progress__state { color: #865532; }
+.hud-surface .card-generation-board .press-track { display: grid; grid-template-columns: 1fr; gap: 0; margin-top: 25px; }
+.hud-surface .card-generation-board .press-stage { display: none; min-height: 0; padding: 21px 15px 16px; border: 2px solid rgba(42, 83, 58, .25); border-radius: 16px 21px 17px 22px; background: rgba(255, 249, 229, .67); }
+.hud-surface .card-generation-board .press-stage.active { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, .42fr); align-items: center; gap: 7px 26px; min-height: 172px; padding: 24px 29px; border-color: #b86742; background: radial-gradient(circle at 91% 9%, #f7e5ab 0 11%, transparent 11.2%), #fff7dd; box-shadow: 0 9px 24px rgba(57, 80, 44, .16); }
+.hud-surface .card-generation-board .press-stage.done { background: #dfedd4; }
+.hud-surface .card-generation-board .press-stage::before { left: 13px; top: -18px; width: 32px; height: 32px; font-size: 12px; }
+.hud-surface .card-generation-board .press-stage::after { display: none; }
+.hud-surface .card-generation-board .press-stage h3 { grid-column: 1; align-self: end; margin: 0; color: #2d543e; font: 760 25px/1.3 "Noto Serif SC Variable", "Songti SC", serif; }
+.hud-surface .card-generation-board .press-stage p { grid-column: 1; align-self: start; margin: 0; color: #5a6756; font-size: 14px; line-height: 1.5; }
+.hud-surface .card-generation-board .press-paper { grid-column: 2; grid-row: 1 / span 2; min-height: 110px; margin-top: 0; padding: 15px 17px; color: #574634; border-radius: 10px 15px 11px 14px; background: #fff9eb; box-shadow: 0 4px 12px rgba(66, 58, 36, .1); transform: rotate(-1deg); }
+.hud-surface .card-generation-board .press-paper strong { color: #345e45; font-size: 15px; }
+.hud-surface .card-generation-board .press-paper span { color: #615946; font-size: 12px; }
+.hud-surface .card-generation-landing { margin-top: 22px; padding: 18px; border-radius: 17px 22px 18px 21px; background: rgba(255, 248, 227, .81); }
+.hud-surface .card-generation-landing__title { color: #28503b; font-size: 17px; }
+.hud-surface .card-generation-landing__item { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 4px 12px; padding: 9px 12px; border-radius: 10px 14px 11px 15px; background: #fff9eb; }
+.hud-surface .card-generation-landing__type { display: inline-flex; align-self: flex-start; padding: 4px 10px; color: #fff8e8; border-radius: 8px 12px 9px 11px; background: #547d59; font-size: 13px; font-weight: 800; }
+.hud-surface .card-generation-landing__concept { min-width: 0; color: #31543e; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hud-surface .card-generation-landing__prompt { grid-column: 2; color: #5f6554; font-size: 13px; }
+.hud-surface .card-generation-board__footer { color: #315742; border-color: rgba(42, 83, 58, .25); font-size: 12px; }
+.hud-surface .card-generation-board__sync-report { color: #284f3b; }
+.hud-surface .card-generation-board__sync-at { color: #526653; }
+
+.hud-surface .candidate-review-table { --card-accent: #b96843; display: grid; grid-template-columns: minmax(0, 1fr) minmax(270px, 320px); gap: clamp(14px, 2.2vw, 27px); min-height: 0; perspective: 1200px; }
+.hud-surface .candidate-review-table[data-card-strategy="recall"] { --card-accent: #c17445; }
+.hud-surface .candidate-review-table[data-card-strategy="cloze"] { --card-accent: #8b6aa0; }
+.hud-surface .candidate-review-table[data-card-strategy="compare"] { --card-accent: #448c91; }
+.hud-surface .candidate-review-table[data-card-strategy="sequence"] { --card-accent: #a36f39; }
+.hud-surface .candidate-review-table[data-card-strategy="why"] { --card-accent: #ae6145; }
+.hud-surface .candidate-review-table[data-card-strategy="boundary"] { --card-accent: #6c77a8; }
+.hud-surface .candidate-review-table[data-card-strategy="application"] { --card-accent: #547c51; }
+.hud-surface .candidate-study-card { padding: clamp(16px, 2vw, 28px); border: 4px solid #fff9e7; border-radius: 28px 34px 29px 36px; background: radial-gradient(circle at 88% 8%, #f7e9b7 0 6%, transparent 6.2%), #e1ebd6; }
+.hud-surface .candidate-study-card__body { padding: 0 4px 8px; }
+.hud-surface .candidate-card__meta { max-width: 780px; margin: 0 auto 17px; padding: 0 0 10px; color: #41634b; border-color: #bfd0b7; font-size: 13px; font-weight: 700; }
+.hud-surface .candidate-flip-stage { position: relative; width: min(710px, calc(100% - 28px)); height: clamp(300px, 54vh, 530px); margin: 0 auto 14px; perspective: 1400px; animation: candidate-draw 560ms cubic-bezier(.2,.75,.2,1) both; }
+.hud-surface .candidate-flip-stage::before,
+.hud-surface .candidate-flip-stage::after { position: absolute; inset: 10px -8px -8px 8px; border: 3px solid #fff7e2; border-radius: 20px 26px 22px 28px; background: #b8d2bd; box-shadow: 0 12px 20px rgba(40, 69, 48, .13); content: ""; transform: rotate(3deg); }
+.hud-surface .candidate-flip-stage::after { inset: 4px -4px -4px 4px; background: #eddba9; transform: rotate(1.5deg); }
+.hud-surface .candidate-flip-card { position: relative; z-index: 1; width: 100%; height: 100%; transform-style: preserve-3d; transition: transform 620ms cubic-bezier(.2,.75,.2,1); }
+.hud-surface .candidate-flip-card.is-flipped { transform: rotateY(180deg); }
+@keyframes candidate-draw { from { opacity: .35; transform: translateY(28px) rotate(-3deg) scale(.94); } to { opacity: 1; transform: translateY(0) rotate(0) scale(1); } }
+.hud-surface .candidate-flip-face { position: absolute; inset: 0; display: flex; flex-direction: column; overflow: auto; padding: clamp(20px, 2.5vw, 34px); backface-visibility: hidden; border: 5px solid #fff9e8; border-radius: 19px 26px 21px 28px; box-shadow: 0 15px 33px rgba(52, 55, 32, .22); }
+.hud-surface .candidate-flip-face--front { background: radial-gradient(circle at 90% 8%, rgba(227, 188, 116, .21) 0 9%, transparent 9.2%), #fff9e9; }
+.hud-surface .candidate-flip-face--back { color: #fff9e8; background: radial-gradient(circle at 82% 17%, rgba(243, 226, 162, .13) 0 13%, transparent 13.2%), #315d4b; transform: rotateY(180deg); }
+.hud-surface .candidate-card__strategy { display: flex; align-items: center; gap: 12px; align-self: flex-start; min-height: 57px; padding: 7px 16px 7px 8px; color: #fff9e8; border-radius: 14px 18px 15px 17px; background: var(--card-accent); box-shadow: 0 4px 0 rgba(67, 53, 37, .15); }
+.hud-surface .candidate-card__strategy > span { display: grid; width: 42px; height: 42px; place-items: center; border-radius: 50%; background: rgba(255, 250, 229, .25); font-size: 25px; }
+.hud-surface .candidate-card__strategy > div { display: grid; gap: 1px; }
+.hud-surface .candidate-card__strategy small { font-size: 11px; font-weight: 750; }
+.hud-surface .candidate-card__strategy strong { font: 850 24px/1.1 "Noto Serif SC Variable", "Songti SC", serif; }
+.hud-surface .candidate-card__kicker { margin: 19px 0 4px; color: #a15d3d; font-size: 13px; }
+.hud-surface .candidate-flip-face--front h2 { margin: 0 0 13px; color: #3f352e; font: 760 clamp(23px, 2.3vw, 34px)/1.27 "Noto Serif SC Variable", "Songti SC", serif; }
+.hud-surface .candidate-card__cue,
+.hud-surface .candidate-card__context { max-width: 66ch; color: #594d41; font-size: 14px; }
+.hud-surface .candidate-card__prompt { margin: 10px 0 0; padding: 14px 17px; color: #274536; border-left: 5px solid var(--card-accent); border-radius: 9px 15px 11px 15px; background: #e7efd9; font: 690 clamp(16px, 1.4vw, 20px)/1.55 "Noto Serif SC Variable", "Songti SC", serif; }
+.hud-surface .candidate-card__refs,
+.hud-surface .candidate-card__reasons { font-size: 12px; }
+.hud-surface .candidate-study-card .answer-slip { margin-top: auto; padding: 12px 15px; border-radius: 12px 16px 13px 17px; background: #f1e6bd; }
+.hud-surface .candidate-study-card .answer-slip small { font-size: 11px; }
+.hud-surface .candidate-study-card .answer-slip strong { font-size: 14px; }
+.hud-surface .candidate-flip-face__stamp { position: absolute; top: 26px; right: 28px; color: rgba(249, 232, 178, .19); font-size: 98px; line-height: 1; }
+.hud-surface .candidate-flip-face__eyebrow { color: #f1dc9f; font-size: 12px; font-weight: 800; letter-spacing: .12em; }
+.hud-surface .candidate-flip-face--back h2 { margin: 22px 0 5px; color: #fff9e8; font: 760 clamp(27px, 3vw, 43px)/1.2 "Noto Serif SC Variable", "Songti SC", serif; }
+.hud-surface .candidate-flip-face__cue { margin: 0 0 20px; color: #e1edcf; font-size: 15px; }
+.hud-surface .candidate-flip-face--back dl { display: grid; gap: 8px; margin: 0; }
+.hud-surface .candidate-flip-face--back dl > div { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px dashed #9db9a5; font-size: 14px; }
+.hud-surface .candidate-flip-face--back dt { color: #ccdfbe; }
+.hud-surface .candidate-flip-face--back dd { margin: 0; text-align: right; font-weight: 800; }
+.hud-surface .candidate-flip-face__footer { margin: auto 0 0; color: #e4e6c6; font-size: 12px; }
+.hud-surface .candidate-flip-toggle { display: flex; min-height: 40px; align-items: center; gap: 8px; margin: 0 auto 12px; padding: 6px 16px; color: #27513c; border: 2px solid #95b89a; border-radius: 999px; background: #fff9e9; font: 750 13px "Noto Sans SC Variable", sans-serif; cursor: pointer; }
+.hud-surface .candidate-study-card .stamp-actions { position: relative; left: auto; right: auto; bottom: auto; display: flex; flex: none; min-height: 54px; justify-content: center; gap: 8px; padding-top: 8px; border-top: 1px solid #b5c6aa; }
+.hud-surface .candidate-study-card .stamp-actions .button { min-height: 42px; font-size: 13px; }
+.hud-surface .candidate-study-card .reject-reasons { position: relative; z-index: 4; left: auto; right: auto; bottom: auto; flex: none; margin-top: 8px; font-size: 13px; }
+.hud-surface .candidate-study-card[data-rejecting="true"] { padding-bottom: clamp(16px, 2vw, 28px); }
+.hud-surface .candidate-review-slip { padding: 22px 19px; color: #44392d; border: 4px solid #fff9e7; border-radius: 22px 27px 23px 29px; background: #f6e8ba; transform: none; box-shadow: 0 12px 25px rgba(43, 55, 36, .17); font-size: 13px; }
+.hud-surface .candidate-review-slip h3 { margin: 14px 0 8px; color: #345b43; font: 760 22px/1.3 "Noto Serif SC Variable", "Songti SC", serif; }
+.hud-surface .candidate-review-slip__formats { display: grid; gap: 9px; margin: 7px 0 12px; }
+.hud-surface .candidate-review-slip__formats > div { display: grid; gap: 3px; padding: 10px 11px; border: 1px solid #d2c28e; border-radius: 10px 14px 11px 15px; background: rgba(255, 250, 235, .72); }
+.hud-surface .candidate-review-slip__formats span { color: #855733; font-size: 11px; font-weight: 850; }
+.hud-surface .candidate-review-slip__formats strong { color: #2f5c43; font: 750 15px/1.35 "Noto Serif SC Variable", "Songti SC", serif; }
+.hud-surface .candidate-review-slip__formats small { color: #5c5745; font-size: 12px; line-height: 1.5; }
+.hud-surface .candidate-review-slip__formats b { color: #285b43; }
+.hud-surface .candidate-review-slip > .small { color: #5c523e; font-size: 13px; line-height: 1.6; }
+.hud-surface .candidate-review-details { margin: 10px 0 4px; border-top: 1px dashed #bba877; border-bottom: 1px dashed #bba877; }
+.hud-surface .candidate-review-details summary { padding: 11px 2px; color: #305740; font-size: 13px; font-weight: 800; cursor: pointer; }
+.hud-surface .candidate-review-slip dl > div { gap: 7px; padding: 8px 0; font-size: 12px; }
+.hud-surface .candidate-review-slip__actions { gap: 9px; }
+.hud-surface .candidate-review-slip__actions .button { min-height: 42px; font-size: 13px; }
+.hud-surface .candidate-review-slip__actions .small { color: #6d4833; font-size: 12px; line-height: 1.55; }
+.hud-surface .reveal-slip { margin: 13px auto; width: min(710px, 100%); background: #fff8e5; }
+.hud-surface .reveal-slip :is(p, li, dt, dd) { font-size: 13px; }
+
+.generation-setup-backdrop { position: fixed; z-index: 150; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(24, 42, 32, .72); backdrop-filter: blur(5px); }
+.generation-setup-backdrop, .generation-setup-backdrop * { box-sizing: border-box; }
+.generation-setup { display: flex; width: min(860px, 100%); max-height: min(780px, calc(100vh - 40px)); min-height: 0; flex-direction: column; overflow: hidden; color: #3e382f; border: 5px solid #fff8e4; border-radius: 27px 35px 28px 34px; background: #fdf5dc; box-shadow: 0 22px 70px rgba(18, 31, 24, .45); }
+.generation-setup__header { position: relative; padding: 25px 32px 21px; color: #fff9e8; background: radial-gradient(circle at 88% 22%, rgba(246, 222, 151, .2) 0 8%, transparent 8.2%), #3d7656; }
+.generation-setup__eyebrow { color: #f5dda3; font-size: 12px; font-weight: 850; letter-spacing: .1em; }
+.generation-setup__header h2 { margin: 5px 0; font: 760 clamp(27px, 3vw, 38px)/1.25 "Noto Serif SC Variable", "Songti SC", serif; }
+.generation-setup__header p { margin: 0; color: #e6eed6; font-size: 14px; line-height: 1.5; }
+.generation-setup__close { position: absolute; top: 14px; right: 17px; display: grid; width: 39px; height: 39px; place-items: center; color: #fff9e8; border: 1px solid rgba(255, 249, 232, .6); border-radius: 50%; background: rgba(255, 249, 232, .12); font: 26px/1 sans-serif; cursor: pointer; }
+.generation-setup .generation-options { display: grid; gap: 18px; min-height: 0; margin: 0; padding: 20px 32px; overflow: auto; border: 0; background: transparent; }
+.generation-setup .generation-options legend { padding: 0 6px; color: #936039; font-size: 13px; font-weight: 850; }
+.generation-setup .generation-options__row { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
+.generation-setup .generation-options__label { width: 100%; color: #345d43; font-size: 15px; font-weight: 850; }
+.generation-setup .chip { min-height: 37px; padding: 7px 13px; color: #4d5445; border: 2px solid #c7ceb5; border-radius: 12px 16px 13px 16px; background: #fffaf0; font: 750 13px "Noto Sans SC Variable", sans-serif; cursor: pointer; }
+.generation-setup .chip.on { color: #205039; border-color: #5c9a6b; background: #dceecb; box-shadow: inset 0 0 0 1px #fffaf0; }
+.generation-setup .chip:disabled { opacity: .6; cursor: not-allowed; }
+.generation-setup .generation-options > .small { margin: 0; color: #5c6755; font-size: 12px; line-height: 1.6; }
+.generation-setup .generation-options__note { flex: 1; min-width: 180px; min-height: 38px; padding: 8px 11px; color: #383a31; border: 2px solid #bfcaac; border-radius: 11px 15px 12px 14px; background: #fffaf0; font: 13px "Noto Sans SC Variable", sans-serif; }
+.generation-setup__footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 17px 32px; border-top: 1px dashed #c8b991; background: #f8ecc9; }
+.generation-setup__footer p { margin: 0; color: #5d5b48; font-size: 13px; }
+.generation-setup__footer > div { display: flex; flex: none; gap: 9px; }
+.generation-setup__footer button { display: inline-flex; min-height: 42px; align-items: center; justify-content: center; gap: 7px; padding: 9px 17px; border-radius: 12px 16px 13px 17px; font: 800 14px "Noto Sans SC Variable", sans-serif; cursor: pointer; }
+.generation-setup__cancel { color: #385541; border: 2px solid #a1b49a; background: #fff9e8; }
+.generation-setup__start { color: #fff9e8; border: 2px solid #2d6c48; background: #43855c; box-shadow: 0 4px 0 #2c6645; }
+.generation-setup__start:disabled { cursor: not-allowed; opacity: .52; box-shadow: none; }
+
+@media (max-width: 900px) {
+  .hud-surface .candidate-review-table { grid-template-columns: minmax(0, 1fr) minmax(210px, 260px); gap: 10px; }
+  .hud-surface .candidate-study-card { padding: 13px; }
+  .hud-surface .candidate-flip-stage { width: calc(100% - 15px); height: 320px; }
+  .hud-surface .candidate-flip-face { padding: 18px; }
+  .hud-surface .candidate-review-slip { padding: 14px 12px; }
+  .hud-surface .candidate-card__strategy strong { font-size: 19px; }
+  .hud-surface .card-generation-board .press-track { grid-template-columns: 1fr; }
+}
+@media (max-width: 650px) {
+  .hud-surface .candidate-review-table { display: flex; flex-direction: column; overflow: auto; }
+  .hud-surface .candidate-study-card { min-height: 470px; flex: none; }
+  .hud-surface .candidate-review-slip { flex: none; min-height: 220px; }
+  .hud-surface .candidate-study-card .stamp-actions { gap: 5px; }
+  .hud-surface .candidate-study-card .stamp-actions .button { font-size: 11px; }
+  .hud-surface .card-generation-board .press-stage.active { grid-template-columns: 1fr; min-height: 0; padding: 18px; }
+  .hud-surface .card-generation-board .press-paper { grid-column: 1; grid-row: auto; min-height: 0; }
+  .generation-setup__footer { flex-direction: column; align-items: stretch; }
+  .generation-setup__footer > div { justify-content: flex-end; }
+}
+@media (max-height: 500px) {
+  .hud-surface .candidate-flip-stage { height: 240px; }
+  .hud-surface .candidate-card__meta { font-size: 11px; margin-bottom: 8px; }
+  .hud-surface .candidate-study-card { padding-bottom: 10px; }
+  .hud-surface .candidate-study-card .stamp-actions { bottom: auto; }
+  .hud-surface .candidate-study-card .stamp-actions .button { min-height: 31px; font-size: 11px; }
+  .hud-surface .candidate-flip-face { padding: 12px 15px; }
+  .hud-surface .candidate-card__strategy { min-height: 40px; }
+  .hud-surface .candidate-card__strategy > span { width: 29px; height: 29px; font-size: 18px; }
+  .hud-surface .candidate-card__strategy strong { font-size: 17px; }
+  .hud-surface .candidate-flip-face--front h2 { font-size: 21px; }
+  .hud-surface .candidate-card__prompt { font-size: 15px; }
+  .generation-setup__header { padding: 12px 20px; }
+  .generation-setup__header h2 { font-size: 24px; }
+  .generation-setup .generation-options { gap: 10px; padding: 11px 20px; }
+  .generation-setup__footer { padding: 8px 20px; }
+}
+.hud-surface .candidate-flip-toggle:focus-visible,
+.hud-surface .candidate-review-details summary:focus-visible,
+.generation-setup :is(button, input):focus-visible { outline: 3px solid #e68c47; outline-offset: 3px; }
+.desktop-app[data-motion-mode="lite"] .candidate-flip-card { transition-duration: 260ms; }
+.desktop-app[data-motion-mode="lite"] .candidate-flip-stage { animation-duration: 250ms; }
+.desktop-app[data-motion-mode="off"] .candidate-flip-card { transition: none; }
+.desktop-app[data-motion-mode="off"] .candidate-flip-stage { animation: none; }
+@media (prefers-reduced-motion: reduce) {
+  .hud-surface .candidate-flip-stage,
+  .hud-surface .candidate-flip-card,
+  .hud-surface .card-generation-board .press-stage,
+  .generation-setup * { transition: none !important; animation: none !important; }
+}

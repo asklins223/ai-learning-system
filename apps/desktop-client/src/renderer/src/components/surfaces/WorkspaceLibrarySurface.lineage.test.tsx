@@ -44,6 +44,7 @@ function detail(origins: Array<ReturnType<typeof origin>>) {
       conceptLabel: "惯性与质量",
       publicSummary: "质量是惯性大小的唯一量度。",
       knowledgeForm: "fact",
+      cardStrategy: "why",
       lifecycle: "active",
       freshness: "fresh",
       presentation: { cardId: null, cardRevision: null, publicationRevision: null },

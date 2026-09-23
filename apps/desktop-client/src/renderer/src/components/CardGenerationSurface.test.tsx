@@ -371,7 +371,7 @@ describe("CardGenerationSurface · packaged 冒烟选择器契约", () => {
 
     // 未决候选的后果必须写在脸上：以前点「激活」会静默把它们打成"未选中"丢弃。
     expect(container.querySelector(".candidate-review-slip__actions")?.textContent)
-      .toContain("还有 1 张没有决定");
+      .toContain("还有 1 张可以审核的卡没有决定");
 
     // 保留之后 meta 行给出「已保留 · 在激活队列里」，脚本用这句话判断提交成功。
     fireEvent.click(within(container).getByRole("button", { name: /^保留/ }));

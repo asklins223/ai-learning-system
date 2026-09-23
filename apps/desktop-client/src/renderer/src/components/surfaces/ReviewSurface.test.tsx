@@ -30,6 +30,7 @@ function item(reviewId: string, objectiveId: string, overrides: Partial<ReviewIt
     scheduleGeneration: 1,
     dueAt: new Date(Date.now() - 3_600_000).toISOString(),
     startability: { kind: "ready" },
+    formalValidationBlocked: null,
     ...overrides,
   };
 }

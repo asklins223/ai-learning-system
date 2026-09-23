@@ -39,6 +39,7 @@ import {
 import { HudPage } from "./hud/HudPage";
 import { useHudPage } from "./hud/use-hud-page";
 import { formatRelative } from "./surfaces/surface-data";
+import { cardStrategyPresentation } from "./surfaces/card-strategy-presentation";
 
 /**
  * The review page shows one candidate at a time. Its projection carries no
@@ -95,6 +96,14 @@ function isActivatableCandidate(candidate: CardGenerationCandidateV1): candidate
     && candidate.candidateEvidenceBindingPlanHash !== null;
 }
 
+function isActionableUndecidedCandidate(candidate: CardGenerationCandidateV1): boolean {
+  return candidate.reviewDecision === "undecided"
+    && candidate.qualityState === "passed"
+    && candidate.publishState === "unpublished"
+    && candidate.isReviewReady
+    && candidate.candidateEvidenceBindingPlanHash !== null;
+}
+
 function knowledgeFormLabel(value: CardGenerationCandidateV1["objective"]["knowledgeForm"]): string {
   return {
     fact: "事实",
@@ -116,7 +125,7 @@ function knowledgeFormLabel(value: CardGenerationCandidateV1["objective"]["knowl
 function practiceItemLabel(
   item: { kind: string; optionCount?: number } | null | undefined,
 ): string {
-  if (!item) return "没有，只能用自己的话答";
+  if (!item) return "无附带客观题";
   switch (item.kind) {
     case "single_choice": return `选择题 · ${item.optionCount ?? "?"} 个选项`;
     case "true_false": return "判断题 · 对不对二选一";
@@ -124,18 +133,6 @@ function practiceItemLabel(
     case "matching": return `配对题 · ${item.optionCount ?? "?"} 组`;
     default: return "有，但这次没读出来";
   }
-}
-
-function strategyLabel(value: CardGenerationCandidateV1["strategy"]): string {
-  return {
-    recall: "主动回忆",
-    cloze: "关键补全",
-    compare: "对比辨析",
-    sequence: "顺序重建",
-    why: "机制解释",
-    boundary: "边界判断",
-    application: "情境应用",
-  }[value];
 }
 
 function transformationLabel(value: CardGenerationCandidateV1["transformationKind"]): string {
@@ -271,6 +268,7 @@ export function CardGenerationSurface() {
   const [revealing, setRevealing] = useState(false);
   const [revealFailure, setRevealFailure] = useState<string | null>(null);
   const [rejectingId, setRejectingId] = useState<string | null>(null);
+  const [flipped, setFlipped] = useState(false);
   const [exposure, setExposure] = useState<CardGenerationExposureEligibilityV1 | null>(null);
   const [exposureFailure, setExposureFailure] = useState<string | null>(null);
   /**
@@ -457,8 +455,8 @@ export function CardGenerationSurface() {
   /** The next candidate nobody has decided on, so a decision keeps the flow going. */
   const nextUndecided = (fromId: string): CardGenerationCandidateV1 | null => {
     const index = candidates.findIndex((candidate) => candidate.candidateId === fromId);
-    return candidates.slice(index + 1).find((candidate) => candidate.reviewDecision === "undecided")
-      ?? candidates.find((candidate) => candidate.reviewDecision === "undecided")
+    return candidates.slice(index + 1).find(isActionableUndecidedCandidate)
+      ?? candidates.find(isActionableUndecidedCandidate)
       ?? null;
   };
 
@@ -515,6 +513,7 @@ export function CardGenerationSurface() {
         if (next) setActiveCandidateId(next.candidateId);
       }
       setReveal(null);
+      setFlipped(false);
       setRevealFailure(null);
       await load(false);
       if (decision !== "undo") undoRef.current?.focus();
@@ -562,6 +561,10 @@ export function CardGenerationSurface() {
         isActivatableCandidate(candidate),
     );
     if (selectedCandidates.length === 0) return;
+    if (candidates.some(isActionableUndecidedCandidate)) {
+      setActionFailure("还有可以审核的候选，请逐张决定后再激活。");
+      return;
+    }
     setBusyAction("activate");
     setActionFailure(null);
     try {
@@ -638,7 +641,7 @@ export function CardGenerationSurface() {
 
   /** 保留即排队：待激活数 = 已保留且可激活的候选数。 */
   const activatableCount = candidates.filter(isActivatableCandidate).length;
-  const undecidedCount = candidates.filter((candidate) => candidate.reviewDecision === "undecided").length;
+  const actionableUndecidedCount = candidates.filter(isActionableUndecidedCandidate).length;
   const practiceQuotaView = practiceQuotaLabel(practiceQuota);
   const progressView = run ? cardGenerationProgressView(run.status, run.progress) : null;
   const generationStage = progressView?.stage ?? 0;
@@ -738,6 +741,7 @@ export function CardGenerationSurface() {
     const next = candidates[activeCandidateIndex + offset];
     if (!next) return;
     setActiveCandidateId(next.candidateId);
+    setFlipped(false);
     setRejectingId(null);
     setRevealFailure(null);
   };
@@ -804,7 +808,7 @@ export function CardGenerationSurface() {
             <div>
               <span className="tag green">{run ? cardGenerationStatusLabel(run.status) : "准备中"}</span>
               <h2>{noteTitle ? `把《${noteTitle}》整理成学习卡` : "把一篇笔记整理成可练习的问题"}</h2>
-              <p>{run ? `生成任务 ${run.runId.slice(0, 8)} · 后台进行中，离开本页不会中断 · 有新进展会自动更新，也可以随时刷新` : "进度只跟着已经确认的阶段走。"}</p>
+              <p>{run ? "后台正在整理，离开本页也会继续。新进展自动更新，你也可以随时刷新。" : "进度只跟着已经确认的阶段走。"}</p>
             </div>
             <button type="button" className="button card-generation-board__sync" disabled={loading} onClick={() => void resync()}>
               <RefreshCw size={14} aria-hidden="true" />{loading ? "正在刷新…" : "刷新状态"}
@@ -887,6 +891,7 @@ export function CardGenerationSurface() {
               <ol className="card-generation-landing__list">
                 {landedCandidates.map((candidate) => (
                   <li key={candidate.candidateId} data-testid="card-generation-landing-item" className="card-generation-landing__item">
+                    <span className="card-generation-landing__type">卡型 · {cardStrategyPresentation[candidate.strategy].label}</span>
                     <strong className="card-generation-landing__concept">{candidate.objective.publicSummary}</strong>
                     <span className="card-generation-landing__prompt">{candidate.front.prompt}</span>
                   </li>
@@ -978,7 +983,7 @@ export function CardGenerationSurface() {
           ) : null}
         </section>
       ) : (
-        <div className="review-table candidate-review-table">
+        <div className="review-table candidate-review-table" data-card-strategy={activeCandidate?.strategy ?? "none"}>
           <section
             className="study-card candidate-study-card"
             aria-labelledby="candidate-card-title"
@@ -997,9 +1002,16 @@ export function CardGenerationSurface() {
               <>
                 <div className="candidate-study-card__body">
                   <div className="candidate-card__meta" role="status" aria-live="polite">
-                    <span>候选 {activeCandidateIndex + 1} / {candidates.length}{undecidedCount ? ` · ${undecidedCount} 张还没决定` : " · 都已决定"}{practiceQuotaView ? ` · ${practiceQuotaView}` : ""}</span>
+                    <span>候选 {activeCandidateIndex + 1} / {candidates.length}{actionableUndecidedCount ? ` · ${actionableUndecidedCount} 张还没决定` : " · 可审核卡都已决定"}{practiceQuotaView ? ` · ${practiceQuotaView}` : ""}</span>
                     <span>{candidateDecisionLabel(activeCandidate)}</span>
                   </div>
+                  <div key={activeCandidate.candidateId} className="candidate-flip-stage">
+                    <div className={`candidate-flip-card${flipped ? " is-flipped" : ""}`}>
+                      <div className="candidate-flip-face candidate-flip-face--front" aria-hidden={flipped}>
+                        <div className="candidate-card__strategy" data-strategy={activeCandidate.strategy}>
+                          <span aria-hidden="true">{cardStrategyPresentation[activeCandidate.strategy].symbol}</span>
+                          <div><small>学习卡型</small><strong>{cardStrategyPresentation[activeCandidate.strategy].label}</strong></div>
+                        </div>
                   <p className="candidate-card__kicker">这张卡准备验证</p>
                   <h2 id="candidate-card-title">{activeCandidate.objective.statement}</h2>
                   {activeCandidate.front.cue ? (
@@ -1021,6 +1033,25 @@ export function CardGenerationSurface() {
                     <small>理解目标摘要</small>
                     <strong>{activeCandidate.objective.publicSummary}</strong>
                   </div>
+                      </div>
+                      <div className="candidate-flip-face candidate-flip-face--back" aria-hidden={!flipped}>
+                        <span className="candidate-flip-face__stamp" aria-hidden="true">{cardStrategyPresentation[activeCandidate.strategy].symbol}</span>
+                        <span className="candidate-flip-face__eyebrow">审核档案 · {activeCandidateIndex + 1} / {candidates.length}</span>
+                        <h2>{cardStrategyPresentation[activeCandidate.strategy].label}</h2>
+                        <p className="candidate-flip-face__cue">{cardStrategyPresentation[activeCandidate.strategy].cue}</p>
+                        <dl>
+                          <div><dt>这张卡练什么</dt><dd>{transformationLabel(activeCandidate.transformationKind)}</dd></div>
+                          <div><dt>知识形态</dt><dd>{knowledgeFormLabel(activeCandidate.objective.knowledgeForm)}</dd></div>
+                          <div><dt>作答方式</dt><dd>正式挑战可文字或口述</dd></div>
+                          <div><dt>质量检查</dt><dd>{candidateDecisionLabel(activeCandidate)}</dd></div>
+                        </dl>
+                        <p className="candidate-flip-face__footer">翻面只看公开档案，不会展示答案或记录答案曝光。</p>
+                      </div>
+                    </div>
+                  </div>
+                  <button type="button" className="candidate-flip-toggle" aria-pressed={flipped} onClick={() => setFlipped((value) => !value)}>
+                    <RotateCcw size={16} aria-hidden="true" />{flipped ? "翻回题面" : "翻看卡片档案"}
+                  </button>
 
                   {/* The answer and its evidence are one deliberate call away, not
                       withheld: the reveal is what the server records as exposure. */}
@@ -1070,10 +1101,10 @@ export function CardGenerationSurface() {
                       title="先看过答案再决定保不保留。代价要说在前面：这张卡激活之后要等 24 小时才能做正式首次验证，期间只能练习。"
                       onClick={() => void revealCandidate(activeCandidate)}
                     >
-                      <Eye size={14} aria-hidden="true" />{revealing ? "正在读取答案…" : "查看答案与证据"}
+                      <Eye size={14} aria-hidden="true" />{revealing ? "正在读取答案…" : "查看答案与证据 · 首次验证延后 24 小时"}
                     </button>
                   ) : null}
-                  {reviewOpen && activeCandidate.reviewDecision === "undecided" && activeCandidate.isReviewReady && activeCandidate.candidateEvidenceBindingPlanHash !== null && rejectingId !== activeCandidate.candidateId ? (
+                  {reviewOpen && isActionableUndecidedCandidate(activeCandidate) && rejectingId !== activeCandidate.candidateId ? (
                     <>
                       <button type="button" className="button" disabled={busyAction !== null} onClick={() => setRejectingId(activeCandidate.candidateId)}>
                         <X size={14} aria-hidden="true" />不保留
@@ -1117,6 +1148,13 @@ export function CardGenerationSurface() {
             <h3>{activeCandidate
               ? activeCandidate.recommendation.recommended ? "建议保留这张" : "逐张做判断"
               : run?.recovery ? cardGenerationRecoveryReasonLabel(run.recovery.publicReasonCode) : "逐张做判断"}</h3>
+            {activeCandidate ? (
+              <div className="candidate-review-slip__formats" aria-label="卡型与作答方式">
+                <div><span>学习卡型 · 练什么</span><strong>{cardStrategyPresentation[activeCandidate.strategy].label}</strong></div>
+                <div><span>作答方式 · 怎么答</span><strong>正式验证用自己的话，文字或口述</strong><small>附带练习：<b>{practiceItemLabel(activeCandidate.practiceItem)}</b>。客观题用于练习，不能单独证明掌握。</small></div>
+                <div><span>答案曝光与首次验证</span><strong>{firstValidationLabel(exposure, exposureFailure)}</strong></div>
+              </div>
+            ) : null}
             {/* 恢复态的 run 仍然可能带着通过门禁的候选：把「还能做什么」说在前面，
                 否则用户只会看到「需要处理」而不知道这张卡上的按钮仍然是有效的。 */}
             {run?.recovery && activeCandidate ? (
@@ -1126,33 +1164,32 @@ export function CardGenerationSurface() {
               </p>
             ) : null}
             {activeCandidate ? (
-              <dl>
-                <div><dt>题型</dt><dd>{strategyLabel(activeCandidate.strategy)}</dd></div>
+              <details className="candidate-review-details">
+                <summary>查看完整审核信息</summary>
+                <dl>
                 <div><dt>教学变换</dt><dd>{transformationLabel(activeCandidate.transformationKind)}</dd></div>
                 <div><dt>理解形态</dt><dd>{knowledgeFormLabel(activeCandidate.objective.knowledgeForm)}</dd></div>
                 <div><dt>预计用时</dt><dd>约 {activeCandidate.estimatedReviewSeconds} 秒</dd></div>
                 <div><dt>候选版本</dt><dd>v{activeCandidate.revision} · 计划 {activeCandidate.planVersion}</dd></div>
                 <div><dt>质量状态</dt><dd>{candidateDecisionLabel(activeCandidate)}</dd></div>
-                <div><dt>随卡练习</dt><dd>{practiceItemLabel(activeCandidate.practiceItem)}</dd></div>
                 <div><dt>看过答案</dt><dd>{exposureLabel(exposure, exposureFailure)}</dd></div>
-                <div><dt>首次验证</dt><dd>{firstValidationLabel(exposure, exposureFailure)}</dd></div>
-              </dl>
+                </dl>
+              </details>
             ) : <p>候选一旦可审核，会在左侧一次出现一张。</p>}
             <div className="rule" />
             <p className="small">问题和目标一直是公开的；答案、评分依据和原文片段只在你主动查看时才给，并且会记下你看过一次 —— 上表的"首次验证"就是看过一次的后果。</p>
             {receipt ? <p className="candidate-review-slip__receipt" role="status"><Check size={15} aria-hidden="true" />已确认 {receipt.mappings.length} 个目标映射</p> : null}
             <div className="candidate-review-slip__actions">
-              {reviewOpen && undecidedCount > 0 ? (
+              {reviewOpen && actionableUndecidedCount > 0 ? (
                 // 曾经这一步会静默把所有"未决"候选打成未选中并丢弃（activation-service
                 // 的 not_selected_at_activation），而界面上没有任何一句话提到这个后果。
                 <p className="small">
-                  还有 {undecidedCount} 张没有决定：点「激活」只提交已保留的 {activatableCount} 张，
-                  其余会被记为未选中并丢弃。想留哪张就先在它上面点「保留」。
+                  还有 {actionableUndecidedCount} 张可以审核的卡没有决定。请先逐张保留或不保留，再激活。
                 </p>
               ) : null}
               {run?.recovery ? recoveryActions() : null}
               {reviewOpen && activatableCount > 0 ? (
-                <button type="button" className="button primary" disabled={busyAction !== null} onClick={() => void activate()}>
+                <button type="button" className="button primary" disabled={busyAction !== null || actionableUndecidedCount > 0} onClick={() => void activate()}>
                   {busyAction === "activate" ? "正在激活…" : `激活 ${activatableCount} 个目标`}<ArrowRight size={14} aria-hidden="true" />
                 </button>
               ) : null}

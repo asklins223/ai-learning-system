@@ -216,4 +216,51 @@ describe("HomeProjectionProvider", () => {
     await waitFor(() => expect(latest?.projection?.dashboardRevision).toBe("workspace-two"));
     expect(latest?.failure).toBeNull();
   });
+
+  /**
+   * F01：伴星投递只说明这份投影旧了。账号与空间都没变，所以同代刷新不该再读一次
+   * 会话——主进程那边一次 `/auth/me` 就是一次 `/auth/me`，事件有多少条它就涨多少。
+   */
+  it("同代伴星投递只重取投影，不再重读会话", async () => {
+    const currentSession = session("22222222-2222-4222-8222-222222222222", 1);
+    const callbacks = new Map<string, (event: GatewayEventV1) => void>();
+    const getProjection = vi.fn()
+      .mockResolvedValueOnce(ok(projection(1, "home-initial"), 1))
+      .mockResolvedValueOnce(ok(projection(1, "home-after-delivery"), 1));
+    const getState = vi.fn().mockResolvedValue(ok(currentSession, 1));
+    installApi({
+      auth: { getState },
+      room: { getProjection },
+      subscriptions: {
+        subscribe: vi.fn().mockImplementation(({ topic }: { topic: { kind: string } }) => (
+          Promise.resolve(ok({ subscriptionId: `${topic.kind}-subscription` }, 1))
+        )),
+        onEvent: vi.fn().mockImplementation((subscriptionId: string, callback: (event: GatewayEventV1) => void) => {
+          callbacks.set(subscriptionId, callback);
+          return () => callbacks.delete(subscriptionId);
+        }),
+        unsubscribe: vi.fn().mockResolvedValue(ok({ closed: true })),
+      },
+    });
+
+    render(<HomeProjectionProvider><Probe /></HomeProjectionProvider>);
+    await waitFor(() => expect(latest?.projection?.dashboardRevision).toBe("home-initial"));
+    await waitFor(() => expect(callbacks.size).toBe(2));
+    expect(getState).toHaveBeenCalledTimes(1);
+
+    act(() => callbacks.get("runtime-subscription")?.({
+      version: 1,
+      subscriptionId: "runtime-subscription",
+      workspaceEpoch: 1,
+      cursor: "cursor-companion-1",
+      eventRevision: 1,
+      kind: "companion_activity_changed",
+      schemaRevision: "desktop-ipc-v1",
+      data: { kind: "companion_activity_changed", inboxSequence: 1 },
+    }));
+
+    await waitFor(() => expect(latest?.projection?.dashboardRevision).toBe("home-after-delivery"));
+    expect(getProjection).toHaveBeenCalledTimes(2);
+    expect(getState).toHaveBeenCalledTimes(1);
+  });
 });

@@ -11,6 +11,8 @@ import "./components/hud/hud-controls.css";
 import "./components/source-intake.css";
 // 理解目标链路的修正层，必须排在 hud 层之后：它覆盖的是 hud-surface.css 自己的规则。
 import "./components/objective-flow.css";
+import "./components/card-generation-flow.css";
+import "./components/surfaces/companion-center.css";
 
 const root = document.getElementById("root");
 

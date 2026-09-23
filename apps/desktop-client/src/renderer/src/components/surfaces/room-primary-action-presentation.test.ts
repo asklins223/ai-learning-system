@@ -30,6 +30,7 @@ function objectiveWithRun(activeRun: { runId: string; phase: string } | null) {
       conceptLabel: "在质量相同的情况下",
       publicSummary: "理解惯性与质量的关系。",
       knowledgeForm: "fact",
+      cardStrategy: null,
       lifecycle: "active",
       freshness: "fresh",
       presentation: { cardId: null, cardRevision: null, publicationRevision: null },

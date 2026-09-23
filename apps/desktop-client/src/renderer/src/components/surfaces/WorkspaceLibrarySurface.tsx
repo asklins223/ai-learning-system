@@ -68,6 +68,7 @@ import {
   type ObjectiveLibraryFilter,
 } from "./objective-library-view-state";
 import { useHudPage } from "../hud/use-hud-page";
+import { cardStrategyLabel } from "./card-strategy-presentation";
 import {
   objectiveQuestRegion,
   orderObjectivesForQuest,
@@ -446,6 +447,7 @@ export function ObjectiveLibrarySurface() {
           <div className="objective-expedition__landscape">
           <section className="v3-goal-focus objective-expedition__focus" aria-labelledby="goal-focus-title">
             <div className="objective-expedition__focus-flags" aria-label="本轮模式与状态">
+              <span className="objective-card-type" data-empty={activeGoal.cardStrategy ? "false" : "true"}><span>卡型</span><strong>{cardStrategyLabel(activeGoal.cardStrategy)}</strong></span>
               <span className={`objective-mode-badge objective-mode-badge--${activeMode?.mode ?? "unavailable"}`}>
                 {activeMode?.label}
               </span>
@@ -512,7 +514,7 @@ export function ObjectiveLibrarySurface() {
                             onClick={() => openObjective(item.objectiveId)}
                           >
                             <span className="objective-quest-node__step" aria-hidden="true">{index + 1}</span>
-                            <span><strong>{item.conceptLabel ?? item.primaryNoteTitle ?? "未命名理解目标"}</strong><small>{formatObjectiveState(item.personalState.state)} · {formatKnowledgeForm(item.knowledgeForm)}</small></span>
+                            <span><strong>{item.conceptLabel ?? item.primaryNoteTitle ?? "未命名理解目标"}</strong><small>卡型 · {cardStrategyLabel(item.cardStrategy)}　{formatObjectiveState(item.personalState.state)}</small></span>
                             <ChevronRight size={15} aria-hidden="true" />
                           </button>
                         </li>
@@ -560,6 +562,7 @@ export function ObjectiveLibrarySurface() {
                         <span className="v3-goal-row__title">{item.conceptLabel ?? item.primaryNoteTitle ?? "未命名理解目标"}</span>
                         <span className="v3-goal-row__summary">{item.publicSummary}</span>
                         <span className="v3-objective-tags">
+                          <span className="objective-card-type objective-card-type--row" data-empty={item.cardStrategy ? "false" : "true"}><span>卡型</span><strong>{cardStrategyLabel(item.cardStrategy)}</strong></span>
                           <span className={`v3-objective-state v3-objective-state--${objectiveStateTone(item.personalState.state)}`} title={objectiveStateHint(item.personalState.state)}>
                             <CircleDot size={12} aria-hidden="true" />{formatObjectiveState(item.personalState.state)}
                           </span>
@@ -672,6 +675,7 @@ export function ObjectiveDetailSurface() {
           <article className="objective-brief__board">
             <header className="objective-brief__masthead">
               <div className="objective-brief__flags">
+                <span className="objective-card-type objective-card-type--brief" data-empty={content.cardStrategy ? "false" : "true"}><span>学习卡型</span><strong>{cardStrategyLabel(content.cardStrategy)}</strong></span>
                 <span className={`objective-mode-badge objective-mode-badge--${detailMode?.mode ?? "unavailable"}`}>{detailMode?.label}</span>
                 <span className={`v3-objective-state v3-objective-state--${objectiveStateTone(detailState)}`}><CircleDot size={12} aria-hidden="true" />{formatObjectiveState(detailState)}</span>
               </div>
@@ -682,6 +686,7 @@ export function ObjectiveDetailSurface() {
             <section className="objective-brief__mission" aria-labelledby="objective-proof-title">
               <div className="objective-brief__mission-heading"><Target size={24} aria-hidden="true" /><h4 id="objective-proof-title">过这一关，需要你证明</h4></div>
               <p>不用背原文。请用自己的话说明这条主张，并给出能让它成立的解释、例子或边界。</p>
+              <p className="objective-brief__type-help">学习卡型说明这道题在练什么。正式验证需要用自己的话回答，可选择文字或口述；随卡客观题用于练习。</p>
               <div className={`objective-brief__mode objective-brief__mode--${detailMode?.mode ?? "unavailable"}`}>
                 <strong>{detailMode?.label}</strong><span>{detailMode?.description}</span>
               </div>

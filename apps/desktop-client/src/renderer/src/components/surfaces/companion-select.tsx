@@ -62,7 +62,7 @@ export function CompanionSelect<T extends string>({
     const root = rootRef.current;
     if (root) {
       const trigger = root.getBoundingClientRect();
-      const scroller = root.closest(".companion-tab-panel");
+      const scroller = root.closest(".companion-center__body, .companion-tab-panel");
       const bounds = scroller?.getBoundingClientRect();
       const spaceBelow = (bounds ? bounds.bottom : window.innerHeight) - trigger.bottom;
       const spaceAbove = trigger.top - (bounds ? bounds.top : 0);

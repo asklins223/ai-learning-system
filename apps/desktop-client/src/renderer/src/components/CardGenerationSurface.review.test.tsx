@@ -215,6 +215,36 @@ afterEach(() => {
 });
 
 describe("CardGenerationSurface · 候选审核", () => {
+  it("翻面只展示公开审核档案，查看答案仍需单独操作", async () => {
+    const { state } = stubGateway([
+      { candidateId: "cand-1", statement: "第一张", reviewDecision: "undecided", publishState: "unpublished" },
+    ]);
+    useRoomStore.setState({ activeCardGenerationRunId: RUN_ID });
+    render(<CardGenerationSurface />);
+
+    await waitFor(() => expect(screen.getByText("第一张")).toBeTruthy());
+    const flip = screen.getByRole("button", { name: "翻看卡片档案" });
+    fireEvent.click(flip);
+    expect(flip.getAttribute("aria-pressed")).toBe("true");
+    expect(document.querySelector(".candidate-flip-card")?.classList.contains("is-flipped")).toBe(true);
+    expect(state.revealCalls).toHaveLength(0);
+    expect(screen.queryByText("提取练习强迫大脑重建记忆痕迹。")).toBeNull();
+  });
+
+  it("仍有可审核候选时，已保留的卡不能提前激活", async () => {
+    const { state } = stubGateway([
+      { candidateId: "cand-1", statement: "第一张", reviewDecision: "undecided", publishState: "unpublished" },
+      { candidateId: "cand-2", statement: "第二张", reviewDecision: "undecided", publishState: "unpublished" },
+    ]);
+    useRoomStore.setState({ activeCardGenerationRunId: RUN_ID });
+    render(<CardGenerationSurface />);
+    await waitFor(() => expect(screen.getByText("第一张")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: /^保留（进入激活队列）/ }));
+    await waitFor(() => expect(state.reviewCalls).toHaveLength(1));
+    expect(screen.getByRole("button", { name: /激活 1 个目标/ }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByText(/还有 1 张可以审核的卡没有决定/)).toBeTruthy();
+  });
+
   it("保留后卡片说出新状态，并自动走到下一张未决候选", async () => {
     const { state } = stubGateway([
       { candidateId: "cand-1", statement: "第一张", reviewDecision: "undecided", publishState: "unpublished" },
@@ -306,9 +336,8 @@ describe("CardGenerationSurface · 候选审核", () => {
 
     await waitFor(() => expect(screen.getByText("第一张")).toBeTruthy());
     expect(screen.getByText("判断题 · 对不对二选一")).toBeTruthy();
-    const practiceRow = [...document.querySelectorAll("dt")]
-      .find((dt) => dt.textContent === "随卡练习")?.nextElementSibling?.textContent ?? "";
-    expect(practiceRow).toBe("判断题 · 对不对二选一");
+    expect(document.querySelector(".candidate-review-slip__formats")?.textContent)
+      .toContain("附带练习：判断题 · 对不对二选一");
   });
 
   it("生成中这一屏：张数是实时的，进度条不再整块藏起来", async () => {
@@ -447,7 +476,7 @@ describe("CardGenerationSurface · 候选审核", () => {
     render(<CardGenerationSurface />);
 
     await waitFor(() => expect(screen.getByText("第一张")).toBeTruthy());
-    expect(screen.getByText("没有，只能用自己的话答")).toBeTruthy();
+    expect(screen.getByText("无附带客观题")).toBeTruthy();
   });
 
   it("不保留先问原因，并把选择的原因码交给服务端", async () => {
