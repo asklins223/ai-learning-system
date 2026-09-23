@@ -77,6 +77,9 @@ const snapshot = {
     { version: 2 as const, kind: "request_hint" as const, level: 1 as const },
   ],
   publishedTargetEligibility: "eligible" as const,
+  // 审计 F28：checkpoint 之外一律 null。夹具按解析后的完整形状写，
+  // 这条用例才是"往返相等"而不是"少一个字段也能过"。
+  checkpointReason: null,
 };
 
 const resultBase = {
@@ -104,6 +107,11 @@ test("V2 create request is versioned and never falls back to V1 origin", () => {
 
 test("public snapshot accepts the frozen V2 binding and rejects V1/unknown/mismatched payloads", () => {
   assert.deepEqual(learningRunPublicSnapshotV2Schema.parse(snapshot), snapshot);
+  // `.default(null)` 是读侧的容忍：服务端还没带这个字段时也解析得出来，且解析结果是
+  // null 而不是 undefined——网关按解析后形状推断返回类型，两者差一个 `undefined`
+  // 就会让调用方的类型变成"字段可有可无"（desktop-gateway.ts 的 getLearningRunV2）。
+  const { checkpointReason: _omitted, ...snapshotWithoutReason } = snapshot;
+  assert.equal(learningRunPublicSnapshotV2Schema.parse(snapshotWithoutReason).checkpointReason, null);
   assert.throws(() => learningRunPublicSnapshotV2Schema.parse({ ...snapshot, extra: true }));
   assert.throws(() => learningRunPublicSnapshotV2Schema.parse({
     ...snapshot,

@@ -23,3 +23,21 @@ if (typeof HTMLMediaElement !== "undefined") {
   HTMLMediaElement.prototype.load = () => undefined
   HTMLMediaElement.prototype.play = () => Promise.resolve()
 }
+
+/**
+ * jsdom 没实现 `Range.prototype.getClientRects`，而 ProseMirror 的
+ * `EditorView.scrollToSelection` 会对选区那个 Range 调它（`singleRect`）——
+ * 报出来的是**未捕获异常** `target.getClientRects is not a function`：用例照样通过、
+ * exit code 照样 0，只在摘要里留一个 `Errors` 段（同上面媒体那条的形状）。
+ *
+ * 补的是真浏览器的语义（返回一个 DOMRectList 形状），不是往生产代码里塞可选链：
+ * 那条路的产物只是滚动位置，jsdom 里没有布局可量。
+ */
+if (typeof Range !== "undefined") {
+  const emptyRectList = () => {
+    const list: DOMRect[] = []
+    return Object.assign(list, { item: (index: number) => list[index] ?? null }) as unknown as DOMRectList
+  }
+  Range.prototype.getClientRects = emptyRectList as unknown as Range["getClientRects"]
+  Range.prototype.getBoundingClientRect = () => new DOMRect()
+}

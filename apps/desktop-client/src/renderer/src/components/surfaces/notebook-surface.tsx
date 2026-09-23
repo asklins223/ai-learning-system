@@ -299,8 +299,10 @@ export function NotebookSurface() {
     /**
      * 这一次走的是长连接还是 HTTP。它不是装饰：流式那条只说明"本机已并进文档"，
      * 服务端落盘还要等 Hocuspocus 的 debounce，保存行不能说成"已保存"。
+     * `no_change` 是第三种回执：手动定版时本机没有未提交改动，这一次什么都没写，
+     * 如实说"这已经是一个版本了"（审计 F36）。
      */
-    via: "stream" | "uploaded" | "unchanged" | "queued";
+    via: "stream" | "uploaded" | "unchanged" | "queued" | "no_change";
   } | null>(null);
   const [saveFailure, setSaveFailure] = useState<string | null>(null);
   const [sharing, setSharing] = useState(false);
@@ -550,7 +552,18 @@ export function NotebookSurface() {
   const save = useCallback(async (reason: "auto" | "manual") => {
     const api = desktopApi();
     const current = data?.note ?? null;
-    if (!api || !current || !current.permissions.canSave || saving || !dirty) return;
+    if (!api || !current || !current.permissions.canSave || saving) return;
+    if (!dirty) {
+      // 审计 F36：手动定版的语义是"把此刻定成一个可回去的版本"，不是"把改动交出去"。
+      // 自动保存 1.2 秒就把 dirty 清掉，原来那道 `!dirty` 早退于是让「提交并确认」
+      // 与 ⌘S 在正常写作节奏里永远静默无反应——用户分不清是没生效还是没必要。
+      // 没有改动时如实回一句"这已经是一个版本了"，自动那条仍然静默（它是 debounce 的）。
+      if (reason === "manual") {
+        setReceipt({ savedAt: new Date().toISOString(), isAutosave: false, via: "no_change" });
+        setSaveState("committed");
+      }
+      return;
+    }
     const nextTitle = titleValue;
     setSaving(true);
     setSaveState("saving");
@@ -831,7 +844,7 @@ export function NotebookSurface() {
               ? receipt.via === "queued"
                 ? "没网，已记在本机，联网后自动交上去"
                 : receipt.via === "stream" ? "已写入，正在同步" : "已自动保存"
-              : "已提交并确认"} · ${formatClock(receipt.savedAt)}`
+              : receipt.via === "no_change" ? "这已经是一个版本了，没有新的改动" : "已提交并确认"} · ${formatClock(receipt.savedAt)}`
           : "● 已经存好，和服务器上的版本一致";
 
   const openSource = () => {
@@ -1488,9 +1501,13 @@ export function NotebookSurface() {
     <div className="actions notebook-actions notebook-actions--editor">
       {/* 撤销/重做归编辑器自己的 history：正文里按 ⌘Z 就是它的原生行为，这一行
           不再替它摆一对按钮。 */}
-      {note.permissions.canSave && dirty ? (
+      {/* 常驻：这不只是"存一下改过的字"，而是把此刻定成一个可回去的版本。
+          挂在 `dirty` 上会让它在自动保存过后消失——那正是 F36 里用户一次都点不到的按钮。
+          名字与纸面提示、版本历史里那句必须同一个（原来屏上的真按钮叫「立即保存」，
+          提示语却在指「提交并确认」）。 */}
+      {note.permissions.canSave ? (
         <button type="button" className="button" disabled={saving} onClick={() => void save("manual")}>
-          {saving ? "正在提交…" : "立即保存"}
+          {saving ? "正在提交…" : "提交并确认"}
         </button>
       ) : null}
       {saveState === "error" ? (

@@ -408,7 +408,13 @@ it("creates note/version/blocks and updates the search projection", async () => 
           inserted.push({ table, value });
           if (table === notes) return { returning: async () => [{ id: "note-1", title: source.title }] };
           if (table === noteVersions) return { returning: async () => [{ id: "version-1" }] };
-          return { onConflictDoUpdate: async () => undefined };
+          // 正文快照的补齐插入走 `onConflictDoNothing(...).returning(...)`（并发下第一个
+          // 打开这篇的人定下起点身份）；搜索投影那条走 `onConflictDoUpdate`。桩要能接住
+          // 两条真实形状——只给 `onConflictDoUpdate` 会让"补齐"这条路直接 TypeError。
+          return {
+            onConflictDoUpdate: async () => undefined,
+            onConflictDoNothing: () => ({ returning: async () => [{ noteId: "note-1" }] }),
+          };
         },
       }),
       update: (table: unknown) => ({
@@ -484,7 +490,11 @@ it("creates note/version/blocks and updates the search projection", async () => 
         values: () => {
           if (table === notes) return { returning: async () => [{ id: "note-1", title: "Source" }] };
           if (table === noteVersions) return { returning: async () => [{ id: "version-1" }] };
-          return { onConflictDoUpdate: async () => undefined };
+          // 同上：正文快照补齐那条是 `onConflictDoNothing(...).returning(...)`。
+          return {
+            onConflictDoUpdate: async () => undefined,
+            onConflictDoNothing: () => ({ returning: async () => [{ noteId: "note-1" }] }),
+          };
         },
       }),
       update: () => updateChain(),
