@@ -600,7 +600,8 @@
 | **F15** | ✅ 已修 | `search/service.ts`：目标进漂移检测（同一上限/排序/标题公式）、幽灵清理补 objective 分支、截断标记；网关「内容过期」含正文过期 | 集测（缺一条/幽灵一条→重建后归零，变异检验红）；活窗口 `missing 1→23`、重建 22 条目标文档、`missing 0`、`Earth's orbital period` 命中 1 条 |
 | **F07** | ✅ 已修 | `governance.ts` 审计写入走 `withWorkerWorkspaceTransaction` | 受限角色集测 3/3（正控/落库/跨空间拒绝，变异检验红）；活体：一次伴星 turn 落 **4 行**审计 |
 | **F08** | ✅ 已修 | `POST /sources/:id/restore` + 通道 + 界面按钮与回执 | 服务端 3 条 + 界面 5 条，两处变异检验；结构盘点来源模块 8→9 |
-| **F32** | ✅ 已修（两条） | worker 判死收尾把来源置 `failed` + 原因；「解析中」计数含排队等待；「全部」悬停说明不含归档 | worker 集测 3/3（变异检验红）；`source-index.test.ts` 15/15（变异检验红） |
+| **F32** | ✅ 已修（三条） | ① worker 判死收尾把来源置 `failed` + 原因（`parse-source.ts` 的 `markSourceParseFailed` + `index.ts` 的 `DEAD_FINALIZERS`）；② 「解析中」计数含排队等待；③ 「全部」悬停说明不含归档 | worker 受限角色集测 3/3（变异检验红）；`source-index.test.ts` 15/15（变异检验红） |
+| **F33** | ✅ 已修 | `normalizeSourceUrl` + `findDuplicateSource` + `createSource` 的 `force`/`duplicateOf`；通道与界面提示（默认「打开已有来源」/次级「仍然再采一次」） | 服务端 4 条 + 界面 2 条，两处变异检验；结构盘点 services 9→10 |
 | **F34** | ✅ 已修 | `deriveSourceTitle` 按句读收尾 | 5 条用例（含真实调用点），变异检验：退回 `slice(0,60)` → 报出审计现场那串以「而」结尾的标题 |
 
 **F28 的差异说明（要产品点头的一条）**：方案 ① 写的是"不满足证据完备性的目标不进复习队列"，
@@ -618,9 +619,7 @@
 `search-global-ipc.test.ts`（5 条原样穿过；缺 `total` 的坏页必须报错而不是回空）。
 
 **本线程未动的清单（下一手的顺序）**：
-1. **F33**（同网址重复采集无提示）——服务端 `normalizeSourceUrl` + 采集前查重 + 409 + 界面
-   "打开已有条目 / 仍然再采一次"（与笔记那条 duplicate 提示同形）。
-2. **F26**（首页恢复后任务区空白）——需要按 §F26 的验法先加状态跟踪再定位。
+1. **F26**（首页恢复后任务区空白）——需要按 §F26 的验法先加状态跟踪再定位。
 3. **F20 / F35 / F37**（笔记本族的其余三条：恢复失败态、版本标签真实性、新建空稿）。
    ⚠️ `notebook-surface.tsx` 与 `note-doc-*` 那批文件此刻有**并行会话在改**，动之前先看
    `git status` 与文件 mtime。
