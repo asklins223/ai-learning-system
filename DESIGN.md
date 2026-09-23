@@ -60,7 +60,7 @@ Home V2 的视觉路径是固定镜头 2.5D：高分辨率日/夜注册图层负
 
 `styles.css:4-31` 这组 token 的**衬底已经收回母本**（2026-09-23 实测，逐条在真窗口读过 computed）：`--ink` `--ink-soft` `--paper` `--paper-strong` `--paper-deep` `--accent` `--line` `--line-strong` `--paper-shadow` `--soft-shadow` 现在都是 `var(--hud-*)` 的别名，**不再各自持有一个近义字面量**（上面那份"`--paper #f7ecd5`、`--accent #bd5b2d`"是收回前的旧值，留在这里只作历史）。`styles.css` 里**仍然自持值的只剩 6 条**：`--focus`（全站焦点环的唯一 token，**HUD 层反过来读它**，引用 49 处）、`--accent-deep`、`--sage` / `--sage-deep`、`--glass-line` / `--glass-text`（深色浮层的描边与文字）。原则是**衬底共用、身份保留**：与 `--hud-*` 只差 1–3 通道的属重抄，收回；差得远或语义不同的别当重复删。
 同一天还删掉了 **`--wood`、`--star`、`--control-bg`、`--control-text`、`--glass-bg`、`--glass-shadow`** 六条：它们在渲染层消费者为 0（用"声明位置 + 词边界 + `var()` 多形态"三条件判的，删除后对拍 0 处计算值差异）。**本文件以前把它们当活 token 介绍过，那些句子现在都不成立了。**
-`--hud-star` / `--hud-gold` 之外还有一处需要知道：**星图有两份调色板，是有意变体，不许互相对齐**。`.universe-page`（`understanding-universe.css`）走 `--color-*` / `color-mix()`，伴星中心里嵌的那份（`hud-surface.css` 的 `.companion-center` 局部表）写字面量——把 16 个共享变量的**计算值**逐个算出来比是 **8 同 8 不同**：同一块 `universe-canvas-controls` 在整页星图是奶油纸 `rgb(255,242,207)`、在嵌的小星图是深夜玻璃 `rgba(11,33,48,.9)`。那份局部表原先的注释自称"与 `.universe-page` 同值"，**这句是假的**，已换成量出来的事实。
+伴星中心的观星房间仍沿用夜空背景，但主阅读区是暖纸书桌。记忆星图在记忆页按需进入，深蓝色仅用于独立星图画布和它的控件；日常阅读、筛选与设置沿用任务页的 `--hud-*` 纸面色。
 
 **本文件此前点名的 `--accent-strong`、`--scene-control`、`--scene-text`、`--shadow-lg`、`--shadow-md` 在代码里不存在**（消费者 0）。当前对应的实现名：`--accent-strong` → `--accent-deep`；`--scene-control` / `--scene-text` → 深色浮层那一组只剩 `--glass-line` / `--glass-text`（`--control-*` 已随零消费者清理删除）；`--shadow-lg` / `--shadow-md` → `--hud-shadow` / `--hud-shadow-small`（见 §Elevation）。
 
@@ -186,12 +186,12 @@ Home V2 的视觉路径是固定镜头 2.5D：高分辨率日/夜注册图层负
 
 伴星的日常操作收进一个稳定的交互台（`components/companion/CompanionHud.tsx`）：身份与页面上下文、功能夹、记录入口、录音、文字输入和发送共用一个 HUD 岛，不再散成多枚漂浮按钮。首页业务入口使用贴着交互台展开的纸质功能夹，禁止圆盘遮住角色；完整记录从右侧展开为纸质手记抽屉（`.companion-history`），禁止居中聊天弹窗与连续圆角聊天气泡。两者共用同一条真实会话（`app/companion-chat-session.tsx`）。
 
-> **2026-09-22 文件名更正：** 本节原先点名的 `CompanionDock.tsx`、`CompanionActionMenu.tsx`、`CompanionChatDrawer.tsx`、`companion-dock.css`、`companion-chat-drawer.css` 在仓库里**都不存在**。交互台与历史抽屉的实现落在 `CompanionHud.tsx` + `companion-hud.css`；下面"玻璃"那一套的实现不在 `companion-hud.css`，而在 `components/hud/hud-surface.css` 的 `.companion-center` 作用域里（`--companion-glass`、`--companion-plate-border`、`backdrop-filter: blur(20px) saturate(1.18)`）。
+交互台与历史抽屉的实现落在 `CompanionHud.tsx` + `companion-hud.css`。伴星中心整页由 `companion-center-surface.tsx` 控制读取与动作，`companion-center-overview.tsx` 和 `companion-center-panels.tsx` 承载分区视图，视觉规则集中在 `companion-center.css`。
 
-分工是一条硬规则：**气球负责"她说了什么"，玻璃负责"你对她做什么"。**
+分工是一条硬规则：**气球负责她此刻说的话，手记纸承载已留下的内容和操作。**
 
 - **气球**（`companion-bubble.css`）是动森式对话气球：奶油纸底 `var(--hud-cream)`（`#fff2cf`）平涂、`1px solid var(--hud-line)` 描边，外面用 `box-shadow: 0 0 0 3px rgba(255,252,235,.88)` 描一圈母本奶油环，再叠 `--hud-shadow-small`；圆角 `24px 27px 8px 24px`（右下角是"开口"那一侧），底部中央旋转 45° 的小方块尾巴指向角色头顶。**语气只有两档**：默认与 `--touch`（`--hud-butter` 暖黄，用于触碰/完成庆祝）；本文件以前写的"`#fff6e2` → `#fbeacb` 渐变 + 双描边 + 四档 cue/touch/page/reply"在代码里已经没有实现。可点击的念头邀请把定位权交给 `button.companion-cue-open`，气泡在那条链里转 `companion-bubble--static`。
-- **玻璃**（`hud-surface.css` 的 `.companion-center` 段）是首页 HUD 岛同一套语言，全部走这一段自己的局部 token：底 `--companion-glass: rgba(11,33,48,.85)`、盘边 `--companion-plate-border: 3px solid rgba(255,252,235,.62)`（就是母本那圈奶油边，alpha 低一档）、模糊 `--companion-glass-blur: blur(20px) saturate(1.18)`、影 `--companion-plate-shadow`、圆角 `--companion-radius-plate`。局部 token 一律以 `--companion-*` 前缀限定在这段作用域内。**以前这句写的底是 `rgba(20,22,24,.7)`、"1px 暖白描边"、"薄荷 `#a8d59a` 主行动 / 蜜桃 `#ef9675` 录音中"——那三个色在 `.companion-center` 里一处都搜不到**：`#a8d59a` 早被 `--hud-mint` 取代，`#ef9675` 只是首页右上角灵动岛的"需要留意"状态灯（`home-v2.css:179`），跟录音无关。
+- **伴星书桌**（`companion-center.css`）使用任务页同族的薄荷标题牌、不规则奶油纸边框、暖纸主板和黄色主按钮。概览先放身份和“和她聊聊”，再用手记纸显示最近日记原文摘录，用两张便签放待回应动态与最近对话。内容多时主板内部滚动，伴星形象仍坐在纸面右侧房间里。分区入口是概览、对话、记忆、日记、动态；人格与边界、数据与隐私进入设置。记忆以候选优先的列表和所选详情为主，星图只在用户请求时读取，在独立画布内探索。
 
 **手记抽屉与快捷设置面板是第三种、有意留出的暖纸方言**（`companion-hud.css` 的 `.companion-history` / `.companion-hud__edge-panel`、`companion-chat-record.css`、`companion-run-trace.css`、`companion-proposal-choice.css`）。`hud-surface.css` 里对此有书面裁决：不去改 `companion-chat-record.css`，那是聊天记录的合同。这两个界面都 `createPortal` 到 `document.body`，取不到 `.companion-hud` 上的变量，所以**必须在各自的作用域里自带一份局部 token 表**，少一条就会静默失效。
 
