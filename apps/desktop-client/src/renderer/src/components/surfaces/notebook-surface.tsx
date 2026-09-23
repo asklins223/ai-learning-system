@@ -475,6 +475,12 @@ export function NotebookSurface() {
   // 正文也只有一个来源了：这一份文档。它既含别人写进来的，也含本机还没交出去的，
   // 所以不必在"帧"和"回读"之间二选一（那两个来源并存正是上一次覆盖的根）。
   const readSourceBlocks = noteDocLive.blocks.length ? noteDocLive.blocks : (note?.currentVersion.blocks ?? []);
+  /**
+   * 这一屏的正文来自哪里（审计 F35）。实时文档优先、没有才退回当前版本——这正是
+   * 上一行那个判据；标签必须跟着它。以前一边渲染未定版的实时文档、一边写
+   * "不可变版本：v1"，而 v1 本身是空的：那句话是假的，用户以为自己在读一个已定版的版本。
+   */
+  const readingUnversionedContent = noteDocLive.blocks.length > 0;
   const readTitle = titleValue;
   // 谁在这同一块里：判据只有对端自己报的那一格，`caretBlock` 为空时不成立
   // （光标还没进正文，说不出"这一段"是哪一段）。
@@ -1240,7 +1246,11 @@ export function NotebookSurface() {
     <>
       <div className="version-ribbon">
         <span>阅读</span>
-        <span>版本 v{note.currentVersion.versionNo}</span>
+        <span>
+          {readingUnversionedContent
+            ? "未定版的当前内容"
+            : `版本 v${note.currentVersion.versionNo}`}
+        </span>
         <span>来源片段 {segments.length}</span>
         <NotebookPresence peers={noteDocLive.presencePeers} selfName={presenceName} />
         {shareStateControls}
@@ -1279,7 +1289,11 @@ export function NotebookSurface() {
       </div>
       <div className="provenance-line">
         <span>来源：{sourceTitle}</span>
-        <span>不可变版本：v{note.currentVersion.versionNo} · {note.currentVersion.contentHash.slice(0, 8)}</span>
+        <span>
+          {readingUnversionedContent
+            ? `未定版的当前内容 · 已存版本 v${note.currentVersion.versionNo}`
+            : `不可变版本：v${note.currentVersion.versionNo} · ${note.currentVersion.contentHash.slice(0, 8)}`}
+        </span>
         <span>最近验证：{validationLabel}</span>
       </div>
       {/* The pasted source clips read as part of the provenance cluster, so they

@@ -18,6 +18,7 @@ import {
   daysSince,
   formatRelative,
   noteBodyText,
+  noteParagraphCount,
   parseImageBlock,
   useSurfaceProjection,
 } from "./surface-data";
@@ -593,7 +594,11 @@ export function NoteLibrarySurface() {
                   data?.featured
                     ? `版本 v${data.featured.currentVersion.versionNo}`
                     : featured?.currentVersionId ? "已有版本" : "等待第一个版本",
-                  data?.featured ? `${data.featured.currentVersion.blocks.length} 段正文` : null,
+                  data?.featured
+                    ? noteParagraphCount(data.featured.currentVersion.blocks) > 0
+                      ? `${noteParagraphCount(data.featured.currentVersion.blocks)} 段正文`
+                      : "还没有正文段落"
+                    : null,
                 ].filter(Boolean).join(" · ")}
               </p>
               <div className="rule" />
@@ -841,6 +846,8 @@ function NoteCoverPhoto({ markdown, workspaceEpoch }: {
  */
 function previewOf(note: NoteDetailV1 | null, listed: boolean): string {
   if (!note) return listed ? "暂时读不到这篇笔记的详情，稍后会自动重试。" : "这篇笔记还没有存过版本，进入编辑写下第一段。";
+  // 判据与卡片上那行段数同一处（审计 F35）：不能一边说"1 段正文"一边说"还没有正文段落"。
+  if (noteParagraphCount(note.currentVersion.blocks) === 0) return "这一版还没有正文段落，进入编辑继续写。";
   const text = noteBodyText(note.currentVersion.blocks);
   if (!text) return "这一版还没有正文段落，进入编辑继续写。";
   return text.length > 96 ? `${text.slice(0, 96)}……` : text;

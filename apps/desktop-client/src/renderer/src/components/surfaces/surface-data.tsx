@@ -291,6 +291,19 @@ export function noteBodyText(blocks: readonly NoteBlockProjectionV1[]): string {
 }
 
 /**
+ * 这一版里有几段"有正文"的段落（审计 F35）。
+ *
+ * 与 `noteBodyText` **同一口径**：图片块算它有说明文字的那部分（没有说明就不算），
+ * 空段落（编辑器光标的落点）不算正文。列表卡以前直接数 `blocks.length`，于是同一张卡上
+ * 会同时写"1 段正文"和"这一版还没有正文段落"——两句话互否，而读者只能信一句。
+ */
+export function noteParagraphCount(blocks: readonly NoteBlockProjectionV1[]): number {
+  return blocks.filter((block) => (block.type === "image"
+    ? (parseImageBlock(block.content)?.alt ?? "").trim().length > 0
+    : noteBlockText(block.content).trim().length > 0)).length;
+}
+
+/**
  * One status, one word. "待解析" used to mean the tab that filters *failed*
  * material while the strip used "待处理" for failed + running and "需处理" for the
  * tab — three near-synonyms for two different things.
