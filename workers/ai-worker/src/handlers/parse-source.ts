@@ -1,4 +1,4 @@
-import { and, eq, ne } from "drizzle-orm";
+import { and, eq, inArray, ne } from "drizzle-orm";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { request as httpRequest, type IncomingMessage, type RequestOptions } from "node:http";
 import { request as httpsRequest } from "node:https";
@@ -11,7 +11,7 @@ import {
 } from "node:zlib";
 import { logger } from "../lib/logger.ts";
 import * as schema from "@ailearn/shared/db-schema";
-import { SourceStatus } from "@ailearn/shared";
+import { safeErrorMessage, SourceStatus } from "@ailearn/shared";
 // 稳定 P1（2026-09-15 审计）：parse_source payload 的精确契约 + fail-closed 读取器
 // （与 API 生产端 source/service.ts 同源），替代此前的 `as string | undefined` 弱读。
 import { readParseSourceJobPayload } from "@ailearn/shared/job-payload-contracts";
@@ -64,6 +64,61 @@ const FETCH_RETRY_COUNT = Number.isFinite(_parsedRetry) && _parsedRetry >= 0 ? _
  */
 export function canAdvanceSourceParse(status: string): boolean {
   return status !== SourceStatus.ARCHIVED;
+}
+
+/**
+ * `parse_source` 判死时的收尾（审计 F32 的第三条，也是 F27 剩下的那半）。
+ *
+ * 采集失败的现场此前只有 `jobs` 那一行知道：`sources.status` 停在 `draft`/`processing`，
+ * 列表把它显示成「待解析 / 正在解析」，用户等一个永远不来的 worker；而"解析失败"
+ * 这个筛选因此永远是 0（审计现场：14 条 dead job 一个都数不到）。失败必须落在
+ * 用户看得见的那张表上。
+ *
+ * 只动"还没解析成"的两态：另一次重试已经把它推到 `ready`、或用户已经归档，
+ * 都不该被这一次失败改回去。原因（脱敏后的那一句）落在 metadata.parseFailure 里，
+ * 详情页据此说清"上一次为什么没成"，而不是只给一个红点。
+ *
+ * 收尾本身失败只记日志：job 已经进终态，这里再抛只会让调用方以为连终态都没写成。
+ */
+export async function markSourceParseFailed(job: JobPayload, message: string): Promise<void> {
+  let sourceId: string;
+  try {
+    ({ sourceId } = readParseSourceJobPayload(job.payload));
+  } catch {
+    // 坏载荷连"这一篇是哪一篇"都读不出来，没有可写的对象。
+    return;
+  }
+  try {
+    await withJobTransaction(job, async (tx) => {
+      const [row] = await tx
+        .select({ id: schema.sources.id, metadata: schema.sources.metadata })
+        .from(schema.sources)
+        .where(and(
+          eq(schema.sources.id, sourceId),
+          eq(schema.sources.workspaceId, job.workspaceId),
+        ))
+        .for("update");
+      if (!row) return;
+      const reason = safeErrorMessage(message).slice(0, 200);
+      await tx
+        .update(schema.sources)
+        .set({
+          status: SourceStatus.FAILED,
+          metadata: {
+            ...((row.metadata ?? {}) as Record<string, unknown>),
+            parseFailure: { at: new Date().toISOString(), reason },
+          },
+          updatedAt: new Date(),
+        })
+        .where(and(
+          eq(schema.sources.id, sourceId),
+          eq(schema.sources.workspaceId, job.workspaceId),
+          inArray(schema.sources.status, [SourceStatus.DRAFT, SourceStatus.PROCESSING]),
+        ));
+    });
+  } catch (err) {
+    logger.warn({ err, jobId: job.id, sourceId }, "marking source parse-failed failed (job is already terminal)");
+  }
 }
 
 /**

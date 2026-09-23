@@ -37,6 +37,7 @@ const admin = postgres(ADMIN_URL, { max: 2 });
 const WORKSPACE_ID = randomUUID();
 const USER_ID = randomUUID();
 const SOURCE_ID = randomUUID();
+const FAILED_SOURCE_ID = randomUUID();
 const JOB_ID = randomUUID();
 const LEASE_TOKEN = randomUUID();
 
@@ -59,6 +60,10 @@ before(async () => {
       VALUES (${SOURCE_ID}, ${WORKSPACE_ID}, 'text', ${"解析上下文回归夹具"},
               ${"pasted"}, 'draft',
               ${tx.json({ rawContent: RAW_TEXT })}, ${USER_ID})`;
+    // 判死收尾用的第二条来源：不参与上面那条解析用例，避免互相污染状态。
+    await tx`INSERT INTO sources (id, workspace_id, type, title, origin, status, metadata, created_by)
+      VALUES (${FAILED_SOURCE_ID}, ${WORKSPACE_ID}, 'text', ${"判死收尾夹具"},
+              ${"pasted"}, 'draft', ${tx.json({ rawContent: RAW_TEXT })}, ${USER_ID})`;
     await tx`INSERT INTO jobs (id, workspace_id, type, payload, status, priority, resource_class,
                                idempotency_key, requested_by, lease_token, attempts, scheduled_at, started_at)
       VALUES (${JOB_ID}, ${WORKSPACE_ID}, 'parse_source',
@@ -69,7 +74,8 @@ before(async () => {
 
 after(async () => {
   await admin.begin(async (tx) => {
-    await tx`DELETE FROM source_segments WHERE source_id = ${SOURCE_ID}`;
+    await tx`DELETE FROM source_segments WHERE source_id IN (${SOURCE_ID}, ${FAILED_SOURCE_ID})`;
+    await tx`DELETE FROM sources WHERE id = ${FAILED_SOURCE_ID}`;
     await tx`DELETE FROM jobs WHERE id = ${JOB_ID}`;
     await tx`DELETE FROM sources WHERE id = ${SOURCE_ID}`;
     await tx`DELETE FROM workspace_members WHERE workspace_id = ${WORKSPACE_ID}`;
@@ -121,4 +127,58 @@ test("runParseSource 把文本来源解析成 ready，而不是 dead 在“找�
 
   const [job] = await admin`SELECT status FROM jobs WHERE id = ${JOB_ID}`;
   assert.notEqual(job.status, "dead", "job 不能被判定为确定性失败");
+});
+
+/**
+ * 审计 F32（也是 F27 剩下的那半）：采集判死时，`sources.status` 必须变成用户看得见的
+ * `failed`，并且带上一次失败的原因；已经解析成功或用户已归档的两态不许被改回去。
+ *
+ * 为什么这条必须在受限角色下跑：写的是 `sources` 的**状态迁移**，而这张表的租户守卫
+ * 只放行带 `app.workspace_id` 的事务——收尾漏设上下文时它会静默 0 行（超管库里永远绿）。
+ */
+test("F32：job 判死时把来源置为 failed，带原因；ready 的那条不动", async () => {
+  const { markSourceParseFailed } = await import("../handlers/parse-source.ts");
+
+  await markSourceParseFailed(
+    {
+      id: JOB_ID,
+      workspaceId: WORKSPACE_ID,
+      requestedBy: USER_ID,
+      payload: { sourceId: FAILED_SOURCE_ID },
+      leaseToken: LEASE_TOKEN,
+    },
+    "operational_error:not_found:Error",
+  );
+
+  const [failed] = await admin`
+    SELECT status, metadata FROM sources WHERE id = ${FAILED_SOURCE_ID}`;
+  assert.equal(failed.status, "failed", `判死后来源应当是 failed，实际 ${failed.status}`);
+  assert.ok(failed.metadata?.parseFailure?.reason, "要留下可显示的原因");
+  assert.ok(failed.metadata.parseFailure.at, "原因要带时间");
+
+  // 坏载荷（读不出 sourceId）不许抛：收尾发生在 job 已是终态之后。
+  await markSourceParseFailed(
+    {
+      id: JOB_ID,
+      workspaceId: WORKSPACE_ID,
+      requestedBy: USER_ID,
+      payload: {},
+      leaseToken: LEASE_TOKEN,
+    },
+    "bad payload",
+  );
+
+  // 已经解析成功的那条不许被改回去。
+  await markSourceParseFailed(
+    {
+      id: JOB_ID,
+      workspaceId: WORKSPACE_ID,
+      requestedBy: USER_ID,
+      payload: { sourceId: SOURCE_ID },
+      leaseToken: LEASE_TOKEN,
+    },
+    "late failure after success",
+  );
+  const [ready] = await admin`SELECT status FROM sources WHERE id = ${SOURCE_ID}`;
+  assert.equal(ready.status, "ready", "ready 的来源不该被判死收尾改回 failed");
 });

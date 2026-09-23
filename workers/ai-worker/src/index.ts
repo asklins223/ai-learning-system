@@ -3,7 +3,7 @@ import { logger } from "./lib/logger.ts";
 import postgres from "postgres";
 import { closeDatabase, db, resolveWorkerStatementTimeoutMs, resolveWorkerDatabaseUrl } from "./db.ts";
 import { NOTIFY_CHANNEL } from "./lib/job-notify.ts";
-import { runParseSource } from "./handlers/parse-source.ts";
+import { markSourceParseFailed, runParseSource } from "./handlers/parse-source.ts";
 import { runCompanionDialogue } from "./handlers/companion-dialogue.ts";
 import { runCompanionMemoryExtract } from "./handlers/companion-memory-extractor.ts";
 import { runCompanionSummarizer } from "./handlers/companion-summarizer.ts";
@@ -66,6 +66,18 @@ const HANDLERS = {
   // 念头管线切片②（2026-09-18）：候选念头生成 + 表达 + 送达。
   companion_thought: runCompanionThought,
 } as const;
+
+/**
+ * 判死时的收尾（审计 F32 / F27 剩下的那半）。
+ *
+ * 通用 job 循环只认识 `jobs` 那张表；而"这一次失败"对用户意味着什么，只有各类型自己
+ * 知道——采集失败就该让 `sources.status` 变成 `failed`（列表显示"解析失败"、
+ * 详情给"重新解析"），否则界面永远说"待解析/正在解析"。收尾失败只记日志：
+ * job 已经是终态，这里再抛只会让人以为终态没写成。
+ */
+const DEAD_FINALIZERS: Partial<Record<string, (job: { id: string; workspaceId: string; requestedBy: string | null; payload: Record<string, unknown>; leaseToken: string; signal?: AbortSignal }, message: string) => Promise<void>>> = {
+  parse_source: markSourceParseFailed,
+};
 
 const POLL_MS = 500;
 const POLL_MAX_MS = 5_000; // QUAL-08: max backoff when queue is idle
@@ -264,6 +276,7 @@ export async function processJob(job: ClaimedJob): Promise<void> {
       }
       jobNonRetryableDeadTotal.labels(job.type).inc();
       jobTerminalTotal.labels(job.type, "dead").inc();
+      await DEAD_FINALIZERS[job.type]?.(job, message);
       logger.error(
         {
           jobId: job.id,
@@ -310,6 +323,7 @@ export async function processJob(job: ClaimedJob): Promise<void> {
     } else {
       // dead — 终态
       jobTerminalTotal.labels(job.type, "dead").inc();
+      await DEAD_FINALIZERS[job.type]?.(job, message);
     }
     logger.error(
       {
