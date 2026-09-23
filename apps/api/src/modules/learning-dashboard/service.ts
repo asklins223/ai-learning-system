@@ -13,7 +13,7 @@
 import { and, eq, lt, inArray, sql, desc, isNull, or, lte } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import type { ApiTransaction } from "../../db/client.ts";
-import { learningObjectivesV2 } from "@ailearn/shared/db-schema/card-generation-v2";
+import { learningObjectivesV2, learningObjectiveRevisionsV2 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { learningRuns } from "@ailearn/shared/db-schema/learning-runs";
 import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
 import { notes } from "@ailearn/shared/db-schema/note";
@@ -41,6 +41,8 @@ const ACTIVE_RUN_PHASES = [
 ] as const;
 
 const FOCUS_LIMIT = 50;
+/** 在途清单与 room 投影那一节同一个上限（`roomActiveRunSummaryDataSchema` 也是 20）。 */
+const ACTIVE_RUN_LIMIT = 20;
 const QUEUE_LIMIT = 5;
 const RECENT_LIMIT = 5;
 
@@ -131,6 +133,78 @@ export async function buildLearningDashboardV2(
       retryable: true,
     };
     counts = { notes: 0, activeObjectives: 0, activeRuns: 0, reviewsDue: 0, needsRepair: 0 };
+  }
+
+  // ── 在途 run 清单（审计 F24）────────────────────────────────────────────
+  // 与 `counts.activeRuns` 同一条判据（workspace + user + ACTIVE_RUN_PHASES）、同一个上限。
+  // 名字来自目标当前修订的 conceptLabel；V2 的每一种 origin 都带顶层 objectiveId。
+  let activeRuns: LearningDashboardV2["activeRuns"] = [];
+  try {
+    const runRows = await tx
+      .select({
+        runId: learningRuns.id,
+        phase: learningRuns.phase,
+        origin: learningRuns.origin,
+        updatedAt: learningRuns.updatedAt,
+      })
+      .from(learningRuns)
+      .where(and(
+        eq(learningRuns.workspaceId, ctx.workspaceId),
+        eq(learningRuns.userId, ctx.userId),
+        inArray(learningRuns.phase, [...ACTIVE_RUN_PHASES]),
+      ))
+      .orderBy(desc(learningRuns.updatedAt))
+      .limit(ACTIVE_RUN_LIMIT);
+
+    const objectiveIds = [...new Set(runRows.flatMap((row) => {
+      if (row.origin && typeof row.origin === "object") {
+        const objectiveId = (row.origin as { objectiveId?: unknown }).objectiveId;
+        if (typeof objectiveId === "string" && objectiveId.length > 0) return [objectiveId];
+      }
+      return [];
+    }))];
+    const labelRows = objectiveIds.length > 0
+      ? await tx
+          .select({
+            objectiveId: learningObjectivesV2.objectiveId,
+            conceptLabel: learningObjectiveRevisionsV2.conceptLabel,
+          })
+          .from(learningObjectivesV2)
+          .innerJoin(
+            learningObjectiveRevisionsV2,
+            and(
+              eq(learningObjectiveRevisionsV2.workspaceId, learningObjectivesV2.workspaceId),
+              eq(learningObjectiveRevisionsV2.objectiveRevisionId, learningObjectivesV2.currentObjectiveRevisionId),
+            ),
+          )
+          .where(and(
+            eq(learningObjectivesV2.workspaceId, ctx.workspaceId),
+            inArray(learningObjectivesV2.objectiveId, objectiveIds),
+            // 与 counts / queue / recent 那三处同一道判据：目标不可见时名字留空，
+            // 而这条 run 本身还在（它是用户自己的行）。
+            visibleObjectivesCondition(ctx.userId, learningObjectivesV2.objectiveId),
+          ))
+      : [];
+    const labelById = new Map(labelRows.map((row) => [row.objectiveId, row.conceptLabel]));
+    activeRuns = runRows.map((row) => {
+      const objectiveId = row.origin && typeof row.origin === "object"
+        && typeof (row.origin as { objectiveId?: unknown }).objectiveId === "string"
+        ? (row.origin as { objectiveId: string }).objectiveId
+        : null;
+      return {
+        runId: row.runId,
+        phase: row.phase,
+        objectiveId,
+        conceptLabel: objectiveId ? labelById.get(objectiveId) ?? null : null,
+        updatedAt: row.updatedAt.toISOString(),
+      };
+    });
+  } catch (err) {
+    // 与 counts 同一档降级：清单读不到就让这一节显式失败，不给一个空清单冒充"没有"。
+    const unavailable = new Set(degraded?.unavailableSections ?? []);
+    unavailable.add("activeRuns");
+    degraded = { unavailableSections: [...unavailable], retryable: true };
+    activeRuns = [];
   }
 
   // ── mode（同一 cutoff）────────────────────────────────────────────────
@@ -249,6 +323,8 @@ export async function buildLearningDashboardV2(
   const stableIdentity = {
     counts,
     mode,
+    // 清单也进哈希：它变了 ETag 就得变，否则客户端会拿 304 继续显示旧的十条。
+    activeRuns,
     degradation: degraded,
     primaryFocus: primaryFocus
       ? {
@@ -285,6 +361,7 @@ export async function buildLearningDashboardV2(
     primaryFocus,
     queue,
     recentObjectives,
+    activeRuns,
     suggestedNote,
     degradation: degraded,
   };

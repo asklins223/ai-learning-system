@@ -77,6 +77,8 @@ function makeDashboard(overrides: Partial<LearningDashboardV2> = {}): LearningDa
     snapshotAt: "2026-08-18T00:00:00.000Z",
     dashboardRevision: "rev-1",
     counts: { notes: 1, activeObjectives: 1, activeRuns: 0, reviewsDue: 0, needsRepair: 0 },
+    // 在途清单（审计 F24）：与 counts.activeRuns 同判据；这一份夹具没有在途 run。
+    activeRuns: [],
     mode: "objectives_ready",
     primaryFocus: {
       objective: surface,

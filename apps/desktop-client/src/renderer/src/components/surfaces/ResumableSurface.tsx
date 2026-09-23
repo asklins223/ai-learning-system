@@ -14,7 +14,7 @@ import { SurfaceDataState, formatRelative, useSurfaceProjection } from "./surfac
  * 躺着 8 个 active + 2 个 paused，只是没有任何一屏把它们列出来。
  *
  * 这一页只做一件事：把投影里那份 `activeRunSummary` 摆出来，每条给出
- * "哪一件事（目标名）· 走到哪（阶段）· 上次验证在什么时候"，并给一个「继续」直达
+ * "哪一件事（目标名）· 走到哪（阶段）· 最近动过什么时候"，并给一个「继续」直达
  * 那条 run。不合并进今日日志：那是历史，这是待办，两件事混在一起就会再次出现
  * "数得出 10 却找不到那 10 条"。
  */
@@ -85,7 +85,7 @@ export function ResumableSurface() {
                   <span className="small">
                     {learningPhaseLabel(item.phase)}
                     {" · "}
-                    {item.lastCanonicalAt ? `上次验证 ${formatRelative(item.lastCanonicalAt)}` : "还没正式答过"}
+                    最近动过 {formatRelative(item.updatedAt)}
                   </span>
                 </div>
                 <button

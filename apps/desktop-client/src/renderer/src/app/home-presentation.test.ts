@@ -181,7 +181,7 @@ describe("homePresentation", () => {
     const dataSummary = homePresentation(presentation({
       queueSummary: { state: "data", data: { total: 2, items: [] } },
       sanitizedReviewSummary: { state: "data", data: { dueCount: 4, route: "review.queue" } },
-      activeRunSummary: { state: "data", data: { activeCount: 1, items: [{ runId: "11111111-1111-4111-8111-111111111111", objectiveId: "22222222-2222-4222-8222-222222222222", phase: "paused", conceptLabel: "轨道周期", lastCanonicalAt: null }] } },
+      activeRunSummary: { state: "data", data: { activeCount: 1, items: [{ runId: "11111111-1111-4111-8111-111111111111", objectiveId: "22222222-2222-4222-8222-222222222222", phase: "paused", conceptLabel: "轨道周期", updatedAt: "2026-09-23T00:00:00.000Z" }] } },
       activeGenerationSummary: { state: "data", data: {} as never },
       recentObjectiveSummary: { state: "data", data: { total: 3, items: [] } },
     }), false, null);
@@ -338,7 +338,7 @@ describe("homePresentation", () => {
   });
 
   it("marks a real active run on the physical notebook", () => {
-    expect(homePresentation(projection({ activeRunSummary: { state: "data", data: { activeCount: 2, items: [{ runId: "11111111-1111-4111-8111-111111111111", objectiveId: "22222222-2222-4222-8222-222222222222", phase: "paused", conceptLabel: "轨道周期", lastCanonicalAt: null }] } } }), false, null))
+    expect(homePresentation(projection({ activeRunSummary: { state: "data", data: { activeCount: 2, items: [{ runId: "11111111-1111-4111-8111-111111111111", objectiveId: "22222222-2222-4222-8222-222222222222", phase: "paused", conceptLabel: "轨道周期", updatedAt: "2026-09-23T00:00:00.000Z" }] } } }), false, null))
       .toMatchObject({ activeRunCount: 2, notebookState: "active" });
   });
 
@@ -349,12 +349,12 @@ describe("homePresentation", () => {
    */
   it("只在恰好一条可恢复时给出 soleActiveRun", () => {
     const one = homePresentation(projection({
-      activeRunSummary: { state: "data", data: { activeCount: 1, items: [{ runId: "11111111-1111-4111-8111-111111111111", objectiveId: "22222222-2222-4222-8222-222222222222", phase: "paused", conceptLabel: "轨道周期", lastCanonicalAt: null }] } },
+      activeRunSummary: { state: "data", data: { activeCount: 1, items: [{ runId: "11111111-1111-4111-8111-111111111111", objectiveId: "22222222-2222-4222-8222-222222222222", phase: "paused", conceptLabel: "轨道周期", updatedAt: "2026-09-23T00:00:00.000Z" }] } },
     }), false, null);
     expect(one.soleActiveRun).toEqual({ runId: "11111111-1111-4111-8111-111111111111" });
 
     const many = homePresentation(projection({
-      activeRunSummary: { state: "data", data: { activeCount: 2, items: [{ runId: "11111111-1111-4111-8111-111111111111", objectiveId: "22222222-2222-4222-8222-222222222222", phase: "paused", conceptLabel: "轨道周期", lastCanonicalAt: null }] } },
+      activeRunSummary: { state: "data", data: { activeCount: 2, items: [{ runId: "11111111-1111-4111-8111-111111111111", objectiveId: "22222222-2222-4222-8222-222222222222", phase: "paused", conceptLabel: "轨道周期", updatedAt: "2026-09-23T00:00:00.000Z" }] } },
     }), false, null);
     expect(many.soleActiveRun).toBeNull();
 
@@ -551,7 +551,7 @@ describe("homePresentation", () => {
     expect(homePresentation(presentation({
       sanitizedReviewSummary: { state: "data", data: { dueCount: 3, route: "review.queue" } },
       queueSummary: { state: "data", data: { total: 2, items: [] } },
-      activeRunSummary: { state: "data", data: { activeCount: 1, items: [{ runId: "11111111-1111-4111-8111-111111111111", objectiveId: "22222222-2222-4222-8222-222222222222", phase: "paused", conceptLabel: "轨道周期", lastCanonicalAt: null }] } },
+      activeRunSummary: { state: "data", data: { activeCount: 1, items: [{ runId: "11111111-1111-4111-8111-111111111111", objectiveId: "22222222-2222-4222-8222-222222222222", phase: "paused", conceptLabel: "轨道周期", updatedAt: "2026-09-23T00:00:00.000Z" }] } },
     }), false, "temporary offline")).toEqual({
       title: "从一份真正想弄懂的材料开始",
       detail: "学习空间目录已经把学习路径和全部功能整理好了",

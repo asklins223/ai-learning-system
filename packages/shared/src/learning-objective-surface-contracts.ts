@@ -343,6 +343,25 @@ export const learningDashboardV2Schema = z.strictObject({
     )
     .max(20),
   recentObjectives: z.array(learningObjectiveSurfaceV3Schema).max(12),
+  /**
+   * 在途学习 run（审计 F24，「未完成的学习」那一页的数据源）。
+   *
+   * 与 `counts.activeRuns` **同一条判据、同一个上限**：两边口径一分叉，界面上就会出现
+   * "数得出 10 项、列出来 1 项"（实测就是这样——清单原来是从 `queue` /
+   * `recentObjectives` 这几个有界集合里反推的，10 条 run 里只有 1 条的目标在里面）。
+   * 名字取目标当前修订的 `conceptLabel`；`updatedAt` 是这条 run 最近一次被动过的时间。
+   */
+  activeRuns: z
+    .array(
+      z.strictObject({
+        runId: z.string().uuid(),
+        phase: z.string().min(1).max(50),
+        objectiveId: z.string().uuid().nullable(),
+        conceptLabel: z.string().max(200).nullable(),
+        updatedAt: z.string().datetime({ offset: true }),
+      }),
+    )
+    .max(20),
   suggestedNote: z
     .strictObject({
       noteId: z.string().uuid(),

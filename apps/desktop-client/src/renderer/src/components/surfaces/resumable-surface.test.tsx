@@ -59,14 +59,14 @@ afterEach(() => {
 });
 
 describe("未完成的学习（审计 F24）", () => {
-  it("每条说清哪一件事、走到哪、上次验证在什么时候，并给一个继续", async () => {
+  it("每条说清哪一件事、走到哪、最近动过什么时候，并给一个继续", async () => {
     installApi({
       state: "data",
       data: {
         activeCount: 2,
         items: [
-          { runId: RUN_ID, objectiveId: OBJECTIVE_ID, phase: "paused", conceptLabel: "Earth's orbital period", lastCanonicalAt: "2026-09-21T00:00:00.000Z" },
-          { runId: "33333333-3333-4333-8333-333333333333", objectiveId: "44444444-4444-4444-8444-444444444444", phase: "active", conceptLabel: null, lastCanonicalAt: null },
+          { runId: RUN_ID, objectiveId: OBJECTIVE_ID, phase: "paused", conceptLabel: "Earth's orbital period", updatedAt: "2026-09-21T00:00:00.000Z" },
+          { runId: "33333333-3333-4333-8333-333333333333", objectiveId: "44444444-4444-4444-8444-444444444444", phase: "active", conceptLabel: null, updatedAt: "2026-09-23T00:00:00.000Z" },
         ],
       },
     });
@@ -75,17 +75,16 @@ describe("未完成的学习（审计 F24）", () => {
     await screen.findByText("Earth's orbital period");
     // 阶段用的是作答面同一份文案（同一条 run 在两个面上同一个词）。
     expect(screen.getByText(/已暂停/)).toBeTruthy();
-    expect(screen.getByText(/上次验证/)).toBeTruthy();
+    expect(screen.getAllByText(/最近动过/).length).toBeGreaterThan(0);
     // 没写概念名的目标回退成"未命名目标"，不是空白。
     expect(screen.getByText("未命名目标")).toBeTruthy();
-    expect(screen.getByText(/还没正式答过/)).toBeTruthy();
     expect(screen.getByText(/共 2 项/)).toBeTruthy();
   });
 
   it("「继续」把那条 run 挂上并进作答面", async () => {
     installApi({
       state: "data",
-      data: { activeCount: 1, items: [{ runId: RUN_ID, objectiveId: OBJECTIVE_ID, phase: "paused", conceptLabel: "轨道周期", lastCanonicalAt: null }] },
+      data: { activeCount: 1, items: [{ runId: RUN_ID, objectiveId: OBJECTIVE_ID, phase: "paused", conceptLabel: "轨道周期", updatedAt: "2026-09-23T00:00:00.000Z" }] },
     });
     render(<ResumableSurface />);
 
@@ -122,7 +121,7 @@ describe("未完成的学习（审计 F24）", () => {
           objectiveId: OBJECTIVE_ID,
           phase: "active",
           conceptLabel: `目标 ${index + 1}`,
-          lastCanonicalAt: null,
+          updatedAt: "2026-09-23T00:00:00.000Z",
         })),
       },
     });

@@ -183,6 +183,13 @@ test("W1-13: Dashboard parses with consistent shape and leaks nothing", () => {
     snapshotAt: "2026-08-16T10:00:00.000Z",
     dashboardRevision: "rev-1",
     counts: { notes: 6, activeObjectives: 3, activeRuns: 1, reviewsDue: 0, needsRepair: 0 },
+    activeRuns: [{
+      runId: "aaaaaaa1-1111-4111-8111-111111111111",
+      phase: "paused",
+      objectiveId: "00000000-0000-4000-8000-000000000003",
+      conceptLabel: "轨道周期",
+      updatedAt: "2026-08-18T00:00:00.000Z",
+    }],
     mode: "run_in_progress",
     primaryFocus: {
       objective: surfaceFixture(),
@@ -208,6 +215,8 @@ test("W1-13: Dashboard degraded mode must be explicit, not masked as empty", () 
     snapshotAt: "2026-08-16T10:00:00.000Z",
     dashboardRevision: "rev-2",
     counts: { notes: 6, activeObjectives: 3, activeRuns: 0, reviewsDue: 0, needsRepair: 0 },
+    // 降级样本：清单读不到时是空数组 + degradation 里点名（不是"没有在途 run"）。
+    activeRuns: [],
     mode: "degraded",
     primaryFocus: null,
     queue: [],

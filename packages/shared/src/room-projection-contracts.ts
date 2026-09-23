@@ -105,19 +105,17 @@ const roomReviewSummaryDataSchema = z.strictObject({
 
 const roomActiveRunItemSchema = z.strictObject({
   runId: uuidSchema,
-  objectiveId: uuidSchema,
+  /** 目标由 run 的 origin 带出；V1 origin 没有目标，这一格就是 null。 */
+  objectiveId: uuidSchema.nullable(),
   phase: nonEmptyStringSchema,
   /**
-   * 恢复清单要说的第一件事是"哪一件事"（审计 F24）：只给 runId/objectiveId 的话，
-   * 首页只能承诺"N 项可恢复"却列不出是什么，用户点进去是一篇没有恢复列表的日志。
-   * 目标没写概念名时是 null，界面回退成"未命名目标"。
+   * 恢复清单要说的第一件事是"哪一件事"（审计 F24）：只给 runId 的话，首页只能承诺
+   * "N 项可恢复"却列不出是什么。名字取目标当前修订的 `conceptLabel`；目标不可见或
+   * V1 origin 没有目标时是 null，界面回退成"未命名目标"。
    */
   conceptLabel: z.string().max(200).nullable(),
-  /**
-   * 这个目标上一次形成正式结论的时间；`null` = 还没正式答过。
-   * 清单据此说"上次验证在 X / 还没正式答过"，而不是拿 run 的创建时间冒充进度。
-   */
-  lastCanonicalAt: isoTimestampSchema.nullable(),
+  /** 这条 run 最近一次被动过的时间（清单上的"最近时间"）。 */
+  updatedAt: isoTimestampSchema,
 });
 
 const roomActiveRunSummaryDataSchema = z.strictObject({

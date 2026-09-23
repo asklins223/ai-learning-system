@@ -142,18 +142,16 @@ export function projectLearningDashboardToRoomProjection(
         data: { dueCount: dashboard.counts.reviewsDue, route: "review.queue" as const },
       };
 
-  const activeRunItems = [...new Map(
-    surfaces
-      .flatMap((surface) => surface.personal.activeRun ? [{ surface, run: surface.personal.activeRun }] : [])
-      .map(({ surface, run }) => [run.runId, {
-        runId: run.runId,
-        objectiveId: surface.objectiveId,
-        phase: run.phase,
-        // 恢复清单要能说出"哪一件事"，所以把目标名与上次正式结论的时间一起带上。
-        conceptLabel: surface.content.conceptLabel,
-        lastCanonicalAt: surface.personal.lastCanonicalAt,
-      }] as const),
-  ).values()];
+  // 在途清单直接取服务端那一份（审计 F24）：以前是从 primaryFocus / queue /
+  // recentObjectives 这几个**有界**集合里反推，于是实测出现"数得出 10 项、
+  // 列出来 1 项"——10 条 run 里只有 1 条的目标出现在那些集合里。
+  const activeRunItems = dashboard.activeRuns.map((run) => ({
+    runId: run.runId,
+    objectiveId: run.objectiveId,
+    phase: run.phase,
+    conceptLabel: run.conceptLabel,
+    updatedAt: run.updatedAt,
+  }));
   const activeRunSummary = countsUnavailable
     ? sectionError("upstream_unavailable")
     : dashboard.counts.activeRuns > 0
