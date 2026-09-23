@@ -10,7 +10,6 @@ import {
   brotliDecompressSync,
 } from "node:zlib";
 import { logger } from "../lib/logger.ts";
-import { db } from "../db.ts";
 import * as schema from "@ailearn/shared/db-schema";
 import { SourceStatus } from "@ailearn/shared";
 // 稳定 P1（2026-09-15 审计）：parse_source payload 的精确契约 + fail-closed 读取器
@@ -1393,12 +1392,19 @@ export async function runParseSource(job: JobPayload) {
   await assertJobLease(job);
   logger.info({ sourceId }, "running parse_source");
 
-  const source = await db.query.sources.findFirst({
-    where: and(
-      eq(schema.sources.id, sourceId),
-      eq(schema.sources.workspaceId, job.workspaceId),
-    ),
-  });
+  // 这一次读取必须跑在带工作区上下文的事务里：`sources` 的
+  // `sec01_v1_sources_tenant_guard` 只放行 `workspace_id = current_setting('app.workspace_id')`，
+  // 没有“上下文未设置即放行”那一支。裸 `db` 句柄读它不会报错，只会返回 0 行，
+  // 于是每一次采集都在下面抛 "not found in workspace"、重试三次后 job 直接 dead，
+  // 而界面上永远显示“正在解析”。（dev worker 早已是受限角色，所以本地必现。）
+  const source = await withJobTransaction(job, (tx) =>
+    tx.query.sources.findFirst({
+      where: and(
+        eq(schema.sources.id, sourceId),
+        eq(schema.sources.workspaceId, job.workspaceId),
+      ),
+    }),
+  );
   if (!source) throw new Error(`source ${sourceId} not found in workspace`);
 
   // R-014: 检查 source 是否已归档，避免旧 job 把归档来源改回 ready。

@@ -649,6 +649,18 @@ jobs:
           node --import tsx --test src/integration-tests/queue-postgres.integration.ts \
             2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/worker-queue.tap"
 
+      - name: Verify source parsing runs with the worker workspace context (F27)
+        working-directory: workers/ai-worker
+        env:
+          NODE_ENV: test
+          DATABASE_URL_MIGRATOR: ${{ env.DATABASE_URL_MIGRATOR }}
+          DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
+          DATABASE_URL_WORKER: ${{ env.DATABASE_URL_WORKER }}
+        run: |
+          set -o pipefail
+          node --import tsx --test src/integration-tests/parse-source-rls-context-postgres.integration.ts \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/parse-source-rls.tap"
+
       - name: Verify every journal migration was applied
         working-directory: apps/api
         run: |

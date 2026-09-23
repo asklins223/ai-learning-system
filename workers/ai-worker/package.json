@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test --test-concurrency=1 $(find src -name '*.test.ts' | sort)",
     "test:companion-dialogue:postgres": "node --import tsx --test --test-concurrency=1 src/integration-tests/companion-dialogue-postgres.integration.ts",
-    "test:companion-integration:postgres": "node --import tsx --test --test-concurrency=1 src/integration-tests/companion-scheduler-ticks-postgres.integration.ts src/integration-tests/companion-memory-handlers-postgres.integration.ts src/integration-tests/companion-agent-postgres.integration.ts src/integration-tests/companion-dialogue-postgres.integration.ts src/integration-tests/companion-memory-semantic-dismissal-postgres.integration.ts"
+    "test:companion-integration:postgres": "node --import tsx --test --test-concurrency=1 src/integration-tests/companion-scheduler-ticks-postgres.integration.ts src/integration-tests/companion-memory-handlers-postgres.integration.ts src/integration-tests/companion-agent-postgres.integration.ts src/integration-tests/companion-dialogue-postgres.integration.ts src/integration-tests/companion-memory-semantic-dismissal-postgres.integration.ts",
+    "test:parse-source-rls:postgres": "node --import tsx --test --test-concurrency=1 src/integration-tests/parse-source-rls-context-postgres.integration.ts"
   },
   "dependencies": {
     "@ailearn/shared": "file:../../packages/shared",
