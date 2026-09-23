@@ -426,6 +426,79 @@ export async function reparseSource(
   return { ok: true, status: SourceStatus.DRAFT };
 }
 
+/**
+ * 把一条已归档的来源恢复到可用状态（审计 F08）。
+ *
+ * 「归档」这条路写的提示语是"可在已归档页签找到"，而此前**没有回去的路**：数据还在
+ * （只是 `status=archived`），界面上唯一的后果却是"再也不能从它开始笔记"。
+ * 「归档」是日常词里可撤销的那一类，所以这里补上撤销。
+ *
+ * 回到哪一档不由用户挑，由事实决定：
+ * - 有片段行 → `ready`（正文还在，立刻可读、可起稿）；
+ * - 没有片段行 → `draft`（只剩元数据，走既有的"重新解析"那条路）。
+ * 这样"恢复到某个中间态"不会把一条没有正文的来源标成可读。
+ *
+ * 幂等：不是 archived 的来源原样返回（重复点、并发点都是同一个结果）。
+ * 索引与 `deleteSource` 对称：归档时删掉了搜索文档，恢复时按 reindex 的同一口径补回
+ * （有片段用片段正文，否则用 origin/rawContent/url 拼的兜底正文）。
+ */
+export type SourceRestoreResult =
+  | { ok: true; status: string; alreadyActive: boolean }
+  | { ok: false; error: "not_found" };
+
+export async function restoreSource(
+  executor: ApiTransaction,
+  sourceId: string,
+  workspaceId: string,
+): Promise<SourceRestoreResult> {
+  const [source] = await executor
+    .select({
+      id: sources.id,
+      status: sources.status,
+      title: sources.title,
+      origin: sources.origin,
+      metadata: sources.metadata,
+    })
+    .from(sources)
+    .where(and(eq(sources.id, sourceId), eq(sources.workspaceId, workspaceId)))
+    .for("update");
+  if (!source) return { ok: false, error: "not_found" };
+  if (source.status !== SourceStatus.ARCHIVED) {
+    return { ok: true, status: source.status, alreadyActive: true };
+  }
+
+  const segments = await executor
+    .select({ text: sourceSegments.text })
+    .from(sourceSegments)
+    .where(and(eq(sourceSegments.sourceId, sourceId), eq(sourceSegments.workspaceId, workspaceId)))
+    .orderBy(asc(sourceSegments.ordinal));
+  const nextStatus = segments.length > 0 ? SourceStatus.READY : SourceStatus.DRAFT;
+
+  await executor
+    .update(sources)
+    .set({ status: nextStatus, updatedAt: new Date() })
+    .where(and(eq(sources.id, sourceId), eq(sources.workspaceId, workspaceId)));
+
+  // 与 `search/service.ts` 的 reindex 同一口径：有片段用片段正文，否则用元数据兜底。
+  const metadata = (source.metadata ?? {}) as { rawContent?: unknown; url?: unknown };
+  const body = segments.length > 0
+    ? segments.map((segment) => segment.text).join("\n")
+    : [
+        source.origin,
+        typeof metadata.rawContent === "string" ? metadata.rawContent : "",
+        typeof metadata.url === "string" ? metadata.url : "",
+      ].filter(Boolean).join("\n");
+  await upsertSearchDocument(executor, {
+    workspaceId,
+    objectType: "source",
+    objectId: sourceId,
+    title: source.title,
+    body,
+  });
+
+  return { ok: true, status: nextStatus, alreadyActive: false };
+}
+
 export async function deleteSource(
   executor: ApiTransaction,
   sourceId: string,

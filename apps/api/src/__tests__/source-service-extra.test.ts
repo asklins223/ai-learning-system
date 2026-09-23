@@ -10,6 +10,7 @@ import {
   getSource,
   listNotesBySource,
   listSources,
+  restoreSource,
   updateSource,
 } from "../modules/source/service.ts";
 import { encodeCursor } from "../lib/pagination.ts";
@@ -527,5 +528,101 @@ it("creates note/version/blocks and updates the search projection", async () => 
     assert.equal(await listNotesBySource({
       query: { sources: { findFirst: async () => undefined } },
     } as any, "missing", WORKSPACE_ID, USER_ID), null);
+  });
+});
+
+describe("source restore（审计 F08）", () => {
+  function restoreExecutor(options: {
+    status: string;
+    segments: readonly { text: string }[];
+    onUpdate?: (value: any) => void;
+    onSearchUpsert?: (value: any) => void;
+  }) {
+    return {
+      select: () => ({
+        from: (table: unknown) => ({
+          where: () => ({
+            // 行锁那条读（sources）与片段那条读（source_segments）形状不同：
+            // 前者 `.for("update")`，后者 `.orderBy(...)`。桩要接住两条真实形状。
+            for: async () => [{
+              id: "source-1",
+              status: options.status,
+              title: "Archived title",
+              origin: "pasted",
+              metadata: { rawContent: "兜底正文" },
+            }],
+            orderBy: async () => options.segments,
+          }),
+        }),
+      }),
+      update: () => ({
+        set: (value: any) => {
+          options.onUpdate?.(value);
+          return { where: async () => undefined };
+        },
+      }),
+      // 搜索投影走 savepoint 事务（best-effort）。
+      transaction: async (run: (tx: any) => Promise<void>) => run({
+        insert: () => ({
+          values: (value: any) => {
+            options.onSearchUpsert?.(value);
+            return { onConflictDoUpdate: async () => undefined };
+          },
+        }),
+      }),
+      query: { sources: { findFirst: async () => undefined } },
+    } as any;
+  }
+
+  it("已归档且有片段：恢复到 ready，并把搜索文档按同一口径补回来", async () => {
+    let updated: any = null;
+    let indexed: any = null;
+    const executor = restoreExecutor({
+      status: SourceStatus.ARCHIVED,
+      segments: [{ text: "第一段" }, { text: "第二段" }],
+      onUpdate: (value) => { updated = value; },
+      onSearchUpsert: (value) => { indexed = value; },
+    });
+
+    const result = await restoreSource(executor, "source-1", WORKSPACE_ID);
+
+    assert.deepEqual(result, { ok: true, status: SourceStatus.READY, alreadyActive: false });
+    assert.equal(updated.status, SourceStatus.READY);
+    assert.equal(indexed.objectType, "source");
+    assert.equal(indexed.objectId, "source-1");
+    assert.equal(indexed.title, "Archived title");
+    assert.equal(indexed.body, "第一段\n第二段");
+  });
+
+  it("已归档但没有片段：回到 draft，正文用元数据兜底", async () => {
+    let indexed: any = null;
+    const executor = restoreExecutor({
+      status: SourceStatus.ARCHIVED,
+      segments: [],
+      onSearchUpsert: (value) => { indexed = value; },
+    });
+
+    const result = await restoreSource(executor, "source-1", WORKSPACE_ID);
+
+    assert.deepEqual(result, { ok: true, status: SourceStatus.DRAFT, alreadyActive: false });
+    // origin=pasted 与 rawContent 都进兜底正文（与 reindex 同口径）。
+    assert.equal(indexed.body, "pasted\n兜底正文");
+  });
+
+  it("没有归档的来源：原样返回，既不改状态也不动索引（幂等）", async () => {
+    let updated: unknown = null;
+    let indexed: unknown = null;
+    const executor = restoreExecutor({
+      status: SourceStatus.READY,
+      segments: [{ text: "第一段" }],
+      onUpdate: (value) => { updated = value; },
+      onSearchUpsert: (value) => { indexed = value; },
+    });
+
+    const result = await restoreSource(executor, "source-1", WORKSPACE_ID);
+
+    assert.deepEqual(result, { ok: true, status: SourceStatus.READY, alreadyActive: true });
+    assert.equal(updated, null, "非归档来源不该被 UPDATE");
+    assert.equal(indexed, null, "非归档来源不该写索引");
   });
 });

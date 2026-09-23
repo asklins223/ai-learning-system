@@ -118,6 +118,7 @@ import {
   desktopSourceUpdateRequestSchema,
   desktopSourceNoteResultSchema,
   desktopSourceArchiveResultSchema,
+  desktopSourceRestoreResultSchema,
   desktopSourceReparseResultSchema,
   desktopAiAuditPageV1Schema,
   desktopNoteListPageSchema,
@@ -522,6 +523,7 @@ const sourceCreateNoteInputSchema = z.strictObject({
 });
 const sourceArchiveInputSchema = z.strictObject({ ...m1InputBase, sourceId: uuidSchema });
 const sourceReparseInputSchema = z.strictObject({ ...m1InputBase, sourceId: uuidSchema });
+const sourceRestoreInputSchema = z.strictObject({ ...m1InputBase, sourceId: uuidSchema });
 const sourceImageGetInputSchema = z.strictObject({
   ...m1InputBase,
   request: sourceImageGetRequestV1Schema,
@@ -2257,6 +2259,20 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     }
     return gateway.reparseSource(input.sourceId, input.meta.requestId);
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, desktopSourceReparseResultSchema);
+
+  /**
+   * 恢复一篇已归档的来源（审计 F08）。门控与归档同一处：服务端 `requireOwner`
+   * 是真正的判据，这里先挡住"点了才知道没权限"。
+   */
+  installHandler(DESKTOP_IPC_CHANNELS.sourceRestore, sourceRestoreInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "source.detail");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    const capabilities = await gateway.getCapabilities(input.meta.requestId);
+    if (capabilities.actionCapabilities["source.archive"] !== "allowed") {
+      throw new DesktopGatewayFailure("forbidden", "never");
+    }
+    return gateway.restoreSource(input.sourceId, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, desktopSourceRestoreResultSchema);
 
   // 站内图片字节：来源详情的正文片段与笔记阅读页都会用到（两者共用同一份
   // `/api/uploads/…` 引用），所以只要其中一个面可达就放行。这里没有 owner 门控

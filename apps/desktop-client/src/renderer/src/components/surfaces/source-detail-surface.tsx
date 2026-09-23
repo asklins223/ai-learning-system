@@ -57,7 +57,7 @@ export function SourceDetailSurface() {
 
   /** The title draft while the folio's headline is a field; null means it reads. */
   const [renaming, setRenaming] = useState<string | null>(null);
-  const [busy, setBusy] = useState<"rename" | "note" | "archive" | "reparse" | null>(null);
+  const [busy, setBusy] = useState<"rename" | "note" | "archive" | "reparse" | "restore" | null>(null);
   const [notice, setNotice] = useState<{ readonly tone: "info" | "error"; readonly text: string } | null>(null);
   const [duplicate, setDuplicate] = useState<DuplicateNote | null>(null);
   const [archiveConfirm, setArchiveConfirm] = useState(false);
@@ -169,7 +169,7 @@ export function SourceDetailSurface() {
     : !canStartNote
       ? "当前工作区的身份只能阅读来源，不能从来源开始笔记。"
       : source.status === "archived"
-        ? "这份来源已经归档，不能再从它开始笔记。"
+        ? "这份来源已经归档；要接着用它，先在上面点「恢复来源」。"
         : source.status !== "ready"
           ? "材料解析完成后才能开始写笔记。"
           : segments.length === 0
@@ -303,6 +303,41 @@ export function SourceDetailSurface() {
   };
 
   /**
+   * 归档的逆操作（审计 F08）。
+   *
+   * 归档那条路写的提示语是"可在已归档页签找到"，而此前没有回去的路——数据一直在
+   * （只是 `status=archived`），界面上唯一的后果却是"再也不能从它开始笔记"。
+   * 恢复到哪一档由服务端按事实定（有片段 → `ready`，没有 → `draft`），回执照实说，
+   * 不假装"恢复完成"就完事：这一档决定了用户接下来能做什么。
+   */
+  const restoreSource = async () => {
+    if (!sourceId || busy) return;
+    setBusy("restore");
+    setNotice(null);
+    try {
+      const restored = unwrapGatewayResult(await window.ailearn.source.restore({
+        meta: createRequestMeta(epochRef.current),
+        sourceId,
+      }));
+      setNotice({
+        tone: "info",
+        text: restored.alreadyActive
+          ? "这份来源本来就没有归档。"
+          : `已把《${source?.title ?? "这份来源"}》恢复到来源列表${
+              restored.status === "ready"
+                ? "，之前解析好的片段都还在"
+                : "；它还没有正文片段，可以重新解析"
+            }。`,
+      });
+      await reload();
+    } catch (error) {
+      setNotice({ tone: "error", text: `恢复没成功：${gatewayErrorMessage(error)}` });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /**
    * 重新解析这一篇（doc 34 L7）。文案里那句"打开来源后可以重新解析"以前没有对应的
    * 端点，也没有按钮——job 被判 dead 时只改 `jobs`，来源会永远停在「处理中」。
    *
@@ -354,6 +389,8 @@ export function SourceDetailSurface() {
     : continueTarget ? "继续写笔记" : "前往笔记库";
 
   const archiveAvailable = canArchive && source?.status !== "archived";
+  // 归档的逆操作：只有已归档的来源才看得到（审计 F08）。
+  const restoreAvailable = canArchive && source?.status === "archived";
   // 与归档同一个门：能力投影里 owner 那批写能力是一起置位的（`source.update` 与
   // `source.archive` 不会一个开一个关），真判据仍在服务端 `requireOwner` 那一处。
   const reparseAvailable = canArchive
@@ -404,11 +441,22 @@ export function SourceDetailSurface() {
           {busy === "reparse" ? "正在重新排…" : "重新解析"}
         </button>
       ) : null}
+      {restoreAvailable ? (
+        <button
+          type="button"
+          className="text-action"
+          title="把它放回默认的来源列表；之前解析好的片段都还在"
+          disabled={busy === "restore"}
+          onClick={() => void restoreSource()}
+        >
+          {busy === "restore" ? "正在恢复…" : "恢复来源"}
+        </button>
+      ) : null}
       {archiveAvailable ? (
         <button
           type="button"
           className="text-action text-action--danger"
-          title="归档后不再出现在默认索引；可在来源库的「已归档」页签找到，但无法从这里恢复"
+          title="归档后不再出现在默认索引，可在来源库的「已归档」页签找到，也能从这里恢复"
           onClick={() => { setNotice(null); setArchiveConfirm(true); }}
         >
           归档

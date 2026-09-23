@@ -279,6 +279,8 @@ import {
   type DesktopSourceUpdateRequest,
   type DesktopSourceArchiveResult,
   type DesktopSourceReparseResult,
+  desktopSourceRestoreResultSchema,
+  type DesktopSourceRestoreResult,
   type DesktopNoteListPage,
   type DesktopNoteCreateRequest,
   type DesktopNoteMutationResult,
@@ -1862,6 +1864,26 @@ export class DesktopGateway {
     await this.ensureConnected(requestId);
     await this.request(`/sources/${this.safeUuid(sourceId)}`, { method: "DELETE" }, true, true, requestId);
     return { sourceId, status: "archived" };
+  }
+
+  /**
+   * `POST /sources/:id/restore`（审计 F08）：归档的逆操作。
+   *
+   * 回到哪一档由服务端按事实定（有片段 → `ready`，没有 → `draft`），客户端不猜；
+   * 返回里带上它算出来的那一档，界面据此说清"恢复成了什么样"。
+   */
+  async restoreSource(sourceId: string, requestId?: string): Promise<DesktopSourceRestoreResult> {
+    await this.ensureConnected(requestId);
+    const result = await this.request(
+      `/sources/${this.safeUuid(sourceId)}/restore`,
+      { method: "POST" },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = desktopSourceRestoreResultSchema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return { sourceId, status: parsed.data.status as DesktopSourceRestoreResult["status"], alreadyActive: parsed.data.alreadyActive };
   }
 
   /**

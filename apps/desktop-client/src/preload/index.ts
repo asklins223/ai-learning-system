@@ -151,6 +151,7 @@ const desktopApi: AILearnDesktopApiM2 = {
     update: (input) => invoke(DESKTOP_IPC_CHANNELS.sourceUpdate, input),
     createNote: (input) => invoke(DESKTOP_IPC_CHANNELS.sourceCreateNote, input),
     archive: (input) => invoke(DESKTOP_IPC_CHANNELS.sourceArchive, input),
+    restore: (input) => invoke(DESKTOP_IPC_CHANNELS.sourceRestore, input),
     reparse: (input) => invoke(DESKTOP_IPC_CHANNELS.sourceReparse, input),
     // 站内图片原始字节：正文引用是 `/api/uploads/…`，渲染层够不到 API 源，
     // 由 main 带会话令牌取回，这里只把那条通道接出来。

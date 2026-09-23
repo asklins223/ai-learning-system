@@ -141,6 +141,7 @@ import {
   type DesktopSourceUpdateRequest,
   type DesktopSourceArchiveResult,
   type DesktopSourceReparseResult,
+  type DesktopSourceRestoreResult,
   desktopNoteListPageSchema,
   type DesktopNoteCreateRequest,
   type DesktopNoteMutationResult,
@@ -309,6 +310,8 @@ export const DESKTOP_IPC_CHANNELS = {
   sourceUpdate: "ailearn.v1.source.update",
   sourceCreateNote: "ailearn.v1.source.createNote",
   sourceArchive: "ailearn.v1.source.archive",
+  /** 归档的逆操作（审计 F08）：数据一直在，只是 status=archived。 */
+  sourceRestore: "ailearn.v1.source.restore",
   sourceReparse: "ailearn.v1.source.reparse",
   sourceImageGet: "ailearn.v1.source.image.get",
   noteList: "ailearn.v1.note.list",
@@ -1936,6 +1939,11 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
     createNote(input: { meta: RequestMetaV1; sourceId: Uuid; force?: boolean }): Promise<GatewayResultV1<DesktopSourceNoteResult>>;
     /** Soft-deletes the source into `archived`; the record stays under 全部. */
     archive(input: { meta: RequestMetaV1; sourceId: Uuid }): Promise<GatewayResultV1<DesktopSourceArchiveResult>>;
+    /**
+     * 归档的逆操作（审计 F08）。回到哪一档由服务端按事实定：有片段 → `ready`，
+     * 没有 → `draft`；重复调用幂等（`alreadyActive` 为真时它本来就没归档）。
+     */
+    restore(input: { meta: RequestMetaV1; sourceId: Uuid }): Promise<GatewayResultV1<DesktopSourceRestoreResult>>;
     /**
      * 重新解析这一篇（doc 34 L7）。job 被判 dead 时 `sources.status` 会永远停在
      * `processing`，界面那句"打开来源后可以重新解析"此前没有对应的端点。

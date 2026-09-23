@@ -128,6 +128,20 @@ export const desktopSourceArchiveResultSchema = z.object({
 export type DesktopSourceArchiveResult = z.infer<typeof desktopSourceArchiveResultSchema>;
 
 /**
+ * 恢复已归档来源的回执（审计 F08）。
+ *
+ * `status` 是服务端按事实算出来的那一档，不是客户端挑的：有片段回到 `ready`
+ * （正文还在，立刻可读可起稿），没有片段回到 `draft`（只剩元数据，走"重新解析"）。
+ * `alreadyActive` 用于幂等：重复点、并发点都返回同一个结果，界面照实说"它本来就没归档"。
+ */
+export const desktopSourceRestoreResultSchema = z.object({
+  sourceId: uuid,
+  status: z.enum(["draft", "processing", "ready", "failed", "archived"]),
+  alreadyActive: z.boolean(),
+}).passthrough();
+export type DesktopSourceRestoreResult = z.infer<typeof desktopSourceRestoreResultSchema>;
+
+/**
  * 重新解析的回执（doc 34 L7）。服务端返回 202 + 新状态，`draft` 意思是
  * "已排去解析、还没开始"，不是"已经解析完"——界面上要说的下一句是"排上了"。
  */

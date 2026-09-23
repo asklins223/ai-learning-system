@@ -15,6 +15,7 @@ import {
   updateSource,
   reparseSource,
   deleteSource,
+  restoreSource,
   createNoteFromSource,
   listNotesBySource,
 } from "./service.ts";
@@ -112,6 +113,19 @@ export async function sourceRoutes(app: FastifyInstance) {
     if (!result) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
     // 2026-08-11：契约统一——软删除返回 204（与 DELETE /notes/:id 一致）
     return reply.code(204).send();
+  });
+
+  // POST /sources/:id/restore — 把已归档的来源恢复成可用状态（审计 F08）
+  // RBAC: 仅 owner 可恢复来源（与归档同一个门）
+  app.post<{ Params: { id: string } }>("/sources/:id/restore", { preHandler: [requireOwner] }, async (req, reply) => {
+    const params = uuidParamSchema.safeParse(req.params);
+    if (!params.success) return reply.code(400).send({ error: "invalid_id_format", message: "无效的 id 格式" });
+    const result = await withWorkspaceTransaction(
+      { workspaceId: req.session.workspaceId, userId: req.session.userId },
+      (transaction) => restoreSource(transaction, req.params.id, req.session.workspaceId),
+    );
+    if (!result.ok) return reply.code(404).send({ error: "not_found", message: "资源不存在" });
+    return { version: 1, status: result.status, alreadyActive: result.alreadyActive };
   });
 
   // POST /sources/:id/create-note — 从来源创建笔记草稿

@@ -28,7 +28,11 @@ const MODULE_CONTRACTS: ModuleContract[] = [
   // 删掉无人调用的 POST /sources/statuses 后：7 路由 / 7 服务。
   // 补上 POST /sources/:id/reparse（doc 34 L7，"可以重新解析"那句文案的端点）后各加一：
   // 两个数一起动正是这条断言要的形状——多一条路由就必须多一个事务边界。
-  { name: "source", handlers: 8, services: 8 },
+  // handlers 8 → 9 / services 8 → 9：审计 F08 补上 POST /sources/:id/restore
+  // （归档的逆操作）。它同样自己开 `withWorkspaceTransaction` 并带上
+  // (workspaceId, userId)，服务端那侧 `restoreSource` 也以 `executor: ApiTransaction`
+  // 开头，所以另外两条断言一起过——这里只是把数量对上，不是放宽判据。
+  { name: "source", handlers: 9, services: 9 },
   // v0.6 新增 /search/drift 与 /search/auto-fix 后：4 路由 / 4 服务
   { name: "search", handlers: 4, services: 4 },
 ];
