@@ -601,6 +601,7 @@
 | **F07** | ✅ 已修 | `governance.ts` 审计写入走 `withWorkerWorkspaceTransaction` | 受限角色集测 3/3（正控/落库/跨空间拒绝，变异检验红）；活体：一次伴星 turn 落 **4 行**审计 |
 | **F08** | ✅ 已修 | `POST /sources/:id/restore` + 通道 + 界面按钮与回执 | 服务端 3 条 + 界面 5 条，两处变异检验；结构盘点来源模块 8→9 |
 | **F32** | ✅ 已修（三条） | ① worker 判死收尾把来源置 `failed` + 原因（`parse-source.ts` 的 `markSourceParseFailed` + `index.ts` 的 `DEAD_FINALIZERS`）；② 「解析中」计数含排队等待；③ 「全部」悬停说明不含归档 | worker 受限角色集测 3/3（变异检验红）；`source-index.test.ts` 15/15（变异检验红） |
+| **F26** | ✅ 已修（"空白"那一条） | `TaskSurface.tsx`：过渡完成加墙钟兜底（`armTransitionDeadline`，时长 + 400ms，两侧幂等并互清） | `task-surface-transition-deadline.test.tsx` 2 条（把 `gsap.timeline` 桩成永不回调＝rAF 停掉，只推墙钟：进场自己走到 `entered`、换面不会永停 `leaving`）；**变异检验**：摘掉兜底两条都红。**未做**：任务区"带 run ID 的加载/失败边界"、恢复弹层"1/共 10 项 + 完整清单"（与 F24 同族） |
 | **F33** | ✅ 已修 | `normalizeSourceUrl` + `findDuplicateSource` + `createSource` 的 `force`/`duplicateOf`；通道与界面提示（默认「打开已有来源」/次级「仍然再采一次」） | 服务端 4 条 + 界面 2 条，两处变异检验；结构盘点 services 9→10 |
 | **F34** | ✅ 已修 | `deriveSourceTitle` 按句读收尾 | 5 条用例（含真实调用点），变异检验：退回 `slice(0,60)` → 报出审计现场那串以「而」结尾的标题 |
 
@@ -619,8 +620,9 @@
 `search-global-ipc.test.ts`（5 条原样穿过；缺 `total` 的坏页必须报错而不是回空）。
 
 **本线程未动的清单（下一手的顺序）**：
-1. **F26**（首页恢复后任务区空白）——需要按 §F26 的验法先加状态跟踪再定位。
-3. **F20 / F35 / F37**（笔记本族的其余三条：恢复失败态、版本标签真实性、新建空稿）。
+1. **F24**（首页"10 项可恢复"点进今日日志）＋ F26 余下两条（任务区加载/失败边界、
+   恢复弹层"先显示 1/共 10 项"）——同一族，一起做。
+2. **F20 / F35 / F37**（笔记本族的其余三条：恢复失败态、版本标签真实性、新建空稿）。
    ⚠️ `notebook-surface.tsx` 与 `note-doc-*` 那批文件此刻有**并行会话在改**，动之前先看
    `git status` 与文件 mtime。
 4. **F24 / F05**（首页"10 项可恢复"的落点、目标简报主笔记错跳）。
