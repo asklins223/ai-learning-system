@@ -123,6 +123,30 @@ export function TaskSurface() {
   const surfaceRef = useRef<HTMLElement>(null);
   const returnFocusRef = useRef<{ element: HTMLElement; fallbackSelector: string } | null>(null);
   const lastSurfaceRef = useRef(surface);
+  /**
+   * 过渡的有界兜底（审计 F26）。
+   *
+   * 进/退场都由 GSAP 时间线的 `onComplete` 推进状态，而那条线靠 rAF 走帧——窗口失焦、
+   * 被遮挡或后台时 Chromium 会把 rAF 停掉，`onComplete` 就永远不来：任务区停在
+   * `leaving`（`aria-hidden` + `inert`），屏上只剩一个空容器，超时也不会自己好
+   * （现场：>15 秒没有题目、加载态或可用退出控件，而 run 详情接口是 200）。
+   * 完成本来就是个有界动作，所以补一条墙钟：到点谁先到谁推进状态，幂等。
+   */
+  const transitionDeadlineRef = useRef<number | null>(null);
+  const clearTransitionDeadline = useCallback(() => {
+    if (transitionDeadlineRef.current !== null) {
+      window.clearTimeout(transitionDeadlineRef.current);
+      transitionDeadlineRef.current = null;
+    }
+  }, []);
+  const armTransitionDeadline = useCallback((delayMs: number, finish: () => void) => {
+    clearTransitionDeadline();
+    transitionDeadlineRef.current = window.setTimeout(() => {
+      transitionDeadlineRef.current = null;
+      finish();
+    }, delayMs);
+  }, [clearTransitionDeadline]);
+  useEffect(() => clearTransitionDeadline, [clearTransitionDeadline]);
 
   useEffect(() => {
     if (surface && !renderedSurface) {
@@ -199,12 +223,16 @@ export function TaskSurface() {
 
       if (surface !== renderedSurface) {
         setTransition("leaving");
+        const settleExit = () => {
+          setRenderedSurface(surface);
+          setTransition(surface ? "entering" : "entered");
+        };
         const finishExit = contextSafe?.(() => {
-          setRenderedSurface(surface);
-          setTransition(surface ? "entering" : "entered");
+          clearTransitionDeadline();
+          settleExit();
         }) ?? (() => {
-          setRenderedSurface(surface);
-          setTransition(surface ? "entering" : "entered");
+          clearTransitionDeadline();
+          settleExit();
         });
 
         if (motionMode === "off") {
@@ -220,6 +248,8 @@ export function TaskSurface() {
           },
           onComplete: finishExit,
         });
+        // 墙钟兜底：给足时间线本身的时长 + 余量；正常情况 onComplete 先到。
+        armTransitionDeadline(surfaceExitDuration * 1000 + 400, settleExit);
         if (artifacts.length) {
           exitTimeline.to(
             artifacts,
@@ -242,7 +272,14 @@ export function TaskSurface() {
       }
 
       setTransition("entering");
-      const finishEnter = contextSafe?.(() => setTransition("entered")) ?? (() => setTransition("entered"));
+      const settleEnter = () => setTransition("entered");
+      const finishEnter = contextSafe?.(() => {
+        clearTransitionDeadline();
+        settleEnter();
+      }) ?? (() => {
+        clearTransitionDeadline();
+        settleEnter();
+      });
       if (motionMode === "off") {
         gsap.set(allAnimated, { autoAlpha: 1, clearProps: "transform" });
         finishEnter();
@@ -256,6 +293,7 @@ export function TaskSurface() {
         },
         onComplete: finishEnter,
       });
+      armTransitionDeadline(surfaceEnterDuration * 1000 + 400, settleEnter);
       enterTimeline.addLabel("artifact-rise", 0);
       if (content) {
         enterTimeline.fromTo(

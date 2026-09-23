@@ -34,7 +34,10 @@ const EXISTING = {
   segments: [],
 };
 
-function installApi(create: ReturnType<typeof vi.fn>) {
+/** 采集请求的形状：这一组用例关心的是 `force` 有没有跟着出去。 */
+export type CreateInput = { request: { url?: string; content?: string; title?: string; force?: boolean } };
+
+function installApi(create: (input: CreateInput) => Promise<unknown>) {
   const gateway = {
     contract: { enabledRoutes: ["source.library"] },
     auth: { getState: vi.fn(async () => ok({ status: "authenticated", workspace: { workspaceId: "w-1" } })) },
@@ -69,7 +72,7 @@ afterEach(() => {
 
 describe("采集栏：同网址第二次采集（审计 F33）", () => {
   it("命中重复：默认不新建，把既有那份端出来，提示里说清是哪一天采过", async () => {
-    const create = vi.fn(async () => ok({
+    const create = vi.fn(async (_input: CreateInput) => ok({
       ...EXISTING,
       duplicateOf: { sourceId: "s-old", title: EXISTING.source.title, createdAt: EXISTING.source.createdAt, status: "ready" },
     }));
@@ -84,11 +87,11 @@ describe("采集栏：同网址第二次采集（审计 F33）", () => {
     expect(screen.getByRole("button", { name: "打开已有来源" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "仍然再采一次" })).toBeTruthy();
     // 第一次请求不带 force（服务端据此查重）。
-    expect(create.mock.calls[0][0].request.force).toBeUndefined();
+    expect(create.mock.calls[0]?.[0]?.request.force).toBeUndefined();
   });
 
   it("点了「仍然再采一次」：请求带 force 重发，才真的建新的一份", async () => {
-    const create = vi.fn()
+    const create = vi.fn(async (_input: CreateInput): Promise<unknown> => ok({ ...EXISTING, duplicateOf: null }))
       .mockResolvedValueOnce(ok({
         ...EXISTING,
         duplicateOf: { sourceId: "s-old", title: EXISTING.source.title, createdAt: EXISTING.source.createdAt, status: "ready" },
@@ -101,7 +104,7 @@ describe("采集栏：同网址第二次采集（审计 F33）", () => {
     fireEvent.click(await screen.findByRole("button", { name: "仍然再采一次" }));
 
     await waitFor(() => expect(create).toHaveBeenCalledTimes(2));
-    expect(create.mock.calls[1][0].request.force).toBe(true);
+    expect(create.mock.calls[1]?.[0]?.request.force).toBe(true);
     // 第二次之后提示不再挂着（这次是真新建）。
     await waitFor(() => expect(screen.queryByText(/就采过了/)).toBeNull());
   });
