@@ -267,12 +267,14 @@ import { noteShareScopeReceiptV1Schema, type NoteShareScopeV1, type NoteShareSco
 import {
   desktopSourceListPageSchema,
   desktopSourceDetailSchema,
+  desktopSourceCreateResultV1Schema,
   desktopSourceNotesPageSchema,
   desktopNoteListPageSchema,
   desktopNoteVersionListSchema,
   desktopSearchPageSchema,
   type DesktopSourceListPage,
   type DesktopSourceDetail,
+  type DesktopSourceCreateResultV1,
   type DesktopSourceCreateRequest,
   type DesktopSourceNotesPage,
   type DesktopSourceNoteResult,
@@ -1750,7 +1752,7 @@ export class DesktopGateway {
   async createSource(
     request: DesktopSourceCreateRequest,
     requestId?: string,
-  ): Promise<DesktopSourceDetail> {
+  ): Promise<DesktopSourceCreateResultV1> {
     await this.ensureConnected(requestId);
     const result = await this.request(
       "/sources",
@@ -1759,7 +1761,7 @@ export class DesktopGateway {
       true,
       requestId,
     );
-    const parsed = desktopSourceDetailSchema.safeParse(result.body);
+    const parsed = desktopSourceCreateResultV1Schema.safeParse(result.body);
     if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
     return parsed.data;
   }

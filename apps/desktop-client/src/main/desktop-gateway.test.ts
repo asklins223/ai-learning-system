@@ -1626,6 +1626,9 @@ describe("DesktopGateway", () => {
         ...overrides,
       },
       segments: [],
+      // 服务端的真实回执从 F33 起带这个字段：null = 这次真的新建了一份；
+      // 非空时返回的是既有那份的详情（界面据此提示"已经采过"）。
+      duplicateOf: null,
     });
 
     function routeCapture(record: { body?: string; method?: string }) {
