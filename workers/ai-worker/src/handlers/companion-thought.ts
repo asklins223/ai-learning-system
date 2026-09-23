@@ -15,17 +15,16 @@
  */
 
 import { sql } from "drizzle-orm";
+import { isFormalAnswerInProgress } from "../lib/formal-answer-signal.ts";
 import { createHash } from "node:crypto";
 import { readCompanionThoughtJobPayload } from "@ailearn/shared";
 import {
-  evaluateDismissalFeedback,
-  isWithinQuietHours,
-  proactiveAvailabilityBlocked,
   proactiveCadenceMs,
-  routineCadenceBlocked,
   type CompanionAvailabilityV1,
   type CompanionInterventionLevelV1,
   type CompanionQuietHours,
+  POLICY_LIMITS,
+  evaluateProactivePolicy,
 } from "@ailearn/shared/companion-proactive-policy";
 import { logger } from "../lib/logger.ts";
 import { assertJobLease, withJobTransaction } from "../lib/job-lease.ts";
@@ -426,41 +425,66 @@ export interface RoutineCueTimingInput {
    * 这一条排在最前面：它是用户对**这个房间**的显式决定，比账号级的时段与节奏更具体。
    */
   readonly spaceMuted: boolean;
+  /** 这个人在这个空间里有一条正式测评正在作答（doc 34 L12）。 */
+  readonly formalAnswerInProgress: boolean;
 }
+
+export type RoutineCueTimingReason =
+  | "allowed" | "space_muted" | "availability" | "quiet_hours" | "formal_answer_in_progress"
+  | "dismissal_feedback" | "dedupe_recent" | "cadence" | "expired";
 
 export function evaluateRoutineCueTiming(input: RoutineCueTimingInput): {
   allow: boolean;
-  reason: "allowed" | "space_muted" | "availability" | "quiet_hours" | "dismissal_feedback" | "cadence";
+  reason: RoutineCueTimingReason;
   detail: Record<string, unknown>;
 } {
-  // 空间级静音排在最前：它是"别在这个房间说话"这一句最具体的指令。
-  if (input.spaceMuted) {
-    return { allow: false, reason: "space_muted", detail: {} };
-  }
-  if (proactiveAvailabilityBlocked(input.availability)) {
-    return { allow: false, reason: "availability", detail: { availability: input.availability } };
-  }
-  if (input.quietHours && isWithinQuietHours(input.quietHours, input.now)) {
-    return { allow: false, reason: "quiet_hours", detail: {} };
-  }
-  if (evaluateDismissalFeedback(input.recentDeliveryStates).suppress) {
-    return { allow: false, reason: "dismissal_feedback", detail: { recentStates: input.recentDeliveryStates } };
-  }
-  if (routineCadenceBlocked({
+  // 这里**不再自己判任何一条**：全部交给 `evaluateProactivePolicy`（doc 34 L12 收形）。
+  // 之前两边的形状是"策略函数写了、管线里另有一份"，缺的两格补进管线之后就变成
+  // 同一件事有两个来源——正是本文批评的东西。
+  // 本函数只剩两件本分的活：把料取到的字段摆成策略要的入参，以及把决策翻回
+  // 管线自己的 reason/detail 词汇（detail 是给那行 silent 日志用的排查线索）。
+  const recentShownCount = input.recentDeliveryStates.filter(
+    (state) => state === "displayed",
+  ).length;
+  const decision = evaluateProactivePolicy({
+    availability: input.availability,
     interventionLevel: input.interventionLevel,
-    msSinceLastCue: input.msSinceLastRoutineCue,
-  })) {
-    return {
-      allow: false,
-      reason: "cadence",
-      detail: {
-        interventionLevel: input.interventionLevel,
-        msSinceLastRoutineCue: input.msSinceLastRoutineCue,
-        cadenceMs: proactiveCadenceMs(input.interventionLevel),
-      },
-    };
-  }
-  return { allow: true, reason: "allowed", detail: {} };
+    formalAnswerInProgress: input.formalAnswerInProgress,
+    msSinceLastShown: input.msSinceLastRoutineCue,
+    recentShownCount,
+    // 念头这条路上没有"单条提示过期"的概念：每次都按未过期交进去，
+    // 过期判定留在 triggered 那一支（到点提醒的 2 小时窗口由 0238/0270 自己管）。
+    expired: false,
+    spaceMuted: input.spaceMuted,
+    quietHours: input.quietHours,
+    recentDeliveryStates: input.recentDeliveryStates,
+    kind: "routine",
+    now: input.now.getTime(),
+  });
+  const reason: RoutineCueTimingReason =
+    decision.reasonCode === "dnd" || decision.reasonCode === "offline"
+      ? "availability"
+      : decision.reasonCode === "cooldown"
+        ? "cadence"
+        : decision.reasonCode;
+  return {
+    allow: decision.allow,
+    reason,
+    detail:
+      reason === "cadence"
+        ? {
+          interventionLevel: input.interventionLevel,
+          msSinceLastRoutineCue: input.msSinceLastRoutineCue,
+          cadenceMs: proactiveCadenceMs(input.interventionLevel),
+        }
+        : reason === "dedupe_recent"
+          ? { recentShownCount, limit: POLICY_LIMITS.dedupeWindowLimit }
+          : reason === "availability"
+            ? { availability: input.availability }
+            : reason === "dismissal_feedback"
+              ? { recentStates: input.recentDeliveryStates }
+              : {},
+  };
 }
 
 /** 表达校验（切片③）：长度 / 内部 token 泄露 / grounding 命中 / 改写不许改数字。 */
@@ -697,6 +721,13 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
       WHERE workspace_id = ${job.workspaceId} AND user_id = ${userId} LIMIT 1
     `);
 
+    // 正式作答进行中（doc 34 L12 缺的最后一格）。判据在 `lib/formal-answer-signal.ts`
+    // ——语音投递那条路现在也读同一个来源，不再各写一份 SQL。
+    const formalRunRows = await isFormalAnswerInProgress(tx, {
+      workspaceId: job.workspaceId,
+      userId,
+    }) ? [{ one: 1 }] : [];
+
     // 环境事实块与对话侧同源（同一份 SQL、同一个 RLS 事务）：她主动开口时知道的
     // 世界，必须和被动回答时知道的是同一个。
     const hereAndNow = await loadHereAndNow(tx, {
@@ -731,6 +762,7 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
     const availability: CompanionAvailabilityV1 = accountRows[0]?.presence?.presence ?? "online";
     // 空间级静音（0266）。缺行按 false：房间档案还没建过时不该默认闭嘴。
     const spaceMuted = roomProfileRows[0]?.proactive_muted === true;
+    const formalAnswerInProgress = formalRunRows.length > 0;
 
     return {
       today,
@@ -758,16 +790,25 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
       interventionLevel,
       availability,
       spaceMuted,
+      formalAnswerInProgress,
       facts: renderHereAndNow(hereAndNow),
     } satisfies ThoughtMaterial & {
       quietHours: CompanionQuietHours | null;
       interventionLevel: CompanionInterventionLevelV1;
       availability: CompanionAvailabilityV1;
       spaceMuted: boolean;
+      formalAnswerInProgress: boolean;
     };
   });
 
-  const { quietHours, interventionLevel, availability, spaceMuted, ...thoughtMaterial } = material;
+  const {
+    quietHours,
+    interventionLevel,
+    availability,
+    spaceMuted,
+    formalAnswerInProgress,
+    ...thoughtMaterial
+  } = material;
 
   // 每一次调度都留一行结局。沉默本身是对的（"沉默默认"是设计），但**沉默且无日志**
   // 等于这个功能不存在——抱怨 #8 的排查过程里，这条管线跑完就是 "job ok"，
@@ -787,6 +828,7 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
     interventionLevel,
     msSinceLastRoutineCue: thoughtMaterial.msSinceLastRoutineCue,
     spaceMuted,
+    formalAnswerInProgress,
   });
   if (!timing.allow) {
     finish("silent", { reason: timing.reason, ...timing.detail });
@@ -962,7 +1004,10 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
     let candidateEmbedding: number[] | null = null;
     if (embeddingProvider) {
       try {
-        candidateEmbedding = await embeddingProvider.embed(expression);
+        // `job.signal` 与上面 chatCompletion 同一口径：不给的话一次挂住的 embed
+        // 只能等 transport 的 300 秒总超时，而本 handler 的预算只有 110 秒、租约 120 秒
+        // ——整轮会带着已付过费的前两个候选一起超时重投。
+        candidateEmbedding = await embeddingProvider.embed(expression, job.signal);
       } catch {
         candidateEmbedding = null;
       }

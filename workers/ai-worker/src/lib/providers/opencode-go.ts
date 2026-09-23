@@ -708,7 +708,7 @@ export class OpenCodeGoProvider implements AIProvider {
         description: tool.description,
         parameters: tool.parameters,
       }));
-      body.tool_choice = "auto";
+      body.tool_choice = request.toolChoice ?? "auto";
     }
     // 无工具轮不再强制 json_object（根因二 2026-09-19，与 openai-compatible 同步）：
     // executeAgentTurn 的无工具轮是伴星自然文本终答，强制 JSON 是 json_envelope_leak

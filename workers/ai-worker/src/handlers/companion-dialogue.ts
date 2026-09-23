@@ -28,6 +28,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { decideCompanionVoiceDelivery, isFormalAnswerInProgress } from "../lib/formal-answer-signal.ts";
 import { canonicalJsonV1, sha256Utf8V1 } from "@ailearn/shared/content-hash";
 import { sql } from "drizzle-orm";
 import { logger } from "../lib/logger.ts";
@@ -270,6 +271,13 @@ export async function runCompanionDialogue(
         `);
         const conv = convRows[0];
         if (!conv) return null;
+        // 正式作答中就不念出来（doc 34 L15 的另一半）。判据与念头管线同一个来源，
+        // 在**这一轮**读一次就够：一次 provider 调用远长于六个阶段的跃迁窗口，
+        // 中途放开等于在用户正在答的那一题上开口。
+        const formalAnswerInProgress = await isFormalAnswerInProgress(tx, {
+          workspaceId: ctx.workspaceId,
+          userId: run.user_id,
+        });
         const userRows = await tx.execute<{ blocks: unknown }>(sql`
           SELECT blocks FROM companion_messages
           WHERE conversation_id = ${run.conversation_id}
@@ -363,6 +371,7 @@ export async function runCompanionDialogue(
         );
         return {
           runId: run.id,
+          formalAnswerInProgress,
           conversationId: run.conversation_id,
           userId: run.user_id,
           userMessageId: run.user_message_id,
@@ -624,8 +633,20 @@ export async function runCompanionDialogue(
   // （见 runCompanionAgentLoop 的 visibleSegments）。
   let voiceSegmentState: CompanionDisplaySegmentState = { cursor: 0, sentCount: 0 };
   let voiceSegmentsEnabled = isCompanionVoiceDialogueEnabled();
+  const voiceDeliveryDecision = decideCompanionVoiceDelivery({
+    voiceDialogueEnabled: voiceSegmentsEnabled,
+    formalAnswerInProgress: read.formalAnswerInProgress,
+  });
+  if (voiceDeliveryDecision === "formal_answer_in_progress") {
+    // 这一句是这条门唯一的可查痕迹：没有它，"她今天怎么不念了"只能靠猜。
+    logger.info({ runId: read.runId }, "正式作答中：这一轮伴星回复只出文字，不切句也不送合成");
+  }
   const emitVisibleVoiceSegments = async (visibleText: string, isFinal: boolean): Promise<void> => {
+    // 不是"藏掉播放"：直接不发段事件，于是正文也不会被送去外部合成服务。
+    // 上面那句 `voiceSegmentsEnabled` 是另一件事——它是"这一段写失败之后本回合别再试"，
+    // 可以在一轮中途被关掉，而正式作答是整轮都不念。
     if (!voiceSegmentsEnabled) return;
+    if (voiceDeliveryDecision !== "delivered") return;
     const split = splitCommittedDisplaySegments(visibleText, voiceSegmentState, isFinal);
     voiceSegmentState = split.next;
     if (split.segments.length === 0) return;

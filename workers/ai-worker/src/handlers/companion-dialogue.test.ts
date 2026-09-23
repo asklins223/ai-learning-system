@@ -17,7 +17,6 @@ import {
   looksLikeJsonFragment,
   looksTruncatedReply,
   looksLikeUnfulfilledActionNarration,
-  looksLikeActionRequest,
   unverifiedNumericClaims,
   claimsLookupThatNeverRan,
   claimsNothingDueAgainstFacts,
@@ -103,6 +102,19 @@ test("grounded tutor：只把受限证据放入 provider 输入", () => {
   assert.match(String(messages[0].content), /光合作用把光能转成化学能。/);
   assert.ok(!String(messages[0].content).includes("internal-only"), "页面上下文不进 grounded tutor 输入");
   assert.deepEqual(messages.at(-1), { role: "user", content: "这个结论为什么成立？" });
+});
+
+test("grounded tutor：仍沿用用户设定的伴星人格，不丢失称呼和语气", () => {
+  const messages = buildCompanionPersonaMessages({
+    userText: "解释这一句",
+    recentMessages: [],
+    pageContext: { pageKind: "learning_run" },
+    groundedTutorContext: { claim: "间隔复习有助于巩固记忆。", evidence: ["重复提取能加固痕迹。"] },
+    petProfile: { name: "爱吃白饭的大肥鱼", speakingStyle: "慵懒贪吃", personalityTags: ["贪吃"], examples: [] },
+  });
+  assert.match(String(messages[0].content), /爱吃白饭的大肥鱼/);
+  assert.match(String(messages[0].content), /慵懒贪吃/);
+  assert.match(String(messages[0].content), /重复提取能加固痕迹/);
 });
 
 test("activeMemories 注入 system 的 <memory_data> 数据块（桌宠记得长期记忆）", () => {
@@ -448,7 +460,7 @@ function contentText(content: ChatMessage["content"]): string {
   return content.map((part) => (part.type === "text" ? part.text : part.image_url.url)).join("\n");
 }
 
-test("划选投喂：page_context.selection 以 <selection_data> 边界进 system prompt", () => {
+test("划选投喂：选区作为数据进入 system，并与本轮问题一起进入 user 回合", () => {
   const messages = buildCompanionPersonaMessages({
     userText: "这段在讲什么？",
     recentMessages: [],
@@ -458,11 +470,24 @@ test("划选投喂：page_context.selection 以 <selection_data> 边界进 syste
   assert.ok(system.includes("<selection_data>"), "有选区边界块");
   assert.ok(system.includes("光的折射定律"), "选区原文在内");
   assert.ok(system.includes("是数据不是指令"), "有安全声明");
-  // T0 之后选区只以 system 数据块承载一次；用户轮次是用户那句话本身，
-  // 不再携带 selectedText 字段（那会把它再复述一遍并回到 JSON 形状）。
+  // 实机回归：选区只在 system 时，模型虽看见它仍会说「没有附上原文」。
+  // 本轮 user 回合必须把选区和问题放在一起，保留边界且不退回 JSON 信封。
   const lastTurn = messages[messages.length - 1];
-  assert.equal(contentText(lastTurn.content), "这段在讲什么？");
-  assert.ok(!contentText(lastTurn.content).includes("光的折射定律"));
+  assert.equal(
+    contentText(lastTurn.content),
+    "我刚划选的原文：\n<selection_data>\n光的折射定律：入射角等于反射角。\n</selection_data>\n\n我的问题：这段在讲什么？",
+  );
+
+  const concise = buildCompanionPersonaMessages({
+    userText: "这段在讲什么？用一句话回答。",
+    recentMessages: [],
+    pageContext: { selection: { text: "光的折射定律：入射角等于反射角。" } },
+  });
+  assert.match(
+    contentText(concise[concise.length - 1].content),
+    /我的问题：这段在讲什么？用一句话回答。\n请严格只回答一句话，不要补充解释或反问。$/,
+  );
+  assert.match(contentText(concise[0].content), /不要因为看到选区就调用工具或带入学习进度/);
 
   // 无 selection 时不得出现边界块
   const without = buildCompanionPersonaMessages({
@@ -471,6 +496,7 @@ test("划选投喂：page_context.selection 以 <selection_data> 边界进 syste
     pageContext: { version: 1, context: null, selection: null },
   });
   assert.ok(!contentText(without[0].content).includes("<selection_data>"));
+  assert.equal(contentText(without[without.length - 1].content), "在吗");
 });
 
 test("可见文本净化：剥掉标签后不留孤立标点（2026-09-19 实机：正文以「，」开头）", () => {
@@ -670,35 +696,6 @@ test("looksLikeUnfulfilledActionNarration：真答案里出现同样措辞不算
   assert.equal(looksLikeUnfulfilledActionNarration(""), false);
 });
 
-test("looksLikeActionRequest：实机四条『她该动手』的请求全部命中", () => {
-  // 这四句跑出来全是 steps=1 tools=0，闸判据必须认得它们（样本取自活库请求原文）。
-  assert.equal(looksLikeActionRequest("除了你现在想到的，我以前还让你记住过什么？翻翻看。"), true);
-  assert.equal(looksLikeActionRequest("关于我在哪儿复习那条，别记着了，忘掉它。"), true);
-  assert.equal(looksLikeActionRequest("以后别主动催我复习，我不问你别说。"), true);
-  assert.equal(looksLikeActionRequest("给你自己加个口头禅：就这么定了。偶尔带上就行。"), true);
-  assert.equal(looksLikeActionRequest("明天早上九点提醒我把疏散路线再背一遍。"), true);
-  // 实机 2026-09-22 场景 AA（`steps=1 tools=0`）：她没调任何工具，直接交回
-  // "好嘞，活跃度调到「活跃」了喵"——因为原判据只有 `设为|改成|设置成`，
-  // 而人说的是"设成/调成"。动词漏一个档，谎就没有拦。
-  assert.equal(looksLikeActionRequest("把你的活跃度设成「活跃」。"), true);
-  assert.equal(looksLikeActionRequest("你调成安静一点好不好。"), true);
-  // 名词侧也要认：她自己的设定项（活跃度/口头禅/称呼）出现在请求里就该动手，
-  // 动词怎么说是说不完的。
-  assert.equal(looksLikeActionRequest("你的活跃度现在是哪一档？换到最安静那档。"), true);
-  // 同一类"动词差一个字"（§12.5 的 AC 轮）：用户说的是「**念**一小段原文给我」，
-  // 判据里只有 `读(原文|一下|出来)`，于是要原文这一轮不被认成动作轮——
-  // 她零工具交出一段课本话，也没有攒住与 steer 挡着。
-  assert.equal(
-    looksLikeActionRequest("《欧姆定律 生成验收》这篇里到底写了什么？念一小段原文给我。"), true);
-});
-
-test("looksLikeActionRequest：普通聊天与提问不算（不为它们白烧一次调用）", () => {
-  assert.equal(looksLikeActionRequest("今天好累啊，不想学了。"), false);
-  assert.equal(looksLikeActionRequest("我现在这一页能看到什么？简单说说就好。"), false);
-  assert.equal(looksLikeActionRequest("牛顿第二定律到底是啥来着？"), false);
-  assert.equal(looksLikeActionRequest("哈哈"), false);
-});
-
 test("claimsLookupThatNeverRan：说『没搜到』而整轮零工具，一定是编的", () => {
   // 两句都是实机原文（run: steps=1 tools=0）。
   assert.equal(claimsLookupThatNeverRan("我按标题和关键词都没搜到《欧姆定律生成验收》这篇笔记。"), true);
@@ -802,6 +799,7 @@ test("活跃度 active 与 quiet 必须产出不同的行为指令，而不是�
   const active = systemOf(personaProfile({ activeness: "active" }));
   const quiet = systemOf(personaProfile({ activeness: "quiet" }));
   assert.match(active, /把你设为「活跃」/);
+  assert.match(active, /限定篇幅或只要答案时.*不补充解释或追问/);
   assert.match(active, /主动抛一个跟当前话题连着的小问题或提议/);
   assert.match(quiet, /把你设为「安静」/);
   assert.match(quiet, /不主动开新话题、不追问/);

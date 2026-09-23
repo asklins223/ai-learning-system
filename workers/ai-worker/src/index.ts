@@ -350,6 +350,29 @@ let lastMemorySkipLogAt = 0;
  * 检查当前进程内存使用是否在安全范围内。
  * 如果堆内存使用超过阈值，返回 false 并记录警告日志。
  */
+/**
+ * 主 tick 里的 V2 制卡 outbox 一次 poll（预算 5 秒即返回，运行中的 job 继续后台跑）。
+ *
+ * 抽出来是因为它原来只在**函数末尾**被调用一次，而中间有一句
+ * `if (claimLimits.interactiveLimit <= 0) return;`：主队列 4 条槽都被占时（后台 job
+ * 单个可跑 110 秒），整轮直接返回，V2 既不被领取也不续约心跳，最长要多等一整个
+ * handler 预算才轮到。
+ *
+ * 注意这**不是**把 V2 挪到主队列之前——第五轮审计 W#5 明确要求 V2 排在 claim/分发
+ * 之后，免得串行 poll 延迟主队列并发配额的分配。顺序照旧，只是让那条早退不再顺手
+ * 跳过 V2 的义务。
+ */
+async function pollV2OutboxWithinTick(): Promise<void> {
+  try {
+    await pollV2Outbox(1, V2_POLL_TICK_BUDGET_MS);
+  } catch (error) {
+    logger.warn(
+      { error: sanitizeOperationalError(error) },
+      "V2 card generation outbox poll failed",
+    );
+  }
+}
+
 function isMemoryAvailable(): boolean {
   const memUsage = process.memoryUsage();
   const heapUsedMB = memUsage.heapUsed / (1024 * 1024);
@@ -484,7 +507,11 @@ export async function tick(): Promise<void> {
     inflightTotal: inflight.size,
     inflightBackground,
   });
-  if (claimLimits.interactiveLimit <= 0) return;
+  if (claimLimits.interactiveLimit <= 0) {
+    // 主队列没槽位也要把 V2 的义务走完（见 `pollV2OutboxWithinTick` 的说明）。
+    await pollV2OutboxWithinTick();
+    return;
+  }
 
   // 2026-08-11：DB 错误退避——tick 顶层 DB 调用（refreshQueueMetrics/reap/
   // claimJobs）抛错时，若不做退避会以 POLL_MS 紧循环重试（DB 抖动时放大负载）。
@@ -537,14 +564,7 @@ export async function tick(): Promise<void> {
   // 不再串行阻塞**下一 tick** 主队列的 claim/分发。超预算时 poll 返回、运行中 job
   // 继续后台跑（30min 租约 + lease CAS + reaper 兜底，不丢副作用、不重复计费）。
   // 每个 job 已 fire-and-forget（inflight），V2 poll 失败仅告警不断主循环。
-  try {
-    await pollV2Outbox(1, V2_POLL_TICK_BUDGET_MS);
-  } catch (error) {
-    logger.warn(
-      { error: sanitizeOperationalError(error) },
-      "V2 card generation outbox poll failed",
-    );
-  }
+  await pollV2OutboxWithinTick();
 }
 
 export async function main() {

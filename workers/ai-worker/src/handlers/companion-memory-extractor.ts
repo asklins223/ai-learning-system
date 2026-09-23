@@ -25,6 +25,7 @@ import { runWithAbortBudget } from "../lib/handler-timeout.ts";
 import { resolveProviderCallTimeout } from "../lib/handler-timeout-config.ts";
 import { MemoryExtractOutputError } from "../lib/non-retryable-errors.ts";
 import { withoutQuotedNames } from "./companion-dialogue-content.ts";
+import { MEMORY_CONTENT_SIMILARITY_THRESHOLD } from "@ailearn/shared/db-schema/assistant-memory";
 import type { JobPayload } from "./index.ts";
 
 /**
@@ -436,6 +437,9 @@ export async function runCompanionMemoryExtract(job: JobPayload): Promise<void> 
     return;
   }
 
+  // 用户明确"忽略"过的事，下一轮抽取不能再当成新事端上来（doc 34 L14 的后半）。
+  let skippedDismissedTwins = 0;
+
   await withJobTransaction(job, async (tx) => {
     // 稳定 P1-1（2026-09-15 审计）：提交前重新校验并续租租约（TOCTOU 围栏）。
     // 入口 assertJobLease 挡不住"LLM 调用期间租约被 reap"后另一实例重领并重复
@@ -450,6 +454,23 @@ export async function runCompanionMemoryExtract(job: JobPayload): Promise<void> 
       // scope 由种类 + 绑定判据决定，不采信模型给的 scope（见 memoryScopeForKind）。
       // 两道判据任一判本地就本地，服务端规则可以否决模型的 portable。
       const scope = memoryScopeForKind(candidate.kind, candidate.scope, candidate.binding, candidate.content);
+      // 同一空间里已经有一条**被本人忽略过**的同类同内容记忆，就整条跳过：
+      // 不写候选、不发气泡、不铺跨空间。判据与 api 侧冲突分组共用同一个数（见
+      // MEMORY_CONTENT_SIMILARITY_THRESHOLD），否则同一句话会在一边算重复、
+      // 另一边算新事。只认 dismissed_at，删除（deleted_at）不算"别再告诉我"。
+      const dismissedTwin = await tx.execute<{ id: string }>(sql`
+        SELECT id FROM assistant_memory_items
+        WHERE workspace_id = ${job.workspaceId}
+          AND user_id = ${userId}
+          AND deleted_at IS NULL
+          AND dismissed_at IS NOT NULL
+          AND similarity(content, ${candidate.content}) > ${MEMORY_CONTENT_SIMILARITY_THRESHOLD}
+        LIMIT 1
+      `);
+      if (dismissedTwin.length > 0) {
+        skippedDismissedTwins += 1;
+        continue;
+      }
       await tx.execute(sql`
         INSERT INTO assistant_memory_items
           (workspace_id, user_id, kind, content, source_event_id, user_stated, user_confirmed,
@@ -526,5 +547,13 @@ export async function runCompanionMemoryExtract(job: JobPayload): Promise<void> 
     }
   });
 
-  logger.info({ jobId: job.id, runId, count: candidates.length }, "memory extract completed");
+  logger.info(
+    {
+      jobId: job.id,
+      runId,
+      count: candidates.length - skippedDismissedTwins,
+      dismissedTwinsSkipped: skippedDismissedTwins,
+    },
+    "memory extract completed",
+  );
 }

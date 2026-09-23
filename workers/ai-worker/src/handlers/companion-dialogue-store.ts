@@ -46,6 +46,8 @@ export interface ReadContext {
   runStatus: string;
   /** L11：run 创建时冻结的账号世代（surface_epoch）。 */
   accountEpoch: number;
+  /** 本轮开始时这个人是否正在正式作答（`lib/formal-answer-signal.ts`，doc 34 L15）。 */
+  formalAnswerInProgress: boolean;
   pageContext: unknown;
   groundedTutorContext: import("./companion-dialogue-content.ts").GroundedTutorContext | null;
   userText: string;

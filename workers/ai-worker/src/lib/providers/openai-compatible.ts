@@ -167,7 +167,7 @@ export class OpenAICompatibleProvider implements AIProvider {
               type: "function" as const,
               function: { name: t.name, description: t.description, parameters: t.parameters },
             })),
-            tool_choice: "auto",
+            tool_choice: options.toolChoice ?? "auto",
           }
         : {}),
       ...((options.disableThinking
@@ -604,7 +604,7 @@ export class OpenAICompatibleProvider implements AIProvider {
 
     if (hasTools) {
       requestBody.tools = tools;
-      requestBody.tool_choice = "auto";
+      requestBody.tool_choice = request.toolChoice ?? "auto";
     }
     // 无工具轮不再强制 json_object（根因二 2026-09-19）：executeAgentTurn 当前唯一
     // 调用方是 companion agent runtime，其无工具轮全是「要自然文本」的终答/闲聊步；

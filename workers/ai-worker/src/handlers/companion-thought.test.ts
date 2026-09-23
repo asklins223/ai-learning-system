@@ -266,6 +266,9 @@ test("时机判定：勿扰 → 静默时段 → 划走两次 → 间隔", () =>
     // 0266：这个房间没有被静音。空间级开关排在最前，所以它必须显式给值——
     // 默认成 false 会把"忘了传"变成"可以打扰"，而那是错的方向。
     spaceMuted: false,
+    // 这一刻没有正式测评在作答。缺省必须显式给：漏传在类型上就该报错，
+    // 而不是"忘了传=可以打扰"。
+    formalAnswerInProgress: false,
   } as const;
   assert.equal(evaluateRoutineCueTiming(base).reason, "allowed");
   // 空间级静音优先于其余三条：它是"别在这个房间说话"这句最具体的指令。
@@ -277,6 +280,24 @@ test("时机判定：勿扰 → 静默时段 → 划走两次 → 间隔", () =>
   // 「勿扰」以前只有 api 那条链路认，念头管线连 presence 这列都没读——用户按了没用。
   assert.equal(evaluateRoutineCueTiming({ ...base, availability: "dnd" }).reason, "availability");
   assert.equal(evaluateRoutineCueTiming({ ...base, availability: "offline" }).reason, "availability");
+  // 正式作答期间一句都不许插（doc 34 L12 缺的最后一格）：排在时段与去重之前。
+  assert.equal(evaluateRoutineCueTiming({
+    ...base, formalAnswerInProgress: true,
+  }).reason, "formal_answer_in_progress");
+  assert.equal(evaluateRoutineCueTiming({
+    ...base, formalAnswerInProgress: true, spaceMuted: true,
+  }).reason, "space_muted", "空间静音仍排最前——顺序是有意定的");
+  // `dedupe_recent`：冷却窗口内同一条展示满两次就不再推（上限取共享的
+  // POLICY_LIMITS，不在测试里硬写第二个 2）。这条以前只有策略函数里有、管线里没人执行。
+  assert.equal(evaluateRoutineCueTiming({
+    ...base, recentDeliveryStates: ["displayed"],
+  }).reason, "allowed", "只展示过一次不该被去重挡掉——挡住就是自己发明了一个更小的上限");
+  assert.equal(evaluateRoutineCueTiming({
+    ...base, recentDeliveryStates: ["displayed", "displayed"],
+  }).reason, "dedupe_recent");
+  assert.equal(evaluateRoutineCueTiming({
+    ...base, recentDeliveryStates: ["spent", "dismissed", "displayed"],
+  }).reason, "allowed", "只有 displayed 计数；把 spent/dismissed 也算进去=第二套判据");
   assert.equal(evaluateRoutineCueTiming({
     ...base, quietHours: { startLocal: "11:00", endLocal: "13:00", timezone: "UTC" },
   }).reason, "quiet_hours");

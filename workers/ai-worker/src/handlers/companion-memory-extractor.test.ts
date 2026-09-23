@@ -166,13 +166,16 @@ test("0256 的例外比抽取器更严，方向必须是这样", () => {
 // maxTokens 之后 content 为空，JSON 解析失败，job 一路重试到 dead。修了摘要器、
 // 日记、念头，抽取器漏了整整一天（实机 2026-09-22：dead 里 OUTPUT_INVALID 与
 // provider_http_400 各一条）。这条不测行为，测的是"下一个新增的取回调用别再漏"。
-test("每个用 json_object 取回的伴星 handler 都必须 withThinkingDisabled", () => {
+test("每个用 json_object 取回的伴星 handler 都必须关思考", () => {
   const dir = new URL(".", import.meta.url);
   const offenders = readdirSync(dir)
     .filter((name) => name.startsWith("companion-") && name.endsWith(".ts") && !name.includes(".test."))
     .filter((name) => {
       const text = readFileSync(new URL(name, dir), "utf8");
-      return text.includes('responseFormat: "json_object"') && !text.includes("withThinkingDisabled(");
+      // 关思考有两条都被实现读到的路径：包 provider 的 withThinkingDisabled，
+      // 以及每次调用自带的 disableThinking（provider 拿不来当参数的 handler 只能走这条）。
+      const disabled = text.includes("withThinkingDisabled(") || text.includes("disableThinking: true");
+      return text.includes('responseFormat: "json_object"') && !disabled;
     });
   assert.deepEqual(offenders, [], `这些 handler 产 JSON 却没关思考：${offenders.join(", ")}`);
 });

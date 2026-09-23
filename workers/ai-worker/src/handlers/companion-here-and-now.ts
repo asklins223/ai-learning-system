@@ -25,6 +25,30 @@ import { noteSearchTerms, parsePageContext } from "./companion-dialogue-content.
 
 const FALLBACK_TIMEZONE = "Asia/Shanghai";
 
+/** 卡片及其来源笔记必须仍可供当前用户阅读；回收站卡不能出现在伴星的工具和统计里。 */
+export function visibleCompanionCardSourceCondition(userId: string) {
+  return sql`(c.note_version_id IS NULL OR EXISTS (
+    SELECT 1 FROM note_versions source_version
+    JOIN notes source_note ON source_note.id = source_version.note_id
+    WHERE source_version.id = c.note_version_id
+      AND source_note.deleted_at IS NULL
+      AND ${sql.raw(noteVisibleSqlText("source_note", `'${userId}'::uuid`))}
+  ))`;
+}
+
+/** 与复习队列同一可消费口径：到期排程必须指向有效目标和可见卡片。外层别名固定为 s。 */
+export function visibleCompanionDueReviewCondition(userId: string) {
+  return sql`(s.subject_type = 'card' AND EXISTS (
+    SELECT 1 FROM learning_objectives_v2 o
+    JOIN learning_cards_v2 c ON c.objective_id = o.objective_id
+      AND c.workspace_id = o.workspace_id AND c.lifecycle = 'active'
+    WHERE o.objective_id = s.subject_id
+      AND o.workspace_id = s.workspace_id
+      AND o.lifecycle = 'active'
+      AND ${visibleCompanionCardSourceCondition(userId)}
+  ))`;
+}
+
 export interface HereAndNowSnapshot {
   /** 用户本地钟面时间，如 `2026-09-20 18:12`。 */
   localTime: string;
@@ -188,19 +212,22 @@ export async function readLearningStats(
         WHERE workspace_id = ${scope.workspaceId} AND user_id = ${scope.userId}
           AND occurred_at > now() - interval '7 days'
       ) AS week_seconds,
-      (SELECT count(*) FROM review_schedules
-        WHERE workspace_id = ${scope.workspaceId} AND user_id = ${scope.userId}
-          AND status = 'pending' AND next_review_at <= now()
-          AND (user_deferred_until IS NULL OR user_deferred_until <= now())
+      (SELECT count(*) FROM review_schedules s
+        WHERE s.workspace_id = ${scope.workspaceId} AND s.user_id = ${scope.userId}
+          AND s.status = 'pending' AND s.next_review_at <= now()
+          AND (s.user_deferred_until IS NULL OR s.user_deferred_until <= now())
+          AND ${visibleCompanionDueReviewCondition(scope.userId)}
       ) AS due_reviews,
-      (SELECT count(*) FROM review_schedules
-        WHERE workspace_id = ${scope.workspaceId} AND user_id = ${scope.userId}
-          AND status = 'pending'
-          AND coalesce(user_deferred_until, next_review_at) > now()
-          AND coalesce(user_deferred_until, next_review_at) <= now() + interval '24 hours'
+      (SELECT count(*) FROM review_schedules s
+        WHERE s.workspace_id = ${scope.workspaceId} AND s.user_id = ${scope.userId}
+          AND s.status = 'pending'
+          AND coalesce(s.user_deferred_until, s.next_review_at) > now()
+          AND coalesce(s.user_deferred_until, s.next_review_at) <= now() + interval '24 hours'
+          AND ${visibleCompanionDueReviewCondition(scope.userId)}
       ) AS due_next_24h,
-      (SELECT count(*) FROM learning_cards_v2
-        WHERE workspace_id = ${scope.workspaceId} AND lifecycle = 'active'
+      (SELECT count(*) FROM learning_cards_v2 c
+        WHERE c.workspace_id = ${scope.workspaceId} AND c.lifecycle = 'active'
+          AND ${visibleCompanionCardSourceCondition(scope.userId)}
       ) AS active_cards,
       (SELECT count(*) FROM notes
         WHERE workspace_id = ${scope.workspaceId} AND deleted_at IS NULL
@@ -346,10 +373,11 @@ export async function loadHereAndNow(
   const runRow = runRows[0];
 
   const dueRows = await tx.execute<{ n: string }>(sql`
-    SELECT count(*) n FROM review_schedules
-    WHERE workspace_id = ${scope.workspaceId} AND user_id = ${scope.userId}
-      AND status = 'pending' AND next_review_at <= now()
-      AND (user_deferred_until IS NULL OR user_deferred_until <= now())
+    SELECT count(*) n FROM review_schedules s
+    WHERE s.workspace_id = ${scope.workspaceId} AND s.user_id = ${scope.userId}
+      AND s.status = 'pending' AND s.next_review_at <= now()
+      AND (s.user_deferred_until IS NULL OR s.user_deferred_until <= now())
+      AND ${visibleCompanionDueReviewCondition(scope.userId)}
   `);
 
   // 今日学习量：按**用户本地日**切，不按 UTC 日——否则早上看到的"今日"是昨天下午。

@@ -388,6 +388,9 @@ function continuationEvent(ws: string, uid: string, f: Fixture) {
     },
     read: {
       runId: f.runId,
+      // 夹具默认"没在正式作答"：这个字段是必填的（编译器逼着每个构造点表态），
+      // 正式作答下该不该念由 `formal-answer-signal.test.ts` 那组用例判。
+      formalAnswerInProgress: false,
       conversationId: f.conversationId,
       userId: uid,
       userMessageId: f.userMessageId,

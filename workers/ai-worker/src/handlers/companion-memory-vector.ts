@@ -206,6 +206,10 @@ export async function retrieveCompanionMemoriesKeyword(
     WHERE workspace_id = ${scope.workspaceId}
       AND user_id = ${scope.userId}
       AND deleted_at IS NULL
+      -- 「忽略」必须真的生效：dismissMemory 写了 dismissed_at，但两条召回路径此前
+      -- 都不看这一位（doc 34 L14）——用户明确忽略过的事，下一轮照样被提升成
+      -- 正式记忆并注入提示词。
+      AND dismissed_at IS NULL
       AND candidate = false
       AND archived_at IS NULL
       AND (scope = 'workspace' OR scope = 'global' OR scope = ${currentScope})
@@ -255,6 +259,8 @@ export async function retrieveCompanionMemoriesVector(
       WHERE m.workspace_id = ${scope.workspaceId}
         AND m.user_id = ${scope.userId}
         AND m.deleted_at IS NULL
+        -- 与关键词降级路径同一句判据：被忽略过的记忆不参与召回（doc 34 L14）。
+        AND m.dismissed_at IS NULL
         AND m.candidate = false
         AND m.archived_at IS NULL
         AND m.embedding_status = 'ready'
