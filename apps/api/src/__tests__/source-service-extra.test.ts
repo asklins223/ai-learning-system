@@ -5,6 +5,7 @@ import { jobs } from "@ailearn/shared/db-schema/job";
 import { noteBlocks, notes, noteVersions, sources } from "@ailearn/shared/db-schema/note";
 import {
   createNoteFromSource,
+  deriveSourceTitle,
   createSource,
   deleteSource,
   getSource,
@@ -81,6 +82,36 @@ describe("source creation and reads", () => {
       sourceId: "source-1",
       fetchUrlContent: true,
     });
+  });
+
+  it("留空标题的文本采集：标题按句读收尾（走的是 createSource 那条路）", async () => {
+    const inserted: Array<{ table: unknown; value: any }> = [];
+    const source = { id: "source-1", workspaceId: WORKSPACE_ID, type: "text", title: "T", status: SourceStatus.DRAFT };
+    const executor = {
+      execute: async () => undefined,
+      select: () => ({
+        from: () => ({ where: () => Object.assign(async () => [], { limit: async () => [] }) }),
+      }),
+      insert: (table: unknown) => ({
+        values: (value: any) => {
+          inserted.push({ table, value });
+          if (table === sources) return { returning: async () => [source] };
+          return Promise.resolve();
+        },
+      }),
+      query: { sources: { findFirst: async () => source }, sourceSegments: { findMany: async () => [] } },
+    } as any;
+
+    await createSource(executor, WORKSPACE_ID, USER_ID, {
+      type: "text",
+      content: "审计走查临时材料（2026-09-23，可删除）。主动回忆比重新阅读更能提升长期保持；检索练习的效果来自提取过程本身，而且间隔重复把复习排在快忘还没忘的时刻，必要难度来自提取过程。",
+      metadata: {},
+    });
+
+    const stored = inserted[0]!.value as { title: string };
+    assert.ok(stored.title.length <= 61, `实际「${stored.title}」`);
+    assert.match(stored.title, /[。！？；，,、：:…]$/u, `标题必须以句读或省略号收尾，实际「${stored.title}」`);
+    assert.ok(!stored.title.endsWith("而"), "不许以连接词收尾");
   });
 
   it("rejects source creation when the pending-job quota is full", async () => {
@@ -540,7 +571,7 @@ describe("source restore（审计 F08）", () => {
   }) {
     return {
       select: () => ({
-        from: (table: unknown) => ({
+        from: () => ({
           where: () => ({
             // 行锁那条读（sources）与片段那条读（source_segments）形状不同：
             // 前者 `.for("update")`，后者 `.orderBy(...)`。桩要接住两条真实形状。
@@ -624,5 +655,35 @@ describe("source restore（审计 F08）", () => {
     assert.deepEqual(result, { ok: true, status: SourceStatus.READY, alreadyActive: true });
     assert.equal(updated, null, "非归档来源不该被 UPDATE");
     assert.equal(indexed, null, "非归档来源不该写索引");
+  });
+});
+
+describe("自动标题的截断（审计 F34）", () => {
+  it("按句读收尾：不在连接词上硬切", () => {
+    const text = "审计走查临时材料（2026-09-23，可删除）。主动回忆比重新阅读更能提升长期保持；检索练习的效果来自提取过程本身，而且间隔重复把复习排在快忘还没忘的时刻，必要难度来自提取过程。";
+    const title = deriveSourceTitle({ content: text });
+    assert.ok(title.length <= 61, `标题不该超预算太多，实际 ${title.length}`);
+    // 收在句读上（；或，或。）——不是"而"这种连接词。
+    assert.match(title, /[。！？；，,、：:…]$/u, `标题必须以句读或省略号收尾，实际「${title}」`);
+    assert.ok(!title.endsWith("而"), "不许以连接词收尾");
+  });
+
+  it("短内容原样保留：不加省略号、不切", () => {
+    assert.equal(deriveSourceTitle({ content: "主动回忆比重新阅读更能提升长期保持。" }), "主动回忆比重新阅读更能提升长期保持。");
+  });
+
+  it("英文长句切在词边界，不切半个词", () => {
+    const title = deriveSourceTitle({ content: "Retrieval practice beats rereading for long-term retention and the effect comes from retrieval itself" });
+    assert.ok(!/[a-z]$/.test(title.slice(0, -1)) || title.endsWith("…"), `实际「${title}」`);
+    assert.ok(title.endsWith("…"));
+    assert.ok(!/\b[a-z]{1,2}…$/.test(title), "不该把单词切成碎片");
+  });
+
+  it("URL 与空内容各有兜底", () => {
+    assert.equal(deriveSourceTitle({}), "未命名来源");
+    const url = `https://example.test/${"a".repeat(120)}`;
+    const title = deriveSourceTitle({ url });
+    assert.equal(title.length, 61, "URL 按预算切 + 省略号");
+    assert.ok(title.endsWith("…"));
   });
 });

@@ -96,6 +96,45 @@ async function deleteSearchDocument(
   }
 }
 
+/** 自动标题的预算与收尾标点（审计 F34）。 */
+const SOURCE_TITLE_BUDGET = 60;
+const SENTENCE_END = "。！？；.!?;…)";
+const SOFT_BREAK = "，,、：:）)】」』";
+
+/**
+ * 留空标题时的自动标题（审计 F34）。
+ *
+ * 病是这么来的：`content.split("\n")[0].slice(0, 60)` 会在一句话中间硬切，
+ * 实测标题以连接词"而"收尾，而且没有省略号——同一串又被列表、详情与后续引用反复显示。
+ *
+ * 规则（越靠前越优先，都只在预算内找最后一个位置）：
+ * 1. 句末标点收尾：整句最自然，不加省略号（读者看到的是完整一句话）；
+ * 2. 次级停顿（逗号、顿号、冒号）收尾：远好过半个词，补省略号说明后面还有；
+ * 3. 拉丁词边界：别把英文单词切成两半，补省略号；
+ * 4. 都不满足就按预算硬切 + 省略号（中文长句没有标点的极端情况）。
+ *
+ * URL 不套这套：它本来就没有句读，按预算切 + 省略号即可。
+ */
+export function deriveSourceTitle(input: { url?: string | null; content?: string | null }): string {
+  const contentLine = input.content?.trim().split("\n")[0]?.trim() ?? "";
+  const url = input.url?.trim() ?? "";
+  const candidate = url || contentLine;
+  if (!candidate) return "未命名来源";
+  if (candidate.length <= SOURCE_TITLE_BUDGET) return candidate;
+
+  const window = candidate.slice(0, SOURCE_TITLE_BUDGET);
+  if (!url) {
+    const floor = Math.floor(SOURCE_TITLE_BUDGET / 3);
+    const lastSentenceEnd = Math.max(...[...SENTENCE_END].map((ch) => window.lastIndexOf(ch)));
+    if (lastSentenceEnd >= floor) return window.slice(0, lastSentenceEnd + 1);
+    const lastSoftBreak = Math.max(...[...SOFT_BREAK].map((ch) => window.lastIndexOf(ch)));
+    if (lastSoftBreak >= floor) return `${window.slice(0, lastSoftBreak + 1)}…`;
+    const lastSpace = window.lastIndexOf(" ");
+    if (lastSpace >= floor) return `${window.slice(0, lastSpace)}…`;
+  }
+  return `${window.trimEnd()}…`;
+}
+
 export async function createSource(
   executor: ApiTransaction,
   workspaceId: string,
@@ -105,7 +144,7 @@ export async function createSource(
   // 如果未传 type，前端检测为初步值；Worker 会再次检测并修正
   const detectedType = input.type ?? detectSourceType(input.content ?? "", input.url);
   // 如果未传 title，使用临时占位标题；Worker 解析后会更新
-  const title = input.title?.trim() || input.url?.slice(0, 60) || input.content?.split("\n")[0]?.slice(0, 60) || "未命名来源";
+  const title = input.title?.trim() || deriveSourceTitle({ url: input.url, content: input.content });
 
   const metadata: Record<string, unknown> = { ...input.metadata };
   // 关键：原代码用 input.type（必填）判断，改成 optional 后必须用 detectedType。
