@@ -86,6 +86,16 @@ export const learningRunPublicSnapshotV2Schema = z
     activeTask: learningTaskPublicSchema.nullable(),
     allowedActions: z.array(learningRunAllowedActionSchema).max(32),
     publishedTargetEligibility: z.enum(["eligible", "practice_only", "blocked"]),
+    /**
+     * 审计 F28：checkpoint 相位为什么停在这里。V2 快照此前完全不投影 checkpoint
+     * 本身，客户端只能从 `allowedActions` 反推（有 `finish_without_commit` 就是
+     * "判不出"），于是「系统侧缺冻结证据」与「这次提交不足以判定」在屏上长得一样，
+     * 用户被引去补一条补不上的证据。非 checkpoint 相位一律为 null。
+     */
+    checkpointReason: z
+      .enum(["no_frozen_evidence", "critic_unavailable", "input_incomplete"])
+      .nullable()
+      .default(null),
   })
   .superRefine((value, context) => {
     if (value.activeTask && value.activeTask.runId !== value.runId) {

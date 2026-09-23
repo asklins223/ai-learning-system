@@ -13,7 +13,7 @@
  * 本文件不含 node: 依赖，可安全从 index 全量导出。
  */
 import { z } from "zod";
-import { knowledgeFormV2Schema } from "./card-generation-v2-contracts.ts";
+import { cardStrategyV2Schema, knowledgeFormV2Schema } from "./card-generation-v2-contracts.ts";
 import { objectiveRevisionClassV2Schema } from "./learning-card-v2-contracts.ts";
 import { learningRunOriginV2Schema } from "./learning-target-v2-contracts.ts";
 
@@ -180,6 +180,8 @@ export const learningObjectiveSurfaceV3Schema = z.strictObject({
     conceptLabel: z.string().min(1).max(200).nullable(),
     publicSummary: z.string().min(1).max(1500),
     knowledgeForm: knowledgeFormV2Schema,
+    /** 当前正式学习卡的思考卡型；手动目标或尚未配卡时为空。 */
+    cardStrategy: cardStrategyV2Schema.nullable(),
     lifecycle: objectiveSurfaceLifecycleV3Schema,
     freshness: objectiveSurfaceFreshnessV3Schema,
     presentation: z.strictObject({
@@ -259,6 +261,7 @@ export const objectiveListItemV3Schema = z.strictObject({
   conceptLabel: z.string().min(1).max(200).nullable(),
   publicSummary: z.string().min(1).max(1500),
   knowledgeForm: knowledgeFormV2Schema,
+  cardStrategy: cardStrategyV2Schema.nullable(),
   lifecycle: objectiveSurfaceLifecycleV3Schema,
   freshness: objectiveSurfaceFreshnessV3Schema,
   primaryNoteTitle: z.string().min(1).max(500).nullable(),

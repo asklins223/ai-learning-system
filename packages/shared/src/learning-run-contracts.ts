@@ -363,6 +363,12 @@ export type LearningRunPublicV1 = {
   checkpoint: {
     kind: "partial" | "not_assessable" | "skipped_task";
     allowedFollowupIds: string[];
+    /**
+     * 审计 F28：为什么这一轮判不出结论。`no_frozen_evidence` = 系统侧缺冻结证据
+     * （补回答补不上，界面不得再提供「继续补充证据」）；`critic_unavailable` =
+     * 评估通道不可用；`input_incomplete` = 这次提交本身不足。历史行缺省。
+     */
+    reasonCode?: "no_frozen_evidence" | "critic_unavailable" | "input_incomplete";
   } | null;
   failure: LearningRunFailureV1 | null;
   projectionStatus: "not_requested" | "pending" | "ready" | "retrying" | "failed";
@@ -1431,6 +1437,17 @@ export const learningRunPublicSchema = baseVersionSchema
       .object({
         kind: z.enum(["partial", "not_assessable", "skipped_task"]),
         allowedFollowupIds: z.array(z.string().min(1)),
+        /**
+         * 审计 F28：`not_assessable` 至少有两种互不相同的原因，而界面过去只有一句
+         * 「这次没有形成可记录的结论」——用户读成"我答得不好"，于是按提示去
+         * 「继续补充证据」，再失败一次。
+         *
+         * `no_frozen_evidence` 是**系统侧**的缺口（评分点没有冻结原文证据，结算闸
+         * fail closed），补充回答永远补不上；`critic_unavailable` 是评估通道暂时
+         * 不可用；`input_incomplete` 才是这次提交本身不足。缺省（历史行）按
+         * `input_incomplete` 读，不编造系统侧原因。
+         */
+        reasonCode: z.enum(["no_frozen_evidence", "critic_unavailable", "input_incomplete"]).optional(),
       })
       .strict()
       .nullable(),

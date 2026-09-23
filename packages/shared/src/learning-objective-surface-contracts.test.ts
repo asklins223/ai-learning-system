@@ -34,6 +34,7 @@ function surfaceFixture(): Record<string, unknown> {
       conceptLabel: "受激辐射与增益介质",
       publicSummary: "理解受激辐射如何产生光放大。",
       knowledgeForm: "causal_model",
+      cardStrategy: "why",
       lifecycle: "active",
       freshness: "fresh",
       presentation: { cardId: CARD, cardRevision: 2, publicationRevision: 2 },

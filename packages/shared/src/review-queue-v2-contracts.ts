@@ -18,6 +18,25 @@ export const reviewQueueStartabilityV2Schema = z.discriminatedUnion("kind", [
 ]);
 export type ReviewQueueStartabilityV2 = z.infer<typeof reviewQueueStartabilityV2Schema>;
 
+/**
+ * 审计 F28：这条目标的正式验证**没有可比的原文证据**。
+ *
+ * 它与 `startability: cooldown` 是两件事，所以不塞进同一个枚举：冷却说的是
+ * "现在还不能开始"，等一会儿就变了；证据缺口说的是"这条目标现在判不出结论"，
+ * 靠等和靠用户补充都不会变——`run-processing-tick.ts` 的结算闸会因为
+ * `task rubric has no frozen evidence` fail closed，实机两题各 39 毫秒空判。
+ *
+ * 队列把缺哪些评分点一起下发，界面才能指名缺口；`missingRubricUnitIds` 为空
+ * 表示"评分点读不出来"（历史双重编码行），那种情况同样不能正式验证。
+ */
+export const reviewQueueFormalValidationBlockedV2Schema = z.strictObject({
+  reason: z.literal("evidence_gap"),
+  missingRubricUnitIds: z.array(z.string().min(1)).max(80),
+});
+export type ReviewQueueFormalValidationBlockedV2 = z.infer<
+  typeof reviewQueueFormalValidationBlockedV2Schema
+>;
+
 export const reviewQueueItemV2Schema = z.strictObject({
   version: z.literal(2),
   reviewId: z.string().uuid(),
@@ -26,6 +45,11 @@ export const reviewQueueItemV2Schema = z.strictObject({
   scheduleGeneration: z.number().int().min(1),
   dueAt: isoTimestampV2Schema,
   startability: reviewQueueStartabilityV2Schema,
+  /**
+   * null = 这条目标的评分点都有冻结证据，正式验证能形成结论。
+   * 非 null = 结算必然 fail closed，界面必须说清"不是你答得不好"。
+   */
+  formalValidationBlocked: reviewQueueFormalValidationBlockedV2Schema.nullable(),
 });
 export type ReviewQueueItemV2 = z.infer<typeof reviewQueueItemV2Schema>;
 
