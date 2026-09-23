@@ -13,7 +13,8 @@ export type ViewPresetId =
   | "objective-library"
   | "objective-detail"
   | "companion-center"
-  | "settings";
+  | "settings"
+  | "resumable";
 
 export type RoomDestination =
   | "room"
@@ -30,7 +31,8 @@ export type RoomDestination =
   | "objective-library"
   | "objective-detail"
   | "companion-center"
-  | "settings";
+  | "settings"
+  | "resumable";
 
 export type RoomSurface = Exclude<RoomDestination, "room"> | null;
 export type RoomTheme = "day" | "night";
@@ -46,6 +48,7 @@ export type PresentationPhase =
 export type RoomIntent =
   | "home"
   | "continue"
+  | "open-resumable"
   | "open-notebook"
   | "review"
   | "search"
@@ -76,6 +79,8 @@ export function resolveRoomIntent(intent: RoomIntent): RoomViewState {
   switch (intent) {
     case "continue":
       return { destination: "study", viewPreset: "study", surface: "study" };
+    case "open-resumable":
+      return { destination: "resumable", viewPreset: "resumable", surface: "resumable" };
     case "open-notebook":
       return { destination: "notebook", viewPreset: "notebook", surface: "notebook" };
     case "review":

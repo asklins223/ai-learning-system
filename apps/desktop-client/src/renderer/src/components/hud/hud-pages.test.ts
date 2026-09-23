@@ -23,6 +23,7 @@ const EXPECTED_PAGES: readonly HudPageId[] = [
   "graph",
   "companion",
   "settings",
+  "resumable",
 ] as const;
 
 describe("HUD companion surface policies", () => {

@@ -149,6 +149,9 @@ export function projectLearningDashboardToRoomProjection(
         runId: run.runId,
         objectiveId: surface.objectiveId,
         phase: run.phase,
+        // 恢复清单要能说出"哪一件事"，所以把目标名与上次正式结论的时间一起带上。
+        conceptLabel: surface.content.conceptLabel,
+        lastCanonicalAt: surface.personal.lastCanonicalAt,
       }] as const),
   ).values()];
   const activeRunSummary = countsUnavailable

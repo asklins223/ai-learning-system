@@ -111,7 +111,12 @@ function needsLearningRunResync(error: unknown): boolean {
 /** 一次作答的绝对上限：到点自动结束，不再挂着不计分也不结算（复盘 #13）。 */
 const FOCUS_SESSION_LIMIT_SECONDS = 60 * 60;
 
-const phaseLabels: Record<LearningRunPublicSnapshotV2["phase"], string> = {
+/**
+ * 阶段的用户可见文案。导出给"未完成的学习"那一页共用：同一条 run 在两个面上
+ * 必须用同一个词（审计 F24）。
+ */
+export const phaseLabels: Record<LearningRunPublicSnapshotV2["phase"], string> = {
+  
   preparing: "正在准备任务",
   active: "进行中",
   assessing: "回答已锁定，正在评估",
@@ -125,6 +130,14 @@ const phaseLabels: Record<LearningRunPublicSnapshotV2["phase"], string> = {
   stale: "内容已变化",
   recoverable_error: "可以恢复",
 };
+
+/**
+ * 投影里的 `phase` 是 `string`（不是枚举），所以这里给一个查表 + 兜底：
+ * 认不出的阶段原样显示，别让清单吞掉一个它没见过的值。
+ */
+export function learningPhaseLabel(phase: string): string {
+  return (phaseLabels as Record<string, string>)[phase] ?? phase;
+}
 
 const terminalCopy: Record<Extract<ResultState, { kind: "terminal" }>["value"]["reasonCode"], string> = {
   user_ended: "这次旅程已安全结束，没有生成新的学习结果。",

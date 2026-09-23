@@ -48,6 +48,8 @@ export const SCENE_CAMERA_PRESETS: Readonly<Record<ViewPresetId, SceneCameraPres
   "objective-detail": { label: "理解目标详情近景", scale: 1.1, xPercent: 0, yPercent: -2 },
   "companion-center": { label: "伴星中心近景", scale: 1.02, xPercent: 0, yPercent: 0 },
   settings: { label: "设置近景", scale: 1.02, xPercent: 0, yPercent: 0 },
+  // 「未完成的学习」是一页待办清单（审计 F24），取景跟着研究册那一档，别自己发明偏移。
+  resumable: { label: "在途学习近景", scale: 1.08, xPercent: 0, yPercent: -2 },
 });
 
 export function sceneCameraPreset(viewPreset: ViewPresetId): SceneCameraPreset {

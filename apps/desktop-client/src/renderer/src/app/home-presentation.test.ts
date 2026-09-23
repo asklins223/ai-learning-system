@@ -158,6 +158,8 @@ describe("homePresentation", () => {
     expect(loadingSummary).toMatchObject({
       dueCount: null,
       activeRunCount: null,
+      // 这一条把 activeRunSummary 覆盖成 loading：读不到就不猜（审计 F24）。
+      soleActiveRun: null,
       queueCount: null,
       recentObjectiveCount: null,
       generationActive: null,
@@ -179,13 +181,15 @@ describe("homePresentation", () => {
     const dataSummary = homePresentation(presentation({
       queueSummary: { state: "data", data: { total: 2, items: [] } },
       sanitizedReviewSummary: { state: "data", data: { dueCount: 4, route: "review.queue" } },
-      activeRunSummary: { state: "data", data: { activeCount: 1, items: [] } },
+      activeRunSummary: { state: "data", data: { activeCount: 1, items: [{ runId: "11111111-1111-4111-8111-111111111111", objectiveId: "22222222-2222-4222-8222-222222222222", phase: "paused", conceptLabel: "轨道周期", lastCanonicalAt: null }] } },
       activeGenerationSummary: { state: "data", data: {} as never },
       recentObjectiveSummary: { state: "data", data: { total: 3, items: [] } },
     }), false, null);
     expect(dataSummary).toMatchObject({
       dueCount: 4,
       activeRunCount: 1,
+      // 恰好一条 + items 读得到：主操作直达那一条（审计 F24）。
+      soleActiveRun: { runId: "11111111-1111-4111-8111-111111111111" },
       queueCount: 2,
       recentObjectiveCount: 3,
       generationActive: true,
@@ -208,6 +212,7 @@ describe("homePresentation", () => {
     expect(emptySummary).toMatchObject({
       dueCount: 0,
       activeRunCount: 0,
+      soleActiveRun: null,
       queueCount: 0,
       recentObjectiveCount: 0,
       generationActive: false,
@@ -226,6 +231,7 @@ describe("homePresentation", () => {
     expect(errorSummary).toMatchObject({
       dueCount: null,
       activeRunCount: null,
+      soleActiveRun: null,
       queueCount: null,
       recentObjectiveCount: null,
       generationActive: null,
@@ -270,6 +276,7 @@ describe("homePresentation", () => {
       objectiveCount: null,
       repairCount: null,
       activeRunCount: 0,
+      soleActiveRun: null,
       notebookState: "empty",
       reviewState: "due",
       shelfState: "unknown",
@@ -331,8 +338,31 @@ describe("homePresentation", () => {
   });
 
   it("marks a real active run on the physical notebook", () => {
-    expect(homePresentation(projection({ activeRunSummary: { state: "data", data: { activeCount: 2, items: [] } } }), false, null))
+    expect(homePresentation(projection({ activeRunSummary: { state: "data", data: { activeCount: 2, items: [{ runId: "11111111-1111-4111-8111-111111111111", objectiveId: "22222222-2222-4222-8222-222222222222", phase: "paused", conceptLabel: "轨道周期", lastCanonicalAt: null }] } } }), false, null))
       .toMatchObject({ activeRunCount: 2, notebookState: "active" });
+  });
+
+  /**
+   * 审计 F24：首页那句「N 项可恢复」必须落到具体的那一件事上——恰好一条时主操作
+   * 直达那条 run（`soleActiveRun`），两条以上时留 null（走清单），读不到 items 时
+   * 也不许猜（宁可退回原来的"去今日学习"）。
+   */
+  it("只在恰好一条可恢复时给出 soleActiveRun", () => {
+    const one = homePresentation(projection({
+      activeRunSummary: { state: "data", data: { activeCount: 1, items: [{ runId: "11111111-1111-4111-8111-111111111111", objectiveId: "22222222-2222-4222-8222-222222222222", phase: "paused", conceptLabel: "轨道周期", lastCanonicalAt: null }] } },
+    }), false, null);
+    expect(one.soleActiveRun).toEqual({ runId: "11111111-1111-4111-8111-111111111111" });
+
+    const many = homePresentation(projection({
+      activeRunSummary: { state: "data", data: { activeCount: 2, items: [{ runId: "11111111-1111-4111-8111-111111111111", objectiveId: "22222222-2222-4222-8222-222222222222", phase: "paused", conceptLabel: "轨道周期", lastCanonicalAt: null }] } },
+    }), false, null);
+    expect(many.soleActiveRun).toBeNull();
+
+    // 计数为 1 但 items 读不出来（老投影/裁剪）：不猜，退回原来的入口。
+    const noItems = homePresentation(projection({
+      activeRunSummary: { state: "data", data: { activeCount: 1, items: [] } },
+    }), false, null);
+    expect(noItems.soleActiveRun).toBeNull();
   });
 
   // The capture harness never injects projection fixtures, so projection.loading
@@ -364,6 +394,7 @@ describe("homePresentation", () => {
       dueCount: null,
       reviewLabel: "今日复习",
       activeRunCount: null,
+      soleActiveRun: null,
       queueCount: null,
       noteCount: null,
       objectiveCount: null,
@@ -407,6 +438,7 @@ describe("homePresentation", () => {
       dueCount: 0,
       reviewLabel: "今天的复习已清空",
       activeRunCount: 0,
+      soleActiveRun: null,
       queueCount: 0,
       // RoomProjectionV1 exposes no library totals: no primary focus means the
       // note/objective counts stay unknown, never 0.
@@ -451,6 +483,7 @@ describe("homePresentation", () => {
       dueCount: null,
       reviewLabel: "今日复习",
       activeRunCount: null,
+      soleActiveRun: null,
       queueCount: null,
       noteCount: null,
       objectiveCount: null,
@@ -496,6 +529,7 @@ describe("homePresentation", () => {
       dueCount: 0,
       reviewLabel: "今天的复习已清空",
       activeRunCount: 0,
+      soleActiveRun: null,
       queueCount: 0,
       noteCount: null,
       objectiveCount: null,
@@ -517,7 +551,7 @@ describe("homePresentation", () => {
     expect(homePresentation(presentation({
       sanitizedReviewSummary: { state: "data", data: { dueCount: 3, route: "review.queue" } },
       queueSummary: { state: "data", data: { total: 2, items: [] } },
-      activeRunSummary: { state: "data", data: { activeCount: 1, items: [] } },
+      activeRunSummary: { state: "data", data: { activeCount: 1, items: [{ runId: "11111111-1111-4111-8111-111111111111", objectiveId: "22222222-2222-4222-8222-222222222222", phase: "paused", conceptLabel: "轨道周期", lastCanonicalAt: null }] } },
     }), false, "temporary offline")).toEqual({
       title: "从一份真正想弄懂的材料开始",
       detail: "学习空间目录已经把学习路径和全部功能整理好了",
@@ -544,6 +578,7 @@ describe("homePresentation", () => {
       dueCount: 3,
       reviewLabel: "3 项待复习",
       activeRunCount: 1,
+      soleActiveRun: { runId: "11111111-1111-4111-8111-111111111111" },
       queueCount: 2,
       noteCount: null,
       objectiveCount: null,

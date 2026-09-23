@@ -26,6 +26,8 @@ describe("scene camera contract", () => {
       "objective-detail",
       "companion-center",
       "settings",
+      // 审计 F24 的「未完成的学习」：取景跟着研究册那一档。
+      "resumable",
     ]);
     for (const preset of Object.values(SCENE_CAMERA_PRESETS)) {
       expect(preset.scale).toBeGreaterThanOrEqual(1);

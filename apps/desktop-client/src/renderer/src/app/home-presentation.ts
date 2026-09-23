@@ -109,6 +109,12 @@ export function homePresentation(projection: RoomProjectionV1 | null, loading: b
       ? 0
       : null;
   const activeRunCount = activeRuns?.state === "data" ? activeRuns.data.activeCount : activeRuns?.state === "empty" ? 0 : null;
+  /**
+   * 首页那句「N 项可恢复」要落到具体的那一件事上（审计 F24）：
+   * 恰好一条时主操作直接进那条 run；两条以上时进「未完成的学习」清单；
+   * 读不到 items（老投影/投影报错）就不猜，退回原来的"去今日学习"。
+   */
+  const activeRunItems = activeRuns?.state === "data" ? activeRuns.data.items : [];
   // RoomProjectionV1 intentionally does not expose full library totals. Keep
   // them unknown instead of inferring a false zero from bounded samples.
   const noteCount = null;
@@ -162,6 +168,10 @@ export function homePresentation(projection: RoomProjectionV1 | null, loading: b
           ? dueCount > 0 ? `${dueCount} 项待复习` : "今天的复习已清空"
           : "今日复习",
     activeRunCount,
+    /** 恰好一条可恢复时主操作要直达的那条；其余情况下为 null（走清单/空态）。 */
+    soleActiveRun: activeRunCount === 1 && activeRunItems.length === 1
+      ? { runId: activeRunItems[0]!.runId }
+      : null,
     queueCount: queue?.state === "data" ? queue.data.total : queue?.state === "empty" ? 0 : null,
     noteCount,
     objectiveCount: null,

@@ -138,6 +138,7 @@ export function HomeV2Provider({ children }: { readonly children: ReactNode }) {
   const setActiveNoteRef = useRoomStore((state) => state.setActiveNoteRef);
   const setActiveSourceId = useRoomStore((state) => state.setActiveSourceId);
   const setActiveObjectiveId = useRoomStore((state) => state.setActiveObjectiveId);
+  const setActiveRunId = useRoomStore((state) => state.setActiveRunId);
   const { projection, loading, failure } = useHomeProjection();
   const companionHome = useCompanionHomeProjection();
   const home = homePresentation(projection, loading, failure);
@@ -392,6 +393,18 @@ export function HomeV2Provider({ children }: { readonly children: ReactNode }) {
       return;
     }
     if (feature.id === "continue") {
+      // 审计 F24：这张卡的附注写着「N 项可恢复」，那点击就必须到那 N 项上——
+      // 恰好一条时直达那条 run；两条以上时进「未完成的学习」清单；读不到时
+      // 才退回原来的今日学习（那是历史日志，不是待办清单）。
+      if (home.soleActiveRun) {
+        setActiveRunId(home.soleActiveRun.runId);
+        invoke("validate");
+        return;
+      }
+      if ((home.activeRunCount ?? 0) > 1) {
+        invoke("open-resumable");
+        return;
+      }
       invoke("continue");
       return;
     }
@@ -432,7 +445,7 @@ export function HomeV2Provider({ children }: { readonly children: ReactNode }) {
       return;
     }
     openFeatureNotice(feature.id);
-  }, [home.note, introVisible, invoke, markIntroSeen, openCatalog, openFeatureNotice, projection, setActiveNoteRef, setActiveObjectiveId, setActiveSourceId]);
+  }, [home.note, home.soleActiveRun, introVisible, invoke, markIntroSeen, openCatalog, openFeatureNotice, projection, setActiveNoteRef, setActiveObjectiveId, setActiveRunId, setActiveSourceId]);
 
   const showAllFeatures = useCallback(() => {
     const alreadyOpen = catalogOpen;

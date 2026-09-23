@@ -7,6 +7,7 @@ import { CardGenerationSurface } from "./CardGenerationSurface";
 import { GraphSurface } from "./surfaces/graph-surface";
 import { ReviewSurface } from "./surfaces/ReviewSurface";
 import { StudySurface } from "./surfaces/StudySurface";
+import { ResumableSurface } from "./surfaces/ResumableSurface";
 import { LearningRunSurface } from "./surfaces/learning-run-surface";
 import { SurfaceReturnControl } from "./surfaces/SurfaceReturnControl";
 import {
@@ -388,6 +389,7 @@ export function TaskSurface() {
             换页会重挂这一层，错误状态自然清掉，不需要额外的重置逻辑。 */}
         <RenderErrorBoundary label="这个页面">
           {renderedSurface === "study" ? <StudySurface /> : null}
+          {renderedSurface === "resumable" ? <ResumableSurface /> : null}
           {renderedSurface === "notebook" ? <NotebookSurface /> : null}
           {renderedSurface === "card-generation" ? <CardGenerationSurface /> : null}
           {renderedSurface === "review" ? <ReviewSurface /> : null}

@@ -27,7 +27,8 @@ export type HudPageId =
   | "search"
   | "graph"
   | "companion"
-  | "settings";
+  | "settings"
+  | "resumable";
 
 export type HudPlate =
   | "home"
@@ -302,6 +303,14 @@ export const HUD_PAGES: Readonly<Record<HudPageId, HudPageDefinition>> = {
       mode: "ambient", seat: "right", framing: "bust", interaction: "on-demand", proactive: "silent", draggable: false,
       starter: "这里没有虚构的模型选择或 BYOK 选项。",
     },
+  },
+  resumable: {
+    id: "resumable",
+    number: "22",
+    title: "未完成的学习",
+    subtitle: "把在途的那几条摊开，挑一条接着走；已经发生的留在今日学习里",
+    plate: "library",
+    companion: { mode: "ambient", seat: "right", framing: "bust", interaction: "on-demand", proactive: "silent", draggable: false },
   },
 };
 

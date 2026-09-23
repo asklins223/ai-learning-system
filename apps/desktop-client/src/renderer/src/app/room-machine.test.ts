@@ -13,6 +13,12 @@ describe("room intent mapping", () => {
     expect(resolveRoomIntent("search").viewPreset).toBe("search");
     expect(resolveRoomIntent("graph").viewPreset).toBe("graph");
     expect(resolveRoomIntent("validate").viewPreset).toBe("validation");
+    // 审计 F24：「未完成的学习」是独立一页，不再落到今日日志（那是历史）。
+    expect(resolveRoomIntent("open-resumable")).toEqual({
+      destination: "resumable",
+      viewPreset: "resumable",
+      surface: "resumable",
+    });
   });
 
   it("cycles through the explicit V1 motion modes", () => {
