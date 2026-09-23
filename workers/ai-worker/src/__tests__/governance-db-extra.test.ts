@@ -51,6 +51,11 @@ function mockSettingsQuery(row: any) {
   const fakeTransaction: any = {
     query: { userAiSettings: { findFirst: async () => row } },
     execute: async () => [{ workspace_id: WS_ID, user_id: USER_ID }],
+    // 审计写入自 F07 起走工作区/actor 事务（`logAICall` 在事务里 `tx.insert(...)`，
+    // 因为 ai_audit_log 的两条 RESTRICTIVE 守卫要 app.workspace_id / app.user_id）。
+    // 桩要接住这条真实形状：转发给当前的 `db.insert` 桩，`insertShouldThrow` 那些
+    // 用例测的仍是同一条失败路径。
+    insert: (table: any) => db.insert(table as never),
   };
   let opened = 0;
   db.transaction = (async (fn: any) => { opened += 1; return fn(fakeTransaction); }) as typeof db.transaction;

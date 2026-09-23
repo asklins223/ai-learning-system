@@ -661,6 +661,18 @@ jobs:
           node --import tsx --test src/integration-tests/parse-source-rls-context-postgres.integration.ts \
             2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/parse-source-rls.tap"
 
+      - name: Verify AI audit rows are written with the worker workspace and actor context (F07)
+        working-directory: workers/ai-worker
+        env:
+          NODE_ENV: test
+          DATABASE_URL_MIGRATOR: ${{ env.DATABASE_URL_MIGRATOR }}
+          DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
+          DATABASE_URL_WORKER: ${{ env.DATABASE_URL_WORKER }}
+        run: |
+          set -o pipefail
+          node --import tsx --test src/integration-tests/ai-audit-rls-context-postgres.integration.ts \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/ai-audit-rls.tap"
+
       - name: Verify every journal migration was applied
         working-directory: apps/api
         run: |

@@ -860,7 +860,25 @@ export async function logAICall(
       errorMessage: params.errorMessage ? safeErrorMessage(params.errorMessage) : null,
     };
     const write = dependencies.write ?? (async (row) => {
-      await db.insert(schema.aiAuditLog).values(row);
+      // 审计行上挂着两条 RESTRICTIVE 守卫（`sec01_v1_ai_audit_tenant_guard` 与
+      // `sec01_v1_ai_audit_insert_actor_guard`）：`workspace_id` / `user_id` 必须分别等于
+      // `app.workspace_id` / `app.user_id`。worker 的独立连接这两项默认都是 NULL，
+      // 于是裸 `db.insert` 被守卫拒掉——审计 F07 现场：近 1 小时 35 次
+      // `failed to write AI audit log`，库侧 9-23 当天 0 行，而真实模型调用确实发生了
+      // （"有没有花钱"因此不能看这张表）。
+      //
+      // 写这类"带工作区与 actor"的行必须把同一份上下文设进事务。调用方已经在同一
+      // 空间/actor 的 worker 事务里时（V2 管道、伴星 job），作用域守卫会把这次写直接
+      // 并进那条事务，不额外开连接。
+      //
+      // actor 为 null 的调用按契约根本不写审计行（`card-generation-v2/providers.ts`
+      // 在 `userId` 为空时连 audit 上下文都不传），所以这里不需要"无 actor 策略"。
+      await withWorkerWorkspaceTransaction(
+        { workspaceId: params.workspaceId, userId: params.userId },
+        async (tx) => {
+          await tx.insert(schema.aiAuditLog).values(row);
+        },
+      );
     });
     await write(values);
     return true;
