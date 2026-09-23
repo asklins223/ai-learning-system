@@ -101,6 +101,9 @@ export function gatewayErrorMessage(error: unknown): string {
       return "服务返回的学习合同版本不受当前客户端支持，已安全停止。";
     case "forbidden":
       return "当前工作区或账号没有执行这个动作的权限。";
+    // 没签同意不是"没权限"：那句会让人去问管理员，而这是他自己一分钟能解的事（doc 34 L13）。
+    case "ai_consent_required":
+      return "还没签署 AI 使用同意，内容不会离开这台电脑。在设置页的「AI 数据同意」里签一下就恢复。";
     case "stale_workspace":
       return "工作区已经变化，请重新加载当前学习队列。";
     case "conflict":

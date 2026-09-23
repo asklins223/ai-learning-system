@@ -99,8 +99,11 @@ const desktopApi: AILearnDesktopApiM2 = {
     getAiSettings: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceAiSettingsGet, input),
     updateAiConsent: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceAiConsentUpdate, input),
     updateAiDataPolicy: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceAiDataPolicyUpdate, input),
+    getAiAuditLog: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceAiAuditLog, input),
     export: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceExport, input),
     rename: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceRename, input),
+    dissolve: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceDissolve, input),
+    transferOwnership: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceTransferOwnership, input),
     create: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceCreate, input)
   },
   // SEC-02 / ADR-0009：Owner 的邀请发出与成员管理。
@@ -121,6 +124,9 @@ const desktopApi: AILearnDesktopApiM2 = {
   },
   clipboard: {
     readLinks: (input) => invoke(DESKTOP_IPC_CHANNELS.clipboardReadLinks, input)
+  },
+  shell: {
+    openExternal: (input) => invoke(DESKTOP_IPC_CHANNELS.shellOpenExternal, input)
   },
   window: {
     getState: (input) => invoke(DESKTOP_IPC_CHANNELS.windowGetState, input),
@@ -145,6 +151,7 @@ const desktopApi: AILearnDesktopApiM2 = {
     update: (input) => invoke(DESKTOP_IPC_CHANNELS.sourceUpdate, input),
     createNote: (input) => invoke(DESKTOP_IPC_CHANNELS.sourceCreateNote, input),
     archive: (input) => invoke(DESKTOP_IPC_CHANNELS.sourceArchive, input),
+    reparse: (input) => invoke(DESKTOP_IPC_CHANNELS.sourceReparse, input),
     // 站内图片原始字节：正文引用是 `/api/uploads/…`，渲染层够不到 API 源，
     // 由 main 带会话令牌取回，这里只把那条通道接出来。
     getImage: (input) => invoke(DESKTOP_IPC_CHANNELS.sourceImageGet, input)

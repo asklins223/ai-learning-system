@@ -44,6 +44,8 @@ import {
   type WorkspaceSummaryV1,
 } from "@ailearn/shared/desktop-ipc-contracts";
 import type { CompanionAnswerModePreferenceV1, CompanionVoicePreferenceV1 } from "@ailearn/shared/companion-shell-contracts";
+import type { DesktopAiAuditItemV1, DesktopAiAuditPageV1 } from "@ailearn/shared/desktop-surface-contracts";
+import { formatObjectiveDateTime } from "./objective-state-copy";
 import {
   EDGE_TTS_VOICE_OPTIONS,
   QWEN_TTS_VOICE_OPTIONS,
@@ -214,6 +216,27 @@ const DATA_POLICY_FIELDS: ReadonlyArray<readonly [keyof AiDataPolicyV1, string, 
   ["auditLogging", "记录 AI 审计日志", "每次外发都留下可追溯的记录，供你回看。"],
 ];
 
+/**
+ * 审计里的数据类别是内部枚举名（db-schema 的 `data_categories`）。认得出的翻成人话，
+ * 认不出的**原样上屏**——编一个标签会让读者以为那是系统认识的东西。
+ */
+const AUDIT_CATEGORY_LABELS: Readonly<Record<string, string>> = {
+  note_content: "笔记正文",
+  user_answer: "你的回答",
+  question: "题目",
+  claim: "结论",
+  quote: "原文引用",
+};
+
+const AUDIT_STATUS_LABELS: Readonly<Record<DesktopAiAuditItemV1["status"], string>> = {
+  success: "已完成",
+  failed: "没成功",
+  blocked: "被拦下",
+};
+
+/** 每页读多少条外发记录。服务端上限 100，这里要的是"翻得动"，不是"一次读完"。 */
+const AUDIT_PAGE_SIZE = 20;
+
 const formatVoiceTime = (seconds: number): string => {
   const total = Math.max(0, Math.floor(seconds));
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
@@ -344,6 +367,25 @@ function SettingsInlineState({
  * value comes from a real client or server fact. Nothing offers what the product
  * cannot honour: no model picker, no BYOK field, no "save" the server never sees.
  */
+/**
+ * 把服务端逐表计数翻成一句人话。
+ *
+ * 键名是数据库表名，不上屏（那是内部词汇）；`_` 前缀那几个是判据摘要，
+ * 它们说的正是用户会追问的"我的东西去哪了"，所以单独翻出来。
+ * 数字一律来自服务端，客户端不自己估。
+ */
+export function summaryOfDissolveCounts(counts: Record<string, number>): string {
+  const cleared = Object.entries(counts)
+    .filter(([key]) => !key.startsWith("_"))
+    .reduce((total, [, value]) => total + value, 0);
+  const rehomed = counts._rehomedGlobalMemories ?? 0;
+  const retired = counts._retiredWorkspaceMemories ?? 0;
+  const parts = [`清掉了 ${cleared} 项内容`];
+  if (rehomed > 0) parts.push(`${rehomed} 条属于你的记忆已迁回你的个人空间`);
+  if (retired > 0) parts.push(`${retired} 条只属于这个空间的记忆已收掉`);
+  return `${parts.join("，")}。`;
+}
+
 export function SettingsSurface() {
   const theme = useRoomStore((state) => state.theme);
   const setTheme = useRoomStore((state) => state.setTheme);
@@ -387,6 +429,10 @@ export function SettingsSurface() {
   const [profile, setProfile] = useState<AuthProfileResultV1 | null>(null);
   const [displayName, setDisplayName] = useState("");
   const [profileBusy, setProfileBusy] = useState<string | null>(null);
+  // 解散是不可逆动作：确认文本按空间名校验，且计数只在成功后由服务端那份带来。
+  const [transferCandidate, setTransferCandidate] = useState<string | null>(null);
+  const [dissolvePending, setDissolvePending] = useState<string | null>(null);
+  const [dissolveConfirmText, setDissolveConfirmText] = useState("");
   const [profileFailure, setProfileFailure] = useState<string | null>(null);
   const [avatarSrc, setAvatarSrc] = useState<string | null>(null);
   const [passwordForm, setPasswordForm] = useState({ current: "", next: "", confirm: "" });
@@ -412,6 +458,14 @@ export function SettingsSurface() {
   /** 作答方式是账号级偏好，读取失败时不能把「跟随安排」当成服务端答案展示。 */
   const [answerModeRead, setAnswerModeRead] = useState(false);
   const [answerModeSaving, setAnswerModeSaving] = useState(false);
+  /**
+   * AI 外发记录（doc 34 L3 的另一半：写侧一直在记，桌面以前没有任何地方读）。
+   * 没点开就不读，读到之前这一行只有说明、没有清单。
+   */
+  const [auditPage, setAuditPage] = useState<DesktopAiAuditPageV1 | null>(null);
+  const [auditOffset, setAuditOffset] = useState(0);
+  const [auditBusy, setAuditBusy] = useState(false);
+  const [auditFailure, setAuditFailure] = useState<string | null>(null);
   // 声音：引擎 + 音色（账号级）。与作答方式同样"读到才画选项"，没读到不能把默认值演成用户的选择。
   const [voicePreference, setVoicePreference] = useState<CompanionVoicePreferenceV1 | null>(null);
   const [voicePreferenceRead, setVoicePreferenceRead] = useState(false);
@@ -880,6 +934,43 @@ export function SettingsSurface() {
   };
 
   /** Owner：移除成员。二次确认在行内完成（第一次点变成确认）。 */
+  /**
+   * Owner：把这个空间交给某个成员（行内二次确认，与"移除成员"同一节奏）。
+   *
+   * 这一步同时是**原 owner 的出口**：转让后自己降为 member，`leaveWorkspace` 那条
+   * `owner_cannot_leave` 就不再挡他。转让与退出是两步、两个动作，
+   * 所以这里不说"你可以退出了"这种还没发生的话——只说现在谁是所有者。
+   */
+  const transferOwnership = async (member: { userId: string; email: string }) => {
+    if (ownerBusy) return;
+    if (transferCandidate !== member.userId) {
+      setTransferCandidate(member.userId);
+      return;
+    }
+    setOwnerBusy(member.userId);
+    setTransferCandidate(null);
+    setNotice(null);
+    setFailureNotice(null);
+    try {
+      unwrapGatewayResult(await window.ailearn.workspace.transferOwnership({
+        meta: createRequestMeta(epochRef.current),
+        workspaceId: currentWorkspace?.workspaceId ?? "",
+        toUserId: member.userId,
+      }));
+      setNotice(`已把「${currentWorkspace?.name ?? "这个空间"}」交给 ${member.email}，你不再是它的所有者。`);
+      // 角色边界变了：走既有的失效路径，再把读者留在这一页。
+      publishGateInvalidation("stale_workspace");
+      invoke("open-settings");
+      setSettingsSection(section);
+      setHudPage("settings", "returning");
+      await load();
+    } catch (error) {
+      setFailureNotice(gatewayErrorMessage(error));
+    } finally {
+      setOwnerBusy(null);
+    }
+  };
+
   const removeMember = async (userId: string) => {
     if (ownerBusy) return;
     if (removeCandidate !== userId) {
@@ -906,6 +997,39 @@ export function SettingsSurface() {
   };
 
   /** Member：退出协作工作区。退出当前空间时服务端会签发个人空间的新会话。 */
+  /**
+   * 解散一个协作空间（端点 `DELETE /workspaces/:id`，判据在服务端迁移 0276）。
+   *
+   * 三件事是这条出口的底线：① 确认必须**输入空间名**，不是点两下；
+   * ② 成功后照服务端带回的逐表计数说话，自己不加"大约多少"这种数字；
+   * ③ 失败绝不写成"已删除"——它走既有的 failureNotice 那条路。
+   */
+  const dissolveWorkspace = async (workspace: WorkspaceSummaryV1) => {
+    if (profileBusy || dissolveConfirmText !== workspace.name) return;
+    setProfileBusy(`dissolve-${workspace.workspaceId}`);
+    setNotice(null);
+    setFailureNotice(null);
+    try {
+      const result = unwrapGatewayResult(await window.ailearn.workspace.dissolve({
+        meta: createRequestMeta(epochRef.current),
+        workspaceId: workspace.workspaceId,
+      }));
+      const summary = summaryOfDissolveCounts(result.counts);
+      setNotice(`已解散「${workspace.name}」。${summary}`);
+      setDissolvePending(null);
+      setDissolveConfirmText("");
+      publishGateInvalidation("stale_workspace");
+      invoke("open-settings");
+      setSettingsSection(section);
+      setHudPage("settings", "returning");
+      await load();
+    } catch (error) {
+      setFailureNotice(gatewayErrorMessage(error));
+    } finally {
+      setProfileBusy(null);
+    }
+  };
+
   const leaveWorkspace = async (workspace: WorkspaceSummaryV1) => {
     if (profileBusy) return;
     setProfileBusy(`leave-${workspace.workspaceId}`);
@@ -1023,6 +1147,28 @@ export function SettingsSurface() {
    * 作答方式是账号级偏好，写它有自己的忙碌位：以前借用 `profileBusy`，结果是
    * 改昵称的同时点这一行会被静默丢弃（控件没有 disabled 状态，也没有反馈）。
    */
+  const loadAuditPage = async (offset: number) => {
+    if (!window.ailearn) return;
+    setAuditBusy(true);
+    setAuditFailure(null);
+    try {
+      const response = await window.ailearn.workspace.getAiAuditLog({
+        meta: createRequestMeta(epochRef.current),
+        limit: AUDIT_PAGE_SIZE,
+        offset,
+      });
+      if (response.workspaceEpoch) epochRef.current = response.workspaceEpoch;
+      setAuditPage(unwrapGatewayResult(response));
+      setAuditOffset(offset);
+    } catch (error) {
+      // 读不到就明说读不到：把失败演成"这个空间没有外发记录"，是替系统撒了一个谎。
+      setAuditPage(null);
+      setAuditFailure(gatewayErrorMessage(error));
+    } finally {
+      setAuditBusy(false);
+    }
+  };
+
   const changeAnswerMode = async (preference: CompanionAnswerModePreferenceV1["preference"]) => {
     if (answerModeSaving) return;
     setAnswerModeSaving(true);
@@ -1113,8 +1259,17 @@ export function SettingsSurface() {
   useEffect(() => () => {
     const element = wiredAudioRef.current;
     const handlers = voiceAudioHandlersRef.current;
-    if (element && handlers) {
-      for (const [event, handler] of Object.entries(handlers)) element.removeEventListener(event, handler);
+    if (element) {
+      // 卸载要**先停下来**再摘监听：以前这里只摘监听，于是切走这一屏之后录音还在放，
+      // 而读数、进度条、那颗「暂停试听」按钮全跟着界面一起没了（方案 35 F9）。
+      element.pause();
+      if (handlers) {
+        for (const [event, handler] of Object.entries(handlers)) element.removeEventListener(event, handler);
+      }
+      // 源也要放开：`preload="none"` 的那段录音留在一个已脱离文档的元素上，
+      // 下次进这一屏时它会先播上一次的音色。
+      element.removeAttribute("src");
+      element.load();
     }
   }, []);
 
@@ -1306,6 +1461,7 @@ export function SettingsSurface() {
                 const current = workspace.workspaceId === currentWorkspace?.workspaceId;
                 const busy = switching === workspace.workspaceId;
                 const canLeave = !workspace.isPersonal && workspace.role !== "owner";
+                const canDissolve = !workspace.isPersonal && workspace.role === "owner";
                 return (
                   <div key={workspace.workspaceId} className="settings-ledger__item">
                     <button
@@ -1336,6 +1492,53 @@ export function SettingsSurface() {
                         <LogOut size={12} aria-hidden="true" />
                         {profileBusy === `leave-${workspace.workspaceId}` ? "退出中…" : "退出"}
                       </button>
+                    ) : null}
+                    {canDissolve ? (
+                      <div className="settings-ledger__dissolve">
+                        {dissolvePending === workspace.workspaceId ? (
+                          <div role="group" aria-label={`解散 ${workspace.name} 的确认`}>
+                            <label className="field">
+                              <span>{`这个空间会连同其中的笔记、卡片与排程一起消失。输入空间名「${workspace.name}」以确认。`}</span>
+                              <input
+                                value={dissolveConfirmText}
+                                onChange={(event) => setDissolveConfirmText(event.target.value)}
+                                placeholder="输入空间名"
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              className="button danger"
+                              disabled={dissolveConfirmText !== workspace.name || profileBusy !== null}
+                              onClick={() => void dissolveWorkspace(workspace)}
+                            >
+                              {profileBusy === `dissolve-${workspace.workspaceId}` ? "解散中…" : "确认解散"}
+                            </button>
+                            <button
+                              type="button"
+                              className="button"
+                              onClick={() => {
+                                setDissolvePending(null);
+                                setDissolveConfirmText("");
+                              }}
+                            >
+                              取消
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            className="button danger settings-ledger__dissolve-trigger"
+                            aria-label={`解散 ${workspace.name}`}
+                            disabled={profileBusy !== null || switching !== null}
+                            onClick={() => {
+                              setDissolvePending(workspace.workspaceId);
+                              setDissolveConfirmText("");
+                            }}
+                          >
+                            解散空间
+                          </button>
+                        )}
+                      </div>
                     ) : null}
                   </div>
                 );
@@ -1675,6 +1878,9 @@ export function SettingsSurface() {
                   >
                     {member.role !== "owner" ? (removeCandidate === member.userId ? (
                       <>
+                        <button type="button" className="button" aria-label={`把 ${member.email} 设为所有者`} disabled={ownerBusy !== null} onClick={() => void transferOwnership(member)}>
+                          {transferCandidate === member.userId ? "确认交出" : "设为所有者"}
+                        </button>
                         <button type="button" className="button danger" aria-label={`移除成员 ${member.email}`} disabled={ownerBusy !== null} onClick={() => void removeMember(member.userId)}>
                           <Trash2 size={12} aria-hidden="true" />
                           确认移除
@@ -1682,10 +1888,15 @@ export function SettingsSurface() {
                         <button type="button" className="button" disabled={ownerBusy !== null} onClick={() => setRemoveCandidate(null)}>取消</button>
                       </>
                     ) : (
+                      <>
+                      <button type="button" className="button" aria-label={`把 ${member.email} 设为所有者`} disabled={ownerBusy !== null} onClick={() => void transferOwnership(member)}>
+                        {transferCandidate === member.userId ? "确认交出" : "设为所有者"}
+                      </button>
                       <button type="button" className="button danger" aria-label={`移除成员 ${member.email}`} disabled={ownerBusy !== null} onClick={() => void removeMember(member.userId)}>
                         <Trash2 size={12} aria-hidden="true" />
                         {ownerBusy === member.userId ? "移除中…" : "移除"}
                       </button>
+                      </>
                     )) : (
                       <span className="tag green">Owner</span>
                     )}
@@ -2121,6 +2332,56 @@ export function SettingsSurface() {
                   />
                 </SettingRow>
               ))}
+              {/* 上面那行"供你回看"以前没有落点：写侧一直在记，桌面没有任何地方读它
+                  （doc 34 L3）。这一行就是那个落点，读的是服务端那份审计。 */}
+              <SettingRow
+                title="外发记录"
+                detail={isOwner
+                  ? "哪一天、把哪类内容发给了哪家模型、成没成。"
+                  : "记录一直在写；这份清单由这个空间的所有者回看。"}
+              >
+                {isOwner ? (
+                  <button type="button" className="button" disabled={auditBusy} onClick={() => void loadAuditPage(0)}>
+                    {auditBusy ? "正在读取…" : auditPage ? "重新读取" : "查看"}
+                  </button>
+                ) : null}
+              </SettingRow>
+              {isOwner && auditFailure ? (
+                <SettingRow title="外发记录暂时读不到" detail={auditFailure}>
+                  <button type="button" className="button" disabled={auditBusy} onClick={() => void loadAuditPage(auditOffset)}>重试</button>
+                </SettingRow>
+              ) : null}
+              {isOwner && !auditFailure && auditPage && auditPage.items.length === 0 ? (
+                <SettingRow title="还没有外发记录" detail="这个空间还没有记下任何一次外发。" />
+              ) : null}
+              {isOwner && auditPage && auditPage.items.length > 0 ? (
+                <>
+                  {auditPage.items.map((item) => (
+                    <SettingRow
+                      key={item.id}
+                      title={`${item.provider} · ${item.modelId}`}
+                      detail={`${formatObjectiveDateTime(item.createdAt)} · 带出去的内容：${item.dataCategories.map((category) => AUDIT_CATEGORY_LABELS[category] ?? category).join("、")}`}
+                    >
+                      <span className={item.status === "success" ? "tag green" : "tag"}>{AUDIT_STATUS_LABELS[item.status]}</span>
+                    </SettingRow>
+                  ))}
+                  <SettingRow
+                    title={`第 ${auditOffset + 1}–${auditOffset + auditPage.items.length} 条 · 共 ${auditPage.total} 条`}
+                    detail="更早的记录按时间往前列。"
+                  >
+                    {auditOffset + auditPage.items.length < auditPage.total ? (
+                      <button
+                        type="button"
+                        className="button"
+                        disabled={auditBusy}
+                        onClick={() => void loadAuditPage(auditOffset + auditPage.items.length)}
+                      >
+                        更早的记录
+                      </button>
+                    ) : null}
+                  </SettingRow>
+                </>
+              ) : null}
             </div>
           </section>
 

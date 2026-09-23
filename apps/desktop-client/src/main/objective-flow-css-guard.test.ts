@@ -55,6 +55,56 @@ describe("结算页的 outcome 必须真的驱动视觉", () => {
   });
 });
 
+describe("夜间结算纸面的可读性", () => {
+  const css = stripComments(read("src/renderer/src/components/objective-flow.css"));
+
+  it("浅色反馈卡与对照卡使用深色墨迹，深色明细保留浅色文字", () => {
+    for (const selector of [
+      "learning-run-arrival-evidence p",
+      "learning-run-arrival-evidence span",
+      "learning-run-result-evidence > div",
+      "learning-run-result-comparison p",
+    ]) {
+      expect(css, `${selector} 缺少夜间文字覆盖`).toMatch(
+        new RegExp(`data-theme="night"\\] \\.${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
+      );
+    }
+    expect(css).toMatch(/data-theme="night"\] \.learning-run-arrival-evidence p,[\s\S]*?\{ color: #44382f; \}/);
+    expect(css).toMatch(/data-theme="night"\] \.learning-run-result-rubric li\[data-verdict="missing"\][\s\S]*?\{ color: #9b472f; \}/);
+  });
+});
+
+describe("远征册与四站场景", () => {
+  const css = stripComments(read("src/renderer/src/components/objective-flow.css"));
+  const source = read("src/renderer/src/components/surfaces/WorkspaceLibrarySurface.tsx");
+
+  it("展开后有明确的关闭文案，列表独占剩余高度并滚动", () => {
+    expect(source).toContain("关闭远征册");
+    expect(css).toMatch(/\.objective-expedition__index-body\s*\{[^}]*flex:\s*1 1 0/);
+    expect(css).toMatch(/\.v3-goal-list\s*\{[^}]*flex:\s*1 1 0[^}]*overflow-y:\s*auto/);
+    expect(css).toMatch(/\.objective-expedition__index\[data-open="true"\]\s*\{[^}]*height:\s*calc\(100% - 24px\)/);
+    expect(source).toContain("aria-expanded={indexOpen}");
+  });
+
+  it("夜间索引用暖纸深墨，搜索框不再继承缩成一小块", () => {
+    expect(css).toMatch(/\.objective-expedition__index\s*\{[^}]*--quest-ink:\s*#44382f[^}]*--quest-paper:\s*#fff9e9/);
+    expect(css).toMatch(/\.v3-goal-search\s*\{[^}]*width:\s*100%[^}]*min-height:\s*44px/);
+  });
+
+  it("地图、简报、作答、结果分别使用不同的真实素材", () => {
+    for (const asset of ["expedition-map-v1", "challenge-clearing-v1", "focus-study-desk-v1", "result-arrival-v1"]) {
+      const path = `src/renderer/public/assets/objective-flow/${asset}.png`;
+      expect(existsSync(path) || existsSync(`apps/desktop-client/${path}`)).toBe(true);
+      expect(css).toContain(`${asset}.png`);
+    }
+    for (const asset of ["expedition-map-night-v1", "challenge-clearing-night-v1", "focus-study-desk-night-v1", "result-arrival-night-v1"]) {
+      const path = `src/renderer/public/assets/objective-flow/${asset}.png`;
+      expect(existsSync(path) || existsSync(`apps/desktop-client/${path}`)).toBe(true);
+      expect(css).toContain(`${asset}.png`);
+    }
+  });
+});
+
 describe("一次性压印的动效预算", () => {
   const css = stripComments(read("src/renderer/src/components/objective-flow.css"));
 
@@ -134,7 +184,7 @@ describe("列表行的事实句不许长成 chip（P10）", () => {
 });
 
 describe("详情页主行动块（P15）", () => {
-  const css = stripComments(read("src/renderer/src/components/approved-surfaces.css"));
+  const css = stripComments(read("src/renderer/src/components/objective-flow.css"));
 
   it("两个紧凑档都不许再给这块降字号", () => {
     // 实机就是在这里量到动词 9px：那条档按**高度**生效，而 B4 的地板清单是按
@@ -144,15 +194,15 @@ describe("详情页主行动块（P15）", () => {
     expect(mediaBodies.length, "@media 块解析不出来").toBeGreaterThan(1);
     const shrinkers = mediaBodies
       .flatMap((body) => body.split("\n"))
-      .filter((line) => /\.v3-next-action/.test(line) && /font-size/.test(line));
+      .filter((line) => /\.objective-brief__launch/.test(line) && /font-size/.test(line));
     expect(shrinkers, `紧凑档还在降主行动块的字号：\n${shrinkers.join("\n")}`).toEqual([]);
   });
 
   it("无条件那一处给动词与说明各自定了字号", () => {
-    const verb = css.match(/\.v3-next-action__verb\s*\{([^}]*)\}/);
+    const verb = css.match(/\.objective-brief__launch strong\s*\{([^}]*)\}/);
     expect(verb, "动词没有规则接手").not.toBeNull();
     expect(Number(/([0-9.]+)px/.exec(verb?.[1] ?? "")?.[1]), "动词字号读不出来").toBeGreaterThanOrEqual(14);
-    const why = css.match(/\.v3-next-action__why\s*\{([^}]*)\}/);
+    const why = css.match(/\.objective-brief__launchpad small\s*\{([^}]*)\}/);
     expect(Number(/font-size:\s*([0-9.]+)px/.exec(why?.[1] ?? "")?.[1])).toBeGreaterThanOrEqual(12);
   });
 });

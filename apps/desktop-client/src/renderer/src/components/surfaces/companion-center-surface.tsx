@@ -5,6 +5,7 @@ import type { CompanionActivityDeliveryV1, CompanionActivityTimelineV1, Companio
 import type { CompanionJourneyAction, CompanionJourneyBootstrap } from "@ailearn/shared/companion-journey-contracts";
 import type { CompanionLearningContextV1 } from "@ailearn/shared/companion-conversation-contracts";
 import { companionPersonaPatchFromPreset, companionPersonaPatchFromProfile } from "@ailearn/shared/companion-memory-desktop-contracts";
+import { companionDisplayName, publishCompanionDisplayName } from "../companion/companion-display-name";
 import { createRequestMeta, gatewayErrorMessage, unwrapGatewayResult } from "../../app/desktop-client";
 import { useCompanionChat } from "../../app/companion-chat-session";
 import { useRoomStore } from "../../app/room-store";
@@ -715,7 +716,9 @@ export function CompanionCenterSurface() {
   if (projection.loading && !data) return <HudPage page="companion" wide><div className="companion-center" aria-label="伴星中心"><div className="companion-map-veil"><SectionState message="正在读取伴星中心" detail="记忆、连续对话与动态会分别确认可用状态。" /></div></div></HudPage>;
   if (!data && projection.failure) return <HudPage page="companion" wide><div className="companion-center" aria-label="伴星中心"><div className="companion-map-veil"><SectionState message="伴星中心暂时不可用" detail={projection.failure} onRetry={refresh} /></div></div></HudPage>;
   if (!data) return null;
-  const companionName = persona?.profile?.name ?? persona?.activePreset?.name ?? "伴星";
+  // 同一份推导（`companionDisplayName`）：以前这里自己抄了一遍 profile→preset→"伴星"，
+  // 而伴星身边那十几处用的是另一份，两边一旦不同序就会各叫各的（方案 35 §17 的移交项）。
+  const companionName = companionDisplayName(persona ?? null);
 
   return <HudPage page="companion" wide><div className="companion-center" ref={centerRef} aria-label="伴星中心" data-active-tab={tab} data-compact-view={compactView}>
     <nav className="companion-compact-mode" aria-label="伴星中心视图">
@@ -747,7 +750,7 @@ export function CompanionCenterSurface() {
         {tab === "dialogue" ? <DialoguePanel section={data.history} items={historyItems} cursor={historyCursor} query={historySearch} searching={historySearching} loadingMore={historyLoadingMore} error={historyError} onQuery={setHistorySearch} onSearch={() => void searchHistory()} onLoadMore={() => void loadMoreHistory()} onContinue={() => chat.setMode("conversation")} onRetry={refresh} /> : null}
         {tab === "activity" ? <ActivityPanel section={data.journey} learningContextSection={data.learningContext} deliverySection={data.activity} deliveries={activityItems} busy={activityBusy} error={activityError} onStart={startJourney} onAction={(action) => void runJourneyAction(action)} onResumeLearning={openLearningRun} onOpenObjective={openLearningObjective} onPresent={(item) => void presentDelivery(item)} onDelivery={(item, transition) => void actOnDelivery(item, transition)} onRetry={refresh} /> : null}
         {tab === "diary" ? <DiaryPanel section={diary.data} loading={diary.loading} failure={diary.failure} date={diaryDate} onDate={setDiaryDate} onMemory={(id) => { setTab("memory"); setFocusMemoryId(id); }} onRetry={() => void diary.reload()} marks={diaryMarks.data?.ok ? new Map(diaryMarks.data.value.days.map((day) => [day.date, day.status])) : null} marksFailure={diaryMarks.data && !diaryMarks.data.ok ? diaryMarks.data.message : null} onMarksMonth={setDiaryMonth} /> : null}
-        {tab === "persona" ? <PersonaPanel section={data.persona} persona={persona} busy={personaBusy} error={personaError} notice={personaNotice} onPreset={(preset) => void runPersona("preset", () => window.ailearn.companion.persona.patch({ meta: createRequestMeta(projection.epochRef.current), request: companionPersonaPatchFromPreset(preset, persona?.profile?.revision) }))} onActiveness={(activeness) => { if (!persona?.profile) return; void runPersona("activeness", () => window.ailearn.companion.persona.patch({ meta: createRequestMeta(projection.epochRef.current), request: companionPersonaPatchFromProfile(persona.profile!, { activeness }) })); }} onBoundary={(key) => { if (!persona?.profile) return; const profile = persona.profile; void runPersona("boundary", () => window.ailearn.companion.persona.patch({ meta: createRequestMeta(projection.epochRef.current), request: companionPersonaPatchFromProfile(profile, { boundaries: { ...profile.boundaries, [key]: profile.boundaries[key] !== true } }) })); }} onReset={() => void runPersona("reset", () => window.ailearn.companion.persona.reset({ meta: createRequestMeta(projection.epochRef.current) }))} onRetry={refresh} /> : null}
+        {tab === "persona" ? <PersonaPanel section={data.persona} persona={persona} busy={personaBusy} error={personaError} notice={personaNotice} onPreset={(preset) => void runPersona("preset", () => window.ailearn.companion.persona.patch({ meta: createRequestMeta(projection.epochRef.current), request: companionPersonaPatchFromPreset(preset, persona?.profile?.revision) }))} onActiveness={(activeness) => { if (!persona?.profile) return; void runPersona("activeness", () => window.ailearn.companion.persona.patch({ meta: createRequestMeta(projection.epochRef.current), request: companionPersonaPatchFromProfile(persona.profile!, { activeness }) })); }} onBoundary={(key) => { if (!persona?.profile) return; const profile = persona.profile; void runPersona("boundary", () => window.ailearn.companion.persona.patch({ meta: createRequestMeta(projection.epochRef.current), request: companionPersonaPatchFromProfile(profile, { boundaries: { ...profile.boundaries, [key]: profile.boundaries[key] !== true } }) })); }} onReset={() => void runPersona("reset", () => window.ailearn.companion.persona.reset({ meta: createRequestMeta(projection.epochRef.current) }))} onRename={(name) => { if (!persona?.profile) return; const profile = persona.profile; void runPersona("name", async () => { const result = await window.ailearn.companion.persona.patch({ meta: createRequestMeta(projection.epochRef.current), request: companionPersonaPatchFromProfile(profile, { name }) }); if (result.ok) publishCompanionDisplayName(name); return result; }); }} onRetry={refresh} /> : null}
         {tab === "data" ? <DataPanel busy={personaBusy} error={personaError} notice={dataNotice} dangerConfirm={dangerConfirm} conflictItems={conflictItems} onDangerConfirm={setDangerConfirm} onConflicts={() => void loadConflicts()} onResolveConflict={(keepId, removeId) => void resolveConflict(keepId, removeId)} onRebuild={() => void runPersona("rebuild", () => window.ailearn.companion.memory.rebuildEmbeddings({ meta: createRequestMeta(projection.epochRef.current) }))} onExport={(kind) => void exportCompanionData(kind)} onDanger={(kind) => void runDanger(kind)} diagnostics={{ mapVersion: starMap?.version ?? null, memoryCount: memories.length, historyCount: historyItems.length }} /> : null}
       </div>
     </section> : null}
@@ -1047,7 +1050,37 @@ function DiaryPanel(props: {
   </div>;
 }
 
-type PersonaPanelProps = { section: Section<CompanionPersonaV1>; persona: CompanionPersonaV1 | null; busy: string | null; error: string | null; notice: string | null; onPreset: (preset: CompanionPersonaPresetV1) => void; onActiveness: (value: CompanionPersonaProfileV1["activeness"]) => void; onBoundary: (key: (typeof BOUNDARY_ITEMS)[number][0]) => void; onReset: () => void; onRetry: () => void };
+type PersonaPanelProps = { section: Section<CompanionPersonaV1>; persona: CompanionPersonaV1 | null; busy: string | null; error: string | null; notice: string | null; onPreset: (preset: CompanionPersonaPresetV1) => void; onActiveness: (value: CompanionPersonaProfileV1["activeness"]) => void; onBoundary: (key: (typeof BOUNDARY_ITEMS)[number][0]) => void; onReset: () => void; onRename: (name: string) => void; onRetry: () => void };
+/**
+ * 改名那一行。草稿住在本地，且**只在真的改过时覆盖**当前值：`null` 表示"跟着档案"，
+ * 于是服务端回什么就显示什么，不会出现输入框和档案各存一份名字。
+ * 单独成组件是因为 `PersonaPanel` 在 hooks 之前就有早退。
+ */
+function CompanionNameRow(props: { readonly current: string; readonly busy: boolean; readonly onRename: (name: string) => void }) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const shown = draft ?? props.current;
+  const trimmed = shown.trim();
+  const dirty = trimmed.length > 0 && trimmed !== props.current;
+  const commit = () => { props.onRename(trimmed); setDraft(null); };
+  // 容器与按钮行都用伴星中心现成的两块（`.companion-inline-form` /
+  // `.companion-action-row`，记忆纠正那一套用的就是它们），不为一行输入新开一档样式。
+  return <div className="companion-inline-form">
+    <input
+      type="text"
+      value={shown}
+      maxLength={60}
+      aria-label="她叫什么"
+      disabled={props.busy}
+      onChange={(event) => setDraft(event.target.value)}
+      onKeyDown={(event) => { if (event.key === "Enter" && dirty) { event.preventDefault(); commit(); } }}
+    />
+    <div className="companion-action-row">
+      <button type="button" className="primary" disabled={props.busy || !dirty} onClick={commit}>改名</button>
+      {dirty ? <button type="button" onClick={() => setDraft(null)}>取消</button> : null}
+    </div>
+  </div>;
+}
+
 function PersonaPanel(props: PersonaPanelProps) {
   if (!props.section.ok || !props.persona) return <SectionState message="人格档案当前不可用" detail={!props.section.ok ? props.section.message : undefined} onRetry={props.onRetry} />;
   const profile = props.persona.profile;
@@ -1056,12 +1089,16 @@ function PersonaPanel(props: PersonaPanelProps) {
     {props.error ? <p className="companion-error" role="alert">{props.error}</p> : null}
     {props.notice ? <p className="companion-notice" role="status">{props.notice}</p> : null}
     <section>
+      <h4>她叫什么</h4><p>署名、对话记录与轨道上的说明都跟着换，改完立刻生效。</p>
+      {profile ? <CompanionNameRow current={profile.name} busy={props.busy !== null} onRename={props.onRename} /> : null}
+    </section>
+    <section>
       <h4>人格外观</h4><p>选择系统提供的完整人格预设。</p>
       <div className="companion-choice-grid">{props.persona.presets.map((preset) => <button key={preset.presetId} type="button" aria-pressed={profile?.presetId === preset.presetId} className={profile?.presetId === preset.presetId ? "is-selected" : undefined} disabled={props.busy !== null} onClick={() => props.onPreset(preset)}><strong>{preset.name}</strong><span>{preset.speakingStyle}</span></button>)}</div>
       <button type="button" disabled={!profile || props.busy !== null} onClick={props.onReset}>恢复系统默认人格</button>
     </section>
     <section>
-      <h4>活跃度</h4><p>控制伴星主动出现的频率，不改变全局通知和设备设置。</p>
+      <h4>活跃度</h4><p>她一次说多少、日记写多细。<strong>多久主动开口一次不在这里</strong>——那由账户页的「主动介入」决定。</p>
       <div className="companion-segmented">{(["quiet", "moderate", "active"] as const).map((value) => <button key={value} type="button" aria-pressed={profile?.activeness === value} className={profile?.activeness === value ? "is-selected" : undefined} disabled={!profile || props.busy !== null} onClick={() => props.onActiveness(value)}>{value === "quiet" ? "安静" : value === "moderate" ? "适度" : "活跃"}</button>)}</div>
     </section>
     <section>

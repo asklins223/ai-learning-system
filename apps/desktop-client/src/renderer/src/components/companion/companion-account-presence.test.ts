@@ -32,19 +32,30 @@ describe("账号级 presence 选项（2026-09-16 裁决 3）", () => {
     });
   });
 
-  it("改一端边界时保留另一端与时区，空输入不产生半成品写入", () => {
+  it("改一端边界保留另一端与时区；不成立的改动画面上给原因，不悄悄吞掉", () => {
     const current = { startLocal: "22:00", endLocal: "07:00", timezone: "Asia/Shanghai" };
     expect(quietHoursWithBoundary(current, "startLocal", "23:30")).toEqual({
-      startLocal: "23:30",
-      endLocal: "07:00",
-      timezone: "Asia/Shanghai",
+      ok: true,
+      value: { startLocal: "23:30", endLocal: "07:00", timezone: "Asia/Shanghai" },
     });
     expect(quietHoursWithBoundary(current, "endLocal", "06:15")).toEqual({
-      startLocal: "22:00",
-      endLocal: "06:15",
-      timezone: "Asia/Shanghai",
+      ok: true,
+      value: { startLocal: "22:00", endLocal: "06:15", timezone: "Asia/Shanghai" },
     });
-    expect(quietHoursWithBoundary(current, "endLocal", "   ")).toBeNull();
+    // 跨零点仍然合法：默认那一条本身就是 22:00 → 次日 07:00。
+    expect(quietHoursWithBoundary(current, "startLocal", "06:30").ok).toBe(true);
+
+    // 清空：旧写法回 `null`，界面上于是"什么都没发生"，受控值还把旧时间弹回去。
+    const cleared = quietHoursWithBoundary(current, "endLocal", "   ");
+    expect(cleared.ok).toBe(false);
+    expect(cleared.ok === false && cleared.reason).toContain("都要填");
+
+    // 两端相等在服务端那一侧是**合法值**，含义是"一整天都不说话"
+    // （`companion-proactive-policy.ts:244`，那里还有测试把它钉成合同）。
+    // 所以拦在界面上并说清后果，而不是让用户以为自己只是设了一个零长的窗口。
+    const same = quietHoursWithBoundary(current, "endLocal", "22:00");
+    expect(same.ok).toBe(false);
+    expect(same.ok === false && same.reason).toContain("一整天");
   });
 
   it("未登录/加载中/读取失败都不算账号级关闭", () => {

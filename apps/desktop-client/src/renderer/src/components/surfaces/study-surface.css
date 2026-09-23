@@ -16,8 +16,7 @@
   /* 文字：按纸面底色（#f1e3c8 日间 / #fff2cf 夜间）验过对比度。
      最浅的一档 --log-meta(#6b5646) 在 #f1e3c8 上是 5.4:1，--log-alarm-meta
      在异常卡的 #f6e0cd 上是 6.2:1，两家都过 WCAG AA（需要 4.5:1）。
-     --log-focus 保持本页自有一味暖锈红：夜间任务纸仍是奶油色，全站夜间
-     焦点色（冷青）压在奶油纸上的对比度不够。 */
+     本页的焦点/强调色见下面对 `--focus` 的页内覆盖。 */
   --log-ink:#33251a;
   --log-body:#4a3728;
   --log-meta:#6b5646;
@@ -25,10 +24,14 @@
   --log-rule:rgba(155,121,84,.26);
   --log-rule-solid:#c9ad86;
   --log-hover:rgba(255,252,238,.72);
-  --log-focus:#b85a31;
+  /* 焦点色只在**这一页**改掉 `--focus`，不再另起一个 `--log-focus` 名字：
+     本页夜间任务纸仍是奶油色，全站夜间的冷青焦点环压在上面对比度不够。
+     名字统一、取值按页面语境局部覆盖，读代码的人只会看到一处「页内焦点色」。 */
+  /* 页内唯一的暖锈红强调色（焦点环与左侧内嵌色带共用） */
+  --focus:#b85a31;
   --log-card:#fffaea;
   /* 全站既有的强缓出曲线（styles.css 的 status-island / 侧栏展开同款） */
-  --log-ease:cubic-bezier(.22,1,.36,1);
+  --log-ease:var(--hud-island-ease);
 
   /* 异常：陶土纸 + 奶油厚描边，与页面的暖纸同族但更"烫"一档 */
   --log-alarm-bg:#f6e0cd;
@@ -66,7 +69,7 @@
     gap:10px;
     min-width:0;
     margin:0;
-    font:600 12px/1.4 "Noto Serif SC","Songti SC",serif;
+    font:600 12px/1.4 "Noto Serif SC Variable","Songti SC",serif;
     color:var(--log-ink);
   }
   & .day-head__date time{
@@ -165,7 +168,7 @@
   }
   & .day-verdict__metric dd{
     margin:3px 0 0;
-    font:700 25px/1.05 "Noto Serif SC","Songti SC",serif;
+    font:700 25px/1.05 "Noto Serif SC Variable","Songti SC",serif;
     font-variant-numeric:tabular-nums;
     color:var(--log-ink);
   }
@@ -189,7 +192,7 @@
   }
   & .day-verdict__copy b{
     display:block;
-    font:650 14px/1.45 "Noto Serif SC","Songti SC",serif;
+    font:650 14px/1.45 "Noto Serif SC Variable","Songti SC",serif;
     color:var(--log-ink);
   }
   /* 分类计数最多两行：窄窗里截成"卡片生成1 · 后台…"会把还能救的信息裁掉，
@@ -215,7 +218,7 @@
   }
   & .day-section-head b{
     flex:none;
-    font:650 13.5px/1.4 "Noto Serif SC","Songti SC",serif;
+    font:650 13.5px/1.4 "Noto Serif SC Variable","Songti SC",serif;
     letter-spacing:.01em;
     color:var(--log-ink);
   }
@@ -267,13 +270,13 @@
   }
   /* 可聚焦的滚动容器：键盘读者要能滚它，聚焦时给出明确反馈 */
   & > .day-log:focus-visible{
-    outline:3px solid var(--log-focus);
-    outline-offset:3px;
+    outline: 3px solid var(--focus);
+    outline-offset: 3px;
     border-radius:var(--log-r-sm);
   }
   & .day-triage:focus-visible{
-    outline:3px solid var(--log-focus);
-    outline-offset:3px;
+    outline: 3px solid var(--focus);
+    outline-offset: 3px;
     border-radius:var(--log-r-sm);
   }
 
@@ -350,7 +353,7 @@
     overflow:hidden;
     -webkit-box-orient:vertical;
     -webkit-line-clamp:2;
-    font:650 13.5px/1.5 "Noto Serif SC","Songti SC",serif;
+    font:650 13.5px/1.5 "Noto Serif SC Variable","Songti SC",serif;
     color:var(--log-alarm-ink);
   }
   & .day-anomaly__meta{
@@ -493,7 +496,7 @@
   & .day-log__body b{
     display:block;
     overflow:hidden;
-    font:650 13.5px/1.5 "Noto Serif SC","Songti SC",serif;
+    font:650 13.5px/1.5 "Noto Serif SC Variable","Songti SC",serif;
     color:var(--log-body);
     text-overflow:ellipsis;
     white-space:nowrap;
@@ -534,7 +537,7 @@
     background:rgba(255,250,235,.5);
   }
   & .day-stream__empty b{
-    font:650 13.5px/1.5 "Noto Serif SC","Songti SC",serif;
+    font:650 13.5px/1.5 "Noto Serif SC Variable","Songti SC",serif;
     color:var(--log-body);
   }
   & .day-stream__empty p{
@@ -577,7 +580,7 @@
     display:block;
   }
   & .day-system__toggle b{
-    font:650 12px/1.45 "Noto Serif SC","Songti SC",serif;
+    font:650 12px/1.45 "Noto Serif SC Variable","Songti SC",serif;
   }
   & .day-system__toggle small{
     margin-top:2px;
@@ -666,7 +669,7 @@
   }
   /* 当前空间那一行给一道左沿：颜色不是唯一载体，同时有"当前空间"四个字。 */
   & .day-spaces__row[data-current]{
-    box-shadow:inset 3px 0 0 var(--log-focus);
+    box-shadow:inset 3px 0 0 var(--focus);
   }
   & .day-spaces__head{
     display:flex;
@@ -677,7 +680,7 @@
   }
   & .day-spaces__head b{
     overflow:hidden;
-    font:650 11.5px/1.5 "Noto Serif SC","Songti SC",serif;
+    font:650 11.5px/1.5 "Noto Serif SC Variable","Songti SC",serif;
     color:var(--log-ink);
     text-overflow:ellipsis;
     white-space:nowrap;
@@ -694,7 +697,7 @@
     font:600 9.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
     font-style:normal;
     letter-spacing:.04em;
-    color:var(--log-focus);
+    color:var(--focus);
   }
   & .day-spaces__numbers{
     display:flex;
@@ -713,7 +716,7 @@
     border-top:1px dashed var(--log-rule-solid);
   }
   & .day-spaces__total b{
-    font:650 11.5px/1.5 "Noto Serif SC","Songti SC",serif;
+    font:650 11.5px/1.5 "Noto Serif SC Variable","Songti SC",serif;
     color:var(--log-ink);
   }
   & .day-spaces__failure{
@@ -740,7 +743,7 @@
     align-items:center;
     gap:6px;
     margin:0;
-    font:650 13px/1.5 "Noto Serif SC","Songti SC",serif;
+    font:650 13px/1.5 "Noto Serif SC Variable","Songti SC",serif;
     color:var(--log-ink);
   }
   & .day-rail__card p{
@@ -779,8 +782,8 @@
     background:transparent;
   }
   & button:focus-visible{
-    outline:3px solid var(--log-focus);
-    outline-offset:3px;
+    outline: 3px solid var(--focus);
+    outline-offset: 3px;
   }
 
   /* 只给读屏的文本 */

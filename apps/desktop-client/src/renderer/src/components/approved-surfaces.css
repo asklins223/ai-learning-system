@@ -15,30 +15,16 @@
  * its provenance.
  */
 
-:root {
-  --v3-ink: #30231a;
-  --v3-soft: #705d4d;
-  --v3-paper: #f5ead5;
-  --v3-paper-light: #fff9eb;
-  --v3-paper-deep: #e8d4b1;
-  --v3-line: rgba(73, 47, 29, 0.22);
-  --v3-line-strong: rgba(66, 41, 25, 0.46);
-  --v3-clay: #bd5a31;
-  --v3-green: #556c55;
-  --v3-gold: #e9c66f;
-  --v3-star: #79cedc;
-  --v3-shadow: 0 24px 60px rgba(46, 27, 16, 0.28), 0 4px 14px rgba(46, 27, 16, 0.18);
-  --v3-shadow-small: 0 12px 28px rgba(43, 27, 17, 0.22), 0 3px 8px rgba(43, 27, 17, 0.14);
-  --v3-hud-cream: #fff2cf;
-  --v3-hud-mint: #b9d3ad;
-  --v3-hud-green: #66816a;
-  --v3-hud-butter: #f3d678;
-  --v3-ease: cubic-bezier(0.23, 1, 0.32, 1);
-}
+/* 这里原先挂着一张 `:root { --v3-*: … }` 别名表，18 条取值与 `--hud-*`
+ * 逐字节相同（其中 `--v3-green` 抄的还是 `--hud-green` 被覆盖前的死值）。
+ * 两套名字描述同一份调色板，等于第二份真理源：改母本不会传到这里，反之也一样。
+ * 所有引用已直接落到 `--hud-*`，不要再加回来。 */
 
 .desktop-app[data-directory-rail] #main-content {
   padding-left: 0 !important;
-}.task-surface:is(.task-surface--study, .task-surface--notebook, .task-surface--card-generation, .task-surface--review, .task-surface--search, .task-surface--validation) {
+}
+
+.task-surface:is(.task-surface--study, .task-surface--notebook, .task-surface--card-generation, .task-surface--review, .task-surface--search, .task-surface--validation) {
   background-position: center;
   background-size: cover;
   isolation: isolate;
@@ -70,7 +56,7 @@
   position: absolute;
   z-index: 18;
   inset: 0;
-  color: var(--v3-ink);
+  color: var(--hud-ink);
   pointer-events: auto;
 }
 
@@ -105,9 +91,9 @@
   max-width: min(720px, calc(100vw - 440px));
   padding: 9px 15px 8px;
   color: #443428;
-  border: 3px solid rgba(255, 252, 236, 0.87);
+  border: 3px solid rgba(255, 252, 235, 0.87);
   border-radius: 19px 24px 17px 22px;
-  background: var(--v3-hud-mint);
+  background: var(--hud-mint);
   box-shadow: 0 9px 20px rgba(45, 28, 17, 0.24);
   text-shadow: none;
 }
@@ -133,7 +119,7 @@
   bottom: 62px;
   left: 88px;
   min-width: 0;
-  transition: left 560ms var(--v3-ease), right 560ms var(--v3-ease);
+  transition: left 560ms var(--hud-ease-out), right 560ms var(--hud-ease-out);
 }
 
 .task-surface:is(.task-surface--source-detail, .task-surface--objective-detail, .task-surface--graph) .approved-surface__content {
@@ -151,7 +137,7 @@
   border-color: rgba(255, 255, 255, 0.22);
   border-radius: 24px;
   background: rgba(43, 31, 24, 0.88);
-  box-shadow: var(--v3-shadow-small);
+  box-shadow: var(--hud-shadow-small);
   color: #fff3df;
   backdrop-filter: blur(12px);
 }
@@ -166,128 +152,69 @@
   gap: 9px;
   padding: 28px;
   border: 1px solid rgba(255, 255, 255, 0.56);
-  border-radius: 4px 20px 4px 4px;
-  background: radial-gradient(circle at 15% 0, rgba(255, 255, 255, 0.64), transparent 36%), var(--v3-paper);
-  box-shadow: var(--v3-shadow);
+  border: 4px solid rgba(255, 252, 235, 0.78);
+  border-radius:31px 42px 29px 38px/35px 30px 43px 31px;
+  background: radial-gradient(circle at 15% 0, rgba(255, 255, 255, 0.64), transparent 36%), var(--hud-paper);
+  box-shadow: var(--hud-shadow);
   text-align: center;
 }
 
 .approved-state strong { font: 680 18px "Noto Serif SC Variable", "Songti SC", serif; }
-.approved-state p { max-width: 44em; margin: 0; color: var(--v3-soft); font-size: 11px; line-height: 1.65; }
+.approved-state p { max-width: 44em; margin: 0; color: var(--hud-soft); font-size: 11px; line-height: 1.65; }
 .approved-state--loading svg { animation: v3-spin 1.2s linear infinite; }
 @keyframes v3-spin { to { transform: rotate(360deg); } }
-
-/* Understanding workbench: real states carried by soft HUD objects, never a fake route map. */
-.v3-goal-workbench { display: grid; height: 100%; min-height: 0; grid-template-columns: minmax(292px, 0.78fr) minmax(0, 1.42fr); gap: 16px; }
 .v3-goal-focus { position: relative; display: flex; min-width: 0; min-height: 0; flex-direction: column; padding: 22px 23px 18px; overflow: hidden; color: #3e3329; border: 4px solid rgba(255, 252, 235, 0.86); border-radius: 31px 24px 35px 27px; background: #8db28f; box-shadow: 0 18px 38px rgba(45, 28, 17, 0.25), 0 3px 10px rgba(45, 28, 17, 0.14); }
 .v3-goal-focus::after { position: absolute; right: -40px; bottom: -55px; width: 155px; height: 128px; content: ""; border: 18px solid rgba(255, 248, 220, 0.12); border-radius: 61% 39% 54% 46%; transform: rotate(-24deg); pointer-events: none; }
-.v3-goal-focus__topline { position: relative; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #3f3b2f; font-size: 9px; font-weight: 700; }
-.v3-objective-state { display: inline-flex; width: fit-content; align-items: center; gap: 5px; color: var(--v3-soft); font-size: 9px; font-weight: 760; }
+.v3-objective-state { width: fit-content; }
 .v3-goal-focus .v3-objective-state { color: #3f3b2f; }
 .v3-objective-state--calm svg { fill: #7fa783; color: #7fa783; }
 .v3-objective-state--progress svg { fill: #b98226; color: #b98226; }
 .v3-objective-state--attention svg { fill: #d87a57; color: #d87a57; }
 .v3-objective-state--neutral svg { fill: #c8b99f; color: #c8b99f; }
-.v3-goal-focus__copy { position: relative; z-index: 1; display: flex; flex: 0 1 auto; min-height: 0; flex-direction: column; padding-top: 27px; }
-.v3-goal-focus__copy > p { width: fit-content; margin: 0 0 9px; padding: 5px 9px; color: #5e4932; border-radius: 12px 15px 11px 14px; background: #f4da83; font-size: 9px; font-weight: 780; }
 .v3-goal-focus h3 { max-width: 16ch; margin: 0; font: 700 26px/1.36 "Noto Serif SC Variable", "Songti SC", serif; letter-spacing: -0.025em; text-wrap: balance; }
 .v3-goal-focus blockquote { display: -webkit-box; max-width: 42ch; margin: 15px 0 19px; overflow: hidden; color: #3e3329; font-size: 10px; line-height: 1.72; -webkit-box-orient: vertical; -webkit-line-clamp: 4; }
-.v3-goal-focus__action { display: flex; width: 100%; min-height: 62px; align-items: center; justify-content: space-between; gap: 12px; margin-top: 0; padding: 11px 13px 11px 15px; color: #39291f; text-align: left; border: 3px solid rgba(255, 252, 235, 0.88); border-radius: 20px 25px 18px 23px; background: #f3d678; box-shadow: 0 10px 22px rgba(56, 39, 24, 0.18); cursor: pointer; transition: transform 180ms var(--v3-ease), box-shadow 180ms ease; }
+.v3-goal-focus__action { margin-top: 0; transition: transform 180ms var(--hud-ease-out), box-shadow 180ms ease; }
 .v3-goal-focus__action span { display: grid; gap: 2px; }
 .v3-goal-focus__action small { color: #715c3e; font-size: 8px; font-weight: 600; }
 .v3-goal-focus__action span:not(small) { font-size: 12px; font-weight: 800; }
-.v3-goal-pulse { position: relative; z-index: 1; display: grid; grid-template-columns: repeat(3, 1fr); margin: auto 0 0; border-top: 1px solid rgba(68, 62, 48, 0.2); }
-.v3-goal-pulse div { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; padding: 12px 9px 3px 0; }
-.v3-goal-pulse div + div { padding-left: 9px; border-left: 1px solid rgba(68, 62, 48, 0.16); }
-.v3-goal-pulse dt { color: #3f3b2f; font-size: 8px; }
-.v3-goal-pulse dd { margin: 0; color: #3e3329; font: 700 16px "Noto Serif SC Variable", "Songti SC", serif; font-variant-numeric: tabular-nums; }
-.v3-goal-focus__source { position: relative; z-index: 1; display: flex; align-items: center; gap: 6px; margin: 10px 0 0; overflow: hidden; color: #3f3b2f; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.v3-goal-focus__source { position: relative; z-index: 1; }
 
-.v3-goal-ledger { display: grid; min-width: 0; min-height: 0; grid-template-rows: auto auto minmax(0, 1fr); gap: 0; padding: 16px 18px 14px; overflow: hidden; border: 4px solid rgba(255, 252, 235, 0.88); border-radius: 31px 42px 29px 38px; background: #fff2cf; box-shadow: var(--v3-shadow); }
-.v3-goal-ledger__header { display: flex; min-height: 62px; align-items: center; justify-content: space-between; gap: 16px; padding: 0 3px 11px; border-bottom: 1px solid rgba(76, 55, 37, 0.2); }
-.v3-goal-ledger__header h3 { margin: 0; font: 680 19px "Noto Serif SC Variable", "Songti SC", serif; }
-.v3-goal-ledger__header p { margin: 3px 0 0; color: var(--v3-soft); font-size: 8px; }
-.v3-goal-search { display: flex; width: min(190px, 42%); height: 36px; align-items: center; gap: 7px; padding: 0 11px; color: var(--v3-soft); border: 2px solid rgba(94, 72, 50, 0.13); border-radius: 17px 21px 16px 19px; background: rgba(255, 255, 255, 0.48); }
-.v3-goal-search input { min-width: 0; width: 100%; padding: 0; color: var(--v3-ink); border: 0; outline: 0; background: transparent; font-size: 10px; }
+.v3-goal-search input { min-width: 0; width: 100%; padding: 0; color: var(--hud-ink); border: 0; outline: 0; background: transparent; font-size: 10px; }
 .v3-goal-search input::placeholder { color: #7c6a58; opacity: 1; }
 .v3-goal-search:focus-within { border-color: #739776; box-shadow: 0 0 0 3px rgba(115, 151, 118, 0.16); }
-.v3-goal-filters { display: flex; gap: 5px; padding: 10px 2px 9px; border-bottom: 1px solid rgba(76, 55, 37, 0.16); }
+.v3-goal-filters { padding: 10px 2px 9px; border-bottom: 1px solid rgba(76, 55, 37, 0.16); }
 .v3-goal-filters button { display: inline-flex; min-height: 27px; align-items: center; gap: 5px; padding: 0 9px; color: #584a3d; border: 0; border-radius: 13px 17px 12px 15px; background: transparent; box-shadow: none; font-size: 9px; cursor: pointer; }
 .v3-goal-filters button span { min-width: 15px; color: #806b59; font-variant-numeric: tabular-nums; }
-.v3-goal-filters button.is-active { color: #fff7e7; background: #66816a; box-shadow: 0 5px 11px rgba(45, 57, 43, 0.2); transform: rotate(-1deg); }
+.v3-goal-filters button.is-active { color: #fff7e7; background: var(--hud-green); box-shadow: 0 5px 11px rgba(45, 57, 43, 0.2); transform: rotate(-1deg); }
 .v3-goal-filters button.is-active span { color: #f7e8c9; }
-.v3-goal-list { min-height: 0; margin: 0; padding: 0 2px; overflow-x: hidden; overflow-y: auto; list-style: none; scrollbar-color: rgba(91, 73, 56, 0.46) transparent; scrollbar-width: thin; }
+.v3-goal-list { scrollbar-color: rgba(91, 73, 56, 0.46) transparent; scrollbar-width: thin; }
 .v3-goal-list > li { min-width: 0; }
-.v3-goal-row { display: grid; width: 100%; min-height: 76px; grid-template-columns: 8px minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 10px 6px; color: #44372d; text-align: left; border: 0; border-bottom: 1px solid rgba(76, 55, 37, 0.17); border-radius: 0; background: transparent; box-shadow: none; cursor: pointer; transition: transform 180ms var(--v3-ease), background-color 160ms ease; }
-.v3-goal-row__marker { width: 6px; height: 6px; border-radius: 50%; background: #ad9e89; box-shadow: 0 0 0 4px rgba(128, 106, 81, 0.09); }
+.v3-goal-row { border-radius: 0; box-shadow: none; transition: transform 180ms var(--hud-ease-out), background-color 160ms ease; }
+.v3-goal-row__marker { box-shadow: 0 0 0 4px rgba(128, 106, 81, 0.09); }
 .v3-goal-row__marker--calm { background: #50775a; }
 .v3-goal-row__marker--progress { background: #9c6d18; }
 .v3-goal-row__marker--attention { background: #a9472e; }
-.v3-goal-row__body { display: grid; min-width: 0; gap: 3px; }
-.v3-goal-row__title { overflow: hidden; font: 680 13px/1.4 "Noto Serif SC Variable", "Songti SC", serif; text-overflow: ellipsis; white-space: nowrap; }
-.v3-goal-row__summary { display: -webkit-box; overflow: hidden; color: #5c4b3e; font-size: 9px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.v3-goal-row__meta { overflow: hidden; color: #6e5a49; font-size: 8px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
-.v3-goal-row__next { display: inline-flex; align-items: center; gap: 4px; color: #70432f; }
+.v3-goal-row__summary { display: -webkit-box; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.v3-goal-row__meta { overflow: hidden; font-variant-numeric: tabular-nums; text-overflow: ellipsis; }
+.v3-goal-row__next { display: inline-flex; align-items: center; gap: 4px; }
 .v3-goal-row__next small { max-width: 86px; overflow: hidden; font-size: 8px; font-weight: 720; text-overflow: ellipsis; white-space: nowrap; }
-.v3-goal-list__empty { display: grid; min-height: 170px; place-content: center; justify-items: center; gap: 5px; color: var(--v3-soft); text-align: center; }
-.v3-goal-list__empty strong { color: var(--v3-ink); font: 650 13px "Noto Serif SC Variable", "Songti SC", serif; }
+.v3-goal-list__empty { display: grid; min-height: 170px; place-content: center; justify-items: center; gap: 5px; text-align: center; }
+.v3-goal-list__empty strong { color: var(--hud-ink); font: 650 13px "Noto Serif SC Variable", "Songti SC", serif; }
 .v3-goal-list__empty span { font-size: 9px; }
-.v3-goal-list__paging, .v3-goal-list__end { display: flex; min-height: 44px; align-items: center; justify-content: center; gap: 10px; color: var(--v3-soft); font-size: 9px; text-align: center; }
-.v3-goal-list__paging button { min-height: 30px; padding: 0 14px; border: 1px solid rgba(82, 91, 69, 0.28); border-radius: 999px; background: rgba(255, 252, 235, 0.7); color: var(--v3-ink); font: inherit; cursor: pointer; }
+.v3-goal-list__paging, .v3-goal-list__end { display: flex; min-height: 44px; align-items: center; justify-content: center; gap: 10px; text-align: center; }
+.v3-goal-list__paging button { min-height: 30px; padding: 0 14px; border: 1px solid rgba(82, 91, 69, 0.28); border-radius: 999px; background: rgba(255, 252, 235, 0.7); color: var(--hud-ink); font: inherit; cursor: pointer; }
 .v3-goal-list__paging button:disabled { cursor: wait; opacity: 0.58; }
 
-.v3-objective-sheet { display: flex; min-width: 0; min-height: 0; flex-direction: column; padding: 0; overflow: auto; border: 4px solid rgba(255, 252, 235, 0.88); border-radius: 31px 42px 29px 38px; background: #fff2cf; box-shadow: var(--v3-shadow); scrollbar-color: rgba(91, 73, 56, 0.46) transparent; scrollbar-width: thin; }
-.v3-objective-intro { padding: 20px 24px 11px; }
-.v3-objective-sheet__header { display: flex; align-items: center; justify-content: space-between; gap: 14px; color: var(--v3-soft); font-size: 8px; font-variant-numeric: tabular-nums; }
-.v3-objective-intro > h3 { max-width: 28ch; margin: 14px 0 8px; font: 700 26px/1.34 "Noto Serif SC Variable", "Songti SC", serif; letter-spacing: -0.03em; text-wrap: balance; }
 .v3-objective-summary { max-width: 68ch; margin: 0 0 12px; color: #554336; font: 12px/1.7 "Noto Serif SC Variable", "Songti SC", serif; }
-.v3-objective-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.v3-objective-tags { flex-wrap: wrap; }
 .v3-objective-tags span { padding: 4px 8px; color: #5f5245; border-radius: 11px 14px 10px 13px; background: #e6d3ad; font-size: 8px; }
-/* P15：整块黄纸就是主行动按钮（实机曾量到标题 strong 与右边那颗按钮**同一个词**，
- * 而按钮只有 77×28，占这块 427×78 视觉重心的 5%）。语法照列表行：纸块可点，
- * 右边只剩一个箭头说它去哪。
- * 不写 width: 100%：父级 .v3-objective-sheet 是 column flex，交叉轴默认就拉满，
- * 再叠上自己 24px 的横向 margin 会向右溢出 48px，把整张纸顶出一条横向滚动条。 */
-.v3-next-action { display: flex; align-items: center; gap: 15px; margin: 14px 24px; padding: 13px 14px 13px 17px; border: 0; border-radius: 20px 25px 18px 23px; background: #f3d678; box-shadow: 0 7px 16px rgba(67, 43, 27, 0.15); color: inherit; font: inherit; text-align: left; cursor: pointer; transition: transform 180ms var(--v3-ease), box-shadow 180ms ease; }
-/* button 的内容模型只收短语元素，所以那一列用 span 承载、再用 grid 摆；
-   箭头靠 flex 的 align-items 居中，不靠 grid-row: 1/-1（隐式行里 -1 就落在第一行）。 */
-.v3-next-action__text { display: grid; flex: 1 1 auto; min-width: 0; gap: 4px; align-content: center; }
-.v3-next-action__label { color: #725437; font-size: 11px; font-weight: 750; }
-.v3-next-action__verb { font: 700 15px/1.3 "Noto Serif SC Variable", "Songti SC", serif; }
-.v3-next-action__why { max-width: 56ch; color: #5f4c38; font-size: 12px; line-height: 1.55; font-weight: 400; }
-.v3-next-action__go { display: inline-flex; width: 34px; height: 34px; flex: none; align-items: center; justify-content: center; color: #fffdf4; border-radius: 17px 21px 16px 19px; background: #b85531; box-shadow: 0 5px 12px rgba(79, 38, 22, 0.23); }
-.v3-next-action:disabled { cursor: not-allowed; opacity: 0.52; }
-.v3-next-action:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
-.v3-action-error { display: flex; align-items: center; gap: 6px; margin: 0 24px 14px; padding: 7px 10px; color: #7a3525; border-radius: 13px 17px 12px 15px; background: #efb092; font-size: 9px; }
-.v3-learning-ledger { margin: 0 24px; padding: 13px 0 14px; border-block: 1px solid rgba(76, 55, 37, 0.18); }
-.v3-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.v3-section-heading > div { display: flex; align-items: center; gap: 7px; }
-.v3-section-heading h4 { margin: 0; font: 680 14px "Noto Serif SC Variable", "Songti SC", serif; }
-.v3-section-heading > span { color: var(--v3-soft); font-size: 8px; }
-.v3-learning-ledger dl { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; margin: 9px 0 0; }
-.v3-learning-ledger dl > div { display: grid; min-width: 0; align-content: start; gap: 4px; padding: 8px 10px 6px 0; background: transparent; }
-.v3-learning-ledger dl > div + div { padding-left: 10px; border-left: 1px solid rgba(76, 55, 37, 0.16); }
-.v3-learning-ledger dt { display: flex; align-items: center; gap: 5px; color: #5c5345; font-size: 8px; }
-.v3-learning-ledger dd { margin: 0; font-size: 10px; font-weight: 760; }
-.v3-learning-ledger small { color: #665d4e; font-size: 8px; line-height: 1.45; }
-.v3-objective-revision { display: flex; flex-wrap: wrap; gap: 5px 11px; margin: auto 24px 0; padding: 10px 0 15px; color: #6c5d50; border-top: 1px dashed rgba(76, 55, 37, 0.2); font-size: 8px; font-variant-numeric: tabular-nums; }
-
-/* P17：这一栏原来跟着 grid 行拉满整列高，里面唯一撑开的 `.v3-origin-list` 又写着
- * flex: 1——只有一条来源时，那条来源下面就是 200 多像素的纯绿。改成按内容长高、
- * 封顶在列高（内容多到超出封顶时，列表自己滚，行为不变）。 */
-.v3-lineage-ledger { display: flex; min-width: 0; min-height: 0; align-self: start; max-height: 100%; flex-direction: column; padding: 17px 18px 14px; overflow: hidden; color: #3e3026; border: 4px solid rgba(255, 252, 235, 0.86); border-radius: 29px 23px 31px 25px; background: #a9c7a2; box-shadow: var(--v3-shadow-small); }
-.v3-lineage-ledger > header { display: flex; min-height: 57px; align-items: center; justify-content: space-between; gap: 10px; padding: 0 2px 11px; border-bottom: 1px solid rgba(71, 67, 49, 0.22); }
-.v3-lineage-ledger > header > div { display: flex; align-items: center; gap: 7px; }
-.v3-lineage-ledger h3 { margin: 0; font: 680 16px "Noto Serif SC Variable", "Songti SC", serif; }
-/* 168px 的上限是给 8px 字定的；B4 把这条抬到 11px 之后，"1 条来源 · 0 条原文证据"
- * 就在这个宽度上折成两行、看着像被裁。让位给右侧自己排，不再设宽。 */
-.v3-lineage-ledger > header > span { flex: none; color: #52412e; font-size: 8px; line-height: 1.4; text-align: right; }
+.v3-action-error { padding: 7px 10px; border-radius: 13px 17px 12px 15px; background: #efb092; }
 .v3-primary-note { display: grid; min-height: 58px; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 10px 2px; color: inherit; text-align: left; border: 0; border-bottom: 1px solid rgba(71, 67, 49, 0.19); background: transparent; box-shadow: none; cursor: pointer; }
 .v3-primary-note span { display: grid; min-width: 0; gap: 2px; }
 .v3-primary-note small { color: #52412e; font-size: 8px; }
 .v3-primary-note strong { overflow: hidden; font: 650 10px/1.45 "Noto Serif SC Variable", "Songti SC", serif; text-overflow: ellipsis; white-space: nowrap; }
 .v3-primary-note--missing { cursor: default; }
-.v3-lineage-warning { display: flex; align-items: flex-start; gap: 6px; margin: 8px 0 0; padding: 7px 9px; color: #6f3326; border-radius: 13px 16px 12px 15px; background: #f3d678; font-size: 8px; line-height: 1.45; }
+.v3-lineage-warning { display: flex; align-items: flex-start; gap: 6px; margin: 8px 0 0; padding: 7px 9px; color: #6f3326; border-radius: 13px 16px 12px 15px; background: var(--hud-butter); font-size: 8px; line-height: 1.45; }
 .v3-lineage-warning svg { flex: 0 0 auto; }
 .v3-origin-list { min-height: 0; flex: 1; padding: 1px 0; overflow: auto; scrollbar-color: rgba(91, 73, 56, 0.46) transparent; scrollbar-width: thin; }
 .v3-origin-row { display: grid; grid-template-columns: 25px minmax(0, 1fr); gap: 8px; padding: 11px 2px; border-bottom: 1px solid rgba(71, 67, 49, 0.18); background: transparent; box-shadow: none; }
@@ -349,7 +276,7 @@
   border-color: rgba(255, 255, 255, 0.22);
   border-radius: 24px;
   background: rgba(43, 31, 24, 0.88);
-  box-shadow: var(--v3-shadow-small);
+  box-shadow: var(--hud-shadow-small);
   backdrop-filter: blur(12px);
 }
 .task-surface--study :is(canvas) { display: none !important; }
@@ -362,7 +289,6 @@
    A second copy of the coordinates in this file loaded after `styles.css`, so it
    used to win the first frame and shift every right-seat page by 22px. */
 .companion-surface-label { display: none; }
-.surface-calibrator__launcher { display: none !important; }
 
 /* Mao PRO is always a fixed bust: hat to upper hip, with arms and wand kept
    inside the seat. The same crop is used by Live2D and its frozen last frame. */
@@ -377,10 +303,9 @@
 .desktop-app[data-directory-rail="collapsed"] .approved-surface__return { left: 22px; width: 176px; padding-left: 70px; }
 .desktop-app[data-directory-rail="collapsed"] .approved-surface__content { left: 22px; }
 .desktop-app[data-directory-rail="collapsed"] .task-surface:is(.task-surface--source-detail, .task-surface--objective-detail, .task-surface--graph) .approved-surface__content { left: 335px; }
-.desktop-app[data-directory-rail="collapsed"] .task-surface--validation :is(.learning-run-workbench, .learning-run-result-board) { right: 22px; left: 22px; }
 
 @media (hover: hover) and (pointer: fine) {
-  .v3-goal-focus__action:hover, .v3-next-action:not(:disabled):hover { transform: translateY(-2px); box-shadow: 0 11px 22px rgba(67, 43, 27, 0.28); }
+  .v3-goal-focus__action:hover { transform: translateY(-2px); box-shadow: 0 11px 22px rgba(67, 43, 27, 0.28); }
   .v3-goal-row:hover { background: rgba(102, 129, 106, 0.08); }
   .v3-primary-note:hover { background: rgba(255, 248, 224, 0.18); transform: translateX(3px); }
 }
@@ -389,7 +314,7 @@
   .approved-surface__heading { top: 9px; left: 64px; max-width: calc(100vw - 270px); padding: 4px 7px; border: 2px solid rgba(255, 252, 235, 0.78); border-radius: 10px 12px 9px 11px; background: rgba(71, 52, 39, 0.62); }
   .approved-surface__heading h2 { font-size: 12px; }
   .approved-surface__heading p { margin-top: 1px; font-size: 5px; }
-  .task-surface:is(.task-surface--objective-library, .task-surface--objective-detail) .approved-surface__heading { top: 9px; left: 52px; max-width: calc(100vw - 220px); padding: 4px 7px; border-width: 2px; border-radius: 10px 12px 9px 11px; background: var(--v3-hud-mint); box-shadow: 0 5px 10px rgba(45, 28, 17, 0.24); }
+  .task-surface:is(.task-surface--objective-library, .task-surface--objective-detail) .approved-surface__heading { top: 9px; left: 52px; max-width: calc(100vw - 220px); padding: 4px 7px; border-width: 2px; border-radius: 10px 12px 9px 11px; background: var(--hud-mint); box-shadow: 0 5px 10px rgba(45, 28, 17, 0.24); }
   .task-surface:is(.task-surface--objective-library, .task-surface--objective-detail) .approved-surface__heading h2 { font-size: 12px; }
   .task-surface:is(.task-surface--objective-library, .task-surface--objective-detail) .approved-surface__heading p { margin-top: 1px; font-size: 5px; }
   .approved-surface__content { top: 48px; right: 124px; bottom: 32px; left: 64px; }
@@ -401,31 +326,17 @@
   .approved-state { min-height: 90px; gap: 4px; padding: 12px; }
   .approved-state strong { font-size: 9px; }
   .approved-state p { font-size: 5px; }
-
-  .v3-goal-workbench { grid-template-columns: minmax(148px, 0.78fr) minmax(0, 1.42fr); gap: 8px; }
   .v3-goal-focus { padding: 10px 11px 9px; border-width: 2px; border-radius: 16px 12px 18px 14px; }
-  .v3-goal-focus::after { right: -20px; bottom: -27px; width: 77px; height: 64px; border-width: 9px; }
-  .v3-goal-focus__topline, .v3-objective-state { gap: 3px; font-size: 5px; }
+  .v3-goal-focus::after { right: -20px; bottom: -27px; width: 77px; height: 64px; border-width: 9px; } .v3-objective-state{ gap: 3px; font-size: 5px; }
   .v3-objective-state svg { width: 6px; height: 6px; }
-  .v3-goal-focus__copy { padding-top: 13px; }
-  .v3-goal-focus__copy > p { margin-bottom: 4px; padding: 2px 5px; border-radius: 6px 8px 6px 7px; font-size: 5px; }
   .v3-goal-focus h3 { font-size: 13px; }
   .v3-goal-focus blockquote { margin: 8px 0 10px; font-size: 5px; }
   .v3-goal-focus__action { min-height: 31px; gap: 6px; padding: 5px 7px; border-width: 2px; border-radius: 10px 13px 9px 12px; }
   .v3-goal-focus__action small { font-size: 4px; }
   .v3-goal-focus__action span:not(small) { font-size: 6px; }
-  .v3-goal-focus__action svg { width: 10px; height: 10px; }
-  .v3-goal-pulse { margin-top: 8px; }
-  .v3-goal-pulse div { padding: 6px 4px 1px 0; }
-  .v3-goal-pulse div + div { padding-left: 4px; }
-  .v3-goal-pulse dt, .v3-goal-focus__source { font-size: 4px; }
-  .v3-goal-pulse dd { font-size: 8px; }
+  .v3-goal-focus__action svg { width: 10px; height: 10px; } .v3-goal-focus__source{ font-size: 4px; }
   .v3-goal-focus__source { gap: 3px; margin-top: 5px; }
   .v3-goal-focus__source svg { width: 7px; height: 7px; }
-  .v3-goal-ledger { gap: 0; padding: 8px 9px 7px; border-width: 2px; border-radius: 16px 21px 15px 19px; }
-  .v3-goal-ledger__header { min-height: 31px; gap: 8px; padding: 0 2px 5px; }
-  .v3-goal-ledger__header h3 { font-size: 10px; }
-  .v3-goal-ledger__header p { margin-top: 1px; font-size: 4px; }
   .v3-goal-search { width: min(95px, 42%); height: 18px; gap: 3px; padding: 0 5px; border-width: 1px; border-radius: 8px 10px 8px 9px; }
   .v3-goal-search svg { width: 7px; height: 7px; }
   .v3-goal-search input { font-size: 5px; }
@@ -446,43 +357,11 @@
   .v3-goal-list__empty strong { font-size: 7px; }
   .v3-goal-list__empty span { font-size: 5px; }
 
-  .v3-objective-sheet { gap: 0; padding: 0; border-width: 2px; border-radius: 16px 21px 15px 19px; }
-  .v3-objective-intro { padding: 9px 11px 5px; }
-  .v3-objective-sheet__header { gap: 7px; font-size: 4px; }
-  .v3-objective-intro > h3 { margin: 7px 0 4px; font-size: 13px; }
   .v3-objective-summary { margin: 0 0 6px; font-size: 6px; }
   .v3-objective-tags { gap: 3px; }
   .v3-objective-tags span { padding: 2px 4px; border-radius: 6px 7px 5px 6px; font-size: 4px; }
-  .v3-next-action { column-gap: 9px; row-gap: 2px; margin: 2px 10px 6px; padding: 8px 9px 8px 11px; border-radius: 10px 13px 9px 12px; }
-  /* 这一档原来把动词打到 8px、说明打到 5px（B4 的洞就是从这儿漏的：地板清单是
-   * 按 :181-254 那段无规则条件挑的，紧凑档没照着列）。整块现在自己就是按钮，
-   * 字号一律不降——要省地方省的是内边距和箭头，不是字。 */
-  .v3-next-action__go { width: 28px; height: 28px; border-radius: 12px 15px 11px 14px; }
-  .v3-next-action__go svg { width: 14px; height: 14px; }
   .v3-action-error { gap: 3px; margin: -2px 6px 0; padding: 3px 5px; border-radius: 7px 9px 6px 8px; font-size: 5px; }
   .v3-action-error svg { width: 7px; height: 7px; }
-  .v3-learning-ledger { margin: 0 11px; padding: 6px 0 7px; border-width: 1px 0; }
-  .v3-section-heading > div { gap: 3px; }
-  .v3-section-heading svg { width: 8px; height: 8px; }
-  .v3-section-heading h4 { font-size: 7px; }
-  .v3-section-heading > span { font-size: 4px; }
-  .v3-learning-ledger dl { gap: 0; margin-top: 4px; }
-  .v3-learning-ledger dl > div { gap: 2px; padding: 4px 4px 3px 0; border-radius: 0; }
-  .v3-learning-ledger dl > div + div { padding-left: 4px; }
-  .v3-learning-ledger dt { gap: 2px; font-size: 4px; }
-  .v3-learning-ledger dt svg { width: 7px; height: 7px; }
-  .v3-learning-ledger dd { font-size: 5px; }
-  .v3-learning-ledger small, .v3-objective-revision { font-size: 4px; }
-  .v3-objective-revision { gap: 2px 5px; margin: auto 11px 0; padding: 5px 0 7px; border-radius: 0; }
-  .v3-lineage-ledger { gap: 0; padding: 8px 9px 7px; border-width: 2px; border-radius: 15px 12px 16px 13px; }
-  .v3-lineage-ledger > header { min-height: 29px; gap: 5px; padding: 0 1px 5px; }
-  .v3-lineage-ledger > header > div { gap: 3px; }
-  .v3-lineage-ledger > header svg { width: 8px; height: 8px; }
-  .v3-lineage-ledger h3 { font-size: 8px; }
-  /* 56px 这个上限是给 4px 字定的。B4 把这条抬到 11px 之后它没跟着改，
-   * 于是"1 条来源 · 0 条原文证据"在紧凑档被折成 3 行、还溢出栏底 6px。
-   * 上限直接拿掉：栏头是 space-between，标题只占 43px，右侧有位置。 */
-  .v3-lineage-ledger > header > span { font-size: 4px; }
   .v3-primary-note { min-height: 29px; grid-template-columns: auto minmax(0, 1fr) auto; gap: 4px; padding: 5px 1px; border-radius: 0; }
   .v3-primary-note > svg { width: 8px; height: 8px; }
   .v3-primary-note small, .v3-primary-note strong { font-size: 4px; }
@@ -504,22 +383,6 @@
 }
 
 @media (max-width: 900px), (max-height: 520px) {
-  .task-surface:is(.task-surface--card-generation, .task-surface--validation) .task-surface__header {
-    top: 9px;
-    left: 64px;
-    width: min(360px, calc(100vw - 270px));
-  }
-  .task-surface:is(.task-surface--card-generation, .task-surface--validation) .task-surface__header h2 { font-size: 12px; }
-  .task-surface:is(.task-surface--card-generation, .task-surface--validation) .task-surface__header p { display: block; font-size: 5px; }
-  .task-surface:is(.task-surface--card-generation, .task-surface--validation) .task-surface__header .surface-close {
-    bottom: 10px;
-    left: -16px;
-    min-width: 82px;
-    width: auto;
-    height: 27px;
-    padding: 0 9px;
-    font-size: 7px;
-  }
   .task-surface--notebook :is(textarea) { padding: 5px 1px; font-size: 7px; }
 }
 
@@ -529,21 +392,11 @@
   padding-left: 70px;
 }
 
-@media (max-width: 900px), (max-height: 520px) {
-  .desktop-app[data-directory-rail="collapsed"] .task-surface:is(.task-surface--card-generation, .task-surface--validation) .task-surface__header .surface-close {
-    left: -53px;
-    width: 102px;
-    padding-left: 46px;
-  }
-  .desktop-app[data-directory-rail="collapsed"] .task-surface--validation :is(.learning-run-workbench, .learning-run-result-board) { right: 11px; left: 11px; }
-}
-
 /* Legibility floor for the compact (200% zoom) viewport: the micro sizes set
    above predate the 7px floor, so every remaining text role is re-raised here.
    This block intentionally comes last and wins over the sizes above. */
-@media (max-width: 900px), (max-height: 520px) {
-  .v3-goal-focus__topline, .v3-objective-state, .v3-goal-focus__copy > p, .v3-goal-focus blockquote, .v3-goal-pulse dt, .v3-goal-focus__source, .v3-goal-ledger__header p, .v3-goal-search input, .v3-goal-filters button, .v3-goal-row__summary, .v3-goal-row__meta, .v3-goal-row__next small, .v3-objective-sheet__header, .v3-objective-summary, .v3-objective-tags span { font-size: 7px; }
-  .v3-learning-ledger dt, .v3-learning-ledger dd, .v3-learning-ledger small, .v3-objective-revision, .v3-lineage-ledger > header > span, .v3-primary-note small, .v3-primary-note strong, .v3-lineage-warning, .v3-origin-row strong, .v3-origin-row > div > div span, .v3-origin-row p, .v3-origin-row small, .v3-origin-empty strong, .v3-origin-empty span, .v3-lineage-boundary strong, .v3-lineage-boundary p { font-size: 7px; }
+@media (max-width: 900px), (max-height: 520px) { .v3-objective-state, .v3-goal-focus blockquote, .v3-goal-focus__source, .v3-goal-search input, .v3-goal-filters button, .v3-goal-row__summary, .v3-goal-row__meta, .v3-goal-row__next small, .v3-objective-summary, .v3-objective-tags span{ font-size: 7px; }
+  .v3-primary-note small, .v3-primary-note strong, .v3-lineage-warning, .v3-origin-row strong, .v3-origin-row > div > div span, .v3-origin-row p, .v3-origin-row small, .v3-origin-empty strong, .v3-origin-empty span, .v3-lineage-boundary strong, .v3-lineage-boundary p { font-size: 7px; }
   .v3-goal-search { height: 26px; }
   .v3-goal-filters button { min-height: 24px; }
   .v3-goal-focus__action { min-height: 38px; }
@@ -553,7 +406,9 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .approved-surface * { animation-duration: 1ms !important; transition-duration: 1ms !important; }
+  /* 只压时长不压迭代次数，`.approved-state--loading svg` 那个 `v3-spin … infinite`
+     会从 1.2s 一圈变成 1ms 一圈——减弱动效反而让它每秒转一千圈。 */
+  .approved-surface * { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
 }
 
 /* 生成中的逐张落地（A1·B4）。字阶与既有进度头条同一档（__label 13px / __meta 12px），

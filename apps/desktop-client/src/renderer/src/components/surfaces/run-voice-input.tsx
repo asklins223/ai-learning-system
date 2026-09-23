@@ -23,22 +23,30 @@ const MIN_TRANSCRIBE_MS = 200;
 export interface VoiceTeachbackValue {
   readonly confirmedTranscript: string;
   readonly voiceArtifactRef?: string;
+  readonly correctionMethod?: "none" | "re_recorded" | "manual_text_edit";
 }
 
 export function VoiceTeachbackEditor({
   maxSeconds,
   value,
   onChange,
+  onBusyChange,
 }: {
   readonly maxSeconds: number;
   readonly value: VoiceTeachbackValue;
   readonly onChange: (value: VoiceTeachbackValue) => void;
+  readonly onBusyChange: (busy: boolean) => void;
 }) {
   const [phase, setPhase] = useState<"idle" | "recording" | "transcribing">("idle");
   const [mic, setMic] = useState<MicrophoneAvailability | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [seconds, setSeconds] = useState(0);
   const recorderRef = useRef<CompanionVoiceRecorder | null>(null);
+
+  useEffect(() => {
+    onBusyChange(phase !== "idle");
+    return () => onBusyChange(false);
+  }, [onBusyChange, phase]);
 
   useEffect(() => {
     let active = true;
@@ -111,6 +119,7 @@ export function VoiceTeachbackEditor({
       }
       onChange({
         confirmedTranscript: transcription.text.trim(),
+        correctionMethod: value.confirmedTranscript.trim() ? "re_recorded" : "none",
         ...(transcription.voiceArtifactId ? { voiceArtifactRef: transcription.voiceArtifactId } : {}),
       });
     } catch (error) {
@@ -118,7 +127,7 @@ export function VoiceTeachbackEditor({
     } finally {
       setPhase("idle");
     }
-  }, [onChange]);
+  }, [onChange, value.confirmedTranscript]);
 
   stopAndTranscribeRef.current = stopAndTranscribe;
 
@@ -171,9 +180,9 @@ export function VoiceTeachbackEditor({
         <span className="sr-only">转写文本（可校对后再提交）</span>
         <textarea
           value={value.confirmedTranscript}
-          disabled={phase === "recording"}
+          disabled={phase !== "idle"}
           placeholder={phase === "transcribing" ? "正在把录音转成文字…" : "录一段说法，这里会出现转写结果；你可以直接改这里的文字。"}
-          onChange={(event) => onChange({ ...value, confirmedTranscript: event.target.value })}
+          onChange={(event) => onChange({ ...value, confirmedTranscript: event.target.value, correctionMethod: "manual_text_edit" })}
         />
       </label>
     </div>

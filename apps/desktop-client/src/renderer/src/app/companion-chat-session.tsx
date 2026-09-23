@@ -10,6 +10,7 @@ import {
 } from "react";
 import type {
   CharacterCuePayloadV1,
+  CompanionContentBlockV1,
   CompanionMessageV1,
   CompanionPageContextV1,
 } from "@ailearn/shared/companion-conversation-contracts";
@@ -109,6 +110,11 @@ export interface CompanionChatLiveReply {
   readonly proposalIds: readonly string[];
 }
 
+export interface CompanionChatRichReply {
+  readonly messageId: string;
+  readonly blocks: readonly CompanionContentBlockV1[];
+}
+
 /**
  * 认领一轮回复的等待结果（SSE 与兜底轮询共用，2026-09-19 ②）。
  *
@@ -184,6 +190,8 @@ export interface CompanionChatSession {
   readonly conversationId: string | null;
   readonly messages: readonly CompanionMessageV1[];
   readonly liveReply: CompanionChatLiveReply | null;
+  /** 本轮图片、引用等结果；文字气泡退场后仍停在伴星身旁。 */
+  readonly richReply: CompanionChatRichReply | null;
   /** 流式生成中的草稿（未生成完的回复）；liveReply 落地后清空。 */
   readonly draft: CompanionChatDraft | null;
   /**
@@ -213,15 +221,25 @@ export interface CompanionChatSession {
   readonly navChips: readonly CompanionNavChip[];
   readonly proposalStates: Readonly<Record<string, CompanionProposalUiState>>;
   readonly mode: CompanionUiMode;
+  /**
+   * 她对自己的称呼：来自账号人格（`pet_profiles.name`），取不到是"伴星"。
+   * 由 `CompanionPresence` 读到后推给这里，气泡、抽屉、轨道与记录署名共用这一份。
+   */
+  readonly companionName: string;
+  setCompanionName(name: string): void;
   /** 向前还有更老的历史页（微信式上滑加载）。 */
   readonly historyHasMore: boolean;
   /** 正在向前翻页。 */
   readonly historyLoadingOlder: boolean;
+  /** 翻页失败时保留当前记录并提供就地重试。 */
+  readonly historyOlderError: string | null;
+  /** 最近窗口或工作空间变化后，搜索池必须重新读取。 */
+  readonly historyRevision: number;
   /** 向前翻一页（每页 20 条）；由历史抽屉的上滑触发。 */
   loadOlderMessages(): Promise<void>;
   /**
    * 全量拉取会话消息（搜索/日期筛选的数据底座，带会话级缓存）。
-   * 上限约 1200 条 + 最近窗口；失败或未就绪返回 null，调用方不得缓存 null。
+   * 只有读到会话开头才返回完整结果；失败或未就绪返回 null，调用方不得缓存 null。
    */
   fetchAllMessages(): Promise<readonly CompanionMessageV1[] | null>;
   /**
@@ -248,10 +266,13 @@ export interface CompanionChatSession {
   dismissStopNotice(): void;
   /** 气泡消费完这条回复（念完并消失）后调用。 */
   dismissLiveReply(): void;
+  dismissRichReply(): void;
   dismissFeedSelection(): void;
   setMode(mode: CompanionUiMode): void;
   dismissNavChip(id: string): void;
   decideProposal(proposalId: string, decision: "confirm" | "reject"): Promise<void>;
+  /** 快照读不成时重试一次：与首次读取同一条路径，不另造第二份真话。 */
+  retryProposal(proposalId: string): void;
   goToRoute(route: DesktopRouteV1): Promise<void>;
 }
 
@@ -302,7 +323,7 @@ export function companionMessageText(message: CompanionMessageV1): string {
  * agent 路由能映射出的每种 DesktopRoute 都必须有落点；没有等价视图时返回
  * false，调用方如实报"跳不了"，不假装跳过了。
  */
-async function applyRouteToRoom(route: DesktopRouteV1): Promise<boolean> {
+export async function applyRouteToRoom(route: DesktopRouteV1): Promise<boolean> {
   const room = useRoomStore.getState();
   switch (route.kind) {
     case "room.home":
@@ -328,9 +349,11 @@ async function applyRouteToRoom(route: DesktopRouteV1): Promise<boolean> {
       room.invoke("open-notebook");
       return true;
     case "learningRun.detail":
-      // 与 ReviewSurface / WorkspaceLibrarySurface 同一条入口：设 activeRunId，
-      // Player 由它驱动挂载。
+      // 与 ReviewSurface / WorkspaceLibrarySurface 同一条入口：设 activeRunId **并且**
+      // 真正切页。只设 id 不会换页（Player 挂在任务视图那一页里，页面由 `invoke` 决定），
+      // 于是「前往」成了一次空转：两条 IPC 都成功、无报错、页面纹丝不动。
       room.setActiveRunId(route.runId);
+      room.invoke("validate");
       return true;
     case "objective.detail":
       room.setActiveObjectiveId(route.objectiveId);
@@ -379,6 +402,32 @@ export function navChipsStillOutsideMessages(
   }
   if (landed.size === 0) return [...chips];
   return chips.filter((chip) => !landed.has(JSON.stringify(chip.route)));
+}
+
+/** 搜索只能使用完整历史；网络失败或游标不前进都不能把部分数据报成“没有找到”。 */
+export async function readCompleteCompanionHistory(
+  baseline: number | null,
+  loadPage: (beforeSeq: number) => Promise<{
+    readonly items: readonly CompanionMessageV1[];
+    readonly hasMore: boolean;
+    readonly oldestSeq: number | null;
+  } | null>,
+): Promise<CompanionMessageV1[] | null> {
+  const older: CompanionMessageV1[] = [];
+  let beforeSeq = baseline;
+  try {
+    while (beforeSeq != null) {
+      const page = await loadPage(beforeSeq);
+      if (!page) return null;
+      older.push(...page.items);
+      if (!page.hasMore) break;
+      if (page.oldestSeq == null || page.oldestSeq >= beforeSeq) return null;
+      beforeSeq = page.oldestSeq;
+    }
+  } catch {
+    return null;
+  }
+  return older.sort((a, b) => a.seq - b.seq);
 }
 
 /**
@@ -563,10 +612,21 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
   const [olderMessages, setOlderMessages] = useState<CompanionMessageV1[]>([]);
   const [historyHasMore, setHistoryHasMore] = useState(false);
   const [historyLoadingOlder, setHistoryLoadingOlder] = useState(false);
+  const [historyOlderError, setHistoryOlderError] = useState<string | null>(null);
+  const [historyRevision, setHistoryRevision] = useState(0);
+  const historyRevisionRef = useRef(0);
   const historyOldestSeqRef = useRef<number | null>(null);
+  /** 最近窗口的下界；全量搜索从这里翻，不受时间线上已翻到哪一页影响。 */
+  const historyRecentOldestSeqRef = useRef<number | null>(null);
+  const historyBaselineReadyRef = useRef(false);
+  const recentMessagesRef = useRef<CompanionMessageV1[]>([]);
   const historyLoadingRef = useRef(false);
-  const historyAllRef = useRef<CompanionMessageV1[] | null>(null);
+  const historyLoadTokenRef = useRef(0);
+  const historyAllRef = useRef<{ scopeRevision: number; revision: number; items: CompanionMessageV1[] } | null>(null);
+  const manuallyNavigatedKindsRef = useRef<Set<string>>(new Set());
+  const autoExecutedRef = useRef<Set<string>>(new Set());
   const [liveReply, setLiveReply] = useState<CompanionChatLiveReply | null>(null);
+  const [richReply, setRichReply] = useState<CompanionChatRichReply | null>(null);
   const [draft, setDraft] = useState<CompanionChatDraft | null>(null);
   const [interrupted, setInterrupted] = useState<CompanionChatInterrupted | null>(null);
   /** 本轮节点轨道（见 CompanionChatSession.nodes 的说明）。 */
@@ -614,6 +674,7 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
   }, []);
 
   const [mode, setMode] = useState<CompanionUiMode>("closed");
+  const [companionName, setCompanionName] = useState("伴星");
   const [cancelling, setCancelling] = useState(false);
   const [stopNotice, setStopNotice] = useState<string | null>(null);
   const conversationRef = useRef<CompanionChatConversationV1 | null>(null);
@@ -644,12 +705,23 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
     draftRef.current = "";
     setConversation(null);
     setMessages([]);
+    recentMessagesRef.current = [];
     setOlderMessages([]);
     setHistoryHasMore(false);
     setHistoryLoadingOlder(false);
+    historyLoadingRef.current = false;
+    historyLoadTokenRef.current += 1;
+    setHistoryOlderError(null);
     historyOldestSeqRef.current = null;
+    historyRecentOldestSeqRef.current = null;
+    historyBaselineReadyRef.current = false;
     historyAllRef.current = null;
+    historyRevisionRef.current += 1;
+    setHistoryRevision(historyRevisionRef.current);
+    manuallyNavigatedKindsRef.current.clear();
+    autoExecutedRef.current.clear();
     setLiveReply(null);
+    setRichReply(null);
     setDraft(null);
     setInterrupted(null);
     setFeedSelection(null);
@@ -657,6 +729,8 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
     setNavChips([]);
     setStreamCue(null);
     setMode("closed");
+    // 称呼是空间/账号级的：换空间后不许留着上一个空间里她的名字。
+    setCompanionName("伴星");
     setFailure(null);
     setPhase("idle");
   }, [workspaceScopeRevision]);
@@ -679,24 +753,40 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
   const ensureConversation = useCallback(async (): Promise<CompanionChatConversationV1> => {
     const existing = conversationRef.current;
     if (existing) return existing;
+    const scopeRevision = useRoomStore.getState().workspaceScopeRevision;
     const epoch = await requireWorkspaceEpoch();
     const ensured = unwrapGatewayResult(await window.ailearn.companion.chat.ensureConversation({
       meta: createRequestMeta(epoch),
       request: { version: 1 },
     }));
+    if (useRoomStore.getState().workspaceScopeRevision !== scopeRevision) {
+      throw new Error("工作空间已切换，请在当前空间重新读取对话。");
+    }
     conversationRef.current = ensured.conversation;
     setConversation(ensured.conversation);
     return ensured.conversation;
   }, []);
 
   const refreshMessages = useCallback(async (conversationId: string, epoch: number) => {
+    const scopeRevision = useRoomStore.getState().workspaceScopeRevision;
     const result = unwrapGatewayResult(await window.ailearn.companion.chat.listMessages({
       meta: createRequestMeta(epoch),
       request: { version: 1, conversationId, limit: 50 },
     }));
-    setMessages(result.items);
-    // 搜索/日期筛选的全量缓存随之过期。
-    historyAllRef.current = null;
+    if (useRoomStore.getState().workspaceScopeRevision !== scopeRevision || conversationRef.current?.id !== conversationId) {
+      throw new Error("工作空间已切换，请在当前空间重新读取对话。");
+    }
+    const changed = !historyBaselineReadyRef.current
+      || JSON.stringify(result.items) !== JSON.stringify(recentMessagesRef.current);
+    if (changed) {
+      setMessages(result.items);
+      recentMessagesRef.current = result.items;
+      historyAllRef.current = null;
+      historyRevisionRef.current += 1;
+      setHistoryRevision(historyRevisionRef.current);
+    }
+    historyBaselineReadyRef.current = true;
+    historyRecentOldestSeqRef.current = result.oldestSeq;
     // 分页基线只在会话首次加载时建立一次：后续 refresh（发完一轮、停止一轮）
     // 只替换"最近窗口"，不动已翻出来的老页游标。
     if (historyOldestSeqRef.current === null) {
@@ -707,9 +797,8 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
   }, []);
 
   /**
-   * 向前翻一页历史（每页 20 条，微信式上滑加载）。失败静默：这是补白读取，
-   * 不走 `unwrapGatewayResult`——它会把 not-ok 升级成门禁全量重置（2026-09-19
-   * 实测教训），翻页失败最多就是少看到一页旧消息。
+   * 向前翻一页历史（每页 20 条）。读取失败保留当前位置，显示重试入口。
+   * 不走 `unwrapGatewayResult`，避免补白读取失败触发门禁全量重置。
    */
   const loadOlderMessages = useCallback(async (): Promise<void> => {
     if (historyLoadingRef.current) return;
@@ -717,14 +806,23 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
     const beforeSeq = historyOldestSeqRef.current;
     if (!conversation || beforeSeq == null) return;
     historyLoadingRef.current = true;
+    const loadToken = ++historyLoadTokenRef.current;
+    const scopeRevision = useRoomStore.getState().workspaceScopeRevision;
     setHistoryLoadingOlder(true);
+    setHistoryOlderError(null);
     try {
       const epoch = await requireWorkspaceEpoch();
       const result = await window.ailearn.companion.chat.listMessages({
         meta: createRequestMeta(epoch),
         request: { version: 1, conversationId: conversation.id, limit: 20, beforeSeq },
       });
-      if (!result.ok) return;
+      if (loadToken !== historyLoadTokenRef.current
+        || useRoomStore.getState().workspaceScopeRevision !== scopeRevision
+        || conversationRef.current?.id !== conversation.id) return;
+      if (!result.ok) {
+        setHistoryOlderError(gatewayErrorMessage(result.error));
+        return;
+      }
       historyOldestSeqRef.current = result.data.oldestSeq;
       setHistoryHasMore(result.data.hasMore);
       setOlderMessages((current) => {
@@ -732,60 +830,53 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
         const older = result.data.items.filter((item) => !seen.has(item.id));
         return older.length > 0 ? [...older, ...current] : current;
       });
-    } catch {
-      // 静默：下一次滚动会再试。
+    } catch (error) {
+      if (loadToken === historyLoadTokenRef.current && conversationRef.current?.id === conversation.id) {
+        setHistoryOlderError(gatewayErrorMessage(error));
+      }
     } finally {
-      historyLoadingRef.current = false;
-      setHistoryLoadingOlder(false);
+      if (loadToken === historyLoadTokenRef.current) {
+        historyLoadingRef.current = false;
+        setHistoryLoadingOlder(false);
+      }
     }
   }, []);
 
   /**
    * 全量拉取（搜索/日期筛选的数据底座，带会话级缓存）：向前翻到会话开头，
    * **再并上当前最近窗口**——搜索池必须包含最近 50 条，否则刚聊过的内容搜不到。
-   * 上限约 1200 条 + 最近窗口；失败静默返回已收集部分。
-   * **未就绪（会话/分页基线还没建立）返回 null**——调用方不得把 null 缓存成
+   * 必须读到会话开头；任何页失败都不把部分结果当作完整搜索池。
+   * **未就绪（会话/最近窗口还没建立）返回 null**——调用方不得把 null 缓存成
    * 「没有消息」，否则一次过早的调用会永久污染搜索与月历（实机踩过）。
    */
   const fetchAllMessages = useCallback(async (): Promise<readonly CompanionMessageV1[] | null> => {
-    if (historyAllRef.current) return historyAllRef.current;
+    const revision = historyRevisionRef.current;
+    const scopeRevision = useRoomStore.getState().workspaceScopeRevision;
+    const cached = historyAllRef.current;
+    if (cached?.revision === revision && cached.scopeRevision === scopeRevision) return cached.items;
     const conversation = conversationRef.current;
-    const baseline = historyOldestSeqRef.current;
-    // 会话/分页基线未就绪 → null（调用方显示重试，而不是把「未就绪」当「无记录」缓存）。
-    if (!conversation || baseline == null) return null;
-    const older: CompanionMessageV1[] = [];
-    let beforeSeq: number | null = baseline;
-    let guard = 0;
-    try {
-      while (beforeSeq != null && guard < 12) {
-        guard += 1;
-        const epoch = await requireWorkspaceEpoch();
-        const result = await window.ailearn.companion.chat.listMessages({
-          meta: createRequestMeta(epoch),
-          request: { version: 1, conversationId: conversation.id, limit: 100, beforeSeq },
-        });
-        if (!result.ok) break;
-        older.push(...result.data.items);
-        historyOldestSeqRef.current = result.data.oldestSeq;
-        setHistoryHasMore(result.data.hasMore);
-        if (!result.data.hasMore || result.data.oldestSeq == null || result.data.oldestSeq === beforeSeq) break;
-        beforeSeq = result.data.oldestSeq;
-      }
-    } catch {
-      // 认证/纪元未就绪等瞬时失败：返回已收集部分（可能为 null）。
-      if (older.length === 0) return null;
-    }
-    older.sort((a, b) => a.seq - b.seq);
-    const seen = new Set(older.map((item) => item.id));
-    const full = [...older, ...messages.filter((item) => !seen.has(item.id))];
-    setOlderMessages((current) => {
-      const known = new Set(current.map((item) => item.id));
-      const missing = older.filter((item) => !known.has(item.id));
-      return missing.length > 0 ? [...missing, ...current] : current;
+    const baseline = historyRecentOldestSeqRef.current;
+    // 会话/最近窗口未就绪 → null；空会话的下界也为 null，但准备好后应返回空结果。
+    if (!conversation || !historyBaselineReadyRef.current) return null;
+    const older = await readCompleteCompanionHistory(baseline, async (beforeSeq) => {
+      if (historyRevisionRef.current !== revision || useRoomStore.getState().workspaceScopeRevision !== scopeRevision) return null;
+      const epoch = await requireWorkspaceEpoch();
+      if (historyRevisionRef.current !== revision || useRoomStore.getState().workspaceScopeRevision !== scopeRevision) return null;
+      const result = await window.ailearn.companion.chat.listMessages({
+        meta: createRequestMeta(epoch),
+        request: { version: 1, conversationId: conversation.id, limit: 100, beforeSeq },
+      });
+      return result.ok ? result.data : null;
     });
-    historyAllRef.current = full;
+    if (!older) return null;
+    if (historyRevisionRef.current !== revision
+      || conversationRef.current?.id !== conversation.id
+      || useRoomStore.getState().workspaceScopeRevision !== scopeRevision) return null;
+    const seen = new Set(older.map((item) => item.id));
+    const full = [...older, ...recentMessagesRef.current.filter((item) => !seen.has(item.id))];
+    historyAllRef.current = { revision, scopeRevision, items: full };
     return full;
-  }, [messages]);
+  }, []);
 
   /**
    * 从 run 摘要里取回"当前活动 run 的 generation"（2026-09-19）。
@@ -910,6 +1001,38 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
   }, [conversation, mode, sending, tracesRevision]);
 
   // ── 提案快照拉取 ──────────────────────────────────────────────────────
+  /**
+   * 取回一份提案快照（成功落 ready，失败落 error）。
+   *
+   * 单独成函数是为了**可重试**：读失败时该 id 会以 `{phase:"error"}` 留在表里，
+   * 而下面那个 effect 的守卫是「不在表里才取」—— 于是"这个选择暂时无法读取"会挂到
+   * 应用重启为止（方案 35 F1）。重试走同一条路径，不另造第二份真话。
+   * 回执归属按会话 id 判：跨工作区切换后晚到的快照不许写回表里。
+   */
+  const loadProposalSnapshots = useCallback(async (ids: readonly string[]): Promise<void> => {
+    const conversationId = conversationRef.current?.id ?? null;
+    if (conversationId === null || ids.length === 0) return;
+    for (const id of ids) {
+      try {
+        const epoch = await requireWorkspaceEpoch();
+        const snapshot = unwrapGatewayResult(await window.ailearn.companion.chat.getProposal({
+          meta: createRequestMeta(epoch),
+          request: { version: 1, proposalId: id },
+        }));
+        if (conversationRef.current?.id !== conversationId) return;
+        setProposalStates((current) => ({ ...current, [id]: { phase: "ready", proposal: snapshot.proposal } }));
+      } catch (error) {
+        if (conversationRef.current?.id !== conversationId) return;
+        setProposalStates((current) => ({ ...current, [id]: { phase: "error", message: gatewayErrorMessage(error) } }));
+      }
+    }
+  }, []);
+
+  const retryProposal = useCallback((proposalId: string): void => {
+    setProposalStates((current) => ({ ...current, [proposalId]: { phase: "loading" } }));
+    void loadProposalSnapshots([proposalId]);
+  }, [loadProposalSnapshots]);
+
   // 消息流里出现 action_ref 就取快照（拿 payloadSha256 与当前状态）。
   useEffect(() => {
     if (!conversation) return;
@@ -925,29 +1048,12 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
     for (const proposalId of liveReply?.proposalIds ?? []) ids.add(proposalId);
     const missing = [...ids].filter((id) => !(id in proposalStates));
     if (missing.length === 0) return;
-    let cancelled = false;
     setProposalStates((current) => {
       const next = { ...current };
       for (const id of missing) next[id] = { phase: "loading" };
       return next;
     });
-    void (async () => {
-      for (const id of missing) {
-        try {
-          const epoch = await requireWorkspaceEpoch();
-          const snapshot = unwrapGatewayResult(await window.ailearn.companion.chat.getProposal({
-            meta: createRequestMeta(epoch),
-            request: { version: 1, proposalId: id },
-          }));
-          if (cancelled) return;
-          setProposalStates((current) => ({ ...current, [id]: { phase: "ready", proposal: snapshot.proposal } }));
-        } catch (error) {
-          if (cancelled) return;
-          setProposalStates((current) => ({ ...current, [id]: { phase: "error", message: gatewayErrorMessage(error) } }));
-        }
-      }
-    })();
-    return () => { cancelled = true; };
+    void loadProposalSnapshots(missing);
   // proposalStates 刻意不进依赖：effect 先写 loading、再异步写 ready；若把它放进依赖，
   // loading 会触发 cleanup，把自己刚发出的快照请求标成 cancelled，卡片便永久停在加载态。
   // 新 proposal 的触发源始终是消息、liveReply 或 mode 变化。
@@ -1282,7 +1388,12 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
             const appendFrom = typeof payload.appendFrom === "number" ? payload.appendFrom : draftRef.current.length;
             // 缺口（appendFrom 落在已收内容之后）不猜：交给终态消息兜底。
             if (appendFrom > draftRef.current.length) return;
-            const next = draftRef.current.slice(0, appendFrom) + payload.textDelta;
+            // 纯追加是最常见的形状（服务端就是按块往后长）：这一支直接拼，省掉一次
+            // 全长 `slice` 拷贝与它产生的临时串。回写/补洞那一支仍走截断重拼。
+            const current = draftRef.current;
+            const next = appendFrom === current.length
+              ? current + payload.textDelta
+              : current.slice(0, appendFrom) + payload.textDelta;
             draftRef.current = next;
             setDraft({ runId: args.runId, text: next });
             return;
@@ -1414,17 +1525,15 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
     const text = input.text.trim();
     if (text.length === 0) return false;
     const generation = (sendGenerationRef.current += 1);
-    setPhase("sending");
-    setStreamCue(null);
-    setFailure(null);
-    setLiveReply(null);
-    setStopNotice(null);
-    setInterrupted(null);
-    // 轨道节点是"本轮"的：不清空的话，上一轮的 skill/tool 节点会让 railVisible
-    // 永久为 true——上一轮的「N 次工具」摘要挂到天荒地老，连纯闲聊轮也挂着。
-    setNodes([]);
-    draftRef.current = "";
-    setDraft(null);
+    /**
+     * 「这一轮开始了」的状态复位**不在这里做**，挪到乐观条目落地那一刻（见下面
+     * `setPhase("sending")`）。放在函数开头时，中间每一条"发送前置门禁"的早退都必须
+     * 自己记得把相位收回去 —— 而同意门禁那条就漏了（不是异常，catch 兜不到），
+     * 于是会话永久停在"正在回复中"：麦克风禁用、气泡挂着「正在结合当前页面想一想」，
+     * 看起来就是"上一条她还没说完"，而服务端什么都没有跑（方案 35 §23）。
+     * 放在这里，漏收这件事在结构上就不可能发生。
+     */
+    let optimisticId: string | null = null;
     try {
       const epoch = await requireWorkspaceEpoch();
       // 同意门禁（2026-09-19）：后端要到 worker 调用 provider 前才检查同意，未签署时
@@ -1449,9 +1558,26 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
       if (generation !== sendGenerationRef.current) return false;
       const voiceArtifactId = input.voiceArtifactId ?? null;
       const clientMessageId = crypto.randomUUID();
+      optimisticId = crypto.randomUUID();
+      /**
+       * 预检（会话纪元、同意门禁、上一轮提交闸门、本轮上下文）全部过了，才宣布"这一轮开始"。
+       * 从这里往前的任何早退都不动相位，用户看到的还是上一条的真实状态。
+       */
+      setPhase("sending");
+      setStreamCue(null);
+      setFailure(null);
+      setLiveReply(null);
+      setRichReply(null);
+      setStopNotice(null);
+      setInterrupted(null);
+      // 轨道节点是"本轮"的：不清空的话，上一轮的 skill/tool 节点会让 railVisible
+      // 永久为 true——上一轮的「N 次工具」摘要挂到天荒地老，连纯闲聊轮也挂着。
+      setNodes([]);
+      draftRef.current = "";
+      setDraft(null);
       const optimistic: CompanionMessageV1 = {
         version: 1,
-        id: crypto.randomUUID(),
+        id: optimisticId,
         workspaceId: active.workspaceId,
         conversationId: active.id,
         seq: Number.MAX_SAFE_INTEGER,
@@ -1588,6 +1714,9 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
           hasActionBlocks: proposalIds.length > 0,
           proposalIds,
         });
+        const richBlocks = reply.blocks.filter((block) => block.type === "image" || block.type === "quote"
+          || block.type === "diagram" || block.type === "card" || block.type === "nav");
+        setRichReply(richBlocks.length > 0 ? { messageId: reply.id, blocks: richBlocks } : null);
       } else {
         cancelRunInBackground(sent.runId, sent.generation, epoch);
         const message = "消息已经送达，但这次回复等待超时。可以打开对话记录稍后查看。";
@@ -1602,6 +1731,12 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
       return true;
     } catch (error) {
       if (generation !== sendGenerationRef.current) return false;
+      if (optimisticId !== null) {
+        // 这一句服务端从来没收到过（409 的拒绝发生在写用户消息**之前**）。留着它
+        // 就是一句"你说过但没有"的幽灵消息：抽屉里看得见、她不回应，直到下一次
+        // 任意刷新才自己消失（方案 35 A3）。输入框那份文本此刻已经还给用户了。
+        setMessages((current) => current.filter((message) => message.id !== optimisticId));
+      }
       setFailure(companionTurnErrorMessage(error));
       setPhase("error");
       return false;
@@ -1665,6 +1800,7 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
   const dismissStopNotice = useCallback(() => setStopNotice(null), []);
 
   const dismissLiveReply = useCallback(() => setLiveReply(null), []);
+  const dismissRichReply = useCallback(() => setRichReply(null), []);
   const dismissFeedSelection = useCallback(() => setFeedSelection(null), []);
   const dismissNavChip = useCallback((id: string) => {
     setNavChips((current) => current.filter((chip) => chip.id !== id));
@@ -1711,29 +1847,39 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
         }]);
       }
     } catch (error) {
+      if (error instanceof RendererGatewayError && error.code === "conflict") {
+        // 撞车意味着这件事**已经在别处处理过了**（或载荷变了），不是用户按错了。
+        // 服务端是唯一真源：把快照取回来，卡自己变成终态留痕。
+        // 原来这里只挂一句 `gatewayErrorMessage`，而那句子是给学习流程写的
+        // 「这条学习状态已经发生变化，请先同步后再继续。」—— 一张已经作废的卡挂着一句
+        // 另一个产品的报错，状态也不刷新（方案 35 F2）。
+        await loadProposalSnapshots([proposalId]);
+        return;
+      }
       setProposalStates((current) => {
         const existing = current[proposalId];
         if (!existing || existing.phase !== "ready") return current;
         return { ...current, [proposalId]: { ...existing, deciding: undefined, error: gatewayErrorMessage(error) } };
       });
     }
-  }, [proposalStates, pushNavChips]);
-
-  /** 用户本会话亲手「前往」过的落点类型（会话内授权升级，见 goToRoute 内注释）。 */
-  const manuallyNavigatedKindsRef = useRef<Set<string>>(new Set());
+  }, [loadProposalSnapshots, proposalStates, pushNavChips]);
 
   const goToRoute = useCallback(async (route: DesktopRouteV1) => {
+    const scopeRevision = useRoomStore.getState().workspaceScopeRevision;
     const resolveResponse = await window.ailearn.navigation.resolve({ meta: createRequestMeta(), route });
     const resolved = unwrapGatewayResult(resolveResponse);
     if (resolved.current.scope !== "workspace") throw new Error("navigation did not resolve to the current workspace");
-    await window.ailearn.navigation.go({
+    if (useRoomStore.getState().workspaceScopeRevision !== scopeRevision) throw new Error("工作空间已切换，请在当前空间重新操作。");
+    unwrapGatewayResult(await window.ailearn.navigation.go({
       meta: createRequestMeta(resolved.current.workspaceEpoch),
       route: resolved.current.route,
       entryKind: "user",
-    });
+    }));
+    if (useRoomStore.getState().workspaceScopeRevision !== scopeRevision) throw new Error("工作空间已切换，请在当前空间重新操作。");
     // 历史栈记完还要真正换页（applyRouteToRoom）——否则按钮点了没反应。
     const applied = await applyRouteToRoom(resolved.current.route);
     if (!applied) throw new Error("这个落点在桌面端还没有对应的页面");
+    if (useRoomStore.getState().workspaceScopeRevision !== scopeRevision) throw new Error("工作空间已切换，请在当前空间重新操作。");
     // 会话内授权升级（2026-09-19 用户实测"第二次就不自动跳了"）：用户亲手点过
     // 「前往」的落点类型，本轮会话里后续同类落点直接自动跳——用户已经用行动
     // 授过权，再让他一枚一枚点同款按钮就是把确认当打卡。会话级记忆，不持久化；
@@ -1746,7 +1892,6 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
   // 事先给的，客户端直接执行，不再要求点「前往」。chip 仍保留（留痕 + 可关掉）。
   // 只执行一次：以 chip id（= 事件 seq）记账，重挂载/轮询重放都不会重复跳。
   // 连续多个预授权路由只执行最后一个（模型一回合内连开两页时，以最终落点为准）。
-  const autoExecutedRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     const pending = navChips.filter(
       (chip) => chip.route
@@ -1781,9 +1926,12 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
     messages: mergedMessages,
     historyHasMore,
     historyLoadingOlder,
+    historyOlderError,
+    historyRevision,
     loadOlderMessages,
     fetchAllMessages,
     liveReply,
+    richReply,
     draft,
     interrupted,
     nodes,
@@ -1792,6 +1940,8 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
     navChips,
     proposalStates,
     mode,
+    companionName,
+    setCompanionName,
     assistantCue,
     send,
     cancel,
@@ -1799,18 +1949,23 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
     stopNotice,
     dismissStopNotice,
     dismissLiveReply,
+    dismissRichReply,
     dismissFeedSelection,
     setMode,
     dismissNavChip,
     decideProposal,
+    retryProposal,
     goToRoute,
   }), [
     assistantCue,
     cancel,
     cancelling,
+    companionName,
     conversation,
     decideProposal,
+    retryProposal,
     dismissLiveReply,
+    dismissRichReply,
     dismissFeedSelection,
     dismissNavChip,
     dismissStopNotice,
@@ -1821,11 +1976,14 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
     goToRoute,
     historyHasMore,
     historyLoadingOlder,
+    historyOlderError,
+    historyRevision,
     interrupted,
     loadOlderMessages,
     mergedMessages,
     mode,
     liveReply,
+    richReply,
     navChips,
     nodes,
     phase,

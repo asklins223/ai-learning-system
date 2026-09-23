@@ -1,5 +1,9 @@
 import type { CSSProperties } from "react";
-import { companionRunTraceExpired, type CompanionRunTrace } from "../../app/companion-agent-nodes";
+import {
+  companionRunTraceExpired,
+  nodeLabel,
+  type CompanionRunTrace,
+} from "../../app/companion-agent-nodes";
 import type { CompanionProposalUiState } from "../../app/companion-chat-session";
 import { CompanionProposalChoice } from "./CompanionProposalChoice";
 import "./companion-run-trace.css";
@@ -41,7 +45,7 @@ function displayedNodeState(nodeState: NodeState, runStatus: string): NodeState 
   return nodeState;
 }
 
-export function shouldOpenRunTrace(trace: CompanionRunTrace): boolean {
+function shouldOpenRunTrace(trace: CompanionRunTrace): boolean {
   return trace.summary.stepCount > 1
     || trace.summary.toolCallCount > 0
     || trace.summary.status === "waiting_for_confirmation"
@@ -55,11 +59,13 @@ export function CompanionRunTraceView({
   defaultOpen = shouldOpenRunTrace(trace),
   proposalStates,
   onDecideProposal,
+  onRetryProposal,
 }: {
   readonly trace: CompanionRunTrace;
   readonly defaultOpen?: boolean;
   readonly proposalStates?: Readonly<Record<string, CompanionProposalUiState>>;
   readonly onDecideProposal?: (proposalId: string, decision: "confirm" | "reject") => void;
+  readonly onRetryProposal?: (proposalId: string) => void;
 }) {
   const expired = companionRunTraceExpired(trace);
   const stateLabel = runStateLabel(trace.summary.status);
@@ -72,7 +78,7 @@ export function CompanionRunTraceView({
       {expired ? (
         <p className="companion-history__trace-expired">过程记录已过期，只保留近期对话过程。</p>
       ) : (
-        <ol style={{ "--trace-count": Math.max(0, trace.nodes.length - 1) } as CSSProperties}>
+        <ol>
           {trace.nodes.map((node, index) => {
             // assistant.status 没有单独的 completed 帧；历史摘要已经终态时仍照搬实时
             // running 会出现「整轮已完成 / 节点仍进行中」的矛盾。只对未决节点采用
@@ -85,7 +91,7 @@ export function CompanionRunTraceView({
                 style={{ "--trace-delay": Math.min(5, Math.max(0, trace.nodes.length - 1 - index)) } as CSSProperties}
               >
                 <div>
-                  <span>{node.label}</span>
+                  <span>{nodeLabel(node)}</span>
                   {node.summary ? <small>{node.summary}</small> : null}
                   {node.proposalId && proposalStates && onDecideProposal ? (
                     <CompanionProposalChoice
@@ -93,6 +99,9 @@ export function CompanionRunTraceView({
                       state={proposalStates[node.proposalId]}
                       context="history"
                       onDecide={(decision) => onDecideProposal(node.proposalId as string, decision)}
+                      onRetry={onRetryProposal
+                        ? () => { onRetryProposal(node.proposalId as string); }
+                        : undefined}
                     />
                   ) : null}
                 </div>

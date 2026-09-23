@@ -59,4 +59,49 @@ describe("CompanionRunTraceView", () => {
     expect(screen.getByText("已完成")).toBeTruthy();
     expect(screen.queryByText("进行中")).toBeNull();
   });
+
+  /**
+   * 工具节点的 `label` 装的是服务端下发的 `definition.description` —— 那是**给模型看的**
+   * 工具说明。轨道与头顶那句都过 `nodeLabel()` 换成给人看的那句话，这一份以前是裸渲染
+   * `node.label`（2026-09-23 真窗口截图：过程里明晃晃写着"**只在用户问自己学了多久时
+   * 调用**；她跟你打招呼时不要调"），于是同一步在轨道上是「正在看你的学习数据」、
+   * 在记录里是一份工具文档。
+   */
+  it("工具节点说给人听的那句话，不把模型看的工具说明吐到界面上", () => {
+    const modelFacing = "读取学习数据统计：今天/本周学了多久、到期复习数。**只在用户问进度时调用**";
+    render(<CompanionRunTraceView trace={traceWith({
+      key: "tool:stats", kind: "tool", label: modelFacing, state: "succeeded",
+      toolName: "companion_get_learning_stats", summary: "今日 39 分钟", proposalId: null,
+    })} />);
+    expect(screen.getByText("正在看你的学习数据")).toBeTruthy();
+    expect(screen.queryByText(modelFacing)).toBeNull();
+    expect(document.body.textContent).not.toContain("只在用户问进度时调用");
+  });
+
+  it("认不出的工具不猜语义，统一说「正在处理…」", () => {
+    render(<CompanionRunTraceView trace={traceWith({
+      key: "tool:odd", kind: "tool", label: "companion_do_something_new 的说明文字", state: "succeeded",
+      toolName: "companion_do_something_new", summary: null, proposalId: null,
+    })} />);
+    expect(screen.getByText("正在处理…")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("companion_do_something_new");
+  });
 });
+
+function traceWith(node: CompanionRunTrace["nodes"][number]): CompanionRunTrace {
+  return {
+    summary: {
+      version: 1,
+      runId: "11111111-1111-4111-8111-111111111111",
+      status: "succeeded",
+      generation: 1,
+      stepCount: 1,
+      toolCallCount: 1,
+      maxSteps: 4,
+      maxToolCalls: 4,
+      assistantMessageId: "22222222-2222-4222-8222-222222222222",
+      nodeCount: 1,
+    },
+    nodes: [node],
+  };
+}

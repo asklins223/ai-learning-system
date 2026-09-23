@@ -9,7 +9,7 @@ import { useRoomStore } from "../../app/room-store";
 /**
  * 详情页的主行动块（31 号文档 P15，批次 B8）。
  *
- * 实机量到的形状：`.v3-next-action` 这块 427×78 的黄纸是全页视觉重心，里面的
+ * 新简报只有一个 `.objective-brief__launch` 主行动按钮，里面的
  * `<strong>` 写着「继续作答」，右边那颗 77×28 的按钮**也**写着「继续作答」。
  * 一个词占两行，真正能按的只有 5% 的面积。现在整块就是那颗按钮。
  *
@@ -99,7 +99,7 @@ describe("详情页的主行动块", () => {
     render(<ObjectiveDetailSurface />);
 
     const block = await waitFor(() => {
-      const el = document.querySelector(".v3-next-action");
+      const el = document.querySelector(".objective-brief__launch");
       expect(el).not.toBeNull();
       return el;
     });
@@ -114,7 +114,7 @@ describe("详情页的主行动块", () => {
     render(<ObjectiveDetailSurface />);
 
     const block = await waitFor(() => {
-      const el = document.querySelector(".v3-next-action");
+      const el = document.querySelector(".objective-brief__launch");
       expect(el).not.toBeNull();
       return el;
     });
@@ -122,6 +122,34 @@ describe("详情页的主行动块", () => {
     fireEvent.click(block!);
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("validate"));
     // resume_run 不该再发起一个 run。
+    expect(api.learningRun.start).not.toHaveBeenCalled();
+  });
+
+  it("最近完成的结果可以重开，且再次挑战不会覆盖旧记录", async () => {
+    const api = installApi(detail({
+      personal: {
+        initialValidation: null,
+        activeRun: null,
+        review: null,
+        practiceTrailCount: 1,
+        lastCanonicalAt: null,
+        latestResult: { runId: RUN_ID, completedAt: "2026-09-20T17:12:00.000Z", outcome: "practice_completed" },
+      },
+      personalState: { state: "unvalidated", activeRunId: null },
+      primaryAction: { kind: "create_run", objectiveId: OBJECTIVE_ID, label: "开始学习", start: CARD_START },
+    }));
+    const { invoke } = stubRoom();
+    render(<ObjectiveDetailSurface />);
+    const previous = await waitFor(() => {
+      const button = [...document.querySelectorAll("button")].find((item) => item.textContent?.includes("回看上次结果"));
+      expect(button).toBeTruthy();
+      return button!;
+    });
+    expect(document.body.textContent).toContain("练习已完成");
+    expect(document.querySelector(".objective-brief__launch")?.textContent).toContain("再挑战一次");
+    fireEvent.click(previous);
+    expect(useRoomStore.getState().activeRunId).toBe(RUN_ID);
+    expect(invoke).toHaveBeenCalledWith("validate");
     expect(api.learningRun.start).not.toHaveBeenCalled();
   });
 
@@ -160,12 +188,14 @@ describe("详情页的主行动块", () => {
     render(<ObjectiveDetailSurface />);
 
     const block = await waitFor(() => {
-      const el = document.querySelector(".v3-next-action");
+      const el = document.querySelector(".objective-brief__launch");
       expect(el?.textContent).toContain("现在还不能正式答");
       return el;
     });
     expect((block as HTMLButtonElement).disabled).toBe(true);
     // 复盘 #9：只留一个按不动的按钮，用户读到的是"产品坏了"。禁用态必须自带原因。
-    expect((block as Element).textContent).toContain("才能开始正式验证");
+    const reason = document.getElementById("objective-next-action-why");
+    expect((block as Element).getAttribute("aria-describedby")).toContain("objective-next-action-why");
+    expect(reason?.textContent).toContain("才能开始正式验证");
   });
 });

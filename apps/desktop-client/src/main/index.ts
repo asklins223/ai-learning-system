@@ -94,6 +94,22 @@ function isWithin(rootPath: string, candidatePath: string): boolean {
 function registerAppProtocol(): void {
   const rendererRoot = resolve(__dirname, '../renderer')
 
+  /**
+   * `rendererRoot` 整个进程里不会变，它的 realpath 没必要每个资源请求都再问一次磁盘
+   * （0269 轮 M21：Pixi 房间、字体、Live2D 模型与清单在启动时就是几十上百个请求，每个
+   * 都白做一次 syscall）。解析失败不缓存，下一次请求会重试。
+   */
+  let rendererRealRootPromise: Promise<string> | null = null
+  const rendererRealRoot = (): Promise<string> => {
+    if (!rendererRealRootPromise) {
+      rendererRealRootPromise = realpath(rendererRoot).catch((error: unknown) => {
+        rendererRealRootPromise = null
+        throw error
+      })
+    }
+    return rendererRealRootPromise
+  }
+
   protocol.handle(APP_SCHEME, async (request) => {
     if (request.method !== 'GET' && request.method !== 'HEAD') {
       return response(405, 'Method not allowed', request.method, { Allow: 'GET, HEAD' })
@@ -138,7 +154,7 @@ function registerAppProtocol(): void {
 
     try {
       const resolvedPaths = await Promise.all([
-        realpath(rendererRoot),
+        rendererRealRoot(),
         realpath(absolutePath)
       ])
       rendererRealPath = resolvedPaths[0]
@@ -342,8 +358,7 @@ const publishedWindowStates = new WeakMap<BrowserWindow, AILearnWindowState>()
 function currentWindowState(window: BrowserWindow): AILearnWindowState {
   return resolveWindowState({
     minimized: window.isMinimized(),
-    visible: window.isVisible(),
-    focused: window.isFocused()
+    visible: window.isVisible()
   })
 }
 
@@ -376,10 +391,10 @@ function registerWindowLifecycle(window: BrowserWindow): void {
   windowStateRevisions.set(window, 0)
   publishedWindowStates.set(window, currentWindowState(window))
 
+  // 焦点不在这一组里：`resolveWindowState` 已经不看焦点了，留着这两条只会变成
+  // 每次都判定、永远判定为"没变"的空转订阅（方案 35 E7）。
   window.on('show', () => publishWindowState(window))
   window.on('hide', () => publishWindowState(window))
-  window.on('focus', () => publishWindowState(window))
-  window.on('blur', () => publishWindowState(window))
   window.on('minimize', () => publishWindowState(window))
   window.on('restore', () => publishWindowState(window))
 }
@@ -484,9 +499,25 @@ app.whenReady().then(async () => {
     hardenWebContents(contents)
   })
 
-  session.defaultSession.setPermissionCheckHandler(() => false)
-  session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => {
-    callback(false)
+  /**
+   * 权限闸：默认全拒，只放行伴星语音输入真正要的那一样（麦克风）。
+   *
+   * 这两行以前是无条件 `false`，于是 `navigator.mediaDevices.getUserMedia` 永远被拒；
+   * 而渲染层的 `isSupported()` 只看 API 存不存在（Chromium 里恒存在），所以麦克风按钮照常
+   * 画出来、tooltip 写着「语音输入」，点下去只能得到「麦克风不可用或未授权」，连 macOS 的
+   * 授权弹窗都不会弹 —— 伴星的语音输入从第一天起就没有工作过（方案 35 E0）。
+   *
+   * 摄像头与其余一切仍然拒：伴星只收声音。`audioCapture` 是 macOS 的设备级授权，
+   * 与 `media` 成对出现，少一个都会变成"点了没反应"。放行前还要过一遍应用自己的
+   * 来源判据，不给第三方帧开口子。
+   */
+  const grantedPermissions = new Set(['media', 'audioCapture'])
+  session.defaultSession.setPermissionCheckHandler((_contents, permission) =>
+    grantedPermissions.has(permission)
+  )
+  session.defaultSession.setPermissionRequestHandler((contents, permission, callback, details) => {
+    const fromAppPage = isAllowedNavigation(details?.requestingUrl ?? contents.getURL())
+    callback(grantedPermissions.has(permission) && fromAppPage)
   })
 
   await createMainWindow()

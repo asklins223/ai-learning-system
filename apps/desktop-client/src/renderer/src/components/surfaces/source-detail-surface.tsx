@@ -5,7 +5,7 @@ import type {
   DesktopSourceSegment,
 } from "@ailearn/shared/desktop-surface-contracts";
 import { useRoomStore } from "../../app/room-store";
-import { createRequestMeta, gatewayErrorMessage, unwrapGatewayResult } from "../../app/desktop-client";
+import { createRequestMeta, gatewayErrorMessage, unwrapGatewayResult, RendererGatewayError } from "../../app/desktop-client";
 import { HudPage } from "../hud/HudPage";
 import { useHudPage } from "../hud/use-hud-page";
 import {
@@ -57,7 +57,7 @@ export function SourceDetailSurface() {
 
   /** The title draft while the folio's headline is a field; null means it reads. */
   const [renaming, setRenaming] = useState<string | null>(null);
-  const [busy, setBusy] = useState<"rename" | "note" | "archive" | null>(null);
+  const [busy, setBusy] = useState<"rename" | "note" | "archive" | "reparse" | null>(null);
   const [notice, setNotice] = useState<{ readonly tone: "info" | "error"; readonly text: string } | null>(null);
   const [duplicate, setDuplicate] = useState<DuplicateNote | null>(null);
   const [archiveConfirm, setArchiveConfirm] = useState(false);
@@ -302,6 +302,41 @@ export function SourceDetailSurface() {
     }
   };
 
+  /**
+   * 重新解析这一篇（doc 34 L7）。文案里那句"打开来源后可以重新解析"以前没有对应的
+   * 端点，也没有按钮——job 被判 dead 时只改 `jobs`，来源会永远停在「处理中」。
+   *
+   * 只给 `failed` 与 `processing` 两种状态看到：`ready` 不需要，`draft` 是刚建还没跑。
+   * 服务端对"已经有任务在跑"回 409，这里原样把那句话显示出来而不是重试——
+   * 重复入队是同一份外部调用付两遍钱。
+   */
+  const reparseSource = async () => {
+    if (!sourceId || busy) return;
+    setBusy("reparse");
+    setNotice(null);
+    try {
+      unwrapGatewayResult(await window.ailearn.source.reparse({
+        meta: createRequestMeta(epochRef.current),
+        sourceId,
+      }));
+      setNotice({ tone: "info", text: "已经排上重新解析了，稍后回到这一页看结果。" });
+      void reload();
+    } catch (error) {
+      // 判"是不是已经有任务在跑"要认**错误码**，不是认文案：文案是
+      // `gatewayErrorMessage` 按码翻出来的中文句子，拿它做子串匹配等于把
+      // "改了措辞就静默走错分支"埋进这里。
+      const inFlight = error instanceof RendererGatewayError && error.code === "conflict";
+      setNotice({
+        tone: "error",
+        text: inFlight
+          ? "这一篇已经有任务在跑了，不用重复排。"
+          : `重新解析没排上：${gatewayErrorMessage(error)}`,
+      });
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const runPrimary = () => {
     if (continueTarget) {
       openNote(continueTarget.noteId, continueTarget.versionId, "edit");
@@ -319,6 +354,10 @@ export function SourceDetailSurface() {
     : continueTarget ? "继续写笔记" : "前往笔记库";
 
   const archiveAvailable = canArchive && source?.status !== "archived";
+  // 与归档同一个门：能力投影里 owner 那批写能力是一起置位的（`source.update` 与
+  // `source.archive` 不会一个开一个关），真判据仍在服务端 `requireOwner` 那一处。
+  const reparseAvailable = canArchive
+    && (source?.status === "failed" || source?.status === "processing");
 
   const actions = duplicate ? (
     <>
@@ -353,6 +392,17 @@ export function SourceDetailSurface() {
       </button>
       {canRename ? (
         <button type="button" className="text-action" onClick={openRename}>重命名</button>
+      ) : null}
+      {reparseAvailable ? (
+        <button
+          type="button"
+          className="text-action"
+          title="这一篇的解析任务已经结束或没跑完，重新排一次"
+          disabled={busy === "reparse"}
+          onClick={() => void reparseSource()}
+        >
+          {busy === "reparse" ? "正在重新排…" : "重新解析"}
+        </button>
       ) : null}
       {archiveAvailable ? (
         <button

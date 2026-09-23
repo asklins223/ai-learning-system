@@ -4,6 +4,8 @@ import gsap from "gsap";
 import { useGSAP } from "@gsap/react";
 import { useRoomStore } from "../app/room-store";
 import { useHomeProjection } from "../app/home-projection";
+import { useCompanionHomeProjection } from "../app/companion-home-projection";
+import { companionCelebrationAllowed } from "../app/companion-celebration-policy";
 import { homePresentation } from "../app/home-presentation";
 import {
   mediaAssetUrl,
@@ -47,6 +49,7 @@ export function RoomStage() {
   const windowState = useRoomStore((state) => state.windowState);
   const inputFocused = useRoomStore((state) => state.inputFocused);
   const masterMuted = useRoomStore((state) => state.masterMuted);
+  const companionTemporarilyHidden = useRoomStore((state) => state.companionTemporarilyHidden);
   const pendingHomeCompletion = useRoomStore((state) => state.pendingHomeCompletion);
   const activeHomeCompletion = useRoomStore((state) => state.activeHomeCompletion);
   const onboardingOpen = useRoomStore((state) => state.onboardingOpen);
@@ -55,7 +58,17 @@ export function RoomStage() {
   const beginPendingHomeCompletion = useRoomStore((state) => state.beginPendingHomeCompletion);
   const markHomeCompletionStarted = useRoomStore((state) => state.markHomeCompletionStarted);
   const consumeHomeCompletion = useRoomStore((state) => state.consumeHomeCompletion);
+  const presentPendingHomeCompletion = useRoomStore((state) => state.presentPendingHomeCompletion);
+  const setCompanionMoment = useRoomStore((state) => state.setCompanionMoment);
   const { projection, loading: homeLoading, failure: homeFailure } = useHomeProjection();
+  const companionHome = useCompanionHomeProjection();
+  const celebrationAllowed = companionCelebrationAllowed({
+    masterMuted,
+    temporarilyHidden: companionTemporarilyHidden,
+    activeness: companionHome.projection?.profileSummary.activeness ?? null,
+    proactiveMuted: companionHome.projection?.roomProfile.proactiveMuted === true,
+    allowPlayful: companionHome.projection?.profileSummary.boundaries.allowPlayful === true,
+  });
   const home = homePresentation(projection, homeLoading, homeFailure);
   const { manifest, error } = useLearningRoomManifest();
   const { notebookState, reviewState, shelfState } = home;
@@ -81,9 +94,19 @@ export function RoomStage() {
   const inReviewScene = viewPreset === "review";
   const inSeatScene = viewPreset !== "room" && !inSearchScene;
   const inGenericSeatScene = inSeatScene && !inReviewScene;
-  const roomIsQuiet = Boolean(surface) || inputFocused || windowState !== "visible" || onboardingOpen;
+  const roomIsQuiet = Boolean(surface) || inputFocused || windowState !== "visible" || onboardingOpen || !celebrationAllowed;
+  useEffect(() => {
+    if (celebrationAllowed) return;
+    if (activeHomeCompletion) consumeHomeCompletion(activeHomeCompletion.id);
+    if (pendingHomeCompletion) {
+      presentPendingHomeCompletion(pendingHomeCompletion.id);
+      setCompanionMoment("idle");
+    }
+  }, [activeHomeCompletion, celebrationAllowed, consumeHomeCompletion, pendingHomeCompletion, presentPendingHomeCompletion, setCompanionMoment]);
   useEffect(() => {
     if (
+      !celebrationAllowed
+      ||
       surface
       || scenePhase !== "idle"
       || windowState !== "visible"
@@ -96,6 +119,7 @@ export function RoomStage() {
   }, [
     activeHomeCompletion,
     beginPendingHomeCompletion,
+    celebrationAllowed,
     onboardingOpen,
     pendingHomeCompletion,
     scenePhase,

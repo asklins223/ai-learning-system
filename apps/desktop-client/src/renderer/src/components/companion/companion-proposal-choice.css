@@ -100,7 +100,7 @@
 }
 
 .companion-choice-card__actions button {
-  min-height: 36px;
+  min-height: 44px;
   padding: 7px 10px;
   color: var(--companion-ink);
   font: inherit;
@@ -109,7 +109,7 @@
   border-radius: 12px 14px 11px 13px;
   background: rgba(255, 255, 255, .76);
   cursor: pointer;
-  transition: background-color 150ms ease-out, border-color 150ms ease-out, transform 150ms ease-out;
+  transition: background-color 150ms ease-out, border-color 150ms ease-out, transform 150ms var(--hud-ease-out);
 }
 
 .companion-choice-card__actions .companion-choice-card__confirm {
@@ -120,6 +120,30 @@
 .companion-choice-card__actions button:disabled {
   cursor: wait;
   opacity: .58;
+}
+
+/* 读不成时的那颗重试（方案 35 F1）。这层没有 `.companion-choice-card button` 的通用规则，
+   不写就是浏览器默认按钮的样子 —— 与 `__actions button` 同一套纸面语法，字号跟着卡片走。 */
+.companion-choice-card__retry {
+  align-self: start;
+  min-height: 44px;
+  margin-top: 2px;
+  padding: 7px 12px;
+  color: var(--companion-ink);
+  font: inherit;
+  font-weight: 700;
+  border: 1.5px solid rgba(143, 193, 166, .82);
+  border-radius: 12px 14px 11px 13px;
+  background: rgba(205, 235, 217, .76);
+  cursor: pointer;
+  transition: background-color 150ms ease-out, border-color 150ms ease-out;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .companion-choice-card__retry:hover {
+    border-color: var(--companion-mint-strong);
+    background: rgba(205, 235, 217, .95);
+  }
 }
 
 @media (hover: hover) and (pointer: fine) {

@@ -97,10 +97,15 @@ function focusSurfaces(dashboard: LearningDashboardV2): LearningObjectiveSurface
 }
 
 export function projectLearningDashboardToRoomProjection(
-  input: unknown,
+  // 类型收口取代运行时再校验：两个调用方（`desktop-gateway.ts:1889` 与 `:1907`）交进来的
+  // 都已经是 `learningDashboardV2Schema.safeParse` 的输出（缓存里存的也是 `dashboard.data`），
+  // 所以原来这句 `parse(input)` 是对**同一个对象**再做一次整树遍历 + 深拷贝——而这是桌面端
+  // 最高频的大读（每次进房间、每次 snapshot_invalidated）。参数从 `unknown` 改成解析后的
+  // 类型之后，"必须给已校验过的数据"由编译器负责，不再靠每次运行花一遍去自证。
+  input: LearningDashboardV2,
   context: RoomProjectionContext,
 ): RoomProjectionV1 {
-  const dashboard = learningDashboardV2Schema.parse(input);
+  const dashboard = input;
   const countsUnavailable = dashboard.degradation?.unavailableSections.includes("counts") ?? false;
   const focusUnavailable = dashboard.degradation?.unavailableSections.includes("focus") ?? false;
   const surfaces = focusSurfaces(dashboard);

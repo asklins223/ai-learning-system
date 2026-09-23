@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -39,10 +40,12 @@ import type { CompanionAgentPermissionLevel } from "@ailearn/shared/companion-ag
 import type { DesktopRouteV1 } from "@ailearn/shared/desktop-ipc-contracts";
 import type { CompanionMessageV1 } from "@ailearn/shared/companion-conversation-contracts";
 import { gatewayErrorMessage } from "../../app/desktop-client";
+import { useRoomStore } from "../../app/room-store";
 import {
   companionMessageText,
   navChipsStillOutsideMessages,
   useCompanionChat,
+  type CompanionChatPhase,
   type CompanionNavChip,
 } from "../../app/companion-chat-session";
 import {
@@ -60,6 +63,7 @@ import {
 import { subscribeHomeV2VoiceLevel } from "../../app/companion-voice-level";
 import { nodeLabel } from "../../app/companion-agent-nodes";
 import type {
+  CompanionAgentNode,
   CompanionAgentNodeState,
   CompanionRunTrace,
 } from "../../app/companion-agent-nodes";
@@ -76,11 +80,13 @@ import {
   companionInterventionHint,
   quietHoursPatch,
   quietHoursWithBoundary,
+  type QuietHoursBoundary,
 } from "./companion-account-presence";
 import {
   companionBubbleHoldMs,
   companionBubbleLineHeights,
   companionBubbleMaxHeightPx,
+  companionBubblePreviewText,
   companionBubbleText,
 } from "./companion-bubble-reveal";
 import {
@@ -94,6 +100,7 @@ import { DIRECTORY_RAIL_MODE_EVENT, DIRECTORY_RAIL_STATE_EVENT } from "../Direct
 import type { Rect } from "./companion-home-placement";
 import {
   CompanionChatRecordArticle,
+  CompanionMessageRichBlocks,
   MonthCalendar,
   highlightText,
   messageDayKey,
@@ -118,7 +125,6 @@ export interface CompanionHudSettings {
   readonly scale: number;
   readonly scaleMin: number;
   readonly scaleMax: number;
-  readonly rendererLabel: string;
   readonly pageMuted: boolean;
   readonly taskActive: boolean;
   readonly focusUntilTaskEnd: boolean;
@@ -139,7 +145,6 @@ export interface CompanionHudSettings {
 export interface CompanionHudProps {
   readonly motionMode: "full" | "lite" | "off";
   readonly voiceEnabled: boolean;
-  readonly contextHint: string | null;
   readonly actions: readonly CompanionHudAction[];
   readonly settings: CompanionHudSettings;
   readonly onRunAction: (id: string) => void;
@@ -202,6 +207,17 @@ export function companionHudReplyText(reply: { readonly text: string; readonly h
   return reply.hasActionBlocks ? CARD_ONLY_LINE : "";
 }
 
+/**
+ * 只有"当前这一轮就是失败"才把那句报错摆在界面上。
+ *
+ * 会话层的 `failure` 在下一次读取成功后仍然留着（`phase` 会回到 `ready`），那是上一轮的
+ * 陈旧报错。输入气泡那侧一直按这条判据筛（旧注释就写在它上面），而对话记录抽屉是无条件
+ * 显示 —— 同一个文件里两套真话（方案 35 B5）。判据收在这一个函数里。
+ */
+function visibleTurnFailure(chat: { readonly failure: string | null; readonly phase: CompanionChatPhase }): string | null {
+  return chat.failure !== null && chat.phase === "error" ? chat.failure : null;
+}
+
 function playButtonBounce(event: ReactPointerEvent<HTMLButtonElement>) {
   const button = event.currentTarget;
   button.getAnimations().forEach((animation) => animation.cancel());
@@ -220,7 +236,6 @@ function playButtonBounce(event: ReactPointerEvent<HTMLButtonElement>) {
 export function CompanionHud({
   motionMode,
   voiceEnabled,
-  contextHint,
   actions,
   settings,
   onRunAction,
@@ -241,7 +256,19 @@ export function CompanionHud({
   const [proposalNotice, setProposalNotice] = useState("");
   const [revealedChars, setRevealedChars] = useState(0);
   const [bubbleStage, setBubbleStage] = useState<BubbleStage>("visible");
+  const [preparingSend, setPreparingSend] = useState(false);
+  const [bubbleExpanded, setBubbleExpanded] = useState(false);
+  const [bodyClipped, setBodyClipped] = useState(false);
+  const hasToolNode = !preparingSend && chat.nodes.some((node) => node.kind === "tool");
+  const preparingSendIdRef = useRef(0);
   const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
+  /**
+   * 这一轮**她不出声**时说的那一句（方案 35 E6）。以前 `text_only` / `failed` 两个
+   * 降级读数在渲染层没有任何消费方（一律和"用户自己停了"走同一支 `noteAudioStopped()`），
+   * 于是界面安静得和"她本来就没有声音"一模一样——用户分不清是没开声音、还是她不想说。
+   * 它不自动消失：不出声是这一轮的属性，气泡在它就该在。
+   */
+  const [speechNotice, setSpeechNotice] = useState<string | null>(null);
   const micRef = useRef<HTMLButtonElement>(null);
   const moreControlRef = useRef<HTMLButtonElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -270,6 +297,8 @@ export function CompanionHud({
    * 同时满足两边。
    */
   const speechSessionRef = useRef<CompanionSpeechSession | null>(null);
+  /** 草稿转成最终回复后仍在播放的会话；显现心跳必须继续读取它的音频位置。 */
+  const speechPositionSessionRef = useRef<CompanionSpeechSession | null>(null);
   const pendingVoiceSegmentsRef = useRef<CompanionVoiceSegmentReadyDetail[]>([]);
   const seenVoiceSegmentIdsRef = useRef(new Set<string>());
   const [voiceSegmentRevision, setVoiceSegmentRevision] = useState(0);
@@ -328,12 +357,19 @@ export function CompanionHud({
     disabled: chat.phase === "sending" || !voiceEnabled,
     onTranscript: async ({ text, voiceArtifactId }) => {
       if (!text.trim()) return;
-      const sent = await chat.send({
-        text,
-        voiceArtifactId,
-        ...(chat.feedSelection ? { selection: { text: chat.feedSelection } } : {}),
-      });
-      if (sent) chat.dismissFeedSelection();
+      const sendId = ++preparingSendIdRef.current;
+      setPreparingSend(chat.phase !== "sending");
+      setBubbleExpanded(false);
+      try {
+        const sent = await chat.send({
+          text,
+          voiceArtifactId,
+          ...(chat.feedSelection ? { selection: { text: chat.feedSelection } } : {}),
+        });
+        if (sent) chat.dismissFeedSelection();
+      } finally {
+        if (sendId === preparingSendIdRef.current) setPreparingSend(false);
+      }
     },
   });
 
@@ -410,11 +446,13 @@ export function CompanionHud({
     if (!draft) return;
     if (draftRunIdRef.current !== draft.runId) {
       draftRunIdRef.current = draft.runId;
+      setBubbleExpanded(false);
       // 换轮：上一轮没念完的立刻停掉，否则两轮的语音会叠在一起。先摘掉计划 id，
       // 免得旧计划的 `stopped` 广播把新的一轮误判成"音频停了"。
       activeSpeechPlanRef.current = null;
       speechSessionRef.current?.stop();
       speechSessionRef.current = null;
+      speechPositionSessionRef.current = null;
       pendingVoiceSegmentsRef.current = pendingVoiceSegmentsRef.current.filter((segment) => segment.runId === draft.runId);
       seenVoiceSegmentIdsRef.current.clear();
       for (const segment of pendingVoiceSegmentsRef.current) seenVoiceSegmentIdsRef.current.add(segment.segmentId);
@@ -436,6 +474,7 @@ export function CompanionHud({
     if (speechSessionRef.current === null) {
       speechSessionRef.current = beginCompanionSpeechLine({ strictSegments: true });
       activeSpeechPlanRef.current = speechSessionRef.current.planId;
+      speechPositionSessionRef.current = speechSessionRef.current;
     }
     const session = speechSessionRef.current;
     reveal.noteSession(session ? session.mode : "unavailable");
@@ -489,6 +528,7 @@ export function CompanionHud({
       activeSpeechPlanRef.current = null;
       speechSessionRef.current?.stop();
       speechSessionRef.current = null;
+      speechPositionSessionRef.current = null;
       pendingVoiceSegmentsRef.current = [];
       seenVoiceSegmentIdsRef.current.clear();
       reveal.reset();
@@ -512,6 +552,7 @@ export function CompanionHud({
       if (!voiceEnabled) {
         // 语音被关掉：会话收干净，别挂在后台继续合成。
         activeSpeechPlanRef.current = null;
+        speechPositionSessionRef.current = null;
         session.stop();
       } else {
         // 把缓冲里还没喂的服务端段补进会话（走流式时已喂过，segmentId 幂等），
@@ -535,6 +576,8 @@ export function CompanionHud({
           });
         }
         pendingVoiceSegmentsRef.current = [];
+        // final 只封住入队，不会立刻播完；显现心跳仍需持有这一会话的音频时钟。
+        speechPositionSessionRef.current = session;
         session.finish();
         handle = { planId: session.planId, mode: session.mode, stop: () => session.stop() };
       }
@@ -614,6 +657,9 @@ export function CompanionHud({
       window.clearTimeout(exitTimer);
       offComplete();
       handle?.stop();
+      if (speechPositionSessionRef.current?.planId === handle?.planId) {
+        speechPositionSessionRef.current = null;
+      }
     };
   }, [chat.dismissLiveReply, chat.draft, chat.interrupted, ensureRevealDriver, chat.liveReply, voiceEnabled]);
 
@@ -632,13 +678,23 @@ export function CompanionHud({
     // `speaking` 的进度**不再**喂给驱动器：那是 80ms 一次的采样值，用它驱动字幕就是
     // 让字幕跟着"上一次采样 + 时间外推"走（第二个时钟，必然漂移）。位置改由下面那个
     // 心跳从音频时钟现算（§14.11 ⑤）。
-    if (progress.phase === "speaking") { /* 位置见 tick */ }
-    else if (progress.phase === "finished" && progress.visibleChars > 0) driver.noteAudioFinished();
-    else if (progress.phase === "finished") {
-      // 整轮一个字都没念过（服务端语音关着 / 没有任何片段）：不能按"音频播完"
-      // 处理——那会瞬间推满全文。交回阅读钟，让文字仍按阅读节奏露出。
+    if (progress.phase === "speaking") {
+      // 位置见下面那个 tick；真的在出声了，就没有什么要解释的。
+      setSpeechNotice(null);
+    } else if (progress.phase === "finished" && progress.visibleChars > 0) {
+      driver.noteAudioFinished();
+    } else if (progress.phase === "text_only" || progress.phase === "failed") {
       driver.noteAudioStopped();
-    } else driver.noteAudioStopped();
+      // 原因那句话**不是这里写的**：播放层在降级那一刻就把人话放进 `progress.failure`
+      // （"语音合成超时，已继续显示文字"，或网关错误对应的那句人话）。以前三条 emit
+      // 全在填这个字段、渲染层没有一个人读 —— 数据一直有，缺的只是把它念出来（E6）。
+      // 这里不留自造的兜底文案：宁可少一句，也不要第二套"为什么没念"的说法。
+      setSpeechNotice(progress.failure ?? null);
+    } else {
+      // 整轮一个字都没念过（服务端语音关着 / 没有任何片段），或用户自己停了：
+      // 不能按"音频播完"处理——那会瞬间推满全文。交回阅读钟，让文字仍按阅读节奏露出。
+      driver.noteAudioStopped();
+    }
   }), []);
 
   /**
@@ -656,7 +712,7 @@ export function CompanionHud({
       if (!driver) return;
       // 每一拍都从**音频时钟**现算一次位置（没有在播时为 null）。
       // 这是"字幕跟着声音走"的唯一时间来源；驱动器自己不再外推。
-      const position = speechSessionRef.current?.currentVisibleChars() ?? null;
+      const position = speechPositionSessionRef.current?.currentVisibleChars() ?? null;
       if (position !== null) driver.noteAudioPosition(position);
       driver.tick();
     }, COMPANION_REVEAL_TICK_MS);
@@ -680,7 +736,10 @@ export function CompanionHud({
       voice.dismissNote();
     }, 5_000);
     return () => window.clearTimeout(timer);
-  }, [voice.note, voice.dismissNote]);
+    // `noteRevision` 必须在依赖里：5 秒内撞上同一个失败时文本一模一样，
+    // 只按 `voice.note` 挂依赖的话这条 effect 根本不会重跑，倒计时既不重置、
+    // 也没有第二次反馈（方案 35 E5）。
+  }, [voice.note, voice.noteRevision, voice.dismissNote]);
 
   /** 输入框自己长高：不要原生右下角拖拽手柄，也不让用户手动拉。 */
   useEffect(() => {
@@ -798,6 +857,12 @@ export function CompanionHud({
       // 量在这里而不是首页的相机投影里：任务页不跑那条投影，留下的旧值会把气泡顶出窗口。
       // 分数乘容器的**实际**高度，外层 gsap 缩放因此天然跟手。
       const anchorRect = anchor ? anchor.getBoundingClientRect() : null;
+      // 结果卡贴角色盒底边。伴星被拖高或窗口缩小时，按卡片底边到视口顶的距离
+      // 收紧高度，让图片与引用仍能在卡内滚动，而不是整张卡被窗口切掉。
+      host.style.setProperty(
+        "--companion-rich-max-h",
+        `${Math.max(120, Math.floor((anchorRect?.bottom ?? host.getBoundingClientRect().bottom) - 18))}px`,
+      );
       let inkTop: number | null = null;
       if (character && anchorRect) {
         const characterRect = character.getBoundingClientRect();
@@ -836,6 +901,27 @@ export function CompanionHud({
     if (character) observer.observe(character);
     const inkObserver = new MutationObserver(followMotion);
     if (character) inkObserver.observe(character, { attributes: true, attributeFilter: ["style"] });
+    /**
+     * 轨道是**条件渲染**的，它的栈高直接进 `--companion-bubble-push-down` 的预算：它挂上、
+     * 摘下或长高时若没人重量，气泡就按旧栈高算下移量。这两件事以前靠"每次渲染都重跑本
+     * effect"顺带兜住；effect 改成只在 `bubbleEl` 变化时重挂之后必须自己盯——轨道的
+     * **盒高**给 ResizeObserver，轨道的**挂/摘**给 host 的 childList（只看直接子节点，
+     * 所以气泡正文逐字增长不会误触发——那本来就有 `bubbleEl` 自己的 ResizeObserver 兜）。
+     */
+    let watchedRail: HTMLElement | null = null;
+    const watchRail = () => {
+      const rail = host.querySelector<HTMLElement>(".companion-hud__rail");
+      if (rail === watchedRail) return;
+      if (watchedRail) observer.unobserve(watchedRail);
+      watchedRail = rail;
+      if (rail) observer.observe(rail);
+    };
+    watchRail();
+    const mountObserver = new MutationObserver(() => {
+      watchRail();
+      followMotion();
+    });
+    mountObserver.observe(host, { childList: true });
     // 角色盒**整体平移**不改变任何尺寸：换页的座位迁移（CSS 过渡）与拖动（gsap 写 x/y）都
     // 只动位置。位置变了，"气泡底边到视口顶还剩多少"就变了——量晚一点，上限就会让气泡长到
     // 窗口外（2026-09-20 用户截图：气泡和步骤展示整块不见）。所以这两种位移也各接一条线：
@@ -852,10 +938,15 @@ export function CompanionHud({
       observer.disconnect();
       inkObserver.disconnect();
       motionObserver.disconnect();
+      mountObserver.disconnect();
       anchor?.removeEventListener("transitionrun", followMotion);
       window.removeEventListener("resize", followMotion);
     };
-  });
+    // `bubbleEl` 用 state 存正是为了能当依赖（见上面的声明处）。这里以前**没有**依赖
+    // 数组，于是每渲染一次就重挂三个 observer、并把那串"读→写→再读"的测量全跑一遍；
+    // 而伴星逐 token 重渲染，等于每个 token 一次强制回流。轨道的挂/摘与长高已改由
+    // `mountObserver` + `watchRail` 负责，不再需要靠重渲染顺带兜。
+  }, [bubbleEl, hasToolNode]);
 
   /**
    * 气泡（连它头顶那条步骤轨道）按左侧目录栏**此刻的几何**让位（2026-09-19）。
@@ -993,13 +1084,25 @@ export function CompanionHud({
     const text = input.trim();
     if (!text) return;
     setInput("");
-    const sent = await chat.send({
-      text,
-      ...(chat.feedSelection ? { selection: { text: chat.feedSelection } } : {}),
-    });
-    if (sent) chat.dismissFeedSelection();
-    else setInput((current) => current || text);
+    const sendId = ++preparingSendIdRef.current;
+    // 接替旧回复时已有过程气泡；不要用预检文案把仍在运行的那一轮盖住。
+    setPreparingSend(chat.phase !== "sending");
+    setBubbleExpanded(false);
+    try {
+      const sent = await chat.send({
+        text,
+        ...(chat.feedSelection ? { selection: { text: chat.feedSelection } } : {}),
+      });
+      if (sent) chat.dismissFeedSelection();
+      else setInput((current) => current || text);
+    } finally {
+      if (sendId === preparingSendIdRef.current) setPreparingSend(false);
+    }
   }, [chat, input]);
+
+  useEffect(() => {
+    if (chat.phase === "sending") setPreparingSend(false);
+  }, [chat.phase]);
 
   /** 停止：**先在本地静音**（方案 §6 第 2 点），再走服务端取消——用户要的是"现在闭嘴"。 */
   const stopTurn = useCallback(() => {
@@ -1007,8 +1110,17 @@ export function CompanionHud({
     void chat.cancel();
   }, [chat]);
 
-  const replyText = chat.liveReply ? plainCompanionBubbleText(companionHudReplyText(chat.liveReply)) : "";
-  const draftText = plainCompanionBubbleText(chat.draft?.text ?? "");
+  // `plainCompanionBubbleText` 是十来趟正则扫全文。它以前裸在渲染体里：伴星每到一个
+  // token、阅读钟每走一拍都重跑一遍，而输入文字其实只在块到达时才变。按原文 memo 之后，
+  // 逐字显现（下面的 `companionBubbleText`）不再触发任何一次剥离。
+  const replyText = useMemo(
+    () => (chat.liveReply ? plainCompanionBubbleText(companionHudReplyText(chat.liveReply)) : ""),
+    [chat.liveReply],
+  );
+  const draftText = useMemo(
+    () => plainCompanionBubbleText(chat.draft?.text ?? ""),
+    [chat.draft?.text],
+  );
   const phase = voice.phase === "listening" ? "listening"
     : voice.phase === "transcribing" ? "transcribing"
       : replyText || draftText ? "replying"
@@ -1023,32 +1135,43 @@ export function CompanionHud({
    * 阶段提示 > 系统提示。过程节点的文案直接取协议 `safeLabel`，不自造描述。
    */
   const currentNode = chat.nodes.length > 0 ? chat.nodes[chat.nodes.length - 1] : null;
-  const replySlotText = replyText ? companionBubbleText(replyText, revealedChars)
+  const activeNode: CompanionAgentNode | null = currentNode?.state === "running" ? currentNode : null;
+  const shownReply = replyText || draftText;
+  const replySlotText = preparingSend && chat.phase !== "sending" ? ""
+    : shownReply ? bubbleExpanded
+      ? shownReply.slice(0, Math.max(0, revealedChars))
+      : companionBubblePreviewText(shownReply, revealedChars)
     // 草稿也按显现计数切片（2026-09-19）：文本到货量不等于该露多少，
     // 露多少由音频/阅读钟决定——"整块文字先出完再念"就是这里漏出来的。
-    : draftText ? companionBubbleText(draftText, revealedChars)
       : "";
   /**
    * 说到一半被打断（失败/超时）：那半句继续留在气泡里，按同一套显现节奏露完。
    * 说明句单独一行挂在下面（`.companion-hud__output-note`），不挤进正文。
    */
-  const interruptedText = plainCompanionBubbleText(chat.interrupted?.text ?? "");
+  const interruptedText = useMemo(
+    () => plainCompanionBubbleText(chat.interrupted?.text ?? ""),
+    [chat.interrupted?.text],
+  );
   const interruptedSlotText = interruptedText ? companionBubbleText(interruptedText, revealedChars) : "";
   const interruptedNote = interruptedSlotText && chat.failure ? chat.failure : null;
+  /** 关于"声音"的一句说明只有一个位置：麦克风那条优先（它正在等用户动作），其次是这轮不出声。 */
+  const outputNotice = voiceNotice ?? speechNotice;
   const slot: { readonly tone: "reply" | "process" | "stopped" | "note"; readonly text: string } | null =
-    replySlotText ? { tone: "reply", text: replySlotText }
+    preparingSend && chat.phase !== "sending" ? { tone: "process", text: "正在准备这轮对话…" }
+      : replySlotText ? { tone: "reply", text: replySlotText }
       : chat.stopNotice ? { tone: "stopped", text: frozenText || chat.stopNotice }
         : interruptedSlotText ? { tone: "stopped", text: interruptedSlotText }
           : chat.phase === "error" && chat.failure ? { tone: "note", text: chat.failure }
-            : chat.phase === "sending" && currentNode ? { tone: "process", text: currentNode.label }
-              : phase === "listening" ? { tone: "process", text: "我在听。说完停一下，我会自动发给 Mao。" }
-                : phase === "transcribing" ? { tone: "process", text: "正在识别，完成后会直接发给 Mao。" }
+            : chat.phase === "sending" && activeNode ? { tone: "process", text: nodeLabel(activeNode) }
+              : phase === "listening" ? { tone: "process", text: `我在听。说完停一下，我会自动发给 ${chat.companionName}。` }
+                : phase === "transcribing" ? { tone: "process", text: `正在识别，完成后会直接发给 ${chat.companionName}。` }
                   : phase === "thinking" ? { tone: "process", text: "我先结合当前页面想一想。" }
-                    : voiceNotice ? { tone: "note", text: voiceNotice }
+                    : outputNotice ? { tone: "note", text: outputNotice }
                       : null;
   const outputText = slot?.text ?? "";
   const outputTone = slot?.tone ?? "reply";
   const stopping = chat.cancelling;
+  const turnFailure = visibleTurnFailure(chat);
 
   /** 把最新一行钉回视野（用户已经自己往上读过时，状态机给的答案是"什么都不做"）。 */
   const pinBubbleToLatest = useCallback(() => {
@@ -1062,6 +1185,11 @@ export function CompanionHud({
     if (next === null) return;
     el.scrollTop = next;
   }, [bubbleFollow]);
+
+  const measureBodyClipped = useCallback(() => {
+    const el = bubbleBodyRef.current;
+    if (el) setBodyClipped(el.scrollHeight > el.clientHeight + 1);
+  }, []);
 
   /**
    * 正文元素的回调 ref：新气泡（= 新一轮）挂载即把跟随复位到"贴底"。上一轮用户自己
@@ -1096,6 +1224,30 @@ export function CompanionHud({
     pinBubbleToLatest();
   }, [outputText, pinBubbleToLatest]);
 
+  useLayoutEffect(() => {
+    measureBodyClipped();
+  }, [outputText, bubbleExpanded, measureBodyClipped]);
+
+  useLayoutEffect(() => {
+    const el = bubbleBodyRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(measureBodyClipped);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [bubbleEl, measureBodyClipped]);
+
+  useLayoutEffect(() => {
+    const el = bubbleBodyRef.current;
+    if (!el) return;
+    if (bubbleExpanded) {
+      el.scrollTop = 0;
+      bubbleFollow.noteScroll({ scrollTop: 0, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight });
+    } else {
+      bubbleFollow.reset();
+      pinBubbleToLatest();
+    }
+  }, [bubbleExpanded, bubbleFollow, pinBubbleToLatest]);
+
   /**
    * 容器尺寸变化同样要回底：窗口缩放会重算 `--companion-bubble-max-h`、失败说明行会占走
    * 正文的高度——容器变矮时，"底部"已经不是屏幕上那一行。ResizeObserver 在挂载时自带
@@ -1119,6 +1271,7 @@ export function CompanionHud({
     const previous = previousPhaseRef.current;
     previousPhaseRef.current = chat.phase;
     if (previous === "sending" || chat.phase !== "sending") return;
+    setBubbleExpanded(false);
     setLaunching(true);
     const timer = window.setTimeout(() => setLaunching(false), 180);
     return () => window.clearTimeout(timer);
@@ -1220,7 +1373,7 @@ export function CompanionHud({
     const state = pendingProposalId ? chat.proposalStates[pendingProposalId] : undefined;
     let next = "";
     if (pendingProposalId && (!state || state.phase !== "ready" || state.proposal.status === "pending")) {
-      next = "Mao 有一项动作在等你确认；可以稍后决定，也可以直接继续聊。";
+      next = `${chat.companionName} 有一项动作在等你确认；可以稍后决定，也可以直接继续聊。`;
     } else if (state?.phase === "ready" && state.proposal.status !== "pending") {
       next = state.proposal.status === "accepted" ? "动作建议已确认。"
         : state.proposal.status === "rejected" ? "动作建议已拒绝。"
@@ -1232,13 +1385,29 @@ export function CompanionHud({
     setProposalNotice(next);
   }, [pendingProposalId, chat.proposalStates]);
 
+  const richReplyDock = chat.richReply && chat.mode !== "history" ? (
+    <aside
+      className={`companion-hud__rich-dock${chat.mode === "conversation" ? " companion-hud__rich-dock--inline" : ""}`}
+      aria-label={`${chat.companionName} 刚找到的内容`}
+    >
+      <header>
+        <strong>刚找到的内容</strong>
+        <button type="button" onClick={chat.dismissRichReply} aria-label="收起这次找到的内容"><X size={16} /></button>
+      </header>
+      <div className="companion-hud__rich-content">
+        <CompanionMessageRichBlocks blocks={chat.richReply.blocks} chat={chat} />
+      </div>
+    </aside>
+  ) : null;
+
   return (
-    <div ref={hudRef} className="companion-hud" data-mode={chat.mode} data-motion={motionMode}>
+    <div ref={hudRef} className="companion-hud" data-mode={chat.mode} data-motion={motionMode} data-rail={hasToolNode || undefined}>
       {railVisible ? (
         <CompanionAgentRail
           nodes={chat.nodes}
           progress={railProgress}
           turnState={railTurnState}
+          companionName={chat.companionName}
           tight={railTight}
           leaving={bubbleStage === "leaving"}
         />
@@ -1251,20 +1420,17 @@ export function CompanionHud({
           data-stage={bubbleStage}
           data-tone={outputTone}
           data-slot={slot?.tone ?? "reply"}
+          data-expanded={bubbleExpanded || undefined}
           data-breath={breath}
         >
           <span className="companion-hud__presence-dot" ref={presenceRef} aria-hidden="true" />
           {/* 长回复的正文在它自己里面滚，新字钉在视野里（见上面的跟随 effect）。 */}
-          <p ref={setBubbleBodyEl} onScroll={handleBubbleScroll}>{outputText}</p>
-          {/* 过程行（2026-09-22 用户报"有过程的时候完全看不到过程"）。
-              以前过程只在"正文还是空的"时占气泡位（slot 优先级），她一开始说话，
-              "正在查你的复习卡"这类信息就整个消失——用户只看到一句话停在那里，
-              不知道她是卡住了还是在干活。现在它挂在正文下面单独一行：只要这一轮还在
-              跑且当前有节点，就一直看得见。 */}
-          {chat.phase === "sending" && currentNode ? (
+          <p className="companion-hud__output-body" ref={setBubbleBodyEl} onScroll={handleBubbleScroll}>{outputText}</p>
+          {/* 已经开始说话时，只保留仍在执行的具体动作；泛泛的「思考中」不再压到正文下面。 */}
+          {slot?.tone === "reply" && chat.phase === "sending" && activeNode && activeNode.kind !== "thinking" ? (
             <p className="companion-hud__output-process" role="status">
               <span className="companion-hud__output-process-dot" aria-hidden="true" />
-              {nodeLabel(currentNode)}
+              {nodeLabel(activeNode)}
             </p>
           ) : null}
           {/* 视觉流式文本**不是**持续 live region（方案 §3 无障碍）：逐字更新会让读屏
@@ -1272,15 +1438,33 @@ export function CompanionHud({
           {/* 被打断的原因就在这里说清楚——以前它只出现在输入面板里，
               用户收起面板就既看不见原因、也不知道那半句还在不在（症状①-D）。 */}
           {interruptedNote ? <p className="companion-hud__output-note" role="status">{interruptedNote}</p> : null}
-          {/* 流式阶段给「显示全文」（方案 §3）：立即完成文字呈现——只推显现驱动器，
-              不碰正在播放的语音（音频进度只是显现的下限）。 */}
-          {chat.draft ? (
+          {/* 麦克风那条提示以前只能抢这唯一的槽位，而她正在说话时槽位归正文 ——
+              于是"点了为什么没反应"那句解释永远看不见（方案 35 E5）。
+              现在正文下面有自己的位置；槽位那份仍然留着（气泡本来就该空着时由它占位）。 */}
+          {outputNotice && slot?.text !== outputNotice ? (
+            <p className="companion-hud__output-note" role="status">{outputNotice}</p>
+          ) : null}
+          {/* 收起态只给两行预览；用户明确点击后才显示全文。显现与语音独立。 */}
+          {slot?.tone === "reply" && (bodyClipped || bubbleExpanded) ? (
             <button
               type="button"
               className="companion-hud__output-reveal"
-              onClick={() => revealDriverRef.current?.finish()}
+              onClick={() => {
+                if (!bubbleExpanded) revealDriverRef.current?.finish();
+                setBubbleExpanded((value) => !value);
+              }}
             >
-              显示全文
+              {bubbleExpanded ? "收起回复" : "展开完整回复"}
+            </button>
+          ) : null}
+          {/* 拾音中给一个「这次不算」的出口；此时没有回复，左下角不会叠展开按钮。 */}
+          {voice.phase === "listening" ? (
+            <button
+              type="button"
+              className="companion-hud__output-reveal"
+              onClick={voice.cancel}
+            >
+              取消录音
             </button>
           ) : null}
           {/* 停止（方案 §6）：生成中用户视线在气泡上，不该强迫他把鼠标移到旁边的按钮列。 */}
@@ -1300,18 +1484,26 @@ export function CompanionHud({
         </div>
       ) : null}
 
+      {chat.mode !== "conversation" ? richReplyDock : null}
+
+      {/* 待决的选择卡三处都有着落（方案 35 B4）：closed 停在身边，conversation 由输入气泡
+          内联那一份接管，history 由抽屉里的留痕接管；actions 见下面那个面板的第一行——
+          dock 与「更多」面板共用 `.companion-hud__panel` 的同一个盒子，在那里再挂一份会
+          正好压在菜单上。以前 dock 只认 closed，于是用户为了翻功能列表打开「更多」，
+          她正在等的那张卡反而当场消失，而气泡的停留计时正为它暂停着，看着像卡死。 */}
       {pendingProposalId && chat.mode === "closed" ? (
-        <aside className="companion-hud__panel companion-hud__proposal-dock" aria-label="Mao 正在等你的选择">
+        <aside className="companion-hud__panel companion-hud__proposal-dock" aria-label={`${chat.companionName} 正在等你的选择`}>
           <CompanionProposalChoice
             proposalId={pendingProposalId}
             state={pendingProposalState}
             context="bubble"
             onDecide={(decision) => { void chat.decideProposal(pendingProposalId, decision); }}
+            onRetry={() => { void chat.retryProposal(pendingProposalId); }}
           />
         </aside>
       ) : null}
 
-      {chat.mode !== "history" ? <nav className="companion-hud__controls" aria-label="Mao 身边的交互">
+      {chat.mode !== "history" ? <nav className="companion-hud__controls" aria-label={`${chat.companionName} 身边的交互`}>
         {voiceEnabled ? (
           <button
             ref={micRef}
@@ -1358,11 +1550,12 @@ export function CompanionHud({
       </nav> : null}
 
       {chat.mode === "conversation" ? (
-        <section className="companion-hud__panel companion-hud__composer" aria-label="给 Mao 的消息气泡">
+        <section className="companion-hud__panel companion-hud__composer" aria-label={`给 ${chat.companionName} 的消息气泡`}>
           <header>
-            <strong>{chat.feedSelection ? "带着这段内容问 Mao" : "给 Mao 留句话"}</strong>
+            <strong>{chat.feedSelection ? `带着这段内容问 ${chat.companionName}` : `给 ${chat.companionName} 留句话`}</strong>
             <button type="button" onClick={() => chat.setMode("closed")} aria-label="收起消息气泡"><X size={16} /></button>
           </header>
+          {richReplyDock}
           {chat.feedSelection ? (
             <blockquote>
               <Quote size={15} aria-hidden="true" />
@@ -1386,8 +1579,10 @@ export function CompanionHud({
                   void sendText();
                 }
               }}
-              placeholder={contextHint ?? "和 Mao 说说你卡在哪里…"}
-              aria-label="给 Mao 的消息"
+              placeholder={chat.feedSelection
+                ? "关于这段内容，想问她什么？"
+                : `想和 ${chat.companionName} 聊什么？`}
+              aria-label={`给 ${chat.companionName} 的消息`}
               // 生成中也允许继续打字：发送这条路服务端本来就支持 supersede（新消息接替
               // 正在跑的那一轮），把输入框锁死只会让用户以为"她没停我不能说话"。
               disabled={phase === "transcribing"}
@@ -1422,13 +1617,13 @@ export function CompanionHud({
           {/* 只在"当前状态就是出错"时显示。会话层里 failure 只有伴随 phase='error'
               才代表本轮失败；抽屉读成功会把 phase 推回 ready 而 failure 留着，
               那属于上一轮的陈旧报错，不该永远挂在这张气泡上。 */}
-          {chat.failure && chat.phase === "error" ? <p className="companion-hud__note companion-hud__note--error" role="status">{chat.failure}</p> : null}
-          {pendingProposalId ? (
+          {turnFailure ? <p className="companion-hud__note companion-hud__note--error" role="status">{turnFailure}</p> : null}          {pendingProposalId ? (
             <CompanionProposalChoice
               proposalId={pendingProposalId}
               state={pendingProposalState}
               context="bubble"
               onDecide={(decision) => { void chat.decideProposal(pendingProposalId, decision); }}
+            onRetry={() => { void chat.retryProposal(pendingProposalId); }}
             />
           ) : null}
         </section>
@@ -1441,6 +1636,17 @@ export function CompanionHud({
             <strong>{moreView === "menu" ? "更多" : "当前页快捷操作"}</strong>
             <button type="button" onClick={() => chat.setMode("closed")} aria-label="关闭更多功能"><X size={16} /></button>
           </header>
+          {pendingProposalId ? (
+            <div className="companion-hud__pending-choice">
+              <CompanionProposalChoice
+                proposalId={pendingProposalId}
+                state={pendingProposalState}
+                context="bubble"
+                onDecide={(decision) => { void chat.decideProposal(pendingProposalId, decision); }}
+                onRetry={() => { void chat.retryProposal(pendingProposalId); }}
+              />
+            </div>
+          ) : null}
           {moreView === "menu" ? (
             <div className="companion-hud__menu-index">
               {actions.length > 0 ? (
@@ -1486,6 +1692,7 @@ export function CompanionHud({
       {settingsOpen ? createPortal(
         <CompanionEdgeSettings
           settings={settings}
+          motionMode={motionMode}
           onClose={() => {
             setSettingsOpen(false);
             window.requestAnimationFrame(() => moreControlRef.current?.focus({ preventScroll: true }));
@@ -1527,8 +1734,9 @@ export function CompanionHud({
  *
  * 非模态：不锁 Tab、不设焦点陷阱——它是一个可以边看页面边调的旁路面板。
  */
-function CompanionEdgeSettings({ settings, onClose }: {
+function CompanionEdgeSettings({ settings, motionMode, onClose }: {
   readonly settings: CompanionHudSettings;
+  readonly motionMode: "full" | "lite" | "off";
   readonly onClose: () => void;
 }) {
   const panelRef = useRef<HTMLElement>(null);
@@ -1558,20 +1766,51 @@ function CompanionEdgeSettings({ settings, onClose }: {
     };
   }, [onClose]);
   return (
-    <aside ref={panelRef} className="companion-hud__edge-panel" role="dialog" aria-label="伴星设置">
+    <aside ref={panelRef} className="companion-hud__edge-panel" data-motion={motionMode} role="dialog" aria-label="伴星设置">
       <header>
         <strong>伴星设置</strong>
         <button ref={closeRef} type="button" onClick={onClose} aria-label="关闭伴星设置"><X size={16} /></button>
       </header>
       <div className="companion-hud__edge-body">
-        <CompanionQuickSettings settings={settings} />
+        <CompanionQuickSettings
+          settings={settings}
+          onOpenVoiceSettings={() => {
+            // 与伴星引导去签署 AI 同意走同一条通道（`companion-chat-session.tsx` 的
+            // guideToConsent）：设分区 → 开设置页。面板自己关掉，不留在设置页上面。
+            const room = useRoomStore.getState();
+            room.setSettingsSection("companion");
+            room.invoke("open-settings");
+            onClose();
+          }}
+        />
       </div>
     </aside>
   );
 }
 
-function CompanionQuickSettings({ settings }: { readonly settings: CompanionHudSettings }) {
+function CompanionQuickSettings({ settings, onOpenVoiceSettings }: {
+  readonly settings: CompanionHudSettings;
+  readonly onOpenVoiceSettings: () => void;
+}) {
   const account = settings.accountState;
+  /**
+   * 静默时段边界不成立时的那句原因。它只是这一屏的即时反馈，不是账号状态的一部分，
+   * 所以住在本地：下一次成功的改动就把它冲掉。
+   */
+  const [quietNotice, setQuietNotice] = useState("");
+  const applyQuietBoundary = (
+    current: NonNullable<CompanionAccountPatch["quietHours"]>,
+    boundary: QuietHoursBoundary,
+    value: string,
+  ) => {
+    const result = quietHoursWithBoundary(current, boundary, value);
+    if (!result.ok) {
+      setQuietNotice(result.reason);
+      return;
+    }
+    setQuietNotice("");
+    settings.onPatchAccount({ quietHours: result.value });
+  };
   const scaleSpan = Math.max(0.0001, settings.scaleMax - settings.scaleMin);
   const fillPercent = Math.min(100, Math.max(0, Math.round(((settings.scale - settings.scaleMin) / scaleSpan) * 100)));
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -1582,11 +1821,18 @@ function CompanionQuickSettings({ settings }: { readonly settings: CompanionHudS
     : permissionLevel === "guided"
       ? "每次产生改动前都会先向你确认。"
       : "跳转、设置与填充可自动执行；不可恢复的操作仍会确认。";
-  const accountMeta = settings.accountFailure
-    ? "读取失败"
-    : !account
-      ? "读取中…"
-      : `${settings.rendererLabel} · 版本 ${account.revision}${settings.accountSaving ? " · 保存中" : ""}`;
+  /**
+   * 这一行只说用户在这块面板上真能懂的一件事：读到没有、存进去没有。
+   *
+   * 以前它写的是 `Live2D · 版本 3`（渲染器名 + 服务端那条 revision）。两个词都不属于
+   * 用户能决定的事，而且"版本 N"读起来像软件版本（方案 35 B2）。读取失败已经由下面
+   * 那条 `companion-hud__note--error` 说清楚，这里不再重复一遍。
+   */
+  const accountMeta = !account
+    ? "正在读取伴星的设置…"
+    : settings.accountSaving
+      ? "正在保存…"
+      : null;
   return (
     <div className="companion-hud__settings">
       <section className="companion-hud__setting-group">
@@ -1624,11 +1870,20 @@ function CompanionQuickSettings({ settings }: { readonly settings: CompanionHudS
             ))}
           </div>
         </div>
+        {/* 声音不在这块面板里造第二份：引擎、音色与试听住在设置的「语音与伴星」那一节，
+            这里只把人带过去。以前入口写着"大小、声音、行为与账号偏好"却没有这一行，
+            用户找不到"声音"会以为功能没做（方案 35 B1）。 */}
+        <div className="companion-hud__setting-row">
+          <span className="companion-hud__setting-label">声音</span>
+          <div className="companion-hud__choice" aria-label="声音">
+            <button type="button" onClick={onOpenVoiceSettings}>朗读与音色</button>
+          </div>
+        </div>
       </section>
 
       <section className="companion-hud__setting-group">
         <h4 className="companion-hud__setting-title">陪伴与账号</h4>
-        <p className="companion-hud__setting-meta">{accountMeta}</p>
+        {accountMeta ? <p className="companion-hud__setting-meta">{accountMeta}</p> : null}
         {account ? (
           <>
             <div className="companion-hud__setting-row">
@@ -1712,7 +1967,7 @@ function CompanionQuickSettings({ settings }: { readonly settings: CompanionHudS
                   value={quiet.startLocal}
                   disabled={settings.accountSaving}
                   aria-label="静默开始时间"
-                  onChange={(event) => { const next = quietHoursWithBoundary(quiet, "startLocal", event.currentTarget.value); if (next) settings.onPatchAccount({ quietHours: next }); }}
+                  onChange={(event) => { applyQuietBoundary(quiet, "startLocal", event.currentTarget.value); }}
                 />
                 <span aria-hidden="true">→</span>
                 <input
@@ -1720,9 +1975,19 @@ function CompanionQuickSettings({ settings }: { readonly settings: CompanionHudS
                   value={quiet.endLocal}
                   disabled={settings.accountSaving}
                   aria-label="静默结束时间"
-                  onChange={(event) => { const next = quietHoursWithBoundary(quiet, "endLocal", event.currentTarget.value); if (next) settings.onPatchAccount({ quietHours: next }); }}
+                  onChange={(event) => { applyQuietBoundary(quiet, "endLocal", event.currentTarget.value); }}
                 />
               </div>
+            ) : null}
+            {/* 静默时段的边界不自己发明解释：管谁、不管谁写在同一行下面。
+                到点的提醒走的是 `evaluateProactivePolicy` 里 triggered 那条早退
+                （`companion-proactive-policy.ts:152`，在时段判定 `:160` 之前），
+                所以它不受这段管 —— 不写出来，用户只会以为开关坏了（方案 35 F5）。 */}
+            <p className="companion-hud__permission-note">
+              这段时间里她不会主动开口；你约过的提醒到点照样会来。
+            </p>
+            {quietNotice ? (
+              <p className="companion-hud__note companion-hud__note--error" role="status">{quietNotice}</p>
             ) : null}
           </>
         ) : null}
@@ -1775,6 +2040,7 @@ function CompanionHistoryDrawer({
   const micRef = useRef<HTMLButtonElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const stopping = chat.cancelling;
+  const turnFailure = visibleTurnFailure(chat);
   /** 单条消息渲染（时间线用）：来自聊天记录库的共享组件。 */
   const renderArticle = useCallback((message: CompanionMessageV1) => (
     <CompanionChatRecordArticle message={message} chat={chat} />
@@ -1794,9 +2060,11 @@ function CompanionHistoryDrawer({
   const [searchInput, setSearchInput] = useState("");
   const [calendarOpen, setCalendarOpen] = useState(false);
   const [dateFilter, setDateFilter] = useState<string | null>(null);
-  const [allMessages, setAllMessages] = useState<readonly CompanionMessageV1[] | null>(null);
-  const [allLoading, setAllLoading] = useState(false);
-  const [allError, setAllError] = useState<string | null>(null);
+  const [allResult, setAllResult] = useState<{ revision: number; items: readonly CompanionMessageV1[] } | null>(null);
+  const [allRequest, setAllRequest] = useState<{ revision: number; status: "loading" | "error"; error?: string } | null>(null);
+  const allMessages = allResult?.revision === chat.historyRevision ? allResult.items : null;
+  const allLoading = allRequest?.revision === chat.historyRevision && allRequest.status === "loading";
+  const allError = allRequest?.revision === chat.historyRevision && allRequest.status === "error" ? allRequest.error : null;
   const prevScrollHeightRef = useRef<number | null>(null);
   /**
    * 用户是否希望列表跟着最新内容走。上滚阅读时置 false，发送/打开抽屉/点「最新」时
@@ -1810,19 +2078,26 @@ function CompanionHistoryDrawer({
 
   const ensureAllMessages = useCallback(async () => {
     if (allMessages || allLoading) return;
-    setAllLoading(true);
-    setAllError(null);
+    const revision = chat.historyRevision;
+    setAllRequest({ revision, status: "loading" });
     try {
       const all = await chat.fetchAllMessages();
       // null = 会话/分页基线还没就绪：不缓存空结果，落「可重试」态而不是无限转圈。
-      if (all) setAllMessages(all);
-      else setAllError("对话记录还没有就绪，请稍后重试。");
+      if (all) {
+        setAllResult({ revision, items: all });
+        setAllRequest((current) => current?.revision === revision ? null : current);
+      } else setAllRequest((current) => current?.revision === revision ? { revision, status: "error", error: "完整记录暂时读取失败，请重试。" } : current);
     } catch (error) {
-      setAllError(gatewayErrorMessage(error));
-    } finally {
-      setAllLoading(false);
+      setAllRequest((current) => current?.revision === revision ? { revision, status: "error", error: gatewayErrorMessage(error) } : current);
     }
   }, [chat, allMessages, allLoading]);
+
+  // 最近消息或工作空间变了，正在查找时立即重取；旧请求的结果带旧 revision，不能冒充新记录。
+  const ensureAllMessagesRef = useRef(ensureAllMessages);
+  ensureAllMessagesRef.current = ensureAllMessages;
+  useEffect(() => {
+    if (recordOpen && (searchInput.trim() || calendarOpen || dateFilter)) void ensureAllMessagesRef.current();
+  }, [chat.historyRevision, recordOpen, searchInput, calendarOpen, dateFilter]);
 
   // 向前翻页时的滚动锚定：prepend 会让浏览器把视口内容整体推下去，这里按高度差拉回来。
   useEffect(() => {
@@ -1832,6 +2107,10 @@ function CompanionHistoryDrawer({
     prevScrollHeightRef.current = null;
     list.scrollTop = list.scrollHeight - prevHeight + list.scrollTop;
   }, [chat.messages.length]);
+
+  useEffect(() => {
+    if (chat.historyOlderError) prevScrollHeightRef.current = null;
+  }, [chat.historyOlderError]);
 
   /** 无条件贴到底部。ResizeObserver 与「打开抽屉」两处共用同一个写入口。 */
   const pinToLatest = useCallback(() => {
@@ -1856,7 +2135,7 @@ function CompanionHistoryDrawer({
     // （图片解码、runTraces 落地），那一下 scroll 的 distance>0 就把意图关掉，
     // 之后的贴底跟随整个失效（实测最后一条被切掉 51px / 101px）。
     if (atBottom) stickToBottomRef.current = true;
-    if (list.scrollTop <= 56 && chat.historyHasMore && !chat.historyLoadingOlder) {
+    if (list.scrollTop <= 56 && chat.historyHasMore && !chat.historyLoadingOlder && !chat.historyOlderError) {
       prevScrollHeightRef.current = list.scrollHeight;
       void chat.loadOlderMessages();
     }
@@ -1908,20 +2187,24 @@ function CompanionHistoryDrawer({
    * 分界线在那天第一条消息的正上方——直接滚消息居中会把分界线裁出视口。
    * 双 rAF：第一帧等 commit，第二帧等 prepend 后的布局稳定。
    */
-  const flashMessage = useCallback((messageId: string, dayKey?: string) => {
+  const flashMessage = useCallback((messageId: string, dayKey?: string) => new Promise<boolean>((resolve) => {
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
         const list = listRef.current;
-        if (!list) return;
+        if (!list) { resolve(false); return; }
         const element = (dayKey ? list.querySelector(`[data-day-key="${dayKey}"]`) : null)
           ?? list.querySelector(`[data-message-id="${messageId}"]`);
-        if (!element) return;
+        if (!element) { resolve(false); return; }
+        // 搜索/日期定位意味着用户正在读旧消息。先撤销贴底意图，并在真正完成
+        // scrollIntoView 之后才清掉 pendingJumpRef，避免 ResizeObserver 抢回底部。
+        stickToBottomRef.current = false;
         element.scrollIntoView({ block: "center" });
         element.setAttribute("data-flash", "true");
         window.setTimeout(() => element.removeAttribute("data-flash"), 1600);
+        resolve(true);
       });
     });
-  }, []);
+  }), []);
 
   /** 搜索命中：记录页里点一下 → 回根页面定位到那条。 */
   const jumpToMessage = useCallback((id: string) => {
@@ -1959,9 +2242,15 @@ function CompanionHistoryDrawer({
           if (cancelled) return;
         }
         if (cancelled) return;
+        if (!present()) {
+          pendingJumpRef.current = null;
+          setJumpNotice("没有定位到那条消息（可能超出可加载范围）");
+          return;
+        }
+        const located = await flashMessage(pending.messageId);
+        if (cancelled) return;
         pendingJumpRef.current = null;
-        if (!present()) { setJumpNotice("没有定位到那条消息（可能超出可加载范围）"); return; }
-        flashMessage(pending.messageId);
+        if (!located) setJumpNotice("没有定位到那条消息，请重试搜索");
         return;
       }
       if (pending.dateKey) {
@@ -1975,9 +2264,15 @@ function CompanionHistoryDrawer({
         }
         if (cancelled) return;
         const first = messagesRef.current.find((message) => messageDayKey(message.createdAt) === pending.dateKey);
+        if (!first) {
+          pendingJumpRef.current = null;
+          setJumpNotice(`${messageDayLabel(`${pending.dateKey}T12:00:00`)}没有聊天记录`);
+          return;
+        }
+        const located = await flashMessage(first.id, pending.dateKey);
+        if (cancelled) return;
         pendingJumpRef.current = null;
-        if (!first) { setJumpNotice(`${messageDayLabel(`${pending.dateKey}T12:00:00`)}没有聊天记录`); return; }
-        flashMessage(first.id, pending.dateKey);
+        if (!located) setJumpNotice("没有定位到那天的消息，请重试按日期查找");
       }
     })();
     return () => { cancelled = true; };
@@ -2052,6 +2347,19 @@ function CompanionHistoryDrawer({
     const timer = window.setTimeout(() => { setMounted(false); setExiting(false); }, 220);
     return () => window.clearTimeout(timer);
   }, [mounted, open]);
+
+  /**
+   * 整窗关闭要把子页一起退掉。关掉的抽屉只是 `return null`，state 全部留着，于是第二次
+   * 点「对话记录」直接开在查找页上（实测：重开时搜索框已在屏上、时间线一条都没渲染）。
+   * 挂在 `mounted` 落下之后而不是 `open` 转假那一刻——退场那 220ms 画面还在，中途换视图会被看见。
+   */
+  useEffect(() => {
+    if (open || mounted) return;
+    setRecordOpen(false);
+    setSearchInput("");
+    setDateFilter(null);
+    setCalendarOpen(false);
+  }, [open, mounted]);
 
   useEffect(() => {
     if (!open || !mounted) return undefined;
@@ -2136,6 +2444,11 @@ function CompanionHistoryDrawer({
         aria-modal="true"
         aria-labelledby="companion-history-title"
         aria-hidden={exiting || undefined}
+        onPointerDownCapture={(event) => {
+          if (calendarOpen && event.target instanceof HTMLElement && !event.target.closest(".companion-record__date-wrap")) {
+            setCalendarOpen(false);
+          }
+        }}
         onKeyDown={(event) => {
           if (event.key === "Escape" && !event.defaultPrevented) {
             event.preventDefault();
@@ -2219,11 +2532,13 @@ function CompanionHistoryDrawer({
               {dateFilter ? messageDayLabel(`${dateFilter}T12:00:00`) : "按日期"}
             </button>
             {calendarOpen ? (
-              <MonthCalendar
-                pool={allMessages ?? chat.messages}
-                selected={dateFilter}
-                onPick={(dayKey) => pickDate(dayKey)}
-              />
+              allMessages ? (
+                <MonthCalendar
+                  pool={allMessages}
+                  selected={dateFilter}
+                  onPick={(dayKey) => pickDate(dayKey)}
+                />
+              ) : <div className="companion-record__calendar-status">{poolStateBlock}</div>
             ) : null}
           </div>
         </div>
@@ -2244,13 +2559,14 @@ function CompanionHistoryDrawer({
             <>
               {chat.phase === "loading" ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />正在读取对话…</p> : null}
               {chat.historyLoadingOlder ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />加载更早的消息…</p> : null}
+              {chat.historyOlderError ? <p className="companion-history__system" role="status">{chat.historyOlderError}<button type="button" className="companion-record__retry" onClick={() => { prevScrollHeightRef.current = listRef.current?.scrollHeight ?? null; void chat.loadOlderMessages(); }}>重试加载</button></p> : null}
               {!chat.historyHasMore && chat.messages.length > 0 ? <p className="companion-history__system">没有更早的消息了</p> : null}
               {chat.messages.map((message, index) => {
                 const previous = index > 0 ? chat.messages[index - 1] : null;
                 const showDay = !previous || messageDayKey(previous.createdAt) !== messageDayKey(message.createdAt);
                 return (
                   <Fragment key={message.id}>
-                    {showDay ? <div className="companion-history__day">{messageDayLabel(message.createdAt)}</div> : null}
+                    {showDay ? <div className="companion-history__day" data-day-key={messageDayKey(message.createdAt)}>{messageDayLabel(message.createdAt)}</div> : null}
                     {renderArticle(message)}
                   </Fragment>
                 );
@@ -2268,7 +2584,7 @@ function CompanionHistoryDrawer({
                 const trace = chat.runTraces.find((item) => item.summary.runId === draft.runId) ?? null;
                 return (
                   <article data-role="assistant" data-live="true">
-                    <header><span>Mao</span><time>正在说…</time></header>
+                    <header><span>{chat.companionName}</span><time>正在说…</time></header>
                     <p>{smoothedDraftText}</p>
                     {trace && shouldShowRunTrace(trace)
                       ? (
@@ -2276,13 +2592,14 @@ function CompanionHistoryDrawer({
                             trace={trace}
                             proposalStates={chat.proposalStates}
                             onDecideProposal={(proposalId, decision) => { void chat.decideProposal(proposalId, decision); }}
+                            onRetryProposal={(proposalId) => { void chat.retryProposal(proposalId); }}
                           />
                         )
                       : null}
                   </article>
                 );
               })()}
-              {chat.phase === "sending" && !chat.draft ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />Mao 正在结合当前页面想一想…</p> : null}
+              {chat.phase === "sending" && !chat.draft ? <p className="companion-history__system"><Loader2 className="companion-hud__spin" size={14} />{chat.companionName} 正在结合当前页面想一想…</p> : null}
             </>
           ) : (
             /* ── 聊天记录视图：只负责「找」。选中搜索命中或日期后回到上面的对话时间线定位 ── */
@@ -2292,20 +2609,23 @@ function CompanionHistoryDrawer({
                 const keyword = searchInput.trim();
                 if (!keyword) {
                   return (
-                    <p className="companion-history__system">
-                      输入关键词搜索全部聊天记录；或点右上角「按日期」选一天——都会回到对话里的那个位置。
-                    </p>
+                    <div className="companion-record__landing">
+                      <strong>想找回哪一句</strong>
+                      <p><b>输入关键词</b><span>在所有对话里搜这句话</span></p>
+                      <p><b>点「按日期」</b><span>挑一天，从那天第一条开始看</span></p>
+                      <small>点一条，回到它在对话里的原位</small>
+                    </div>
                   );
                 }
                 const needle = keyword.toLowerCase();
                 const hits = (allMessages ?? []).filter((message) => companionMessageText(message).toLowerCase().includes(needle));
                 return (
                   <>
-                    {poolStateBlock}
+                    {!calendarOpen ? poolStateBlock : null}
                     {allMessages != null && hits.length === 0 ? <p className="companion-history__system">没有找到包含「{keyword}」的消息</p> : null}
                     {hits.map((message) => (
                       <button key={message.id} type="button" className="companion-record__hit" onClick={() => jumpToMessage(message.id)}>
-                        <header><span>{message.role === "user" ? "你" : "Mao"}</span><time>{messageDayLabel(message.createdAt)} {messageTime(message.createdAt)}</time></header>
+                        <header><span>{message.role === "user" ? "你" : chat.companionName}</span><time>{messageDayLabel(message.createdAt)} {messageTime(message.createdAt)}</time></header>
                         <p>{highlightText(companionMessageText(message), keyword)}</p>
                       </button>
                     ))}
@@ -2334,9 +2654,17 @@ function CompanionHistoryDrawer({
             data-voice-phase={voice.phase}
             data-unsupported={!voice.supported || undefined}
             onClick={() => voice.toggle()}
-            disabled={voice.phase === "transcribing"}
-            title={voice.supported ? "语音输入" : "当前设备没有可用的麦克风"}
-            aria-label={voice.phase === "listening" ? "结束语音输入并发送" : "语音输入"}
+            // 与头顶那颗同一套判据：hook 的 disabled 里也含 `sending`，只按 transcribing
+            // 置灰的话，这里点下去是 `begin()` 静默 return——连一句原因都没有（方案 35 E4）。
+            disabled={voice.phase === "transcribing" || chat.phase === "sending"}
+            title={voice.supported
+              ? (chat.phase === "sending" ? "正在回复中——停止当前回复后可说话" : "语音输入")
+              : "当前设备没有可用的麦克风"}
+            aria-label={voice.phase === "listening"
+              ? "结束语音输入并发送"
+              : voice.supported
+                ? (chat.phase === "sending" ? "正在回复中——停止当前回复后可说话" : "语音输入")
+                : "当前设备没有可用的麦克风"}
           >
             {voice.phase === "transcribing" ? <Loader2 className="companion-hud__spin" size={15} aria-hidden="true" /> : <Mic size={15} aria-hidden="true" />}
           </button>
@@ -2360,7 +2688,7 @@ function CompanionHistoryDrawer({
             }
           }}
           placeholder={voice.phase === "listening" ? "正在听…" : "继续问她点什么…"}
-          aria-label="继续问 Mao"
+          aria-label={`继续问 ${chat.companionName}`}
         />
         {chat.phase === "sending" ? (
           <button type="button" className="companion-history__composer-stop" disabled={stopping} onClick={stopTurn} aria-label="停止这一轮">
@@ -2378,7 +2706,7 @@ function CompanionHistoryDrawer({
         return visible.length > 0 && !recordOpen ? <div className="companion-history__nav">{visible.map((chip) => <div key={chip.id}><span>{chip.summary}</span>{chip.route ? <button type="button" onClick={() => void openRoute(chip)}>前往</button> : <small>桌面端暂不支持这个跳转</small>}<button type="button" onClick={() => chat.dismissNavChip(chip.id)} aria-label="知道了"><X size={12} /></button></div>)}</div> : null;
       })()}
       {!recordOpen && jumpNotice ? <p className="companion-history__error" role="status">{jumpNotice}</p> : null}
-      {!recordOpen && (navNote || chat.failure) ? <p className="companion-history__error" role="status">{navNote ?? chat.failure}</p> : null}
+      {!recordOpen && (navNote || turnFailure) ? <p className="companion-history__error" role="status">{navNote ?? turnFailure}</p> : null}
       </aside>
     </>,
     document.body,
@@ -2432,7 +2760,11 @@ function useSmoothedDraftText(draft: { runId: string; text: string } | null): st
       setShownLength(state.shown);
     }, DRAFT_SMOOTH_TICK_MS);
     return () => window.clearInterval(timer);
-  }, []);
+    // 依赖是**闸门**，不是读数（钟面只碰 `stateRef`，那里永远现值）。以前这里是 `[]`：
+    // 本组件在抽屉里无条件挂载，于是这条 60ms 的钟从应用启动一直跑到退出——没有草稿、
+    // 没有回包、抽屉从没打开过的时候也在按 16Hz 唤醒主线程。按 `runId` 挂/摘之后，
+    // 没有进行中的一轮就没有钟；换轮从零起算的语义不变。
+  }, [draft?.runId]);
 
   const text = draft?.text ?? "";
   return text.slice(0, shownLength);

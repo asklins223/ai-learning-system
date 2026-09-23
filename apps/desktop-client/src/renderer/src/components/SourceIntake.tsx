@@ -15,20 +15,13 @@ import {
   formatCaptureSize,
   hasOpenModal,
   isEditableTarget,
+  isSourceCaptureTarget,
   markLinkSeen,
   readSeenLinks,
   titleFromFileName,
 } from "../app/source-intake";
 
 gsap.registerPlugin(useGSAP);
-
-/** 采集栏已有自己的投放格：落在它头上就归它，别再铺全局浮层抢。 */
-const OWNED_DROP_SELECTOR = ".capture-strip, .capture-form";
-
-function isOwnedDropTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-  return Boolean(target.closest(OWNED_DROP_SELECTOR));
-}
 
 function hostOf(url: string): string {
   try {
@@ -402,7 +395,7 @@ export function GlobalDropOverlay() {
       Boolean(transfer && (transfer.types.includes("Files") || transfer.types.includes("text/uri-list")));
 
     const onDragEnter = (event: DragEvent) => {
-      if (onboardingRef.current || isEditableTarget(event.target) || isOwnedDropTarget(event.target) || hasOpenModal()) {
+      if (onboardingRef.current || isEditableTarget(event.target) || isSourceCaptureTarget(event.target) || hasOpenModal()) {
         dragDepthRef.current = 0;
         if (phaseRef.current?.kind === "armed") setPhase(null);
         return;
@@ -417,7 +410,7 @@ export function GlobalDropOverlay() {
     };
     const onDragOver = (event: DragEvent) => {
       // 放行这次拖放：preventDefault 之后 drop 事件才会进来。
-      if (phaseRef.current && !isEditableTarget(event.target) && !isOwnedDropTarget(event.target)) {
+      if (phaseRef.current && !isEditableTarget(event.target) && !isSourceCaptureTarget(event.target)) {
         event.preventDefault();
         if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
       }
@@ -429,7 +422,7 @@ export function GlobalDropOverlay() {
     };
     const onDrop = (event: DragEvent) => {
       // 采集栏、编辑器各有自己的投放格：它们 preventDefault 过的，这层不碰。
-      if (onboardingRef.current || event.defaultPrevented || isEditableTarget(event.target) || isOwnedDropTarget(event.target)) {
+      if (onboardingRef.current || event.defaultPrevented || isEditableTarget(event.target) || isSourceCaptureTarget(event.target)) {
         dragDepthRef.current = 0;
         return;
       }

@@ -93,7 +93,7 @@ afterEach(() => {
 
 const ledgerText = async () => {
   const aside = await waitFor(() => {
-    const el = document.querySelector(".v3-lineage-ledger");
+    const el = document.querySelector(".objective-brief__dossier");
     expect(el).not.toBeNull();
     return el;
   });

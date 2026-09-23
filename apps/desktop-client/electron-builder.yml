@@ -20,6 +20,10 @@ mac:
   target:
     - dmg
     - zip
+  # 伴星语音输入要用麦克风。macOS 少了这条描述，系统弹窗根本不会出现，
+  # TCC 直接把 getUserMedia 判拒 —— 只放开主进程的权限闸是不够的。
+  extendInfo:
+    NSMicrophoneUsageDescription: AI Learn 需要用麦克风把你的话转给伴星。
 
 win:
   target:

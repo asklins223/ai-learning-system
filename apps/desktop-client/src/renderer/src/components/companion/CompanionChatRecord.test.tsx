@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CompanionMessageV1 } from "@ailearn/shared/companion-conversation-contracts";
 import type { CompanionChatSession } from "../../app/companion-chat-session";
@@ -64,6 +64,20 @@ describe("CompanionChatRecordArticle 的跳转块（方案 29 §4.8）", () => {
       kind: "note.detail",
       noteId: "5a5a5a5a-5a5a-4a5a-8a5a-5a5a5a5a5a5a",
     });
+  });
+
+  it("落点失败时就地说明并允许重试", async () => {
+    const goToRoute = vi.fn().mockRejectedValueOnce(new Error("导航失败")).mockResolvedValueOnce(undefined);
+    render(<CompanionChatRecordArticle message={message({ blocks: [
+      { type: "nav", label: "去复习", route: { kind: "review" } },
+    ] })} chat={session(goToRoute)} />);
+    const button = screen.getByRole("button", { name: "去复习" });
+    fireEvent.click(button);
+    await waitFor(() => expect(screen.getByRole("status")).toBeTruthy());
+    expect(button.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(button);
+    await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
+    expect(goToRoute).toHaveBeenCalledTimes(2);
   });
 
   it("桌面端没有等价形态的落点：留下她去过哪里的痕迹，但不给假按钮", () => {
@@ -221,6 +235,9 @@ describe("CompanionChatRecordArticle 的图片块", () => {
     expect(img.getAttribute("src")).toBe("blob:app/abc");
     expect(img.getAttribute("alt")).toContain("消防疏散");
     expect(screen.getByText("《消防疏散》· 第 2 张")).toBeTruthy();
+    const turn = img.closest("article");
+    expect(turn?.classList.contains("companion-record__rich-turn")).toBe(true);
+    expect(img.closest(".companion-record__body")).toBeNull();
   });
 
   it("还在取字节时不给破图，只给一句载入中", () => {

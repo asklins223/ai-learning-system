@@ -1,13 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   clampCompanionAnchorToPolygon,
-  companionCueRank,
-  companionNormalizedFootAnchor,
   companionPointerHasPrimaryContact,
   companionPositionForProjectedFootAnchor,
   companionProjectedFootPoint,
-  companionPositionForHomeZone,
-  companionPositionForNormalizedFootAnchor,
   companionSafeInset,
   companionSeatTarget,
   companionSemanticTravelDuration,
@@ -15,25 +11,10 @@ import {
   companionTranslationBounds,
   companionViewportCorrection,
   companionWorldAnchorFromProjectedFoot,
-  pointFallsWithinExpandedRect,
   shouldCommitCompanionDrag,
-  type CompanionCuePriority,
 } from "./companion-home-placement";
 
 describe("Home V2 companion placement", () => {
-  it("keeps every semantic anchor inside the visible scene", () => {
-    const frame = { width: 1_024, height: 700 };
-    const companion = { width: 190, height: 280 };
-
-    for (const zone of ["shelf", "desk", "window", "rest"] as const) {
-      const position = companionPositionForHomeZone(zone, frame, companion);
-      expect(position.x).toBeGreaterThanOrEqual(6);
-      expect(position.y).toBeGreaterThanOrEqual(6);
-      expect(position.x + companion.width).toBeLessThanOrEqual(frame.width - 6);
-      expect(position.y + companion.height).toBeLessThanOrEqual(frame.height - 6);
-    }
-  });
-
   it("corrects a transformed companion into the zoomed viewport safe area", () => {
     const frame = { left: 0, right: 512, top: 0, bottom: 350 };
     const companion = { left: 430, right: 565, top: 150, bottom: 339 };
@@ -41,19 +22,6 @@ describe("Home V2 companion placement", () => {
 
     expect(safe).toBe(9);
     expect(companionViewportCorrection(frame, companion, safe)).toEqual({ x: -62, y: 0 });
-  });
-
-  it("round-trips a dragged foot point through viewport resizing", () => {
-    const originalFrame = { left: 0, right: 1_280, top: 0, bottom: 720 };
-    const originalCompanion = { left: 360, right: 520, top: 330, bottom: 590 };
-    const anchor = companionNormalizedFootAnchor(originalFrame, originalCompanion);
-
-    expect(anchor).toEqual({ x: 0.34375, y: 590 / 720 });
-    expect(companionPositionForNormalizedFootAnchor(
-      anchor,
-      { width: 1_440, height: 810 },
-      { width: 180, height: 292.5 },
-    )).toEqual({ x: 405, y: 371.25 });
   });
 
   it("round-trips an arbitrary room-space foot through a transformed camera", () => {
@@ -116,52 +84,9 @@ describe("Home V2 companion placement", () => {
     expect(shouldCommitCompanionDrag("lostpointercapture", true, true)).toBe(false);
   });
 
-  it("separates head and body touches and accepts a small handoff margin", () => {
+  it("separates head and body touches by the visible height ratio", () => {
     expect(companionTouchKindAt(120, 100, 200)).toBe("head");
     expect(companionTouchKindAt(200, 100, 200)).toBe("body");
-    expect(pointFallsWithinExpandedRect(
-      { x: 92, y: 142 },
-      { left: 100, right: 180, top: 100, bottom: 140 },
-      10,
-    )).toBe(true);
-    expect(pointFallsWithinExpandedRect(
-      { x: 70, y: 142 },
-      { left: 100, right: 180, top: 100, bottom: 140 },
-      10,
-    )).toBe(false);
-  });
-
-  it("orders proactive cues by the product contract", () => {
-    expect(([
-      "ordinary",
-      "due-review",
-      "active-learning",
-      "interrupted-task",
-      "sync-error",
-    ] satisfies CompanionCuePriority[]).map(companionCueRank)).toEqual([1, 2, 3, 4, 5]);
-  });
-
-  it("keeps the five cue priorities strictly ordered from sync-error down to ordinary", () => {
-    // The inline `prioritizedCue` useMemo in CompanionPresence.tsx resolves the
-    // highest-priority candidate first, so the documented order must be
-    // strictly increasing in rank:
-    // sync-error > interrupted-task > active-learning > due-review > ordinary.
-    const rankOrder = ([
-      "ordinary",
-      "due-review",
-      "active-learning",
-      "interrupted-task",
-      "sync-error",
-    ] satisfies CompanionCuePriority[]).map(companionCueRank);
-
-    for (let index = 1; index < rankOrder.length; index += 1) {
-      expect(rankOrder[index]).toBeGreaterThan(rankOrder[index - 1]);
-    }
-    expect(rankOrder.at(-1)).toBeGreaterThan(rankOrder[0]);
-    expect(companionCueRank("sync-error")).toBeGreaterThan(companionCueRank("interrupted-task"));
-    expect(companionCueRank("interrupted-task")).toBeGreaterThan(companionCueRank("active-learning"));
-    expect(companionCueRank("active-learning")).toBeGreaterThan(companionCueRank("due-review"));
-    expect(companionCueRank("due-review")).toBeGreaterThan(companionCueRank("ordinary"));
   });
 });
 

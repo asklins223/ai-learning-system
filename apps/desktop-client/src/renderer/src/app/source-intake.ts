@@ -56,6 +56,11 @@ export function isEditableTarget(target: EventTarget | null): boolean {
   return Boolean(target.closest(EDITABLE_SELECTOR));
 }
 
+/** 来源采集栏拥有自己的文字与文件投放格，全局采集器和伴星都要让路。 */
+export function isSourceCaptureTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && Boolean(target.closest(".capture-strip, .capture-form"));
+}
+
 /** 当前是否有模态对话框开着：有就别弹新窗，排队等下一轮。 */
 export function hasOpenModal(): boolean {
   return Boolean(document.querySelector(

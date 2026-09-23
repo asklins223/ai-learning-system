@@ -11,6 +11,8 @@ import {
 import { ArrowLeft, ArrowRight, RotateCcw } from "lucide-react";
 import type { LearningObjectiveSurfaceV3 } from "@ailearn/shared/learning-objective-surface-contracts";
 import type { ReviewQueueV2 } from "@ailearn/shared/review-queue-v2-contracts";
+import type { AnswerModePreferenceV1 } from "@ailearn/shared/companion-shell-contracts";
+import { answerModeToResponsePreference } from "@ailearn/shared/companion-shell-contracts";
 import { useRoomStore } from "../../app/room-store";
 import {
   createCommandId,
@@ -669,6 +671,22 @@ export function ReviewSurface() {
     return () => window.removeEventListener("resize", measure);
   }, []);
 
+  /**
+   * 账号「作答方式」偏好（doc 34 L15）。读不到就当未设置（"any" → 服务端按情况
+   * 编排）：这一个值只是开跑时的一个提示参数，不该因为偏好读失败而点不动「开始复习」。
+   */
+  const readAnswerMode = useCallback(async (): Promise<AnswerModePreferenceV1> => {
+    const gateway = window.ailearn;
+    if (!gateway) return "any";
+    try {
+      const response = await gateway.companion.answerMode.get({ meta: createRequestMeta(epochRef.current) });
+      if (response.workspaceEpoch) epochRef.current = response.workspaceEpoch;
+      return unwrapGatewayResult(response).preference;
+    } catch {
+      return "any";
+    }
+  }, []);
+
   const startReview = async (item: ReviewItem) => {
     if (item.startability.kind !== "ready" || startingReviewId || !window.ailearn) return;
     const commandId = startCommandIdsRef.current.get(item.reviewId) ?? createCommandId("start-review");
@@ -677,6 +695,7 @@ export function ReviewSurface() {
     setActiveReviewTarget(null);
     focusedReturnTargetRef.current = null;
     setFailure(null);
+    const answerMode = await readAnswerMode();
     try {
       const response = await window.ailearn.learningRun.start({
         meta: createRequestMeta(epochRef.current),
@@ -691,7 +710,9 @@ export function ReviewSurface() {
           },
           goal: "stabilize",
           requestedTimeBudgetSeconds: 180,
-          responsePreference: "adaptive",
+          // 硬写的 "adaptive" 就是 L15：设置页那个选择在复习这条路上从来没生效。
+          // 映射只认 shared 的那一张表，界面不再自己判。
+          responsePreference: answerModeToResponsePreference(answerMode),
         },
       });
       if (response.workspaceEpoch) epochRef.current = response.workspaceEpoch;

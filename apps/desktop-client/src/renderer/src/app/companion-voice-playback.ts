@@ -113,6 +113,28 @@ export const COMPANION_SPEECH_GAP_DEADLINE_MS = 4_000;
 /** 合成失败后的重试间隔与次数（原来是**零退避**盲重试一次，且丢掉原始异常）。 */
 const SYNTH_RETRY_DELAY_MS = 250;
 const SYNTH_MAX_ATTEMPTS = 3;
+
+/**
+ * 永久拒绝：重试第二次不会改变答案，只会多要一次外部合成配额。
+ *
+ * 403 由网关按状态码翻成 `forbidden`；服务端在 403 上带 `error` token 时翻成专用码
+ * （`desktop-gateway.ts` 的 `mapResponseError`）。"还没签 AI 使用同意"就是这种
+ * （`apps/api/src/modules/identity/ai-consent-gate.ts`，doc 34 L13）。
+ * `api_untrusted` / `unsupported_contract` 同族：契约对不上时再打十次也是错。
+ */
+const PERMANENT_VOICE_REJECTIONS = new Set([
+  "forbidden",
+  // 2026-09-23 起"没签同意"从 `forbidden` 里分了出来（专用码 `ai_consent_required`）；
+  // 它同样永久，且**必须跟着进这张表**——否则那次拆分正好把"不再重试"这件事弄丢。
+  "ai_consent_required",
+  "api_untrusted",
+  "unsupported_contract",
+]);
+
+function isPermanentVoiceRejection(error: unknown): boolean {
+  const code = (error as { readonly code?: unknown } | null | undefined)?.code;
+  return typeof code === "string" && PERMANENT_VOICE_REJECTIONS.has(code);
+}
 /**
  * 一段音频"播完"的额外容忍量：等待上限 = 这段音频自身的时长 + 这个数。
  *
@@ -142,16 +164,6 @@ export function stopCompanionSpeech(): void {
   generation += 1;
   host?.stop();
   emit({ planId, phase: "stopped", segmentIndex: -1, segmentCount: 0, visibleChars: 0 });
-}
-
-/**
- * 现在能不能出声（宿主没装、未解锁、静音、窗口不可见都算不能）。
- *
- * 给"创建会话那一刻还不可出声、终态时已经可以了"这条路径用：那时应该换一次性台词
- * （`speakCompanionLine`），而不是让整轮静默。
- */
-export function isCompanionVoiceAudible(): boolean {
-  return host?.audible() ?? false;
 }
 
 /**
@@ -422,6 +434,10 @@ async function runQueuedSpeech(args: {
         return await synthesize(segment);
       } catch (error) {
         lastError = error;
+        // 权限类拒绝是**永久**的：没签 AI 同意时服务端直接 403
+        // （`identity/ai-consent-gate.ts`，doc 34 L13），退避再打三次只是把同一个
+        // 答案要三遍，还会多要三份外部合成配额。当场放弃，让调用方按"没出声"走文字降级。
+        if (isPermanentVoiceRejection(error)) break;
         if (attempt < SYNTH_MAX_ATTEMPTS - 1) {
           await new Promise((resolve) => { setTimeout(resolve, SYNTH_RETRY_DELAY_MS * (attempt + 1)); });
         }

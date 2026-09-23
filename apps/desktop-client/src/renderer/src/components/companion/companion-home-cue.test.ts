@@ -2,8 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   COMPANION_ORDINARY_CUE_DEBOUNCE_MS,
   companionCueAllowed,
-  companionCueRank,
-  shouldCompanionBorrowPlacement,
   type CompanionCuePriority,
 } from "./companion-home-placement";
 
@@ -14,15 +12,6 @@ const PRIORITY_ORDER: readonly CompanionCuePriority[] = [
   "interrupted-task",
   "sync-error",
 ];
-
-describe("companion cue arbitration", () => {
-  it("ranks the five priorities as sync-error > interrupted-task > active-learning > due-review > ordinary", () => {
-    const ranks = PRIORITY_ORDER.map(companionCueRank);
-    for (let index = 1; index < ranks.length; index += 1) {
-      expect(ranks[index]).toBeGreaterThan(ranks[index - 1]);
-    }
-  });
-});
 
 /**
  * 客户端这一层**不再定义"她多久主动说一次"**——那是服务端的
@@ -77,18 +66,5 @@ describe("主动气泡的显示闸", () => {
         origin: "thought", priority, lastOrdinaryCueAt: now, now,
       })).toBe(true);
     }
-  });
-});
-
-describe("companion placement borrowing", () => {
-  it("never borrows a user-chosen world position, including for key reminders", () => {
-    expect(shouldCompanionBorrowPlacement({ priority: "due-review", placementOwner: "user", dragging: false })).toBe(false);
-    expect(shouldCompanionBorrowPlacement({ priority: "sync-error", placementOwner: "user", dragging: false })).toBe(false);
-    expect(shouldCompanionBorrowPlacement({ priority: "ordinary", placementOwner: "user", dragging: false })).toBe(false);
-  });
-
-  it("never borrows while a semantic anchor owns placement or a pointer is active", () => {
-    expect(shouldCompanionBorrowPlacement({ priority: "due-review", placementOwner: "semantic", dragging: false })).toBe(false);
-    expect(shouldCompanionBorrowPlacement({ priority: "due-review", placementOwner: "user", dragging: true })).toBe(false);
   });
 });

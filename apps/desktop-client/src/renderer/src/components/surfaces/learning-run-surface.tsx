@@ -43,6 +43,8 @@ import {
   unwrapGatewayResult,
 } from "../../app/desktop-client";
 import { useRoomStore } from "../../app/room-store";
+import { useCompanionHomeProjection } from "../../app/companion-home-projection";
+import { speakCompanionLine, type CompanionSpeechHandle } from "../../app/companion-voice-playback";
 import { HudPage } from "../hud/HudPage";
 import { useHudPage } from "../hud/use-hud-page";
 import { reviewTargetFromReturnContract } from "../review-focus";
@@ -75,7 +77,7 @@ import { ObjectiveProgressBand } from "./ObjectiveProgressBand";
 import { progressSegmentForOutcome } from "./objective-progress-band";
 import { VoiceTeachbackEditor } from "./run-voice-input";
 import { microphoneAvailabilityCopy, probeMicrophone, type MicrophoneAvailability } from "../voice-capability";
-import { learningRunFeedback } from "./objective-quest-presentation";
+import { companionResultFeedbackAllowed, learningDiscoveryCard, learningRunFeedback } from "./objective-quest-presentation";
 
 type ResultState =
   | { kind: "idle" }
@@ -131,14 +133,16 @@ const terminalCopy: Record<Extract<ResultState, { kind: "terminal" }>["value"]["
   permission_revoked: "当前账号已失去这条学习内容的权限。",
 };
 
+// 静态穷举表既防止新增 outcome 时漏掉结果印章，也为异常展示模型保留安全文案。
+// 正常路径优先采用 learningRunFeedback 给出的、能随真实证据变化的 seal。
 const outcomeSeal: Record<LearningRunOutcome, string> = {
-  demonstrated: "已理解",
-  partial: "部分理解",
-  needs_repair: "需要修补",
-  not_assessable: "无法评估",
-  practice_completed: "练习完成",
-  skipped: "已跳过",
-  declared_unable: "已记录",
+  demonstrated: "掌握完成",
+  partial: "推进一段",
+  needs_repair: "发现缺口",
+  not_assessable: "暂未判定",
+  practice_completed: "练习已留痕",
+  skipped: "已放回路线",
+  declared_unable: "先去补给",
 };
 
 const facetLabels: Record<string, string> = {
@@ -258,6 +262,33 @@ function provenLedgerText(result: LearningRunResultV2): string {
   if (result.demonstratedFacets.length) return facetText(result.demonstratedFacets, "");
   if (result.outcome === "practice_completed") return "这次是练习，所以不写进理解账本。";
   return "这次没有能写进理解账本的新证据。";
+}
+
+function stableLineIndex(seed: string, length: number): number {
+  let hash = 0;
+  for (let index = 0; index < seed.length; index += 1) hash = ((hash << 5) - hash + seed.charCodeAt(index)) | 0;
+  return Math.abs(hash) % length;
+}
+
+/**
+ * 伴星只念评分已经证明的内容。开头有一点稳定随机感，同一结果反复打开不会换台词，
+ * 也不会把模板随机成新的学习结论。
+ */
+function companionResultLine(result: LearningRunResultV2, targetSummary: string, seed: string): string {
+  const feedback = learningRunFeedback(result);
+  const subject = targetSummary.length > 30 ? `${targetSummary.slice(0, 30)}…` : targetSummary;
+  const strongestEvidence = feedback.strengths[0] ?? feedback.achievement;
+  const nextEvidence = feedback.improvements[0] ?? feedback.gap;
+  if (result.outcome === "demonstrated") {
+    const opener = ["过关啦", "这关拿下啦", "新的理解证据收好啦"][stableLineIndex(`${seed}:success`, 3)];
+    return `${opener}！关于${subject}，${strongestEvidence}`;
+  }
+  if (result.outcome === "practice_completed") {
+    const opener = ["练习记录收好啦", "这一轮走完啦", "这次有了复盘材料"][stableLineIndex(`${seed}:practice`, 3)];
+    return `${opener}。${strongestEvidence} 接下来留意：${nextEvidence}`;
+  }
+  const opener = ["已经向前走了一段", "这次的线索很清楚", "进展已经留下来了"][stableLineIndex(`${seed}:progress`, 3)];
+  return `${opener}。${strongestEvidence} 下一步先补：${nextEvidence}`;
 }
 
 const scheduleReasonLabels: Record<string, string> = {
@@ -438,7 +469,7 @@ function rendererStateFor(payload: ArtifactPayload): LearningRendererDraftState 
   return { kind: "structured", activePartId: null, focusedElementId: null };
 }
 
-function payloadIsReady(payload: ArtifactPayload): boolean {
+function payloadIsReady(payload: ArtifactPayload, task: LearningTaskPublic | null): boolean {
   switch (payload.kind) {
     case "voice":
       return payload.confirmedTranscript.trim().length > 0;
@@ -451,8 +482,11 @@ function payloadIsReady(payload: ArtifactPayload): boolean {
     case "true_false":
       return typeof payload.answer === "boolean";
     case "matching":
-      // 要求每一端都被连过：连一半就提交会把"没连的"默默算错。
-      return payload.assignments.length >= 2;
+      // 所有左端都必须连上，左右两端都不能重复占用。
+      return task?.activeVariant.interaction.kind === "matching"
+        && payload.assignments.length === task.activeVariant.interaction.publicLeftIds.length
+        && new Set(payload.assignments.map((pair) => pair.leftId)).size === payload.assignments.length
+        && new Set(payload.assignments.map((pair) => pair.rightId)).size === payload.assignments.length;
     case "relation":
       return payload.edges.length > 0;
     case "repair":
@@ -602,6 +636,67 @@ function repairOperationTarget(operation: RepairOperationV1): string | null {
   return operation.op === "insert" ? operation.afterElementId : operation.elementId;
 }
 
+function repairPreviewItems({
+  elementIds,
+  labels,
+  replacementOptionIds,
+  replacementLabels,
+  operations,
+}: {
+  readonly elementIds: string[];
+  readonly labels?: Record<string, string>;
+  readonly replacementOptionIds: string[];
+  readonly replacementLabels?: Record<string, string>;
+  readonly operations: RepairOperationV1[];
+}): Array<{ key: string; label: string; changed: boolean }> {
+  const original = elementIds.map((id) => ({
+    key: `source:${id}`,
+    sourceId: id,
+    label: indexedPublicLabel(labels, elementIds, id, "元素"),
+    changed: false,
+  }));
+
+  return operations.reduce((items, operation, operationIndex) => {
+    if (operation.op === "remove") {
+      return items.filter((item) => item.sourceId !== operation.elementId);
+    }
+    if (operation.op === "replace") {
+      return items.map((item) => item.sourceId === operation.elementId
+        ? {
+            ...item,
+            label: indexedPublicLabel(replacementLabels, replacementOptionIds, operation.replacementOptionId, "替换项"),
+            changed: true,
+          }
+        : item);
+    }
+    if (operation.op === "move") {
+      const fromIndex = items.findIndex((item) => item.sourceId === operation.elementId);
+      if (fromIndex < 0) return items;
+      const next = [...items];
+      const [moved] = next.splice(fromIndex, 1);
+      const toIndex = Math.max(0, Math.min(operation.toIndex, next.length));
+      next.splice(toIndex, 0, { ...moved!, changed: true });
+      return next;
+    }
+    const inserted = {
+      key: `insert:${operationIndex}:${operation.replacementOptionId}`,
+      sourceId: `insert:${operationIndex}`,
+      label: indexedPublicLabel(replacementLabels, replacementOptionIds, operation.replacementOptionId, "插入项"),
+      changed: true,
+    };
+    if (operation.afterElementId === null) return [inserted, ...items];
+    const afterIndex = items.findIndex((item) => item.sourceId === operation.afterElementId);
+    if (afterIndex < 0) return [...items, inserted];
+    return [...items.slice(0, afterIndex + 1), inserted, ...items.slice(afterIndex + 1)];
+  }, original);
+}
+
+function structuredPartReady(value: StructuredPartAnswerV1, orderingTouched: boolean): boolean {
+  if (value.kind === "ordering") return value.orderedTokenIds.length > 1 && orderingTouched;
+  if (value.kind === "relation") return value.edges.length > 0;
+  return value.operations.length > 0;
+}
+
 function PartEditor({
   part,
   value,
@@ -622,9 +717,20 @@ function PartEditor({
   }
 
   if (part.kind === "relation" && value.kind === "relation") {
+    const selectedEdgeKind = part.allowedEdgeKinds.includes(relationDraft.edgeKind)
+      ? relationDraft.edgeKind
+      : part.allowedEdgeKinds[0];
+    const relationAlreadyExists = value.edges.some((edge) => edge.fromNodeId === relationDraft.from
+      && edge.toNodeId === relationDraft.to
+      && edge.edgeKind === selectedEdgeKind);
+    const canAddRelation = Boolean(relationDraft.from
+      && relationDraft.to
+      && selectedEdgeKind
+      && relationDraft.from !== relationDraft.to
+      && !relationAlreadyExists);
     const addEdge = () => {
-      if (!relationDraft.from || !relationDraft.to || relationDraft.from === relationDraft.to) return;
-      onChange({ ...value, edges: [...value.edges, { fromNodeId: relationDraft.from, toNodeId: relationDraft.to, edgeKind: relationDraft.edgeKind }] });
+      if (!canAddRelation) return;
+      onChange({ ...value, edges: [...value.edges, { fromNodeId: relationDraft.from, toNodeId: relationDraft.to, edgeKind: selectedEdgeKind! }] });
       setRelationDraft((current) => ({ ...current, from: "", to: "" }));
     };
     return (
@@ -634,16 +740,19 @@ function PartEditor({
             <option value="">选择起点</option>
             {part.publicNodeIds.map((id) => <option key={id} value={id}>{indexedPublicLabel(labels, part.publicNodeIds, id, "节点")}</option>)}
           </select>
-          <select aria-label="关系类型" value={relationDraft.edgeKind} onChange={(event) => setRelationDraft((current) => ({ ...current, edgeKind: event.target.value as RelationEdgeKindV1 }))}>
+          <select aria-label="关系类型" value={selectedEdgeKind ?? ""} onChange={(event) => setRelationDraft((current) => ({ ...current, edgeKind: event.target.value as RelationEdgeKindV1 }))}>
             {part.allowedEdgeKinds.map((kind) => <option key={kind} value={kind}>{relationKindLabel(kind)}</option>)}
           </select>
           <select aria-label="关系终点" value={relationDraft.to} onChange={(event) => setRelationDraft((current) => ({ ...current, to: event.target.value }))}>
             <option value="">选择终点</option>
             {part.publicNodeIds.map((id) => <option key={id} value={id}>{indexedPublicLabel(labels, part.publicNodeIds, id, "节点")}</option>)}
           </select>
-          <button type="button" className="run-icon-button" onClick={addEdge} aria-label="加入关系"><Plus size={16} aria-hidden="true" /></button>
+          <button type="button" className="run-icon-button" disabled={!canAddRelation} onClick={addEdge} aria-label="加入关系"><Plus size={16} aria-hidden="true" /></button>
         </div>
-        <ul className="run-relation-list">
+        {!canAddRelation && relationDraft.from && relationDraft.to ? (
+          <p className="run-editor-guidance" role="status">{relationDraft.from === relationDraft.to ? "起点和终点不能是同一项。" : relationAlreadyExists ? "这条关系已经加入了。" : ""}</p>
+        ) : null}
+        <ul className="run-relation-list" aria-label="已经创建的关系" aria-live="polite">
           {value.edges.map((edge, index) => (
             <li key={`${edge.fromNodeId}-${edge.toNodeId}-${index}`}>
               <span>{indexedPublicLabel(labels, part.publicNodeIds, edge.fromNodeId, "节点")} {relationKindLabel(edge.edgeKind)} {indexedPublicLabel(labels, part.publicNodeIds, edge.toNodeId, "节点")}</span>
@@ -657,6 +766,13 @@ function PartEditor({
 
   if (part.kind === "repair" && value.kind === "repair") {
     const operations = value.operations;
+    const previewItems = repairPreviewItems({
+      elementIds: part.publicElementIds,
+      labels,
+      replacementOptionIds: part.replacementOptionIds,
+      replacementLabels,
+      operations,
+    });
     const updateOperation = (elementId: string, op: string) => {
       const next = operations.filter((operation) => repairOperationTarget(operation) !== elementId);
       if (op === "replace") next.push({ op: "replace", elementId, replacementOptionId: part.replacementOptionIds[0] ?? "" });
@@ -679,7 +795,7 @@ function PartEditor({
               </select>
               {operation?.op === "replace" || operation?.op === "insert" ? (
                 <select
-                  aria-label="选择替换内容"
+                  aria-label={`${indexedPublicLabel(labels, part.publicElementIds, elementId, "元素")}的替换内容`}
                   value={operation.replacementOptionId}
                   onChange={(event) => onChange({ ...value, operations: operations.map((candidate) => repairOperationTarget(candidate) === elementId ? { ...candidate, replacementOptionId: event.target.value } : candidate) as RepairOperationV1[] })}
                 >
@@ -706,16 +822,14 @@ function PartEditor({
         </div>
         <aside className="run-repair-preview" aria-live="polite">
           <strong><Check size={15} aria-hidden="true" />修补预览</strong>
-          {operations.length ? (
-            <ul>
-              {operations.map((operation, index) => {
-                const targetId = repairOperationTarget(operation);
-                const target = targetId ? indexedPublicLabel(labels, part.publicElementIds, targetId, "元素") : "当前位置";
-                const action = operation.op === "replace" ? "替换" : operation.op === "remove" ? "移除" : operation.op === "move" ? `移动到第 ${operation.toIndex + 1} 位` : "在后面插入";
-                return <li key={`${operation.op}-${targetId}-${index}`}><span>{target}</span><b>{action}</b></li>;
-              })}
-            </ul>
-          ) : <p>还没有修改；原内容会保持不变。</p>}
+          <ol className="run-repair-preview__sequence">
+            {previewItems.map((item, index) => (
+              <li key={item.key} data-changed={item.changed ? "true" : "false"}>
+                <span>{index + 1}</span><b>{item.label}</b>
+              </li>
+            ))}
+          </ol>
+          <p>{operations.length ? `已预览 ${operations.length} 处修补。` : "还没有修改；原内容会保持不变。"}</p>
         </aside>
       </div>
     );
@@ -743,6 +857,7 @@ function ChoiceEditor({
           type="button"
           role="radio"
           aria-checked={value === id}
+          tabIndex={value === id || (value === undefined && index === 0) ? 0 : -1}
           className={`run-choice-option${value === id ? " is-selected" : ""}`}
           onClick={() => onChange(id)}
           onKeyDown={(event) => {
@@ -750,9 +865,10 @@ function ChoiceEditor({
             event.preventDefault();
             const offset = event.key === "ArrowDown" || event.key === "ArrowRight" ? 1 : -1;
             const nextIndex = (index + offset + ids.length) % ids.length;
+            const group = event.currentTarget.parentElement;
             onChange(ids[nextIndex]!);
             window.requestAnimationFrame(() => {
-              event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("[role='radio']")[nextIndex]?.focus();
+              group?.querySelectorAll<HTMLButtonElement>("[role='radio']")[nextIndex]?.focus();
             });
           }}
         >
@@ -776,6 +892,17 @@ function TrueFalseEditor({
   readonly value: boolean | undefined;
   readonly onChange: (value: boolean) => void;
 }) {
+  const options = [true, false] as const;
+  const moveSelection = (current: boolean, key: string, button: HTMLButtonElement) => {
+    if (!["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight"].includes(key)) return;
+    const currentIndex = options.indexOf(current);
+    const offset = key === "ArrowDown" || key === "ArrowRight" ? 1 : -1;
+    const nextIndex = (currentIndex + offset + options.length) % options.length;
+    onChange(options[nextIndex]!);
+    window.requestAnimationFrame(() => {
+      button.parentElement?.querySelectorAll<HTMLButtonElement>("[role='radio']")[nextIndex]?.focus();
+    });
+  };
   return (
     <div className="run-truefalse">
       <p className="run-truefalse__claim">{proposition}</p>
@@ -784,15 +911,27 @@ function TrueFalseEditor({
           type="button"
           role="radio"
           aria-checked={value === true}
+          tabIndex={value === true || value === undefined ? 0 : -1}
           className={`button${value === true ? " primary" : ""}`}
           onClick={() => onChange(true)}
+          onKeyDown={(event) => {
+            if (!["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight"].includes(event.key)) return;
+            event.preventDefault();
+            moveSelection(true, event.key, event.currentTarget);
+          }}
         >这条说法对</button>
         <button
           type="button"
           role="radio"
           aria-checked={value === false}
+          tabIndex={value === false ? 0 : -1}
           className={`button${value === false ? " primary" : ""}`}
           onClick={() => onChange(false)}
+          onKeyDown={(event) => {
+            if (!["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight"].includes(event.key)) return;
+            event.preventDefault();
+            moveSelection(false, event.key, event.currentTarget);
+          }}
         >这条说法错</button>
       </div>
       {value === undefined ? <p className="meta">先选一个，再提交。</p> : null}
@@ -818,9 +957,9 @@ function MatchingEditor({
 
   const connect = (rightId: string) => {
     if (!activeLeft) return;
-    // 一个左端只保留一条连线：重复连同一端是改答案，不是加答案。
+    // 两端都只保留一条连线：重新选择任意一端都是改答案，不会生成互相冲突的配对。
     onChange([
-      ...value.filter((pair) => pair.leftId !== activeLeft),
+      ...value.filter((pair) => pair.leftId !== activeLeft && pair.rightId !== rightId),
       { leftId: activeLeft, rightId },
     ]);
     setActiveLeft(null);
@@ -852,6 +991,7 @@ function MatchingEditor({
                 type="button"
                 className="run-matching__item"
                 disabled={!activeLeft}
+                aria-label={activeLeft ? `把${labels?.[activeLeft] ?? activeLeft}与${labels?.[id] ?? id}配成一对` : `先选择左侧项目，再连接${labels?.[id] ?? id}`}
                 onClick={() => connect(id)}
               >
                 {labels?.[id] ?? id}
@@ -891,6 +1031,7 @@ function OrderingEditor({
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
   const [grabbedIndex, setGrabbedIndex] = useState<number | null>(null);
   const [announcement, setAnnouncement] = useState("尚未调整顺序");
+  const pointerIndexRef = useRef<number | null>(null);
 
   const moveTo = (fromIndex: number, toIndex: number) => {
     if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0 || fromIndex >= value.length || toIndex >= value.length) return;
@@ -913,8 +1054,10 @@ function OrderingEditor({
         {value.map((id, index) => (
           <li
             key={id}
+            data-order-index={index}
             draggable
             data-dragging={draggedIndex === index ? "true" : "false"}
+            aria-grabbed={grabbedIndex === index || draggedIndex === index}
             onDragStart={() => setDraggedIndex(index)}
             onDragOver={(event) => event.preventDefault()}
             onDrop={(event) => { event.preventDefault(); if (draggedIndex !== null) moveTo(draggedIndex, index); setDraggedIndex(null); }}
@@ -926,6 +1069,36 @@ function OrderingEditor({
               className="run-order-grip"
               aria-pressed={grabbedIndex === index}
               aria-label={`${indexedPublicLabel(labels, ids, id, "排序项")}，当前第 ${index + 1} 位。按空格抓取后用上下方向键移动`}
+              onPointerDown={(event) => {
+                if (event.pointerType === "mouse" && event.button !== 0) return;
+                event.preventDefault();
+                pointerIndexRef.current = index;
+                setDraggedIndex(index);
+                event.currentTarget.setPointerCapture?.(event.pointerId);
+                setAnnouncement(`正在拖动第 ${index + 1} 项`);
+              }}
+              onPointerMove={(event) => {
+                const fromIndex = pointerIndexRef.current;
+                if (fromIndex === null) return;
+                const target = document.elementFromPoint?.(event.clientX, event.clientY)?.closest<HTMLElement>("[data-order-index]");
+                const toIndex = Number(target?.dataset.orderIndex);
+                if (!Number.isInteger(toIndex) || fromIndex === toIndex) return;
+                moveTo(fromIndex, toIndex);
+                pointerIndexRef.current = toIndex;
+                setDraggedIndex(toIndex);
+              }}
+              onPointerUp={(event) => {
+                if (pointerIndexRef.current === null) return;
+                event.currentTarget.releasePointerCapture?.(event.pointerId);
+                pointerIndexRef.current = null;
+                setDraggedIndex(null);
+                setAnnouncement("已放下排序项");
+              }}
+              onPointerCancel={() => {
+                pointerIndexRef.current = null;
+                setDraggedIndex(null);
+                setAnnouncement("已取消拖动");
+              }}
               onKeyDown={(event) => {
                 if (event.key === " " || event.key === "Enter") {
                   event.preventDefault();
@@ -964,28 +1137,71 @@ function StructuredBundleEditor({
   interaction,
   value,
   onChange,
-  onReviewReady,
+  restoredDraft,
+  onReviewStateChange,
 }: {
   readonly interaction: StructuredBundleInteraction;
   readonly value: StructuredBundlePayload;
   readonly onChange: (value: StructuredBundlePayload) => void;
-  readonly onReviewReady: () => void;
+  readonly restoredDraft: boolean;
+  readonly onReviewStateChange: (ready: boolean) => void;
 }) {
   const [activePart, setActivePart] = useState(0);
+  const [touchedOrderingParts, setTouchedOrderingParts] = useState<ReadonlySet<string>>(() => new Set(
+    restoredDraft
+      ? interaction.parts.filter((part) => part.kind === "ordering").map((part) => part.partId)
+      : [],
+  ));
+  useEffect(() => {
+    if (!restoredDraft) return;
+    setTouchedOrderingParts(new Set(
+      interaction.parts.filter((part) => part.kind === "ordering").map((part) => part.partId),
+    ));
+  }, [interaction.parts, restoredDraft]);
   const reviewing = activePart >= interaction.parts.length;
   const part = interaction.parts[Math.min(activePart, interaction.parts.length - 1)];
   const partValue = value.partAnswers[Math.min(activePart, value.partAnswers.length - 1)];
 
+  const openPart = (index: number) => {
+    onReviewStateChange(false);
+    setActivePart(index);
+  };
+
+  const answerSummary = (item: StructuredPartPublicV1, answer: StructuredPartAnswerV1 | undefined) => {
+    if (!answer || item.kind !== answer.kind) return "这个片段还没有有效答案";
+    if (item.kind === "ordering" && answer.kind === "ordering") {
+      return answer.orderedTokenIds.map((id) => indexedPublicLabel(item.publicTokenLabels, item.publicTokenIds, id, "排序项")).join(" → ");
+    }
+    if (item.kind === "relation" && answer.kind === "relation") {
+      return answer.edges.map((edge) => `${indexedPublicLabel(item.publicNodeLabels, item.publicNodeIds, edge.fromNodeId, "节点")} ${relationKindLabel(edge.edgeKind)} ${indexedPublicLabel(item.publicNodeLabels, item.publicNodeIds, edge.toNodeId, "节点")}`).join("；");
+    }
+    if (item.kind === "repair" && answer.kind === "repair") {
+      return repairPreviewItems({
+        elementIds: item.publicElementIds,
+        labels: item.publicElementLabels,
+        replacementOptionIds: item.replacementOptionIds,
+        replacementLabels: item.replacementOptionLabels,
+        operations: answer.operations,
+      }).map((preview) => preview.label).join(" → ");
+    }
+    return "这个片段还没有有效答案";
+  };
+
   if (reviewing) {
     return (
       <div className="run-bundle-review">
-        <header><Check size={18} aria-hidden="true" /><div><strong>提交前再看一遍</strong><span>两个证明片段都完成后，整组答案会一起提交。</span></div></header>
+        <header><Check size={18} aria-hidden="true" /><div><strong>提交前再看一遍</strong><span>全部证明片段会作为一组答案提交。</span></div></header>
         <ol>
           {interaction.parts.map((item, index) => (
-            <li key={item.partId}><span>片段 {index + 1}</span><strong>{item.kind === "ordering" ? "顺序整理" : item.kind === "relation" ? "关系搭建" : "纠错修补"}</strong><button type="button" className="text-action" onClick={() => setActivePart(index)}>返回修改</button></li>
+            <li key={item.partId}>
+              <span>片段 {index + 1}</span>
+              <strong>{item.kind === "ordering" ? "顺序整理" : item.kind === "relation" ? "关系搭建" : "纠错修补"}</strong>
+              <p>{answerSummary(item, value.partAnswers[index])}</p>
+              <button type="button" className="text-action" onClick={() => openPart(index)}>返回修改</button>
+            </li>
           ))}
         </ol>
-        <button type="button" className="button" onClick={() => setActivePart(Math.max(0, interaction.parts.length - 1))}>返回上一步</button>
+        <button type="button" className="button" onClick={() => openPart(Math.max(0, interaction.parts.length - 1))}>返回上一步</button>
       </div>
     );
   }
@@ -997,10 +1213,11 @@ function StructuredBundleEditor({
       ? part.publicNodeLabels
       : part.publicElementLabels;
   const replacementLabels = part.kind === "repair" ? part.replacementOptionLabels : undefined;
+  const currentPartReady = structuredPartReady(partValue, part.kind !== "ordering" || touchedOrderingParts.has(part.partId));
   return (
     <div className="run-bundle-editor">
       <div className="run-bundle-progress" role="status" aria-label={`组合证明，第 ${activePart + 1} 个，共 ${interaction.parts.length} 个`}>
-        {interaction.parts.map((item, index) => <i key={item.partId} data-active={index <= activePart ? "true" : "false"} />)}
+        {interaction.parts.map((item, index) => <i key={item.partId} data-active={index <= activePart ? "true" : "false"} data-current={index === activePart ? "true" : "false"} />)}
         <span>{activePart + 1} / {interaction.parts.length}</span>
       </div>
       <section className="run-bundle-part">
@@ -1013,16 +1230,21 @@ function StructuredBundleEditor({
           onChange={(nextPart) => {
             const next = [...value.partAnswers] as [StructuredPartAnswerV1] | [StructuredPartAnswerV1, StructuredPartAnswerV1];
             next[activePart] = nextPart;
+            if (part.kind === "ordering") {
+              setTouchedOrderingParts((current) => new Set([...current, part.partId]));
+            }
+            onReviewStateChange(false);
             onChange({ ...value, partAnswers: next });
           }}
         />
       </section>
       <footer className="run-bundle-nav">
-        <button type="button" className="button" disabled={activePart === 0} onClick={() => setActivePart((current) => Math.max(0, current - 1))}>上一个片段</button>
-        <button type="button" className="button primary" onClick={() => {
+        <button type="button" className="button" disabled={activePart === 0} onClick={() => openPart(Math.max(0, activePart - 1))}>上一个片段</button>
+        <span className="run-bundle-nav__status" role="status">{currentPartReady ? "这个片段已经可以继续" : part.kind === "ordering" ? "先调整一次顺序，再继续" : "先完成这个片段，再继续"}</span>
+        <button type="button" className="button primary" disabled={!currentPartReady} onClick={() => {
           const next = activePart + 1;
           setActivePart(next);
-          if (next >= interaction.parts.length) onReviewReady();
+          if (next >= interaction.parts.length) onReviewStateChange(true);
         }}>{activePart === interaction.parts.length - 1 ? "复核整组答案" : "下一个片段"}</button>
       </footer>
     </div>
@@ -1033,12 +1255,16 @@ function InteractionEditor({
   task,
   value,
   onChange,
-  onStructuredReview,
+  restoredStructuredDraft,
+  onStructuredReviewStateChange,
+  onVoiceBusyChange,
 }: {
   readonly task: LearningTaskPublic;
   readonly value: ArtifactPayload;
   readonly onChange: (value: ArtifactPayload) => void;
-  readonly onStructuredReview: () => void;
+  readonly restoredStructuredDraft: boolean;
+  readonly onStructuredReviewStateChange: (ready: boolean) => void;
+  readonly onVoiceBusyChange: (busy: boolean) => void;
 }) {
   const interaction = task.activeVariant.interaction;
 
@@ -1048,8 +1274,9 @@ function InteractionEditor({
     return (
       <VoiceTeachbackEditor
         maxSeconds={interaction.maxSeconds}
-        value={{ confirmedTranscript: value.confirmedTranscript, voiceArtifactRef: value.voiceArtifactRef }}
-        onChange={(next) => onChange({ ...value, confirmedTranscript: next.confirmedTranscript, voiceArtifactRef: next.voiceArtifactRef })}
+        value={{ confirmedTranscript: value.confirmedTranscript, voiceArtifactRef: value.voiceArtifactRef, correctionMethod: value.correctionMethod }}
+        onChange={(next) => onChange({ ...value, confirmedTranscript: next.confirmedTranscript, voiceArtifactRef: next.voiceArtifactRef, correctionMethod: next.correctionMethod })}
+        onBusyChange={onVoiceBusyChange}
       />
     );
   }
@@ -1059,6 +1286,7 @@ function InteractionEditor({
       <label className="run-text-editor" style={{ display: "block", height: "100%" }}>
         <span className="sr-only">用自己的话回答</span>
         <textarea
+          aria-label="用自己的话回答"
           style={{ resize: "none", outline: "none", display: "block" }}
           maxLength={interaction.maxChars}
           value={value.text}
@@ -1116,7 +1344,7 @@ function InteractionEditor({
   }
 
   if (interaction.kind === "structured_bundle" && value.kind === "structured_bundle") {
-    return <StructuredBundleEditor interaction={interaction} value={value} onChange={onChange} onReviewReady={onStructuredReview} />;
+    return <StructuredBundleEditor interaction={interaction} value={value} onChange={onChange} restoredDraft={restoredStructuredDraft} onReviewStateChange={onStructuredReviewStateChange} />;
   }
 
   return <p className="run-inline-error">这道题要的作答方式这台电脑给不了，已经停住没有提交。</p>;
@@ -1139,7 +1367,16 @@ type LearningRunBodyProps = {
 function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) {
   const setActiveReviewTarget = useRoomStore((state) => state.setActiveReviewTarget);
   const setCompanionMoment = useRoomStore((state) => state.setCompanionMoment);
-  const queueHomeCompletion = useRoomStore((state) => state.queueHomeCompletion);
+  const masterMuted = useRoomStore((state) => state.masterMuted);
+  const companionTemporarilyHidden = useRoomStore((state) => state.companionTemporarilyHidden);
+  const companionHome = useCompanionHomeProjection();
+  const companionFeedbackAllowed = companionResultFeedbackAllowed({
+    masterMuted,
+    temporarilyHidden: companionTemporarilyHidden,
+    activeness: companionHome.projection?.profileSummary.activeness ?? null,
+    proactiveMuted: companionHome.projection?.roomProfile.proactiveMuted === true,
+    allowPlayful: companionHome.projection?.profileSummary.boundaries.allowPlayful === true,
+  });
   const [snapshot, setSnapshot] = useState<LearningRunPublicSnapshotV2 | null>(null);
   /**
    * 秒表与到点自动结束（复盘 #13）。
@@ -1171,6 +1408,8 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   const [draftWriteBlocked, setDraftWriteBlocked] = useState(false);
   const [orderingTouched, setOrderingTouched] = useState(false);
   const [structuredReviewReady, setStructuredReviewReady] = useState(false);
+  const [restoredStructuredDraft, setRestoredStructuredDraft] = useState(false);
+  const [voiceEditorBusy, setVoiceEditorBusy] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
   const [resultState, setResultState] = useState<ResultState>({ kind: "idle" });
   const [targetReveal, setTargetReveal] = useState<TargetRevealState>({ kind: "idle" });
@@ -1204,6 +1443,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   const [waitingSeconds, setWaitingSeconds] = useState(0);
   const [resultQueryFailure, setResultQueryFailure] = useState<PlayerFailure | null>(null);
   const [resultAcknowledgementActive, setResultAcknowledgementActive] = useState(false);
+  const [discoveryRevealed, setDiscoveryRevealed] = useState(false);
   const assessmentPending = resultState.kind === "pending"
     || snapshot?.phase === "assessing" || snapshot?.phase === "committing";
   /**
@@ -1235,6 +1475,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   const resultPollGenerationRef = useRef(0);
   const resultAcknowledgementEligibleRef = useRef(false);
   const acknowledgedResultKeyRef = useRef<string | null>(null);
+  const resultSpeechRef = useRef<CompanionSpeechHandle | null>(null);
   const draftWriteGenerationRef = useRef(0);
   const epochRef = useRef<number | undefined>(undefined);
   const taskKeyRef = useRef<string | null>(null);
@@ -1249,17 +1490,21 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   const recoveryHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const unavailableHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const primaryContentRef = useRef<HTMLDivElement | null>(null);
-  const resultOutcome = resultState.kind === "result" ? resultState.value.result.outcome : null;
-  const demonstratedResult = resultOutcome !== null && shouldConfirmCompanionForOutcome(resultOutcome);
+  const discoveryResultKey = resultState.kind === "result"
+    ? `${resultState.value.runId}:${resultState.value.result.snapshotId}:${resultState.value.result.outcome}`
+    : null;
   const showResult = resultState.kind === "result" || resultState.kind === "terminal";
   const finishResultCeremony = useCallback(() => {
     setResultAcknowledgementActive(false);
-    setCompanionMoment("idle");
-  }, [setCompanionMoment]);
+  }, []);
 
   useEffect(() => {
     onPageChange(showResult ? "result" : "assessment");
   }, [onPageChange, showResult]);
+
+  useEffect(() => {
+    setDiscoveryRevealed(false);
+  }, [discoveryResultKey]);
 
   useLayoutEffect(() => {
     const activeFence = activateLearningRunRequestFence(runRequestFenceRef.current, runId);
@@ -1292,12 +1537,26 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   }, [dirty]);
 
   useEffect(() => {
+    if (companionFeedbackAllowed) return;
+    resultSpeechRef.current?.stop();
+    resultSpeechRef.current = null;
+    setCompanionMoment("idle");
+  }, [companionFeedbackAllowed, setCompanionMoment]);
+
+  useEffect(() => () => {
+    resultSpeechRef.current?.stop();
+    resultSpeechRef.current = null;
+  }, []);
+
+  useEffect(() => {
     taskKeyRef.current = null;
     editorRevisionRef.current = 0;
     focusKeyRef.current = null;
     confirmationReturnFocusRef.current = null;
     resultAcknowledgementEligibleRef.current = false;
     acknowledgedResultKeyRef.current = null;
+    resultSpeechRef.current?.stop();
+    resultSpeechRef.current = null;
     snapshotRequestGenerationRef.current += 1;
     acceptedSnapshotRef.current = null;
     draftWriteGenerationRef.current += 1;
@@ -1307,6 +1566,8 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
     setDraftWriteBlocked(false);
     setOrderingTouched(false);
     setStructuredReviewReady(false);
+    setRestoredStructuredDraft(false);
+    setVoiceEditorBusy(false);
     setReturnContract(null);
     setResultState({ kind: "idle" });
     setResultAcknowledgementActive(false);
@@ -1440,6 +1701,8 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
       setDirty(false);
       setOrderingTouched(false);
       setStructuredReviewReady(false);
+      setRestoredStructuredDraft(false);
+      setVoiceEditorBusy(false);
     }
     const draftEditorRevision = editorRevisionRef.current;
 
@@ -1472,6 +1735,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
         if (draft.payload) {
           setEditor(editorFromDraft(draft.payload));
           if (draft.payload.kind === "ordering") setOrderingTouched(true);
+          if (draft.payload.kind === "structured_bundle") setRestoredStructuredDraft(true);
         }
       } else {
         setDraftStatus("已取回草稿；你刚写的还没存上");
@@ -1755,18 +2019,23 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
     if (value.status === "learning_result") {
       setResultState({ kind: "result", value });
       const resultKey = `${value.runId}:${value.result.snapshotId}:${value.result.outcome}`;
-      const canAcknowledge = resultAcknowledgementEligibleRef.current
-        && shouldConfirmCompanionForOutcome(value.result.outcome);
-      if (canAcknowledge && acknowledgedResultKeyRef.current !== resultKey) {
+      const isFreshResult = resultAcknowledgementEligibleRef.current
+        && acknowledgedResultKeyRef.current !== resultKey;
+      const playsFullCeremony = isFreshResult && shouldConfirmCompanionForOutcome(value.result.outcome);
+      const hasPositiveCompanionFeedback = ["demonstrated", "practice_completed", "partial"].includes(value.result.outcome);
+      if (isFreshResult) {
         acknowledgedResultKeyRef.current = resultKey;
-        setResultAcknowledgementActive(true);
-        setCompanionMoment("confirm");
-        // The one-shot confirmation is unlocked only by a trusted,
-        // demonstrated result observed after processing in this mount. Keep
-        // it pending until the cottage has fully returned to its idle phase;
-        // this surface may unmount before that transition completes.
-        queueHomeCompletion(`learning-result:${resultKey}`);
-      } else if (!canAcknowledge) {
+        setResultAcknowledgementActive(playsFullCeremony);
+        if (companionFeedbackAllowed && hasPositiveCompanionFeedback) {
+          setCompanionMoment(playsFullCeremony ? "confirm" : "encourage");
+          resultSpeechRef.current?.stop();
+          resultSpeechRef.current = speakCompanionLine(companionResultLine(value.result, snapshot?.target.publicSummary ?? "这条理解目标", resultKey));
+        } else {
+          resultSpeechRef.current?.stop();
+          resultSpeechRef.current = null;
+          setCompanionMoment("idle");
+        }
+      } else {
         // skipped / declared_unable / repair and restored terminal results are
         // deliberately neutral and never reuse the success presentation.
         setResultAcknowledgementActive(false);
@@ -1789,7 +2058,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
       if (requestIsCurrent()) applyReturnContract(null);
     }
     return true;
-  }, [applyReturnContract, queueHomeCompletion, requestSnapshotRefresh, runId, setCompanionMoment]);
+  }, [applyReturnContract, companionFeedbackAllowed, requestSnapshotRefresh, runId, setCompanionMoment, snapshot?.target.publicSummary]);
 
   useEffect(() => {
     if (!snapshot || snapshot.runId !== runId || !shouldPollLearningRunResult(snapshot.phase)) return;
@@ -1836,7 +2105,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   };
 
   const submit = async (payload: ArtifactPayload) => {
-    if (!snapshot?.activeTask || !window.ailearn || submitting || resyncing || recovery !== null) return;
+    if (!snapshot?.activeTask || !window.ailearn || submitting || resyncing || recovery !== null || (payload.kind === "voice" && voiceEditorBusy)) return;
     if (payload.kind === "ordering" && !orderingTouched) {
       setDraftStatus("先调整一次顺序，确认这不是题目给出的随机初始排列");
       return;
@@ -1845,7 +2114,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
       setDraftStatus("先完成全部片段并复核整组答案，再提交");
       return;
     }
-    if (payload.kind !== "declared_unable" && !payloadIsReady(payload)) {
+    if (payload.kind !== "declared_unable" && !payloadIsReady(payload, snapshot.activeTask)) {
       setDraftStatus("先完成当前任务，再提交可信证据");
       return;
     }
@@ -2111,6 +2380,16 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   const activeTask = snapshot.activeTask;
   const result = resultState.kind === "result" ? resultState.value.result : null;
   const terminal = resultState.kind === "terminal" ? resultState.value : null;
+  const resultSeed = result ? `${runId}:${result.snapshotId}:${result.outcome}` : null;
+  const rawDiscoveryCard = result && resultSeed ? learningDiscoveryCard(result, resultSeed) : null;
+  // 安静模式仍保留真实学习发现，但不能把它包装成“伴星在说话”。这是学习反馈，
+  // 不是角色主动打扰；声音、动作和角色口吻都由 companionFeedbackAllowed 单独关掉。
+  const discoveryCard = rawDiscoveryCard && !companionFeedbackAllowed && rawDiscoveryCard.eyebrow === "伴星发现"
+    ? { ...rawDiscoveryCard, eyebrow: "本次闪光点" as const }
+    : rawDiscoveryCard;
+  const companionFeedbackLine = result && resultSeed
+    ? companionResultLine(result, snapshot.target.publicSummary, resultSeed)
+    : null;
 
   const loadTargetReveal = () => {
     if (targetReveal.kind === "loading" || targetReveal.kind === "ready") return;
@@ -2137,6 +2416,11 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
   const exitDestinationLabel = exitRoute.kind === "review.queue" ? "回到复习队列" : "返回学习空间";
   // 「同步中」是内部词：用户要知道的不是数据在同步，而是回去之后落点还没定。
   const resultReturnLabel = returnContract?.status === "projection_pending" ? `确认中 · ${exitDestinationLabel}` : exitDestinationLabel;
+  const nextChallengeLabel = result?.outcome === "declared_unable"
+    ? "先回研究册把这条看懂，再回来验证"
+    : result && result.gapFacets.length
+      ? `先补上「${facetText(result.gapFacets.slice(0, 1), "")}」`
+      : returnTargetLabel(returnTarget);
   const recoveryHeading = recovery === "draft" ? "草稿版本需要同步" : "上一动作结果需要确认";
   const processingHeadline = processingPhase === "committing"
     ? "正在记录可信学习结果"
@@ -2175,6 +2459,10 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
     action.kind === "activate_followup"
     || action.kind === "finish_current_evidence"
     || action.kind === "finish_without_commit");
+  const checkpointPrimaryAction = checkpointActions.find((action) => action.kind === "finish_current_evidence")
+    ?? checkpointActions.find((action) => action.kind === "activate_followup")
+    ?? checkpointActions.find((action) => action.kind === "finish_without_commit")
+    ?? null;
   const checkpointUnassessable = checkpointActions.some((action) => action.kind === "finish_without_commit");
   const quickActions: LearningRunAllowedActionV2[] = [];
   if (switchAction) quickActions.push(switchAction);
@@ -2192,8 +2480,8 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
    */
   const isExitAction = (action: LearningRunAllowedActionV2) => action.kind === "skip_run" || action.kind === "end";
   const exitActions = quickActions.filter(isExitAction);
-  const helpActions = quickActions.filter((action) => !isExitAction(action));
-  const quickButton = (action: LearningRunAllowedActionV2) => {
+  const helpActions = quickActions.filter((action) => !isExitAction(action) && action !== checkpointPrimaryAction);
+  const quickButton = (action: LearningRunAllowedActionV2, primary = false) => {
     const isHint = action.kind === "request_hint";
     const isSwitch = action.kind === "switch_variant";
     const blockedSwitch = isSwitch && blockedSwitchIds.has(action.alternativeId);
@@ -2210,8 +2498,9 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
       <button
         key={actionKey(action)}
         type="button"
-      className="button"
+        className={`button${primary ? " primary" : ""}${blockedSwitch ? " learning-run-alt-disabled" : ""}`}
         disabled={busy || (isHint && hintsExhausted) || blockedSwitch}
+        aria-describedby={blockedSwitch ? "learning-run-switch-note" : undefined}
         title={blockedSwitch ? microphoneReason : undefined}
         onClick={() => {
           const needsDowngradeConfirmation = isHint
@@ -2250,66 +2539,87 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
         <>
         {result && feedback ? <LearningRunCeremony active={resultAcknowledgementActive} headline={feedback.headline} achievement={feedback.achievement} onFinish={finishResultCeremony} /> : null}
         <section className="learning-run-result-board" data-outcome={result ? result.outcome : "no_result"} data-tone={feedback?.tone ?? "neutral"} data-acknowledgement={resultAcknowledgementActive ? "active" : "idle"}>
-          <aside className="learning-run-result-summary" data-tone={demonstratedResult ? "confirmed" : "neutral"}>
-            <span className="learning-run-result-summary__kicker">{result?.outcome === "practice_completed" ? "练习关完成" : "远征结果"}</span>
+          <header className="learning-run-arrival">
+            <div className="learning-run-arrival__topline">
+              <span>{result?.outcome === "practice_completed" ? "练习旅程完成" : "本次挑战记录"}</span>
+              <span>{runOriginLabel(snapshot.originV2)} · {formatClock(clock.seconds)}</span>
+            </div>
             {result && !SEALLESS_OUTCOMES.has(result.outcome) ? (
-              <strong className="learning-run-result-summary__seal">{outcomeSeal[result.outcome]}</strong>
+              <strong className="learning-run-arrival__seal">{feedback?.seal ?? outcomeSeal[result.outcome]}</strong>
             ) : (
-              <strong className="learning-run-result-summary__quiet">{
-                result?.outcome === "declared_unable" ? "这次说了暂时不会" : "这次先放着"
-              }</strong>
+              <strong className="learning-run-arrival__quiet">{result?.outcome === "declared_unable" ? "这次说了暂时不会" : "这次先放着"}</strong>
             )}
-            <p>{snapshot.target.publicSummary}</p>
-            {/* B10：这一条带和列表焦点卡、详情页顶部是**同一个组件**。
-                这里画的是"这一轮把位置推到第几段"，读的是服务端签发的
-                result.outcome——不是这条目标的累计位置：run 快照的 target 里
-                根本没有 personalState（只有题面、评分规则与练习件），
-                累计那一格要等服务端发这个字段，不能本机推。 */}
+            <h2 ref={primaryHeadingRef} tabIndex={-1} data-surface-initial-focus="true">
+              {feedback?.headline ?? "这次旅程没有形成新的学习结果"}
+            </h2>
+            <p className="learning-run-arrival__target">{snapshot.target.publicSummary}</p>
             <ObjectiveProgressBand segment={progressSegmentForOutcome(result?.outcome)} />
-            <dl>
-              {thisTime.coveredCount ? (
-                <div><dt>这次说清</dt><dd>{thisTime.coveredCount} 条</dd></div>
-              ) : null}
-              <div><dt>用时</dt><dd>{formatClock(clock.seconds)}</dd></div>
-              {result?.demonstratedFacets.length ? (
-                <div><dt>算进理解</dt><dd>{result.demonstratedFacets.length} 项</dd></div>
-              ) : null}
-              {result?.gapFacets.length ? (
-                <div><dt>仍有缺口</dt><dd>{result.gapFacets.length} 项</dd></div>
-              ) : null}
-            </dl>
-          </aside>
+          </header>
+          {feedback ? (
+            <section className="learning-run-arrival-evidence" aria-label="本次学习反馈">
+              <div><span>{feedback.tone === "neutral" ? "本次记录" : result?.outcome === "practice_completed" && !thisTime.coveredCount ? "本次判定" : "做对了什么"}</span><p>{feedback.achievement}</p></div>
+              <div><span>还差什么</span><p>{feedback.gap}</p></div>
+              <div><span>下一步</span><p>{nextChallengeLabel}</p></div>
+            </section>
+          ) : null}
           <article className="learning-run-result-report">
-            <header>
-              <span>{runOriginLabel(snapshot.originV2)}</span>
-              <h2 ref={primaryHeadingRef} tabIndex={-1} data-surface-initial-focus="true">
-                {feedback?.headline ?? "这次旅程没有形成新的学习结果"}
-              </h2>
-            </header>
-            {feedback ? (
+            <div className="learning-run-result-report__intro"><span>学习证据</span><h3>把这次收获带走</h3></div>
+            {feedback && companionFeedbackAllowed ? (
               <div className="learning-run-result-companion" role="status">
                 <Sparkles size={17} aria-hidden="true" />
-                <p><strong>{feedback.tone === "success" ? "伴星回来了" : "这次线索已收好"}</strong><span>{feedback.achievement}</span></p>
+                <p>
+                  <strong>{feedback.tone === "success" ? "伴星回来庆祝了" : feedback.tone === "neutral" ? "这次线索已收好" : "伴星为这次进展点点头"}</strong>
+                  <span>{companionFeedbackLine ?? feedback.achievement}</span>
+                </p>
               </div>
+            ) : null}
+            {discoveryCard ? (
+              <section className="learning-run-discovery" data-motif={discoveryCard.motif} aria-label="本次学习发现卡">
+                <button
+                  type="button"
+                  className={`learning-run-discovery__card${discoveryRevealed ? " is-revealed" : ""}`}
+                  onClick={() => setDiscoveryRevealed(true)}
+                  aria-expanded={discoveryRevealed}
+                >
+                  {discoveryRevealed ? (
+                    <span className="learning-run-discovery__front" aria-live="polite">
+                      <small>{discoveryCard.eyebrow}</small>
+                      <strong>{discoveryCard.title}</strong>
+                      <span>{discoveryCard.detail}</span>
+                      <em>来自本次真实评分证据 · 不计经验值</em>
+                    </span>
+                  ) : (
+                    <span className="learning-run-discovery__back">
+                      <Sparkles size={19} aria-hidden="true" />
+                      <strong>翻开本次发现</strong>
+                      <small>每轮从真实评分里抽一张，不编造奖励</small>
+                    </span>
+                  )}
+                </button>
+              </section>
             ) : null}
             {result ? (
               <div className="learning-run-result-evidence">
-                {thisTime.coveredFacets.length ? (
+                {feedback && feedback.tone !== "neutral" ? (
                   <div data-role="proved-this-time">
-                    <b>这次说清了</b>
-                    <p>{facetText(thisTime.coveredFacets, "")}</p>
+                    <b>{result.outcome === "practice_completed" && !thisTime.coveredCount ? "本次判定" : "做对了什么"}</b>
+                    {feedback.strengths.length ? (
+                      <ul>{feedback.strengths.map((reason) => <li key={reason}>{reason}</li>)}</ul>
+                    ) : <p>{feedback.achievement}</p>}
                   </div>
                 ) : null}
                 <div>
-                  <b>算进理解</b>
+                  <b>本次掌握</b>
                   <p>{provenLedgerText(result)}</p>
                 </div>
                 <div>
-                  <b>还需补上</b>
-                  <p>{facetText(result.gapFacets, "这次没有留下待补的理解缺口。")}</p>
+                  <b>还差什么</b>
+                  {feedback?.improvements.length ? (
+                    <ul>{feedback.improvements.map((reason) => <li key={reason}>{reason}</li>)}</ul>
+                  ) : <p>{feedback?.gap ?? "按下一步建议继续即可。"}</p>}
                 </div>
                 <div>
-                  <b>复习安排</b>
+                  <b>学习状态变化</b>
                   <p>{scheduleImpactText(result.scheduleImpact)}</p>
                 </div>
               </div>
@@ -2320,8 +2630,8 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
               </div>
             )}
             {result?.assessment?.rubricResults.length ? (
-              <div className="learning-run-result-rubric">
-                <b>逐条判定</b>
+              <details className="learning-run-result-rubric">
+                <summary>查看逐条判定 · {result.assessment.rubricResults.length} 条</summary>
                 <ul>
                   {result.assessment.rubricResults.map((item) => (
                     <li key={item.rubricItemId} data-verdict={item.verdict}>
@@ -2332,7 +2642,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
                     </li>
                   ))}
                 </ul>
-              </div>
+              </details>
             ) : null}
             {result ? (
               <div className="learning-run-result-reveal">
@@ -2344,8 +2654,23 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
                 {targetReveal.kind === "loading" ? <p className="small">正在读取答案…</p> : null}
                 {targetReveal.kind === "ready" ? (
                   <div className="learning-run-result-reveal__body">
-                    <h3 className="serif">这次想考的是</h3>
-                    <p className="learning-run-result-reveal__answer">{targetReveal.reveal.answerText}</p>
+                    {lockedAnswer ? (
+                      <section className="learning-run-result-comparison" aria-label="提交回答与参考要点对照">
+                        <div>
+                          <span>你提交的回答</span>
+                          <p>{lockedAnswer}</p>
+                        </div>
+                        <div>
+                          <span>这次想考的是</span>
+                          <p className="learning-run-result-reveal__answer">{targetReveal.reveal.answerText}</p>
+                        </div>
+                      </section>
+                    ) : (
+                      <>
+                        <h3 className="serif">这次想考的是</h3>
+                        <p className="learning-run-result-reveal__answer">{targetReveal.reveal.answerText}</p>
+                      </>
+                    )}
                     {targetReveal.reveal.support.explanation ? <p>{targetReveal.reveal.support.explanation}</p> : null}
                     {targetReveal.reveal.support.boundary ? <p><b>边界</b>　{targetReveal.reveal.support.boundary}</p> : null}
                     {targetReveal.reveal.support.misconception ? <p><b>常见误解</b>　{targetReveal.reveal.support.misconception}</p> : null}
@@ -2357,13 +2682,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
             ) : null}
             <section className="learning-run-next-step">
               <span>接下来</span>
-              <strong>{
-                result?.outcome === "declared_unable"
-                  ? "先回研究册把这条看懂，再回来验证"
-                  : result && result.gapFacets.length
-                    ? `先补上「${facetText(result.gapFacets.slice(0, 1), "")}」`
-                    : returnTargetLabel(returnTarget)
-              }</strong>
+              <strong>{nextChallengeLabel}</strong>
               <p>
                 {result?.outcome === "declared_unable"
                   ? "说不会不扣任何东西：这条已排到最近的复习。回研究册看懂之后再来一次，就当第一次见。"
@@ -2384,25 +2703,17 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
         </section>
         </>
       ) : (
-        <section className="learning-run-workbench" data-phase={snapshot.phase} data-interaction={activeTask?.activeVariant.interaction.kind ?? "none"}>
-          <aside className="learning-run-journey">
-            <div className="learning-run-journey__state"><i aria-hidden="true" />{runModeLabel}</div>
-            <div className="learning-run-journey__target">
-              <span className="learning-run-journey__kicker">{phaseLabels[snapshot.phase]} · {runOriginLabel(snapshot.originV2)}</span>
-              <h2 title={snapshot.target.publicSummary}>{snapshot.target.publicSummary}</h2>
-            </div>
-            <dl>
-              <div><dt>当前位置</dt><dd>{activeTask ? `问题 ${activeTask.sequence}` : phaseLabels[processingPhase]}</dd></div>
-              <div><dt>作答方式</dt><dd>{activeTask ? interactionLabel(activeTask) : "等待下一步"}</dd></div>
-              <div><dt>证据范围</dt><dd>{eligibilityLabel(snapshot.publishedTargetEligibility)}</dd></div>
-            </dl>
-            <div className="learning-run-clock">
-              <div><span>专注时间</span><b>{formatClock(clock.seconds)}</b></div>
-              <small className="meta">{clock.paused ? "离开页面时不计时" : `已到 ${formatClock(clock.seconds)}`}</small>
-            </div>
-          </aside>
-          <section className="learning-run-stage">
-            <header className="learning-run-stage__header">
+        <section className="learning-run-focus" data-phase={snapshot.phase} data-interaction={activeTask?.activeVariant.interaction.kind ?? "none"}>
+          <header className="learning-run-focus__rail">
+            <strong className="learning-run-focus__mode">{runModeLabel}</strong>
+            <div className="learning-run-focus__target"><span>{activeTask ? `问题 ${activeTask.sequence} · ${interactionLabel(activeTask)}` : phaseLabels[processingPhase]}</span><strong title={snapshot.target.publicSummary}>{snapshot.target.publicSummary}</strong></div>
+            <span className="learning-run-focus__eligibility">{eligibilityLabel(snapshot.publishedTargetEligibility)}</span>
+            <div className="learning-run-focus__clock"><b>{formatClock(clock.seconds)}</b><small>{clock.paused ? "已暂停计时" : "专注时间"}</small></div>
+          </header>
+          <div className="learning-run-focus__body">
+          <section className="learning-run-paper">
+            <div className="learning-run-paper__scroll">
+            <header className="learning-run-paper__question">
               <div>
                 <span>{activeTask ? `${facetLabels[activeTask.intent] ?? activeTask.intent} · ${interactionLabel(activeTask)}` : phaseLabels[processingPhase]}</span>
                 <small>{activeTask && snapshot.phase === "active" ? draftStatus : "进度"}</small>
@@ -2438,7 +2749,14 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
             </div> : null}
             <div className="learning-run-response">
               {canAnswerNow && activeTask ? (
-                <InteractionEditor task={activeTask} value={editor ?? emptyEditor(activeTask)} onChange={updateEditor} onStructuredReview={() => setStructuredReviewReady(true)} />
+                <InteractionEditor
+                  task={activeTask}
+                  value={editor ?? emptyEditor(activeTask)}
+                  onChange={updateEditor}
+                  restoredStructuredDraft={restoredStructuredDraft}
+                  onStructuredReviewStateChange={setStructuredReviewReady}
+                  onVoiceBusyChange={setVoiceEditorBusy}
+                />
             ) : unresolvedResultFailure ? (
               <div role="alert">
                 <strong className="title">暂时无法确认最终学习结果</strong>
@@ -2492,6 +2810,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
               </div>
             )}
           </div>
+            </div>
           <footer className="learning-run-dock">
             <div className="learning-run-dock__row learning-run-dock__row--exit">
               <span className="learning-run-dock__status" role="status">
@@ -2502,7 +2821,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
                     : draftStatus}
               </span>
               <div className="actions">
-                {exitActions.map(quickButton)}
+                {exitActions.map((action) => quickButton(action))}
                 {/* 复盘 #12：两个出口必须一眼看得见——「稍后再做」= 不想做，
                     「暂时不会」= 不会做（这是一种真实作答结果，会记为需要复习）。
                     此前它藏在「更多选择」里，和 skip_task / end 挤在同一个菜单。 */}
@@ -2531,7 +2850,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
                     {resultQueryBusy ? "正在重新检查…" : "重新检查结果"}
                   </button>
                 ) : null}
-                {helpActions.map(quickButton)}
+                {helpActions.map((action) => quickButton(action))}
                 {moreActions.length > 0 ? (
                   <details className="learning-run-more">
                     <summary>更多选择</summary>
@@ -2551,8 +2870,9 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
                   className="button primary"
                   disabled={busy
                     || submitting
+                    || voiceEditorBusy
                     || !editor
-                    || (editor.kind !== "declared_unable" && !payloadIsReady(editor))
+                    || (editor.kind !== "declared_unable" && !payloadIsReady(editor, activeTask))
                     || (editor.kind === "ordering" && !orderingTouched)
                     || (editor.kind === "structured_bundle" && !structuredReviewReady)}
                   onClick={() => editor && void submit(editor)}
@@ -2560,6 +2880,8 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
                   {submitting ? <LoaderCircle size={15} aria-hidden="true" /> : <ArrowRight size={15} aria-hidden="true" />}
                   提交回答
                 </button>
+              ) : checkpointPrimaryAction ? (
+                quickButton(checkpointPrimaryAction, true)
               ) : (
                 <button type="button" className="button primary" onClick={() => onExit({ route: exitRoute })}>
                   <ArrowLeft size={15} aria-hidden="true" />{resultReturnLabel}
@@ -2570,10 +2892,11 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
                 同一容器里换行，结果压在按钮身上（实测与「暂停」「给我一点提示」重叠），
                 而且用的是给深色底的浅色字，落在奶油纸上几乎看不见。 */}
             {blockedSwitchIds.size > 0 ? (
-              <p className="learning-run-switch-note" role="status">{`现在还不能改用语音讲解：${microphoneReason}`}</p>
+              <p id="learning-run-switch-note" className="learning-run-switch-note" role="status">{`现在还不能改用语音讲解：${microphoneReason}`}</p>
             ) : null}
           </footer>
           </section>
+          </div>
         </section>
       )}
       </div>

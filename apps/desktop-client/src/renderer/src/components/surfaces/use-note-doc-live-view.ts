@@ -40,10 +40,20 @@ const RELOAD_DEBOUNCE_MS = 400;
 const DRAFT_SAVE_DEBOUNCE_MS = 600;
 
 // 渲染进程没有 `Buffer`（那是主进程那一侧的类型环境），所以自己走 btoa/atob。
+/**
+ * 逐字节 `binary += String.fromCharCode(byte)` 每加一字节都要重造一遍整条字符串，
+ * 长度上是 **O(n²)**；而 `b64` 是**每个本地更新**（每个按键的事务）和 `decodeUpdate`
+ * 校验每个远端帧都要走的。分块 `apply` 之后总代价变成线性，32768 是 spread 参数上限内
+ * 的标准安全块。同样的形状在 `run-voice-input.tsx` / `use-companion-voice-input.ts`
+ * 里早就用了，这里只是没跟上。
+ */
+const B64_CHUNK = 0x8000;
 const b64 = (bytes: Uint8Array): string => {
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary);
+  const parts: string[] = [];
+  for (let offset = 0; offset < bytes.length; offset += B64_CHUNK) {
+    parts.push(String.fromCharCode(...bytes.subarray(offset, offset + B64_CHUNK)));
+  }
+  return btoa(parts.join(""));
 };
 const unB64 = (text: string): Uint8Array => {
   const binary = atob(text);

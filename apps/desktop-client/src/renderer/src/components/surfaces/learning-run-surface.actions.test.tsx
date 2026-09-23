@@ -80,7 +80,7 @@ const snapshot = (overrides: Record<string, unknown> = {}) => learningRunPublicS
   ...overrides,
 });
 
-function stubGateway(base = snapshot()) {
+function stubGateway(base = snapshot(), draft: unknown = null) {
   const state = {
     snapshots: [base],
     actions: [] as Array<{ kind: string; level?: number }>,
@@ -99,7 +99,7 @@ function stubGateway(base = snapshot()) {
     },
     learningRun: {
       get: vi.fn(async () => ok(current())),
-      getDraft: vi.fn(async () => ok(null)),
+      getDraft: vi.fn(async () => ok(draft)),
       saveDraft: vi.fn(async (input: { runId: string; taskId: string }) => ok({
         version: 2,
         runId: input.runId,
@@ -110,8 +110,8 @@ function stubGateway(base = snapshot()) {
         draftRevision: 1,
         draftHash: "d".repeat(64),
       })),
-      submit: vi.fn(async () => {
-        state.submits.push({});
+      submit: vi.fn(async (input: { request: { payload: unknown } }) => {
+        state.submits.push(input);
         return ok({
           version: 2,
           runId: RUN_ID,
@@ -169,13 +169,27 @@ function stubGateway(base = snapshot()) {
   return { gateway, state };
 }
 
-function renderRun(base = snapshot()) {
+function renderRun(base = snapshot(), draft: unknown = null) {
   // 秒表按设计只在"可见且有焦点"时走（与服务端租约同规则）；jsdom 默认无焦点。
   vi.spyOn(document, "hasFocus").mockReturnValue(true);
-  const harness = stubGateway(base);
+  const harness = stubGateway(base, draft);
   useRoomStore.setState({ activeRunId: RUN_ID, activeObjectiveId: OBJECTIVE_ID });
   render(<LearningRunSurface onExit={() => undefined} />);
   return harness;
+}
+
+function renderInteraction(interaction: Record<string, unknown>, draft: unknown = null) {
+  const task = activeTask(0);
+  return renderRun(snapshot({
+    activeTask: {
+      ...task,
+      activeVariant: { ...task.activeVariant, interaction },
+    },
+  }), draft);
+}
+
+async function submitButton() {
+  return await screen.findByRole("button", { name: /提交回答/ }) as HTMLButtonElement;
 }
 
 async function confirmHintDowngrade() {
@@ -256,7 +270,7 @@ describe("LearningRunSurface · 动作区", () => {
 
   it("专注时间逐秒推进，服务端读数只会抬高它、绝不把钟拨回去", async () => {
     const { state } = renderRun();
-    const clockText = () => document.querySelector(".learning-run-clock b")?.textContent ?? "";
+    const clockText = () => document.querySelector(".learning-run-focus__clock b")?.textContent ?? "";
 
     await waitFor(() => expect(clockText()).toBe("00:12"), { timeout: 2_000 });
     await waitFor(() => expect(clockText()).toBe("00:15"), { timeout: 6_000 });
@@ -358,8 +372,10 @@ describe("LearningRunSurface · 动作区", () => {
     // 折叠菜单里的按钮 jsdom 一样按名字查得到，所以"查得到"本身不算数。
     const followup = await waitFor(() => screen.getByRole("button", { name: /继续补充证据/ }));
     expect(followup.closest("details")).toBeNull();
+    expect(followup.className).toContain("primary");
     const finish = screen.getByRole("button", { name: /结束但不改变复习/ });
     expect(finish.closest("details")).toBeNull();
+    expect(screen.queryByRole("button", { name: "返回学习空间" })).toBeNull();
     // 不再声称"正在准备下一步"——checkpoint 等的是用户，不是后台。
     expect(document.body.textContent).not.toContain("正在准备下一步");
     expect(document.body.textContent).toContain("这次没有形成可记录的结论");
@@ -397,5 +413,155 @@ describe("LearningRunSurface · 动作区", () => {
     fireEvent.click(button!);
     await confirmHintDowngrade();
     await waitFor(() => expect(document.body.textContent).toContain("只计练习分"));
+  });
+});
+
+describe("LearningRunSurface · 九类作答", () => {
+  it("文本题能输入并提交，草稿状态贴近编辑区", async () => {
+    const { gateway } = renderInteraction({ kind: "text_response", maxChars: 400 });
+    const textarea = await screen.findByRole("textbox", { name: "用自己的话回答" });
+    fireEvent.change(textarea, { target: { value: "先确认阶段，再解释不能换序的原因。" } });
+    expect((await submitButton()).disabled).toBe(false);
+    fireEvent.click(await submitButton());
+    await waitFor(() => expect(gateway.learningRun.submit).toHaveBeenCalledTimes(1));
+    expect(gateway.learningRun.submit.mock.calls[0]?.[0]).toMatchObject({ request: { payload: { kind: "text", text: "先确认阶段，再解释不能换序的原因。" } } });
+  });
+
+  it("语音题的转写文本可校对，手工修改被如实标记", async () => {
+    const { gateway } = renderInteraction({ kind: "voice_teachback", maxSeconds: 60 });
+    const transcript = await screen.findByRole("textbox", { name: "转写文本（可校对后再提交）" });
+    fireEvent.change(transcript, { target: { value: "我会先说明第一步，再解释后续步骤。" } });
+    fireEvent.click(await submitButton());
+    await waitFor(() => expect(gateway.learningRun.submit).toHaveBeenCalledTimes(1));
+    expect(gateway.learningRun.submit.mock.calls[0]?.[0]).toMatchObject({ request: { payload: { kind: "voice", correctionMethod: "manual_text_edit" } } });
+  });
+
+  it("单选题整行可点，方向键移动选中项且只有一个 Tab 停靠点", async () => {
+    const { gateway } = renderInteraction({ kind: "single_choice", publicOptionIds: ["a", "b", "c"], publicOptionLabels: { a: "方案甲", b: "方案乙", c: "方案丙" } });
+    const radios = await screen.findAllByRole("radio");
+    expect(radios.map((radio) => radio.getAttribute("tabindex"))).toEqual(["0", "-1", "-1"]);
+    fireEvent.keyDown(radios[0]!, { key: "ArrowDown" });
+    await waitFor(() => expect(radios[1]?.getAttribute("aria-checked")).toBe("true"));
+    expect(radios.map((radio) => radio.getAttribute("tabindex"))).toEqual(["-1", "0", "-1"]);
+    fireEvent.click(await submitButton());
+    await waitFor(() => expect(gateway.learningRun.submit).toHaveBeenCalledTimes(1));
+    expect(gateway.learningRun.submit.mock.calls[0]?.[0]).toMatchObject({ request: { payload: { kind: "choice", selectedOptionId: "b" } } });
+  });
+
+  it("判断题方向键可切换答案，未选择时不可提交", async () => {
+    const { gateway } = renderInteraction({ kind: "true_false", proposition: "这条说法成立吗？" });
+    const radios = await screen.findAllByRole("radio");
+    expect((await submitButton()).disabled).toBe(true);
+    fireEvent.keyDown(radios[0]!, { key: "ArrowDown" });
+    await waitFor(() => expect(radios[1]?.getAttribute("aria-checked")).toBe("true"));
+    fireEvent.click(await submitButton());
+    await waitFor(() => expect(gateway.learningRun.submit).toHaveBeenCalledTimes(1));
+    expect(gateway.learningRun.submit.mock.calls[0]?.[0]).toMatchObject({ request: { payload: { kind: "true_false", answer: false } } });
+  });
+
+  it("配对题必须连完所有左端，重新连接右端会撤掉原配对", async () => {
+    const { gateway } = renderInteraction({
+      kind: "matching",
+      publicLeftIds: ["l1", "l2", "l3"],
+      publicRightIds: ["r1", "r2", "r3"],
+      publicLabels: { l1: "左甲", l2: "左乙", l3: "左丙", r1: "右甲", r2: "右乙", r3: "右丙" },
+    });
+    await screen.findByRole("button", { name: "左甲" });
+    const connect = (left: string, right: string) => {
+      fireEvent.click(screen.getByRole("button", { name: new RegExp(`^${left}`) }));
+      fireEvent.click(screen.getByRole("button", { name: `把${left}与${right}配成一对` }));
+    };
+    connect("左甲", "右甲");
+    connect("左乙", "右甲");
+    expect(screen.getByText("已连 1 对")).toBeTruthy();
+    connect("左甲", "右乙");
+    connect("左丙", "右丙");
+    expect((await submitButton()).disabled).toBe(false);
+    fireEvent.click(await submitButton());
+    await waitFor(() => expect(gateway.learningRun.submit).toHaveBeenCalledTimes(1));
+    expect(gateway.learningRun.submit.mock.calls[0]?.[0]).toMatchObject({ request: { payload: { kind: "matching", assignments: [
+      { leftId: "l2", rightId: "r1" }, { leftId: "l1", rightId: "r2" }, { leftId: "l3", rightId: "r3" },
+    ] } } });
+  });
+
+  it("排序题初始随机顺序不能直接交，键盘抓取移动后可提交", async () => {
+    const { gateway } = renderInteraction({ kind: "ordering", publicTokenIds: ["a", "b", "c"], publicTokenLabels: { a: "甲", b: "乙", c: "丙" } });
+    const grip = await screen.findByRole("button", { name: /甲，当前第 1 位/ });
+    expect((await submitButton()).disabled).toBe(true);
+    fireEvent.keyDown(grip, { key: " " });
+    expect(grip.getAttribute("aria-pressed")).toBe("true");
+    fireEvent.keyDown(grip, { key: "ArrowDown" });
+    await waitFor(() => expect(document.querySelector(".run-order-list li:first-child .run-order-label")?.textContent).toBe("乙"));
+    expect((await submitButton()).disabled).toBe(false);
+    fireEvent.click(await submitButton());
+    await waitFor(() => expect(gateway.learningRun.submit).toHaveBeenCalledTimes(1));
+  });
+
+  it("关系题拦住自连接和重复关系，并显示已组成的句子", async () => {
+    const { gateway } = renderInteraction({ kind: "relation_canvas", publicNodeIds: ["a", "b"], allowedEdgeKinds: ["supports"], publicNodeLabels: { a: "论点", b: "证据" } });
+    const from = await screen.findByRole("combobox", { name: "关系起点" });
+    const to = screen.getByRole("combobox", { name: "关系终点" });
+    const add = screen.getByRole("button", { name: "加入关系" }) as HTMLButtonElement;
+    expect(add.disabled).toBe(true);
+    fireEvent.change(from, { target: { value: "a" } });
+    fireEvent.change(to, { target: { value: "a" } });
+    expect(add.disabled).toBe(true);
+    expect(screen.getByText("起点和终点不能是同一项。")).toBeTruthy();
+    fireEvent.change(to, { target: { value: "b" } });
+    fireEvent.click(add);
+    expect(screen.getByText("论点 支持 证据")).toBeTruthy();
+    fireEvent.change(from, { target: { value: "a" } });
+    fireEvent.change(to, { target: { value: "b" } });
+    expect(add.disabled).toBe(true);
+    fireEvent.click(await submitButton());
+    await waitFor(() => expect(gateway.learningRun.submit).toHaveBeenCalledTimes(1));
+  });
+
+  it("修复题同屏显示原内容、动作和真实修复后的顺序", async () => {
+    const { gateway } = renderInteraction({
+      kind: "repair",
+      publicElementIds: ["a", "b"],
+      allowedOperationKinds: ["replace", "remove"],
+      replacementOptionIds: ["x", "y"],
+      publicElementLabels: { a: "原句甲", b: "原句乙" },
+      replacementOptionLabels: { x: "新句甲", y: "新句乙" },
+    });
+    const action = await screen.findByRole("combobox", { name: "原句甲的修正动作" });
+    fireEvent.change(action, { target: { value: "replace" } });
+    const replacement = screen.getByRole("combobox", { name: "原句甲的替换内容" });
+    fireEvent.change(replacement, { target: { value: "y" } });
+    const preview = document.querySelector(".run-repair-preview__sequence")!;
+    expect(preview.textContent).toContain("新句乙");
+    expect(preview.textContent).toContain("原句乙");
+    expect(preview.textContent).not.toContain("原句甲");
+    fireEvent.click(await submitButton());
+    await waitFor(() => expect(gateway.learningRun.submit).toHaveBeenCalledTimes(1));
+  });
+
+  it("组合题逐段完成，复核时能读到整组答案，返回修改后需重新复核", async () => {
+    const { gateway } = renderInteraction({
+      kind: "structured_bundle",
+      parts: [
+        { kind: "relation", partId: "one", publicNodeIds: ["a", "b"], publicNodeLabels: { a: "前提", b: "结论" }, allowedEdgeKinds: ["supports"], partTrustCeiling: "facet_eligible", qualificationProfileHash: null },
+        { kind: "repair", partId: "two", publicElementIds: ["x"], publicElementLabels: { x: "旧说法" }, allowedOperationKinds: ["replace"], replacementOptionIds: ["y"], replacementOptionLabels: { y: "新说法" }, partTrustCeiling: "facet_eligible", qualificationProfileHash: null },
+      ],
+    });
+    const next = await screen.findByRole("button", { name: "下一个片段" }) as HTMLButtonElement;
+    expect(next.disabled).toBe(true);
+    fireEvent.change(screen.getByRole("combobox", { name: "关系起点" }), { target: { value: "a" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "关系终点" }), { target: { value: "b" } });
+    fireEvent.click(screen.getByRole("button", { name: "加入关系" }));
+    fireEvent.click(next);
+    fireEvent.change(await screen.findByRole("combobox", { name: "旧说法的修正动作" }), { target: { value: "replace" } });
+    fireEvent.click(screen.getByRole("button", { name: "复核整组答案" }));
+    expect(screen.getByText("前提 支持 结论")).toBeTruthy();
+    expect(screen.getByText("新说法")).toBeTruthy();
+    expect((await submitButton()).disabled).toBe(false);
+    fireEvent.click(screen.getAllByRole("button", { name: "返回修改" })[0]!);
+    expect((await submitButton()).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "下一个片段" }));
+    fireEvent.click(screen.getByRole("button", { name: "复核整组答案" }));
+    fireEvent.click(await submitButton());
+    await waitFor(() => expect(gateway.learningRun.submit).toHaveBeenCalledTimes(1));
   });
 });

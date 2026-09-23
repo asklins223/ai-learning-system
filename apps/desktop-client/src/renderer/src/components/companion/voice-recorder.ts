@@ -23,6 +23,15 @@ export interface CompanionVoiceRecorderOptions {
    * 它；worklet 每 ~2.7ms 推一帧，所以这里做了节流，不让它牵着 React 每帧重渲。
    */
   readonly onLevel?: (level: number) => void;
+  /**
+   * 录到 `MAX_DURATION_MS` 上限时通知调用方，**不由录音器自己停**。
+   *
+   * 以前这一句是 `void this.stop()`：返回值没人接，于是调用方（`use-companion-voice-input`）
+   * 一直停在 `listening`——气泡写着「我在听」、按钮还在脉动，麦克风灯其实已经灭了，
+   * 那 60 秒音频当场丢掉；用户再点一次只会得到「好像没录到内容」（方案 35 E2）。
+   * 交回调用方走正常的收尾路径，这段录音才还会被送去识别。
+   */
+  readonly onLimit?: () => void;
 }
 
 const TARGET_SAMPLE_RATE = 16000;
@@ -108,9 +117,12 @@ export class CompanionVoiceRecorder {
   private startedAt = 0;
   private recording = false;
   private readonly levelListener: ((level: number) => void) | null = null;
+  private readonly limitListener: (() => void) | null = null;
+  private limitFired = false;
 
   constructor(options?: CompanionVoiceRecorderOptions) {
     this.levelListener = options?.onLevel ?? null;
+    this.limitListener = options?.onLimit ?? null;
   }
 
   static isSupported(): boolean {
@@ -134,6 +146,7 @@ export class CompanionVoiceRecorder {
     this.chunks = [];
     this.totalFrames = 0;
     this.startedAt = Date.now();
+    this.limitFired = false;
     let lastLevelAt = 0;
     const levelListener = this.levelListener;
     const onChunk = (chunk: Float32Array) => {
@@ -146,7 +159,11 @@ export class CompanionVoiceRecorder {
         lastLevelAt = now;
         levelListener(companionVoiceLevel(copy));
       }
-      if (now - this.startedAt >= MAX_DURATION_MS) void this.stop();
+      // 到上限：交回调用方收尾（它会 `stop()` 并把这段送去识别），不自己悄悄停掉。
+      if (now - this.startedAt >= MAX_DURATION_MS && !this.limitFired) {
+        this.limitFired = true;
+        this.limitListener?.();
+      }
     };
     try {
       const workletUrl = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: "application/javascript" }));

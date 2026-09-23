@@ -174,8 +174,7 @@ export const HUD_PAGES: Readonly<Record<HudPageId, HudPageDefinition>> = {
     subtitle: "目标不是列表，而是一张正在推进的理解路线",
     plate: "workshop",
     companion: {
-      mode: "ambient", seat: "right", framing: "bust", interaction: "on-demand", proactive: "silent", draggable: false,
-      starter: "先补上还没有证据覆盖的那一段，再进入验证会更稳。",
+      mode: "hidden", seat: "none", framing: "bust", interaction: "none", proactive: "silent", draggable: false,
     },
   },
   "goal-detail": {
@@ -185,8 +184,7 @@ export const HUD_PAGES: Readonly<Record<HudPageId, HudPageDefinition>> = {
     subtitle: "围绕一个主张查看证据、出处、版本和验证入口",
     plate: "workshop",
     companion: {
-      mode: "ambient", seat: "left", framing: "bust", interaction: "on-demand", proactive: "silent", draggable: false,
-      starter: "定义已有证据，但真实应用情境仍然空缺。",
+      mode: "hidden", seat: "none", framing: "bust", interaction: "none", proactive: "silent", draggable: false,
     },
   },
   generating: {

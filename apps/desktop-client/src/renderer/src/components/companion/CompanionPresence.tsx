@@ -19,6 +19,8 @@ import {
 } from "../../app/desktop-client";
 import { resolveSceneMotionMode } from "../../scene/scene-motion";
 import { useCompanionHomeProjection } from "../../app/companion-home-projection";
+import { companionCelebrationAllowed } from "../../app/companion-celebration-policy";
+import { stopCompanionSpeech } from "../../app/companion-voice-playback";
 import { HUD_PAGES } from "../hud/hud-pages";
 import { HOME_V2_CAMERA_FRAME_EVENT } from "../home-v2/home-v2-camera";
 import { useHomeV2 } from "../home-v2/HomeV2Experience";
@@ -47,6 +49,7 @@ import {
   type WindowLive2DCharacterMoment,
 } from "./window-live2d-contract";
 import { CompanionBubble } from "./CompanionBubble";
+import { companionDisplayName, subscribeCompanionDisplayName } from "./companion-display-name";
 import { CompanionHud, type CompanionHudAction } from "./CompanionHud";
 import { createCueDeliveryReporter, findCueDelivery } from "./companion-cue-delivery";
 import { hasForeignModal } from "./companion-modal-ownership";
@@ -109,6 +112,7 @@ export function CompanionPresence() {
   const motionMode = resolveSceneMotionMode(motionPreference, reducedMotion);
   const onboardingOpen = useRoomStore((state) => state.onboardingOpen);
   const companionMoment = useRoomStore((state) => state.companionMoment);
+  const masterMuted = useRoomStore((state) => state.masterMuted);
   const companionPosition = useRoomStore((state) => state.companionPosition);
   const companionHomeZone = useRoomStore((state) => state.companionHomeZone);
   const companionPlacementOwner = useRoomStore((state) => state.companionPlacementOwner);
@@ -139,6 +143,17 @@ export function CompanionPresence() {
   } = useHomeV2();
   const windowState = useRoomStore((state) => state.windowState);
   const companionProjection = useCompanionHomeProjection();
+  const celebrationAllowed = companionCelebrationAllowed({
+    masterMuted,
+    temporarilyHidden: companionTemporarilyHidden,
+    activeness: companionProjection.projection?.profileSummary.activeness ?? null,
+    proactiveMuted: companionProjection.projection?.roomProfile.proactiveMuted === true,
+    allowPlayful: companionProjection.projection?.profileSummary.boundaries.allowPlayful === true,
+  });
+  const presentedCompanionMoment = !celebrationAllowed
+    && (companionMoment === "confirm" || companionMoment === "encourage")
+    ? "idle"
+    : companionMoment;
   // 2026-09-16 裁决：唯一形态 Live2D；LIVE2D_RUNTIME_ALLOWED 保留为构建期总闸，
   // 关闭时伴星不可用（隐藏 + 说明），不再有 orb 兜底。
   const live2dRuntimeAllowed = LIVE2D_RUNTIME_ALLOWED;
@@ -225,8 +240,12 @@ export function CompanionPresence() {
   const [homeCue, setHomeCue] = useState<string | null>(null);
   /** 当前气泡若源自念头（切片④），可点击让她主动开场。 */
   const [homeCueThoughtId, setHomeCueThoughtId] = useState<string | null>(null);
+  const [cueOpenError, setCueOpenError] = useState<string | null>(null);
+  const [cueOpening, setCueOpening] = useState(false);
+  const cueOpeningRef = useRef(false);
+  useEffect(() => setCueOpenError(null), [homeCueThoughtId]);
   const [externalModalOpen, setExternalModalOpen] = useState(false);
-  const { mode, setMode, assistantCue, liveReply, phase: chatPhase } = useCompanionChat();
+  const { mode, setMode, assistantCue, liveReply, phase: chatPhase, companionName, setCompanionName } = useCompanionChat();
   const engaged = mode !== "closed";
   /**
    * 聊天回复的语义 cue（2026-09-19 接 CharacterCuePayloadV1）：intensity 不再固定
@@ -332,10 +351,27 @@ export function CompanionPresence() {
       });
       setAccountState(unwrapGatewayResult(response).account);
       setAccountFailure(null);
+      // 称呼与账号设置同为账号级，共用这一次已鉴权的 epoch。单独包一层 try：
+      // 名字没读到不能把整次账号读取判成失败。
+      // 这里**不走** `unwrapGatewayResult` —— 它对任何 not-ok 都先 publishGateInvalidation
+      // 再抛，一次补白读取不该把工作区视图打回首页（同一条教训写在
+      // `companion-chat-session.tsx` 的补白轮询上）。
+      try {
+        const persona = await window.ailearn.companion.persona.get({
+          meta: createRequestMeta(context.workspace.workspaceEpoch),
+        });
+        if (persona.ok) setCompanionName(companionDisplayName(persona.data));
+      } catch {
+        // 留着默认称呼：拿不到名字不等于她叫模型名（方案 35 B3）。
+      }
     } catch (error) {
       setAccountFailure(gatewayErrorMessage(error));
     }
-  }, []);
+  }, [setCompanionName]);
+
+  // 伴星中心改了名字，这里当场换过来。写入响应本来就带着新名字，
+  // 所以不再拉一遍人格——两处各自拉就会出现"中心已改、气泡还叫旧名字"。
+  useEffect(() => subscribeCompanionDisplayName(setCompanionName), [setCompanionName]);
 
   useEffect(() => {
     setAccountState(null);
@@ -572,16 +608,31 @@ export function CompanionPresence() {
   }, [presencePaused]);
 
   useEffect(() => {
-    if (companionMoment !== "lamp") return;
+    if (presentedCompanionMoment !== "lamp") return;
     const settle = gsap.delayedCall(1.35, () => setCompanionMoment("idle"));
     return () => { settle.kill(); };
-  }, [companionMoment, setCompanionMoment]);
+  }, [presentedCompanionMoment, setCompanionMoment]);
 
   useEffect(() => {
-    if (companionMoment !== "confirm" || surface) return;
+    if (presentedCompanionMoment !== "confirm") return;
     const settle = gsap.delayedCall(4.2, () => setCompanionMoment("idle"));
     return () => { settle.kill(); };
-  }, [companionMoment, setCompanionMoment, surface]);
+  }, [presentedCompanionMoment, setCompanionMoment]);
+
+  useEffect(() => {
+    if (presentedCompanionMoment !== "encourage") return;
+    const settle = gsap.delayedCall(3.2, () => setCompanionMoment("idle"));
+    return () => { settle.kill(); };
+  }, [presentedCompanionMoment, setCompanionMoment]);
+
+  useEffect(() => {
+    if (celebrationAllowed || (companionMoment !== "confirm" && companionMoment !== "encourage")) return;
+    // The visual gate above is synchronous, so a profile change cannot flash a
+    // frame of celebration. This effect then cancels the stored moment and the
+    // matching voice plan instead of letting either resume later.
+    stopCompanionSpeech();
+    setCompanionMoment("idle");
+  }, [celebrationAllowed, companionMoment, setCompanionMoment]);
 
   useEffect(() => {
     if (!touchKind) return;
@@ -1241,12 +1292,17 @@ export function CompanionPresence() {
 
   // 念头气泡点击（切片④）：她的开场消息落进会话并打开聊天抽屉。
   const openThoughtCue = useCallback(async (thoughtId: string) => {
+    if (cueOpeningRef.current) return;
+    cueOpeningRef.current = true;
+    setCueOpening(true);
+    setCueOpenError(null);
     const revealed = revealedCueRef.current;
     try {
-      await window.ailearn.companion.chat.openThought({
+      const result = await window.ailearn.companion.chat.openThought({
         meta: createRequestMeta(),
         request: { version: 1, thoughtId },
       });
+      if (!result.ok) throw result.error;
       setHomeCue(null);
       setHomeCueThoughtId(null);
       setMode("history");
@@ -1254,7 +1310,10 @@ export function CompanionPresence() {
       // `revealed` 与可点的气泡是同一处代码同时设的，取不到就是这条气泡不该有回执。
       if (revealed) void cueDeliveryReporter.opened(revealed);
     } catch {
-      // 打不开（已点过/过期）就静默，气泡按自身时间线消失。
+      setCueOpenError("这条念头暂时打不开。可以再点一次，或打开对话记录。");
+    } finally {
+      cueOpeningRef.current = false;
+      setCueOpening(false);
     }
   }, [cueDeliveryReporter, setMode]);
 
@@ -1291,7 +1350,7 @@ export function CompanionPresence() {
   // 功能夹是首页弹层：暂停（弹窗/窗口隐藏）、进入任务页或伴星不可用时收起。
   // （放在 companionUnavailable 声明之后，见该常量定义处。）
 
-  const completionCue = companionMoment === "confirm" ? "这次学习已经收好，新的理解正回到小屋里。" : null;
+  const completionCue = presentedCompanionMoment === "confirm" ? "这次学习已经收好，新的理解正回到小屋里。" : null;
   const visibleHomeCue = completionCue ?? (homeV2IntroVisible ? null : homeCue);
   /**
    * 她这一轮在做什么，由服务端那条 cue 的 `intent` 决定**姿势**（2026-09-20 接入）。
@@ -1307,7 +1366,9 @@ export function CompanionPresence() {
     ? "celebrate"
     : touchKind === "body"
       ? "think"
-      : companionMoment === "lamp" || companionMoment === "confirm"
+      : presentedCompanionMoment === "encourage"
+        ? "encourage"
+      : presentedCompanionMoment === "lamp" || presentedCompanionMoment === "confirm"
         ? "celebrate"
         : cuePresentation ?? (engaged ? "invite" : "idle");
   const presentationEmotion: Live2DEmotionEvent | null = touchKind === "head"
@@ -1316,18 +1377,13 @@ export function CompanionPresence() {
       ? { emotion: "curious", intensity: 0.65 }
       : chatEmotion
         ? { emotion: chatEmotion.emotion, intensity: chatEmotion.intensity, at: chatEmotion.at }
-        : companionMoment === "lamp" || companionMoment === "confirm"
+        : presentedCompanionMoment === "lamp" || presentedCompanionMoment === "confirm" || presentedCompanionMoment === "encourage"
         ? { emotion: "happy", intensity: 0.85 }
         : engaged
           ? { emotion: "curious", intensity: 0.4 }
           : null;
 
   // 唯一形态下的状态文案（形态切换已随 orb 一并移除）。
-  const rendererLabel = status === "ready"
-    ? "Live2D"
-    : status === "loading"
-      ? "正在准备 Live2D"
-      : "Live2D 不可用";
   const companionUnavailable = !live2dRuntimeAllowed || status === "unavailable";
 
   /**
@@ -1522,7 +1578,7 @@ export function CompanionPresence() {
             />
           </div>
           {status === "loading" && !presenceHidden ? (
-            <span className="companion-loading-state" role="status">Mao 正在来到书桌边…</span>
+            <span className="companion-loading-state" role="status">{companionName} 正在来到书桌边…</span>
           ) : null}
           {companionVisualOnly && status === "ready" ? (
             <span className="companion-surface-label" aria-hidden="true">
@@ -1538,7 +1594,6 @@ export function CompanionPresence() {
           <CompanionHud
             motionMode={motionMode}
             voiceEnabled={!assessmentMode}
-            contextHint={companionPolicy.starter ?? null}
             actions={homeMode ? actionItems : []}
             onRunAction={runActionItem}
             onAgentToolState={handleAgentToolState}
@@ -1546,7 +1601,6 @@ export function CompanionPresence() {
               scale: companionScale,
               scaleMin: MIN_COMPANION_SCALE,
               scaleMax: MAX_COMPANION_SCALE,
-              rendererLabel,
               pageMuted,
               taskActive: Boolean(surface),
               focusUntilTaskEnd: companionFocusUntilTaskEnd,
@@ -1569,12 +1623,14 @@ export function CompanionPresence() {
         ) : null}
         {/* 主动提示气泡与回复气泡共用头顶通道，同样不能放进裁切画布。 */}
         {companionPolicy.proactive === "allow" && visibleHomeCue && !hudOccupied && !engaged ? (
-          homeCueThoughtId ? (
+          homeCueThoughtId && !completionCue ? (
             <button
               type="button"
               className="companion-cue-open"
               onClick={() => void openThoughtCue(homeCueThoughtId)}
-              aria-label={`${visibleHomeCue}——点开和她聊`}
+              aria-label={`${visibleHomeCue}——${cueOpening ? "正在打开" : "点开和她聊"}`}
+              aria-describedby={cueOpenError ? "companion-cue-open-error" : undefined}
+              disabled={cueOpening}
             >
               <CompanionBubble
                 text={visibleHomeCue}
@@ -1589,6 +1645,12 @@ export function CompanionPresence() {
               motionMode={motionMode}
             />
           )
+        ) : null}
+        {cueOpenError && homeCueThoughtId && !completionCue && visibleHomeCue && !engaged ? (
+          <div id="companion-cue-open-error" className="companion-cue-error" role="status">
+            <span>{cueOpenError}</span>
+            <button type="button" onClick={() => { setCueOpenError(null); setMode("history"); }}>打开对话记录</button>
+          </div>
         ) : null}
       </div>
 

@@ -50,21 +50,38 @@ describe("CompanionAgentRail", () => {
   it("回合结束后只塌成摘要行，不自计时退场", () => {
     vi.useFakeTimers();
     try {
-      render(<CompanionAgentRail nodes={TOOL_NODES} progress={null} turnState="done" />);
-      expect(screen.getByRole("status", { name: "Mao 正在做的事" })).toBeTruthy();
+      render(<CompanionAgentRail nodes={TOOL_NODES} progress={null} turnState="done" companionName="小彩" />);
+      expect(screen.getByRole("status", { name: "小彩 正在做的事" })).toBeTruthy();
       act(() => { vi.advanceTimersByTime(500); });
       expect(screen.getByText("1 次工具")).toBeTruthy();
       // 曾经这里有个 5.4s 的 `expired`：整条轨道自己消失，与气泡何时走无关。
       act(() => { vi.advanceTimersByTime(30_000); });
-      expect(screen.getByRole("status", { name: "Mao 正在做的事" })).toBeTruthy();
+      expect(screen.getByRole("status", { name: "小彩 正在做的事" })).toBeTruthy();
     } finally {
       vi.useRealTimers();
     }
   });
 
   it("气泡退场时轨道带 data-leaving，交给 CSS 与它同一拍淡出", () => {
-    render(<CompanionAgentRail nodes={TOOL_NODES} progress={null} turnState="done" leaving />);
-    const rail = screen.getByRole("status", { name: "Mao 正在做的事" });
+    render(<CompanionAgentRail nodes={TOOL_NODES} progress={null} turnState="done" companionName="小彩" leaving />);
+    const rail = screen.getByRole("status", { name: "小彩 正在做的事" });
     expect(rail.getAttribute("data-leaving")).toBe("true");
+  });
+
+  it("出错那一轮即使被垂直预算挤成摘要行，也照样说「没说完」", () => {
+    // `folded = collapsed || tight`：矮窗口下失败轮次也会被收成一行，
+    // "出错不自动收"那条承诺由 `:149` 设的 collapsed=false 被 tight 盖掉。
+    // 那时如果这句话里不含"没说完"，用户只剩一条红边框可读（方案 35 F4）。
+    render(
+      <CompanionAgentRail
+        nodes={TOOL_NODES}
+        progress={{ stepCount: 2, maxSteps: 4, toolCallCount: 1, maxToolCalls: 12 }}
+        turnState="failed"
+        companionName="小彩"
+        tight
+      />,
+    );
+    const rail = screen.getByRole("status", { name: "小彩 正在做的事" });
+    expect(rail.textContent).toContain("没说完");
   });
 });

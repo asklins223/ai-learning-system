@@ -91,6 +91,66 @@ afterEach(() => {
 });
 
 describe("列表焦点卡的主行动", () => {
+  it("远征册可用明确关闭入口和 Esc 退回地图", async () => {
+    installApi([listItem()]);
+    stubRoom();
+    render(<ObjectiveLibrarySurface />);
+    const panel = await waitFor(() => {
+      const element = document.querySelector<HTMLElement>(".objective-expedition__index");
+      expect(element).not.toBeNull();
+      return element!;
+    });
+    const toggle = panel.querySelector<HTMLButtonElement>(".objective-expedition__index-toggle")!;
+    fireEvent.click(toggle);
+    expect(panel.getAttribute("data-open")).toBe("true");
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(toggle.textContent).toContain("关闭远征册");
+    fireEvent.keyDown(panel.querySelector("input")!, { key: "Escape" });
+    expect(panel.getAttribute("data-open")).toBe("false");
+    expect(document.activeElement).toBe(toggle);
+  });
+
+  it("远征册关闭重开时恢复列表滚动位置", async () => {
+    installApi([listItem(), listItem({ objectiveId: "00000000-0000-4000-8000-000000000002" })]);
+    stubRoom();
+    render(<ObjectiveLibrarySurface />);
+    const toggle = await waitFor(() => {
+      const button = document.querySelector<HTMLButtonElement>(".objective-expedition__index-toggle");
+      expect(button).not.toBeNull();
+      return button!;
+    });
+    fireEvent.click(toggle);
+    const list = document.querySelector<HTMLUListElement>(".v3-goal-list")!;
+    list.scrollTop = 144;
+    fireEvent.scroll(list);
+    fireEvent.click(toggle);
+    fireEvent.click(toggle);
+    await waitFor(() => expect(document.querySelector<HTMLUListElement>(".v3-goal-list")?.scrollTop).toBe(144));
+  });
+
+  it("离开再回地图时保留刚才的目标入口，即使下一关已经变化", async () => {
+    const secondId = "00000000-0000-4000-8000-000000000002";
+    installApi([listItem(), listItem({ objectiveId: secondId, conceptLabel: "刚才的目标" })]);
+    const { invoke } = stubRoom();
+    render(<ObjectiveLibrarySurface />);
+    const second = await waitFor(() => {
+      const button = [...document.querySelectorAll<HTMLButtonElement>(".objective-quest-node")].find((item) => item.textContent?.includes("刚才的目标"));
+      expect(button).toBeTruthy();
+      return button!;
+    });
+    fireEvent.click(second);
+    expect(invoke).toHaveBeenCalledWith("open-objective");
+    cleanup();
+    render(<ObjectiveLibrarySurface />);
+    const recent = await waitFor(() => {
+      const button = document.querySelector<HTMLButtonElement>(".objective-expedition__recent");
+      expect(button?.textContent).toContain("刚才的目标");
+      return button!;
+    });
+    fireEvent.click(recent);
+    expect(useRoomStore.getState().activeObjectiveId).toBe(secondId);
+  });
+
   it('写着「开始首次验证」就真的去 start，而不是打开详情页', async () => {
     const api = installApi([listItem()]);
     const { invoke } = stubRoom();
@@ -151,6 +211,12 @@ describe("列表焦点卡的主行动", () => {
     installApi([listItem()]);
     render(<ObjectiveLibrarySurface />);
 
+    const toggle = await waitFor(() => {
+      const button = document.querySelector<HTMLButtonElement>(".objective-expedition__index-toggle");
+      expect(button).not.toBeNull();
+      return button!;
+    });
+    fireEvent.click(toggle);
     await waitFor(() => expect(document.querySelector(".v3-goal-row")).not.toBeNull());
     const next = document.querySelector(".v3-goal-row__next")?.textContent ?? "";
     expect(next).toContain("进入详情");
@@ -170,7 +236,7 @@ describe("列表焦点卡的主行动", () => {
     });
     expect(node?.textContent).toContain(title);
     expect(node?.getAttribute("title")).toBe(title);
-    expect(document.querySelector(".objective-expedition__index")?.hasAttribute("open")).toBe(false);
+    expect(document.querySelector(".objective-expedition__index")?.getAttribute("data-open")).toBe("false");
   });
 
   it("来源行被省略号截断时，完整标题仍然拿得到", async () => {
@@ -196,8 +262,13 @@ describe("读取计数的说法", () => {
    * placeholder 同理——它承诺的范围要跟着实际范围走。
   */
   const counter = async () => {
-    await waitFor(() => expect(document.querySelector(".objective-expedition__index > summary small")).not.toBeNull());
-    return document.querySelector(".objective-expedition__index > summary small")?.textContent ?? "";
+    const toggle = await waitFor(() => {
+      const button = document.querySelector<HTMLButtonElement>(".objective-expedition__index-toggle");
+      expect(button).not.toBeNull();
+      return button!;
+    });
+    fireEvent.click(toggle);
+    return toggle.querySelector("small")?.textContent ?? "";
   };
 
   it("全部读完时只说总数，不再摆一个 16 / 16", async () => {

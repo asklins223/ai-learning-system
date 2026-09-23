@@ -156,7 +156,6 @@ export function App() {
   const onboardingOpen = useRoomStore((state) => state.onboardingOpen);
   const resetWorkspaceScope = useRoomStore((state) => state.resetWorkspaceScope);
   const setReducedMotion = useRoomStore((state) => state.setReducedMotion);
-  const windowState = useRoomStore((state) => state.windowState);
   const setWindowState = useRoomStore((state) => state.setWindowState);
   const platform = window.ailearnDesktop?.platform ?? "unknown";
 
@@ -170,17 +169,14 @@ export function App() {
 
   useEffect(() => {
     const unsubscribe = window.ailearnDesktop?.onWindowState?.(setWindowState);
-    const onVisibility = () => setWindowState(
-      document.hidden || !document.hasFocus() ? "hidden" : "visible",
-    );
+    // 只看"看不看得见"。以前这里还并了 `!document.hasFocus()`，于是渲染层自己就把
+    // 失焦报成离场，主进程那条真实状态白推了（方案 35 E7）。焦点不是判据，
+    // 最小化 / 隐藏 / 遮挡才是——那三种 Chromium 都会吐 `visibilitychange`。
+    const onVisibility = () => setWindowState(document.hidden ? "hidden" : "visible");
     document.addEventListener("visibilitychange", onVisibility);
-    window.addEventListener("focus", onVisibility);
-    window.addEventListener("blur", onVisibility);
     return () => {
       unsubscribe?.();
       document.removeEventListener("visibilitychange", onVisibility);
-      window.removeEventListener("focus", onVisibility);
-      window.removeEventListener("blur", onVisibility);
     };
   }, [setWindowState]);
 
@@ -200,7 +196,15 @@ export function App() {
       data-scene-renderer="poster-live2d"
       data-home-scene-variant="v2"
       data-motion-mode={motionMode}
-      data-window-state={windowState}
+      /*
+       * 这里原来还挂着 `data-window-state={windowState}`。删它不是为了省一个属性，是为了
+       * **摘掉 App 对 `windowState` 的订阅**：那个状态每变一次（失焦、最小化、
+       * `visibilitychange`，都是高频事件）根组件就重渲染，而下面这段 `room` 的 JSX 是在
+       * App 自己的一次渲染里造出来的，整棵渲染树跟着走一遍——渲染层没有任何 memo 拦得住。
+       * 属性本身全仓无读方：CSS 零处、测试零处；唯一的探针
+       * `capture-home-v2-lighthouse.mjs` 读的是 `.companion-presence[data-window-state]`
+       * （由 `CompanionPresence` 自己挂的那个）。以后要看窗口状态去那儿读。
+       */
     >
       {/*
         外壳级兜底（2026-09-20）：门禁、场景或伴星自身崩了时的最后一道。没有它，

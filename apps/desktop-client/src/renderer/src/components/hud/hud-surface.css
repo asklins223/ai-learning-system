@@ -12,7 +12,7 @@
 .desktop-app.hud-surface {
   min-width: 0;
   min-height: 0;
-  font-family: "Noto Sans SC Variable", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-family: "Noto Sans SC Variable", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
   color: var(--hud-ink);
 }
 
@@ -309,12 +309,6 @@
 .desktop-app.hud-surface.page-17.companion-absent .content.full {
   right: 55px;
 }
-@media (max-width: 760px) {
-  .desktop-app.hud-surface.page-16 .content.full,
-  .desktop-app.hud-surface.page-17 .content.full { right: var(--companion-seat-right-compact, 124px); }
-  .desktop-app.hud-surface.page-16.companion-absent .content.full,
-  .desktop-app.hud-surface.page-17.companion-absent .content.full { right: 28px; }
-}
 
 /* ---------------------------------------------------------------------------
  * Home (mockup 01/04): the room keeps its own life, but the two HUD islands
@@ -345,8 +339,8 @@
   box-shadow: var(--hud-shadow-small);
   pointer-events: auto;
   transition:
-    width var(--hud-island-motion) cubic-bezier(0.22, 1, 0.36, 1),
-    height var(--hud-island-motion) cubic-bezier(0.22, 1, 0.36, 1),
+    width var(--hud-island-motion) var(--hud-island-ease),
+    height var(--hud-island-motion) var(--hud-island-ease),
     background-color 180ms ease-out,
     box-shadow 180ms ease-out;
 }
@@ -416,7 +410,9 @@
   overflow: visible;
   border-radius: 999px;
   background: rgba(42, 31, 24, 0.92);
-  box-shadow: 0 14px 36px rgba(16, 13, 11, 0.28), 0 2px 8px rgba(16, 13, 11, 0.2);
+  /* 展开态原先换成 rgba(16,13,11,…) 自写阴影，收起态用的是 --hud-shadow-small；
+     同一颗岛的色温与影子必须一致。 */
+  box-shadow: var(--hud-shadow-small);
 }
 
 .hud-surface.nav-collapsed .home-v2-hud.home-v2-hud--expanded {
@@ -424,8 +420,6 @@
   width: min(548px, calc(100vw - 36px));
   padding: 2px 2px 2px 89px;
 }
-
-.hud-surface .home-v2-hud__directory { display: none; }
 
 /* The trigger fills the collapsed island (290px, or 364px beside the collapsed
    rail) and narrows to the expanded 236px pill. Its width is explicit instead of
@@ -450,17 +444,17 @@
   box-shadow: none;
   backdrop-filter: none;
   transition:
-    width var(--hud-island-motion) cubic-bezier(0.22, 1, 0.36, 1),
-    height var(--hud-island-motion) cubic-bezier(0.22, 1, 0.36, 1),
-    grid-template-columns var(--hud-island-motion) cubic-bezier(0.22, 1, 0.36, 1),
-    gap var(--hud-island-motion) cubic-bezier(0.22, 1, 0.36, 1),
-    padding var(--hud-island-motion) cubic-bezier(0.22, 1, 0.36, 1),
+    width var(--hud-island-motion) var(--hud-island-ease),
+    height var(--hud-island-motion) var(--hud-island-ease),
+    grid-template-columns var(--hud-island-motion) var(--hud-island-ease),
+    gap var(--hud-island-motion) var(--hud-island-ease),
+    padding var(--hud-island-motion) var(--hud-island-ease),
     color 150ms ease-out,
     background-color 150ms ease-out,
     border-color 180ms ease-out,
     border-radius 180ms ease-out,
     box-shadow 180ms ease-out,
-    transform 150ms ease-out;
+    transform 150ms var(--hud-ease-out);
 }
 
 .hud-surface.nav-collapsed .home-v2-hud__trigger { width: calc(364px - 2px - 89px); }
@@ -472,8 +466,8 @@
   height: 0;
   opacity: 0;
   transition:
-    width var(--hud-island-motion) cubic-bezier(0.22, 1, 0.36, 1),
-    height var(--hud-island-motion) cubic-bezier(0.22, 1, 0.36, 1),
+    width var(--hud-island-motion) var(--hud-island-ease),
+    height var(--hud-island-motion) var(--hud-island-ease),
     opacity var(--hud-island-motion) linear;
 }
 .hud-surface .home-v2-hud__trigger-copy small { display: block; color: #d2c3b3; font-size: 9px; }
@@ -493,8 +487,10 @@
   color: #fffaf1;
   border: 1px solid rgba(255, 249, 237, 0.2);
   border-radius: 999px;
-  background: rgba(20, 22, 24, 0.74);
-  box-shadow: 0 12px 30px rgba(16, 13, 11, 0.27), 0 2px 7px rgba(16, 13, 11, 0.2);
+  /* 收起态是暖黑 rgba(42,31,24,.9)，展开态原先换成 rgba(20,22,24,.74)——B 通道最高，
+     是真正的冷灰，同一颗岛两个色温。这里回到母本岛的暖黑与双层柔影。 */
+  background: rgba(42, 31, 24, 0.9);
+  box-shadow: var(--hud-shadow-small);
   backdrop-filter: blur(20px) saturate(1.16);
 }
 
@@ -532,12 +528,12 @@
   /* The box itself never moves: a shifted panel would drag its clip region past
      the island's edge and show the leaving copy outside the pill. */
   transform: none;
-  transition: opacity var(--hud-island-motion) cubic-bezier(0.22, 1, 0.36, 1);
+  transition: opacity var(--hud-island-motion) var(--hud-island-ease);
 }
 
 .hud-surface .home-v2-hud__panel > * {
   transform: translateX(10px);
-  transition: transform var(--hud-island-motion) cubic-bezier(0.22, 1, 0.36, 1);
+  transition: transform var(--hud-island-motion) var(--hud-island-ease);
 }
 
 .hud-surface.nav-collapsed .home-v2-hud__panel {
@@ -715,7 +711,12 @@
 /* Opening a source lands a beat later on another page; the row answers the press
    itself rather than leaving the click silent. */
 .hud-surface button.source-sheet:active { background: rgba(255, 243, 214, 0.92); }
-.hud-surface button.source-sheet:focus-visible { outline: 3px solid rgba(57, 103, 132, 0.38); outline-offset: -3px; }
+/* 这条特异度 (0,2,1) 高于全局那条 `:is(button, …):focus-visible`，所以它写着
+   `outline: none` 就等于把整列来源行的键盘焦点指示**关掉**——真按 Tab 走过来量到
+   `outline-style:none 0px`（焦点环普查：全站 977 次焦点，这是三处之一）。
+   环本身照母本 `3px solid var(--focus)`；只保留原有的 -3px：这些行在
+   `overflow:auto` 的列表里，环画在外面会被裁掉半圈。 */
+.hud-surface button.source-sheet:focus-visible { outline: 3px solid var(--focus); outline-offset: -3px; }
 .hud-surface button.source-sheet > .source-copy { min-width: 0; }
 
 /* Real titles run longer than the mockup's samples; two lines keep the row
@@ -761,12 +762,7 @@
 /* Capture is a real write now: the dashed slot is the paste/drop target and the
    form opens inside the strip, so the mockup's material carries the whole flow. */
 .hud-surface .capture-strip { overflow: auto; scrollbar-color: rgba(255, 247, 226, 0.32) transparent; scrollbar-width: thin; }
-.hud-surface .capture-slot { display: block; }
 
-.hud-surface .capture-slot .drop-slot { cursor: pointer; transition: border-color 140ms var(--hud-ease-out), background-color 140ms var(--hud-ease-out); }
-.hud-surface .capture-slot .drop-slot:hover,
-.hud-surface .capture-slot .drop-slot[data-armed="true"] { border-color: rgba(255, 247, 226, 0.92); background: rgba(255, 247, 226, 0.12); }
-.hud-surface .capture-slot .drop-slot:focus-visible { outline: 3px solid rgba(255, 241, 168, 0.72); outline-offset: 2px; }
 .hud-surface .drop-slot[aria-disabled="true"] { cursor: not-allowed; opacity: 0.55; }
 
 .hud-surface .capture-form { display: grid; gap: 8px; margin: 19px 0 14px; }
@@ -793,14 +789,14 @@
   border: 1px dashed rgba(255, 247, 226, 0.48);
   border-radius: 10px;
   background: rgba(20, 30, 24, 0.26);
-  font: 11px/1.6 "Noto Sans SC Variable", "Noto Sans SC", system-ui, sans-serif;
+  font: 11px/1.6 "Noto Sans SC Variable", system-ui, sans-serif;
   outline: 0;
 }
 .hud-surface .capture-form textarea { height: 132px; resize: vertical; }
 .hud-surface .capture-form textarea::placeholder,
 .hud-surface .capture-form input::placeholder { color: rgba(223, 230, 216, 0.6); }
 .hud-surface .capture-form textarea:focus,
-.hud-surface .capture-form input:focus { border-color: rgba(255, 247, 226, 0.92); background: rgba(20, 30, 24, 0.38); }
+.hud-surface .capture-form input:focus { border-color: rgba(255, 252, 235, 0.92); background: rgba(20, 30, 24, 0.38); }
 
 .hud-surface .capture-count { color: #c3cdba; font-size: 9px; }
 .hud-surface .capture-count.over { color: #f3b6a2; font-weight: 700; }
@@ -812,16 +808,15 @@
 .hud-surface .capture-ok { margin: 12px 0 0; color: #f0e2bd; font-size: 10px; line-height: 1.55; }
 .hud-surface .capture-locked { margin: 9px 0 0; color: #d7ddcf; font-size: 10px; line-height: 1.55; }
 
-@media (prefers-reduced-motion: reduce) {
-  .hud-surface .capture-slot .drop-slot { transition: none; }
-}
-
 .hud-surface .search-line button { flex: 0 0 auto; }
 
 /* The mockup's tabs are static spans; the client makes them the status filter,
    so they carry the affordances of every other control on the paper. */
 .hud-surface .index-tabs button {
-  padding: 0;
+  /* 命中区实测只有 12×25（9px 字加 `padding:0`），是全应用最矮的可按压元素——
+     房子最小的一档是 24-26px（`.hud-picker__trigger`=24、`.nav-collapse`=26）。
+     只补竖向 padding：文字签条的外观（无盒、下划线标选中）保持不变。 */
+  padding: 6px 0;
   color: var(--hud-soft);
   font-size: 9px;
   text-align: left;
@@ -832,7 +827,7 @@
 }
 
 .hud-surface .index-tabs button:hover { color: var(--hud-ink); }
-.hud-surface .index-tabs button:focus-visible { outline: 2px solid rgba(57, 103, 132, 0.5); outline-offset: 3px; }
+.hud-surface .index-tabs button:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
 
 @media (prefers-reduced-motion: reduce) {
   .hud-surface .index-tabs button { transition: none; }
@@ -891,7 +886,7 @@
   transition: background-color 140ms ease, color 140ms ease;
 }
 .hud-surface .search-command__clear:hover { color: var(--hud-ink); background: rgba(96, 72, 51, 0.2); }
-.hud-surface .search-command__clear:focus-visible { outline: 3px solid rgba(57, 103, 132, 0.42); outline-offset: 1px; }
+.hud-surface .search-command__clear:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
 
 /* The index keeps its own scroll, so the running count and the next-page cursor
    ride at the end of the list rather than floating over it. */
@@ -1093,7 +1088,7 @@
 }
 .hud-surface .settings-account-column .space-identity h3 {
   margin: 0 0 4px;
-  font: 680 18px/1.3 "Noto Serif SC", "Songti SC", serif;
+  font: 680 18px/1.3 "Noto Serif SC Variable", "Songti SC", serif;
   letter-spacing: -0.02em;
 }
 
@@ -1113,7 +1108,7 @@
   color: #7d3a20;
 }
 .hud-surface .settings-inline-state > span { min-width: 0; }
-.hud-surface .settings-inline-state b { display: block; font: 650 12px/1.4 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .settings-inline-state b { display: block; font: 650 12px/1.4 "Noto Serif SC Variable", "Songti SC", serif; }
 .hud-surface .settings-inline-state small { display: block; margin-top: 2px; color: inherit; font-size: 10px; line-height: 1.5; opacity: 0.82; overflow-wrap: anywhere; }
 
 /* Membership (members): who you are, then the spaces that answer to it. */
@@ -1135,7 +1130,7 @@
   border-radius: 50%;
   background: #52644f;
   color: #fff8e8;
-  font: 700 19px "Noto Serif SC", "Songti SC", serif;
+  font: 700 19px "Noto Serif SC Variable", "Songti SC", serif;
 }
 /* 用户上传的头像与首字母印章同位同尺寸，占满那一格。 */
 .hud-surface .settings-identity__avatar {
@@ -1145,7 +1140,7 @@
   object-fit: cover;
   display: block;
 }
-.hud-surface .settings-identity b { display: block; font: 650 14px/1.3 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .settings-identity b { display: block; font: 650 14px/1.3 "Noto Serif SC Variable", "Songti SC", serif; }
 .hud-surface .settings-identity small { display: block; margin-top: 3px; color: var(--hud-soft); font-size: 9px; }
 
 .hud-surface .settings-ledger { display: grid; gap: 5px; margin: 13px 0 0; }
@@ -1189,7 +1184,7 @@
   font-size: 11px;
   font-weight: 700;
 }
-.hud-surface .settings-ledger__row b { display: block; font: 650 12px/1.3 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .settings-ledger__row b { display: block; font: 650 12px/1.3 "Noto Serif SC Variable", "Songti SC", serif; }
 .hud-surface .settings-ledger__row small { display: block; margin-top: 2px; color: var(--hud-soft); font-size: 9px; }
 
 /* Visual theme picker (appearance): the two plates the reader actually stands on. */
@@ -1253,12 +1248,15 @@
   margin-top: 11px;
   padding: 11px 13px;
   border-radius: 19px 24px 17px 22px;
-  background: rgba(255, 255, 255, 0.34);
+  /* 原先是 rgba(255,255,255,.34)——中性纯白压在奶油纸上，是全站唯一没被暖化的
+     白色叠加层（DESIGN.md 的 Warm-First）。改成从 --hud-paper-light 派生，
+     底色变了它跟着变，不再是一个游离的字面值。 */
+  background: color-mix(in srgb, var(--hud-paper-light) 46%, transparent);
 }
 .hud-surface .settings-block__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 /* 块头说明之后接输入行：间距走体系，不再写内联 marginTop。 */
 .hud-surface .settings-block__head + .hud-field { margin-top: 10px; }
-.hud-surface .settings-block__head b { display: block; font: 650 12px/1.3 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .settings-block__head b { display: block; font: 650 12px/1.3 "Noto Serif SC Variable", "Songti SC", serif; }
 .hud-surface .settings-block__head p { margin: 3px 0 0; color: var(--hud-soft); font-size: 9px; line-height: 1.5; }
 .hud-surface .settings-field { display: grid; gap: 6px; margin-top: 10px; }
 .hud-surface .settings-form .settings-field { margin-top: 0; }
@@ -1295,7 +1293,7 @@
   line-height: 1;
 }
 .hud-surface .settings-disclosure[open] > summary::after { content: "−"; }
-.hud-surface .settings-disclosure > summary b { display: block; font: 650 12px/1.35 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .settings-disclosure > summary b { display: block; font: 650 12px/1.35 "Noto Serif SC Variable", "Songti SC", serif; }
 .hud-surface .settings-disclosure > summary small { display: block; margin-top: 2px; color: var(--hud-soft); font-size: 9px; }
 .hud-surface .settings-disclosure > .settings-form,
 .hud-surface .settings-disclosure > .settings-rows { margin: 0 0 12px; }
@@ -1351,7 +1349,7 @@
 .hud-surface .settings-voice__toggle:hover:not(:disabled) { transform: translateY(-1px); background: var(--hud-butter); }
 .hud-surface .settings-voice__toggle:active:not(:disabled) { transform: scale(0.95); transition-duration: 110ms; }
 .hud-surface .settings-voice__toggle:disabled { opacity: 0.45; cursor: default; }
-.hud-surface .settings-voice__reading b { display: block; font: 650 12px/1.35 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .settings-voice__reading b { display: block; font: 650 12px/1.35 "Noto Serif SC Variable", "Songti SC", serif; }
 .hud-surface .settings-voice__reading small {
   display: block;
   margin-top: 2px;
@@ -1401,7 +1399,7 @@
 .hud-surface .settings-row__mark { grid-column: 1; display: grid; place-items: center; color: #5f7a5d; }
 .hud-surface .settings-row__body { grid-column: 2; display: block; min-width: 0; }
 .hud-surface .settings-row__control { grid-column: 3; display: inline-flex; align-items: center; justify-content: flex-end; gap: 7px; flex-wrap: wrap; }
-.hud-surface .settings-row b { display: block; font: 650 12px/1.35 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .settings-row b { display: block; font: 650 12px/1.35 "Noto Serif SC Variable", "Songti SC", serif; }
 .hud-surface .settings-row small { display: block; margin-top: 2px; color: var(--hud-soft); font-size: 10px; line-height: 1.5; }
 
 .hud-surface .settings-invite-receipt {
@@ -1414,7 +1412,7 @@
   border-radius: 15px 19px 14px 17px;
   background: var(--hud-butter);
 }
-.hud-surface .settings-invite-receipt b { display: block; font: 650 12px/1.35 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .settings-invite-receipt b { display: block; font: 650 12px/1.35 "Noto Serif SC Variable", "Songti SC", serif; }
 .hud-surface .settings-invite-receipt small { display: block; margin-top: 2px; color: var(--hud-soft); font-size: 9px; }
 .hud-surface .settings-invite-receipt code {
   min-width: 0;
@@ -1503,7 +1501,7 @@
   background: rgba(255, 255, 255, 0.34);
   text-align: center;
 }
-.hud-surface .settings-stat b { font: 680 24px/1 "Noto Serif SC", "Songti SC", serif; color: #4c664f; }
+.hud-surface .settings-stat b { font: 680 24px/1 "Noto Serif SC Variable", "Songti SC", serif; color: #4c664f; }
 .hud-surface .settings-stat span { color: var(--hud-soft); font-size: 9px; }
 .hud-surface .settings-stat[data-loading="true"] b { color: var(--hud-soft); }
 
@@ -1629,7 +1627,7 @@
 
 .hud-surface .article-copy h3 {
   margin: 20px 0 9px;
-  font: 650 17px/1.5 "Noto Serif SC", "Songti SC", serif;
+  font: 650 17px/1.5 "Noto Serif SC Variable", "Songti SC", serif;
 }
 
 /* A source is renamed in place: the folio's headline becomes the field, so it
@@ -1695,13 +1693,13 @@
 }
 
 .hud-surface .note-links button:hover { background: rgba(255, 250, 238, 0.92); transform: translateY(-1px); }
-.hud-surface .note-links button:focus-visible { outline: 3px solid rgba(57, 103, 132, 0.38); outline-offset: 2px; }
+.hud-surface .note-links button:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
 
 /* A note with no version is listed but not openable: it says so through the
    title, and the row stops pretending to be a target. */
 .hud-surface .note-links button:disabled { cursor: not-allowed; opacity: 0.6; }
 .hud-surface .note-links button:disabled:hover { background: rgba(255, 250, 238, 0.5); transform: none; }
-.hud-surface .note-links span { overflow: hidden; font: 650 12px/1.5 "Noto Serif SC", "Songti SC", serif; text-overflow: ellipsis; white-space: nowrap; }
+.hud-surface .note-links span { overflow: hidden; font: 650 12px/1.5 "Noto Serif SC Variable", "Songti SC", serif; text-overflow: ellipsis; white-space: nowrap; }
 .hud-surface .note-links small { color: var(--hud-soft); font-size: 9px; }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1733,10 +1731,6 @@
 
 /* The chat drawer narrows the note so the ribbon owns the right edge. */
 .hud-surface.drawer-open .content { right: 405px; }
-
-@media (max-width: 760px) {
-  .hud-surface.drawer-open .content { right: 205px; }
-}
 
 /* The mockup writes the room control as decorative `<span>`s; the client uses
    real buttons, so the same pill geometry is restated for the interactive
@@ -1789,7 +1783,7 @@
   box-shadow: 0 0 5px rgba(255, 223, 158, 0.8);
   transform: translateX(-50%);
 }
-.hud-surface .room-control > button:focus-visible { outline: 3px solid rgba(255, 241, 168, 0.72); outline-offset: 2px; }
+.hud-surface .room-control > button:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
 
 /* The card is the mockup's own `.home-menu`, so its generated `position:
    absolute; right: 25px; top: 77px` is kept verbatim and it hangs off the
@@ -1934,7 +1928,7 @@
   transform: scaleX(0.16);
   transform-origin: right center;
   pointer-events: none;
-  transition: opacity 100ms ease-out, transform 300ms cubic-bezier(0.22, 1, 0.36, 1), border-color 180ms ease-out;
+  transition: opacity 100ms ease-out, transform 300ms var(--hud-island-ease), border-color 180ms ease-out;
 }
 
 .hud-surface .room-control[data-expanded="true"]::before {
@@ -1960,7 +1954,7 @@
   box-shadow: 0 10px 26px rgba(20, 14, 10, 0.24), 0 2px 7px rgba(20, 14, 10, 0.2);
   backdrop-filter: blur(18px) saturate(1.12);
   cursor: pointer;
-  transition: color 150ms ease-out, background-color 150ms ease-out, transform 150ms ease-out, opacity 150ms ease-out;
+  transition: color 150ms ease-out, background-color 150ms ease-out, transform 150ms var(--hud-ease-out), opacity 150ms ease-out;
 }
 
 .hud-surface .room-control .room-control-trigger::before {
@@ -1977,8 +1971,8 @@
 .hud-surface .room-control .room-control-trigger:hover { background: rgba(35, 32, 30, 0.9); }
 .hud-surface .room-control .room-control-trigger:active { transform: scale(0.94); }
 .hud-surface .room-control .room-control-trigger:focus-visible {
-  outline: 3px solid rgba(255, 241, 168, 0.72);
-  outline-offset: 2px;
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
 }
 
 /* Motion-mode status, the old trigger's dot. `<i>` in the markup because the
@@ -2020,7 +2014,7 @@
   opacity: 0;
   transform: translateX(8px);
   pointer-events: none;
-  transition: opacity 150ms ease-out, transform 240ms cubic-bezier(0.22, 1, 0.36, 1), background-color 140ms var(--hud-ease-out), color 140ms ease;
+  transition: opacity 150ms ease-out, transform 240ms var(--hud-island-ease), background-color 140ms var(--hud-ease-out), color 140ms ease;
 }
 
 .hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger):not(.room-control-space) {
@@ -2031,7 +2025,7 @@
   pointer-events: auto;
   /* 65ms 延迟只给展开位移（opacity/transform）；悬停与按压的
      background/color 通道零延迟，反馈必须跟手。 */
-  transition: opacity 150ms ease-out 65ms, transform 240ms cubic-bezier(0.22, 1, 0.36, 1) 65ms,
+  transition: opacity 150ms ease-out 65ms, transform 240ms var(--hud-island-ease) 65ms,
     background-color 140ms var(--hud-ease-out), color 140ms ease;
 }
 
@@ -2138,7 +2132,7 @@
 }
 
 .hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger):not(.room-control-space) svg {
-  animation: hud-slot-icon-in 240ms cubic-bezier(0.23, 1, 0.32, 1) backwards;
+  animation: hud-slot-icon-in 240ms var(--hud-ease-out) backwards;
 }
 
 .hud-surface .room-control[data-expanded="true"] > button:not(.room-control-trigger):not(.room-control-space):nth-child(2) svg { animation-delay: 65ms; }
@@ -2155,7 +2149,7 @@
 
 /* 日夜/静音互换时的落位小动画（key 重挂触发）。 */
 .hud-surface .room-control .room-control-icon-swap {
-  animation: hud-icon-settle 200ms cubic-bezier(0.23, 1, 0.32, 1);
+  animation: hud-icon-settle 200ms var(--hud-ease-out);
 }
 
 @keyframes hud-icon-settle {
@@ -2270,7 +2264,7 @@
   border: 1px solid var(--hud-line-strong);
   border-radius: 50%;
   background: rgba(255, 250, 238, 0.52);
-  font: 700 12px "Noto Serif SC", "Songti SC", serif;
+  font: 700 12px "Noto Serif SC Variable", "Songti SC", serif;
   cursor: pointer;
   transition: background-color 140ms var(--hud-ease-out), color 140ms ease;
 }
@@ -2284,8 +2278,8 @@
 }
 
 .hud-surface .first-space .space-pick button:focus-visible {
-  outline: 3px solid rgba(57, 103, 132, 0.38);
-  outline-offset: 2px;
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
 }
 
 /* The invite field's skin is shared with the menu's, so both rows keep the
@@ -2350,7 +2344,7 @@
 }
 
 .hud-surface button.book-cover:focus-visible {
-  outline: 3px solid rgba(255, 241, 168, 0.72);
+  outline: 3px solid var(--focus);
   outline-offset: 3px;
 }
 
@@ -2392,13 +2386,13 @@
   color: var(--hud-soft);
   border: 0;
   background: transparent;
-  font: 750 9px "Noto Sans SC Variable", "Noto Sans SC", "PingFang SC", sans-serif;
+  font: 750 9px "Noto Sans SC Variable", "PingFang SC", sans-serif;
   cursor: pointer;
   transition: color 140ms var(--hud-ease-out);
 }
 
 .hud-surface .ribbon-action:hover { color: var(--hud-ink); }
-.hud-surface .ribbon-action:focus-visible { outline: 2px solid rgba(57, 103, 132, 0.5); outline-offset: 2px; }
+.hud-surface .ribbon-action:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
 
 @media (prefers-reduced-motion: reduce) {
   .hud-surface .ribbon-action { transition: none; }
@@ -2425,7 +2419,7 @@
    sans-serif UI font. */
 .hud-surface .reading-body h3 {
   margin: 20px 0 9px;
-  font: 650 17px/1.5 "Noto Serif SC", "Songti SC", serif;
+  font: 650 17px/1.5 "Noto Serif SC Variable", "Songti SC", serif;
 }
 
 .hud-surface .reading-body .code-block {
@@ -2461,7 +2455,7 @@
 /* The two pasted clips hang over the paper's top-right, so the title field
    stops before them instead of running under the notes. */
 .hud-surface .editor-copy h2 { padding-right: 176px; }
-.hud-surface .editor-copy h2 input:focus-visible { outline: none; }
+.hud-surface .editor-copy h2 input:focus-visible { outline: 3px solid var(--focus); }
 .hud-surface .editor-copy h2 input::placeholder { color: #967e6b; }
 .hud-surface .editor-copy h2 input:disabled { cursor: not-allowed; }
 
@@ -2540,7 +2534,12 @@
 }
 
 .hud-surface .companion-center {
-  /* 画布调色板：与 .hud-surface .universe-page 同值（深夜三色）。 */
+  /* 这块是"嵌在伴星中心里的那份星图"的调色板，**不是** `.universe-page` 那份的副本。
+     原来注释写着"与 .hud-surface .universe-page 同值"，逐个算过计算值之后不成立：
+     16 个共享变量里 8 个不同（同一块 `universe-canvas-controls` 在星图页是奶油纸
+     `rgb(255,242,207)`，在这里是深夜玻璃 `rgba(11,33,48,.9)`；四条 alpha 还各自漂了
+     2–6 个百分点，比如 `--universe-edge` 0.84 对 0.78）。两份都是有意为之的变体，
+     差别在"整页星图"和"卡片里嵌的小星图"，所以谁也别去"对齐"谁。 */
   --universe-envelope-a: rgba(121, 206, 220, 0.19);
   --universe-envelope-b: rgba(233, 198, 111, 0.1);
   --universe-label: #fff3df;
@@ -2717,7 +2716,7 @@
 
 .hud-surface .companion-workbench-header h2 {
   margin: 0;
-  font: 680 var(--companion-font-page)/1.2 "Noto Serif SC", "Songti SC", serif;
+  font: 680 var(--companion-font-page)/1.2 "Noto Serif SC Variable", "Songti SC", serif;
   color: #fff3df;
 }
 
@@ -2811,7 +2810,7 @@
 .hud-surface .companion-heading-actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: var(--companion-gap-row); }
 .hud-surface .companion-heading-actions button { white-space: nowrap; }
 .hud-surface .companion-panel-heading > button { white-space: nowrap; }
-.hud-surface .companion-panel-heading h3 { margin: 0; font: 650 var(--companion-font-panel)/1.3 "Noto Serif SC", "Songti SC", serif; color: #fff3df; }
+.hud-surface .companion-panel-heading h3 { margin: 0; font: 650 var(--companion-font-panel)/1.3 "Noto Serif SC Variable", "Songti SC", serif; color: #fff3df; }
 .hud-surface .companion-panel-heading p { margin: var(--companion-gap-inline) 0 0; color: var(--companion-glass-soft); font-size: var(--companion-font-micro); line-height: 1.55; }
 
 /* 基础按钮：白玻璃小签。primary/danger 叠加变体。 */
@@ -2913,8 +2912,8 @@
 .hud-surface .companion-search input:focus-visible,
 .hud-surface .companion-search button:focus-visible,
 .hud-surface .companion-select__menu:focus-visible {
-  outline: 3px solid rgba(131, 216, 231, 0.5);
-  outline-offset: 2px;
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
 }
 
 .hud-surface .companion-filter-group,
@@ -3024,7 +3023,7 @@
   background: rgba(143, 199, 167, 0.12);
 }
 
-.hud-surface .companion-memory-detail > strong { font: 650 var(--companion-font-title)/1.65 "Noto Serif SC", "Songti SC", serif; color: #fff3df; }
+.hud-surface .companion-memory-detail > strong { font: 650 var(--companion-font-title)/1.65 "Noto Serif SC Variable", "Songti SC", serif; color: #fff3df; }
 .hud-surface .companion-memory-detail > small { color: var(--companion-glass-soft); font-size: var(--companion-font-micro); }
 .hud-surface .companion-memory-detail__meta { display: flex; flex-wrap: wrap; gap: var(--companion-gap-row); }
 .hud-surface .companion-memory-detail__meta span {
@@ -3156,7 +3155,7 @@
 .hud-surface .companion-persona-groups > section > h4,
 .hud-surface .companion-data-groups > section > h4 {
   margin: 0;
-  font: 650 var(--companion-font-section)/1.3 "Noto Serif SC", "Songti SC", serif;
+  font: 650 var(--companion-font-section)/1.3 "Noto Serif SC Variable", "Songti SC", serif;
   color: #fff3df;
 }
 
@@ -3168,7 +3167,7 @@
 .hud-surface .companion-activity-card > button { justify-self: start; }
 .hud-surface .companion-activity-card.is-journey { border-color: rgba(121, 206, 220, 0.4); background: rgba(121, 206, 220, 0.1); }
 .hud-surface .companion-activity-card > svg { color: #e9c66f; }
-.hud-surface .companion-activity-card strong { font: 650 var(--companion-font-body)/1.5 "Noto Serif SC", "Songti SC", serif; color: #fff3df; }
+.hud-surface .companion-activity-card strong { font: 650 var(--companion-font-body)/1.5 "Noto Serif SC Variable", "Songti SC", serif; color: #fff3df; }
 .hud-surface .companion-activity-card p { margin: 0; color: var(--companion-glass-soft); font-size: var(--companion-font-micro); line-height: 1.55; }
 .hud-surface .companion-activity-card small { color: var(--companion-glass-soft); font-size: var(--companion-font-micro); }
 .hud-surface .companion-delivery-card { border: var(--companion-card-border); background: var(--companion-card-glass); }
@@ -3211,7 +3210,7 @@
    0252 把图放进日记页时必须显式归零，让子块里的 max-width:100% 真的生效。 */
 .hud-surface .companion-diary-entry > * { min-width: 0; }
 /* 日记正文：她自己写的一段话，读起来要像手记不像标题。数字表已随 0250 一起撤下。 */
-.hud-surface .companion-diary-prose { margin: 0; font: 400 var(--companion-font-title)/1.9 "Noto Serif SC", "Songti SC", serif; color: #fff3df; }
+.hud-surface .companion-diary-prose { margin: 0; font: 400 var(--companion-font-title)/1.9 "Noto Serif SC Variable", "Songti SC", serif; color: #fff3df; }
 .hud-surface .companion-diary-prose + .companion-diary-prose { margin-top: 2px; }
 .hud-surface .companion-diary-entry > small { color: var(--companion-glass-soft); font-size: var(--companion-font-micro); }
 
@@ -3414,7 +3413,7 @@
   box-shadow: inset 0 0 0 1px rgba(96, 60, 35, 0.15);
 }
 .hud-surface .companion-select__option.is-selected svg { color: #49382b; }
-.hud-surface .companion-select__option svg { color: #79cedc; }
+.hud-surface .companion-select__option svg { color: var(--hud-star); }
 .hud-surface .companion-select.is-paper .companion-select__trigger {
   border-color: rgba(233, 198, 111, 0.42);
   background: rgba(233, 198, 111, 0.1);
@@ -3444,7 +3443,7 @@
 }
 
 .hud-surface .companion-map-headline { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--companion-gap-row) var(--companion-gap-block); }
-.hud-surface .companion-map-headline h2 { margin: 0; font: 680 var(--companion-font-panel)/1.25 "Noto Serif SC", "Songti SC", serif; color: #fff3df; }
+.hud-surface .companion-map-headline h2 { margin: 0; font: 680 var(--companion-font-panel)/1.25 "Noto Serif SC Variable", "Songti SC", serif; color: #fff3df; }
 .hud-surface .companion-map-headline > span { flex: 0 0 auto; color: #e9c66f; font-size: var(--companion-font-micro); font-weight: 700; }
 .hud-surface .companion-map-headline p { flex-basis: 100%; margin: 0; color: var(--companion-glass-soft); font-size: var(--companion-font-micro); line-height: 1.55; }
 
@@ -3596,7 +3595,7 @@
 }
 
 .hud-surface .companion-map-selection > div { display: grid; flex: 1 1 auto; min-width: 0; gap: var(--companion-gap-inline); }
-.hud-surface .companion-map-selection strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 650 var(--companion-font-body)/1.4 "Noto Serif SC", "Songti SC", serif; color: #fff3df; }
+.hud-surface .companion-map-selection strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 650 var(--companion-font-body)/1.4 "Noto Serif SC Variable", "Songti SC", serif; color: #fff3df; }
 .hud-surface .companion-map-selection span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--companion-glass-soft); font-size: var(--companion-font-micro); }
 .hud-surface .companion-map-selection > span { flex: 0 0 auto; max-width: 150px; white-space: normal; color: var(--companion-glass-soft); font-size: var(--companion-font-micro); line-height: 1.45; }
 .hud-surface .companion-map-selection button { flex: 0 0 auto; border-color: rgba(121, 206, 220, 0.45); background: rgba(121, 206, 220, 0.14); color: #d8eef2; }
@@ -3680,7 +3679,6 @@
 }
 
 @media (max-width: 760px), (max-height: 480px) {
-  .desktop-app.hud-surface.page-20 .task-title { display: none; }
   .hud-surface .companion-center {
     --companion-bench-w: auto;
     --companion-bench-left: 56px;
@@ -3712,7 +3710,7 @@
     -webkit-backdrop-filter: var(--companion-glass-blur);
     box-shadow: var(--companion-plate-shadow);
   }
-  .hud-surface .companion-compact-mode strong { min-width: 0; color: #fff3df; font: 650 var(--companion-font-title)/1.2 "Noto Serif SC", "Songti SC", serif; }
+  .hud-surface .companion-compact-mode strong { min-width: 0; color: #fff3df; font: 650 var(--companion-font-title)/1.2 "Noto Serif SC Variable", "Songti SC", serif; }
   .hud-surface .companion-compact-mode > div { display: flex; gap: var(--companion-gap-inline); }
   /* 视图切换是紧凑模式里唯一的顶层导航，触控目标与其他按钮同档（44px）。 */
   .hud-surface .companion-compact-mode button {
@@ -3852,7 +3850,7 @@
 
 .hud-surface .editor-tools button.tool:hover { background: rgba(230, 214, 184, 0.6); }
 .hud-surface .editor-tools button.tool:disabled { cursor: not-allowed; opacity: 0.45; }
-.hud-surface .editor-tools button.tool:focus-visible { outline: 2px solid rgba(57, 103, 132, 0.5); outline-offset: 1px; }
+.hud-surface .editor-tools button.tool:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
 
 /* The mockup sizes every `.editor-tools` span as a 29px tool square; the legend
    is a span too, so it has to opt back out of that box. */
@@ -4363,16 +4361,16 @@
    键盘聚焦之后改用鼠标拖卡时，Chromium 仍把它算作 focus-visible，环会跟着手指
    一路画在整列卡片外面；而裸的 :focus 更糟：鼠标点一下卡面就出现一个红框。 */
 .hud-surface .card-deck[data-deck-ring="true"]:focus {
-  outline: 3px solid var(--focus, #9a351d);
-  outline-offset: 4px;
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
 }
 
 .hud-surface .deck-nav__step:focus-visible,
 .hud-surface .queue-reason__order button:focus-visible,
 .hud-surface .queue-reason__more:focus-visible,
 .hud-surface .queue-reason__failure button:focus-visible {
-  outline: 2px solid var(--focus, #9a351d);
-  outline-offset: 2px;
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
 }
 
 /* 理由条里的内联按钮从没复位过 text-align，长目标名换行后会相对左对齐的段落
@@ -4410,9 +4408,6 @@
   .hud-surface .deck-nav__step { width: 22px; height: 22px; border-width: 1px; border-radius: 9px 10px 8px 9px; }
   .hud-surface .deck-nav__step svg { width: 11px; height: 11px; }
 }
-
-
-
 
 /* ---------------------------------------------------------------------------
  * Note library: the shelf's two entries and the index's rows.
@@ -4453,7 +4448,7 @@
 }
 
 .hud-surface .note-open:hover strong { text-decoration: underline; text-underline-offset: 4px; }
-.hud-surface .note-open:focus-visible { outline: 2px solid rgba(57, 103, 132, 0.5); outline-offset: 3px; }
+.hud-surface .note-open:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
 
 /* 整张「继续写作」卡都可点：透明覆盖层铺满卡片，hover/焦点给卡片描一圈，
    让人知道点哪里都算。它排在卡片第一个子元素，后面的动作区按 DOM 顺序
@@ -4470,7 +4465,7 @@
 
 .hud-surface .current-note__open:hover,
 .hud-surface .current-note__open:focus-visible {
-  outline: 2px solid rgba(57, 103, 132, 0.5);
+  outline: 3px solid var(--focus);
   outline-offset: -6px;
 }
 
@@ -4510,7 +4505,7 @@
   border-bottom: 2px solid var(--hud-line-strong);
   outline: none;
   background: transparent;
-  font: 650 14px "Noto Serif SC", "Songti SC", serif;
+  font: 650 14px "Noto Serif SC Variable", "Songti SC", serif;
 }
 
 .hud-surface .note-rename-input:focus { border-bottom-color: #af522c; }
@@ -4520,14 +4515,14 @@
   color: var(--hud-soft);
   border: 0;
   background: transparent;
-  font: 750 10px "Noto Sans SC Variable", "Noto Sans SC", "PingFang SC", sans-serif;
+  font: 750 10px "Noto Sans SC Variable", "PingFang SC", sans-serif;
   cursor: pointer;
   transition: color 140ms var(--hud-ease-out);
 }
 
 .hud-surface .text-action:hover { color: var(--hud-ink); }
 .hud-surface .text-action:disabled { cursor: not-allowed; opacity: 0.45; }
-.hud-surface .text-action:focus-visible { outline: 2px solid rgba(57, 103, 132, 0.5); outline-offset: 2px; }
+.hud-surface .text-action:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
 .hud-surface .text-action--strong { color: #6f4a30; }
 .hud-surface .text-action--danger:hover { color: #a4482f; }
 
@@ -4576,7 +4571,7 @@
 .hud-surface .card-generation-board__header h2 {
   margin: 9px 0 5px;
   color: #fff8e8;
-  font: 680 22px/1.35 "Noto Serif SC", "Songti SC", serif;
+  font: 680 22px/1.35 "Noto Serif SC Variable", "Songti SC", serif;
 }
 .hud-surface .card-generation-board__header p {
   max-width: 64ch;
@@ -4638,7 +4633,7 @@
   align-items: center;
   gap: 7px;
   color: var(--cgp-ink);
-  font: 680 19px/1.3 "Noto Serif SC", "Songti SC", serif;
+  font: 680 19px/1.3 "Noto Serif SC Variable", "Songti SC", serif;
 }
 .hud-surface .card-generation-progress__meta {
   color: var(--cgp-ink-soft);
@@ -4652,7 +4647,7 @@
 }
 .hud-surface .card-generation-progress__percent {
   color: #ffe9a8;
-  font: 700 30px/1 "Noto Serif SC", "Songti SC", serif;
+  font: 700 30px/1 "Noto Serif SC Variable", "Songti SC", serif;
   /* 数字等宽，百分比从 5% 走到 50% 时那一位不会左右跳。 */
   font-variant-numeric: tabular-nums;
 }
@@ -4732,12 +4727,6 @@
   0%, 100% { box-shadow: 0 0 0 2px rgba(243, 214, 120, 0.34), 0 0 12px rgba(243, 214, 120, 0.2); }
   50% { box-shadow: 0 0 0 2px rgba(243, 214, 120, 0.62), 0 0 16px rgba(243, 214, 120, 0.4); }
 }
-@media (prefers-reduced-motion: reduce) {
-  .hud-surface .card-generation-progress__step.is-current .card-generation-progress__rail {
-    animation: none;
-    box-shadow: 0 0 0 2px rgba(243, 214, 120, 0.5), 0 0 12px rgba(243, 214, 120, 0.26);
-  }
-}
 .desktop-app[data-motion-mode="off"] .card-generation-progress__step.is-current .card-generation-progress__rail {
   animation: none;
   box-shadow: 0 0 0 2px rgba(243, 214, 120, 0.5), 0 0 12px rgba(243, 214, 120, 0.26);
@@ -4771,7 +4760,7 @@
   gap: 12px;
 }
 .hud-surface .card-generation-board .press-paper strong {
-  font: 680 13px/1.45 "Noto Serif SC", "Songti SC", serif;
+  font: 680 13px/1.45 "Noto Serif SC Variable", "Songti SC", serif;
 }
 .hud-surface .card-generation-board .press-paper span {
   color: var(--hud-soft);
@@ -4796,7 +4785,7 @@
   text-align: center;
 }
 .hud-surface .card-generation-hud-state strong {
-  font: 680 18px/1.45 "Noto Serif SC", "Songti SC", serif;
+  font: 680 18px/1.45 "Noto Serif SC Variable", "Songti SC", serif;
 }
 .hud-surface .card-generation-hud-state p {
   max-width: 46ch;
@@ -4873,7 +4862,7 @@
   font-weight: 800;
 }
 .hud-surface .candidate-study-card .answer-slip strong {
-  font: 620 13px/1.65 "Noto Serif SC", "Songti SC", serif;
+  font: 620 13px/1.65 "Noto Serif SC Variable", "Songti SC", serif;
 }
 .hud-surface .candidate-study-card .stamp-actions {
   flex-wrap: wrap;
@@ -4921,11 +4910,8 @@
   padding-top: 16px;
 }
 
-/* LearningRun is a practice workbench, not the mockup's fixed answer sheet.
-   The green rail carries orientation and the cream stage changes shape with
-   the server-authorized interaction. The palette stays deliberately small:
-   green for context, cream for work, peach for the one primary action, and a
-   single butter strip for a hint or next step. */
+/* Shared run/editor primitives. The focus scene and result composition live
+   in objective-flow.css; this file keeps only still-used editor controls. */
 .hud-surface .learning-run-result-board {
   width: 100%;
   height: 100%;
@@ -4939,79 +4925,6 @@
 }
 .hud-surface .learning-run-primary-content { width: 100%; height: 100%; min-width: 0; min-height: 0; }
 
-.hud-surface .learning-run-journey {
-  position: relative;
-  display: flex;
-  min-width: 0;
-  min-height: 0;
-  flex-direction: column;
-  padding: 28px 26px 24px;
-  overflow: hidden;
-  color: #fff8e8;
-  background: var(--hud-green);
-}
-.hud-surface .learning-run-journey::after {
-  position: absolute;
-  right: -72px;
-  bottom: -104px;
-  width: 220px;
-  height: 220px;
-  content: "";
-  border: 22px solid rgba(255, 248, 232, 0.08);
-  border-radius: 52% 48% 60% 40%;
-  transform: rotate(-18deg);
-  pointer-events: none;
-}
-.hud-surface .learning-run-journey > * { position: relative; z-index: 1; }
-.hud-surface .learning-run-journey__state {
-  display: inline-flex;
-  align-items: center;
-  align-self: flex-start;
-  gap: 8px;
-  font-size: 10px;
-  font-weight: 800;
-}
-.hud-surface .learning-run-journey__state i {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--hud-butter);
-  box-shadow: 0 0 0 5px rgba(243, 214, 120, 0.13);
-}
-.hud-surface .learning-run-journey__kicker {
-  margin-top: 31px;
-  color: rgba(255, 248, 232, 0.68);
-  font-size: 9px;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-}
-.hud-surface .learning-run-journey h2 {
-  display: -webkit-box;
-  margin: 7px 0 0;
-  overflow: hidden;
-  font: 680 clamp(21px, 2.2vw, 30px)/1.34 "Noto Serif SC", "Songti SC", serif;
-  overflow-wrap: anywhere;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 4;
-}
-.hud-surface .learning-run-journey dl { margin: 30px 0 0; }
-.hud-surface .learning-run-journey dl > div {
-  display: grid;
-  grid-template-columns: 64px minmax(0, 1fr);
-  gap: 12px;
-  padding: 11px 0;
-  border-top: 1px solid rgba(255, 248, 232, 0.2);
-}
-.hud-surface .learning-run-journey dt {
-  color: rgba(255, 248, 232, 0.62);
-  font-size: 9px;
-}
-.hud-surface .learning-run-journey dd {
-  margin: 0;
-  font-size: 10px;
-  font-weight: 750;
-  text-align: right;
-}
 .hud-surface .learning-run-clock { margin-top: auto; }
 .hud-surface .learning-run-clock > div:first-child {
   display: flex;
@@ -5136,48 +5049,6 @@
   resize: none;
 }
 
-.hud-surface .learning-run-stage {
-  display: flex;
-  min-width: 0;
-  min-height: 0;
-  flex-direction: column;
-  padding: 26px 31px 20px;
-  background: linear-gradient(150deg, rgba(255, 255, 255, 0.32), transparent 38%), var(--hud-cream);
-}
-.hud-surface .learning-run-stage__header {
-  flex: 0 0 auto;
-  padding-bottom: 19px;
-  border-bottom: 1px solid var(--hud-line);
-}
-.hud-surface .learning-run-stage__header > div {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  color: #5a735c;
-  font-size: 9px;
-  font-weight: 800;
-  letter-spacing: 0.04em;
-}
-.hud-surface .learning-run-stage__header small {
-  color: var(--hud-soft);
-  font-size: 9px;
-  font-weight: 650;
-  letter-spacing: 0;
-}
-.hud-surface .learning-run-stage__header h2 {
-  max-width: 38ch;
-  margin: 12px 0 0;
-  font: 680 clamp(20px, 2.05vw, 28px)/1.45 "Noto Serif SC", "Songti SC", serif;
-  overflow-wrap: anywhere;
-}
-.hud-surface .learning-run-stage__header p {
-  max-width: 72ch;
-  margin: 7px 0 0;
-  color: var(--hud-soft);
-  font-size: 10px;
-  line-height: 1.6;
-}
 .hud-surface .learning-run-response {
   min-width: 0;
   min-height: 0;
@@ -5215,7 +5086,7 @@
   border: 0;
   outline: 0;
   background: repeating-linear-gradient(transparent 0 31px, rgba(76, 100, 86, 0.13) 31px 32px);
-  font: 500 14px/32px "Noto Serif SC", "Songti SC", serif;
+  font: 500 14px/32px "Noto Serif SC Variable", "Songti SC", serif;
   resize: none;
 }
 .hud-surface .learning-run-response .run-text-editor textarea::placeholder { color: rgba(89, 72, 57, 0.52); }
@@ -5301,7 +5172,7 @@
 .hud-surface .run-bundle-part h4 {
   margin: 0 0 12px;
   color: #5a735c;
-  font: 800 10px "Noto Sans SC Variable", "Noto Sans SC", sans-serif;
+  font: 800 10px "Noto Sans SC Variable", sans-serif;
   letter-spacing: 0.05em;
 }
 .hud-surface .run-blocker {
@@ -5313,7 +5184,7 @@
   color: var(--hud-soft);
   text-align: center;
 }
-.hud-surface .run-blocker strong { color: var(--hud-ink); font: 680 18px "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .run-blocker strong { color: var(--hud-ink); font: 680 18px "Noto Serif SC Variable", "Songti SC", serif; }
 .hud-surface .run-inline-error { color: #8a4936; }
 
 .hud-surface .learning-run-dock {
@@ -5384,51 +5255,6 @@
 .hud-surface .learning-run-more__menu button:hover:not(:disabled) { background: rgba(185, 211, 173, 0.42); }
 .hud-surface .learning-run-more__menu button:disabled { cursor: not-allowed; opacity: 0.45; }
 
-/* The result keeps the same physical object as the run: green orientation rail
-   plus a cream report. Evidence is a ruled list, not three more status cards. */
-.hud-surface .learning-run-result-board {
-  display: grid;
-  grid-template-columns: minmax(260px, 0.31fr) minmax(0, 1fr);
-}
-.hud-surface .learning-run-result-summary {
-  display: flex;
-  min-width: 0;
-  min-height: 0;
-  flex-direction: column;
-  padding: 31px 28px 27px;
-  color: #fff8e8;
-  background: var(--hud-green);
-}
-.hud-surface .learning-run-result-summary__kicker {
-  color: rgba(255, 248, 232, 0.68);
-  font-size: 9px;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-}
-.hud-surface .learning-run-result-summary__seal {
-  margin-top: 22px;
-  font: 680 clamp(27px, 3vw, 42px)/1.15 "Noto Serif SC", "Songti SC", serif;
-}
-.hud-surface .learning-run-result-summary > p {
-  display: -webkit-box;
-  margin: 16px 0 0;
-  overflow: hidden;
-  color: rgba(255, 248, 232, 0.76);
-  font-size: 10px;
-  line-height: 1.65;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 5;
-}
-.hud-surface .learning-run-result-summary dl { margin: auto 0 0; }
-.hud-surface .learning-run-result-summary dl > div {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 11px 0;
-  border-top: 1px solid rgba(255, 248, 232, 0.2);
-}
-.hud-surface .learning-run-result-summary dt { color: rgba(255, 248, 232, 0.62); font-size: 9px; }
-.hud-surface .learning-run-result-summary dd { margin: 0; font-size: 11px; font-weight: 800; }
 .hud-surface .learning-run-result-report {
   display: flex;
   min-width: 0;
@@ -5446,7 +5272,7 @@
 .hud-surface .learning-run-result-report h2 {
   max-width: 34ch;
   margin: 10px 0 0;
-  font: 680 clamp(22px, 2.4vw, 32px)/1.42 "Noto Serif SC", "Songti SC", serif;
+  font: 680 clamp(22px, 2.4vw, 32px)/1.42 "Noto Serif SC Variable", "Songti SC", serif;
 }
 .hud-surface .learning-run-result-evidence { margin-top: 24px; border-top: 1px solid var(--hud-line); }
 .hud-surface .learning-run-result-evidence > div,
@@ -5493,7 +5319,7 @@
   transform: rotate(-0.18deg);
 }
 .hud-surface .learning-run-next-step span { font-size: 9px; font-weight: 800; }
-.hud-surface .learning-run-next-step strong { font: 680 13px/1.45 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .learning-run-next-step strong { font: 680 13px/1.45 "Noto Serif SC Variable", "Songti SC", serif; }
 .hud-surface .learning-run-next-step p { margin: 0; color: #6b523b; font-size: 9px; line-height: 1.55; }
 .hud-surface .learning-run-result-actions { margin-top: auto; padding-top: 20px; flex-wrap: wrap; }
 
@@ -5515,7 +5341,7 @@
   background: var(--hud-cream);
   box-shadow: var(--hud-shadow);
 }
-.hud-surface .run-confirmation h2 { font: 680 19px/1.4 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .run-confirmation h2 { font: 680 19px/1.4 "Noto Serif SC Variable", "Songti SC", serif; }
 .hud-surface .run-confirmation p { color: var(--hud-soft); font-size: 10px; line-height: 1.6; }
 .hud-surface .run-confirmation .actions { flex-wrap: wrap; }
 
@@ -5541,37 +5367,15 @@
   .hud-surface .candidate-review-slip h3 { margin: 6px 0 5px; }
   .hud-surface .candidate-review-slip dl > div { gap: 5px; padding: 4px 0; }
   .hud-surface .candidate-review-slip__actions { gap: 4px; padding-top: 7px; }
-  /* Compact LearningRun: compress whitespace and layout, not legibility.
-     Body text keeps a 9px floor and interactive controls keep >=24px hit
-     targets instead of scaling the whole type ramp down. */
   .hud-surface .learning-run-result-board { border-width: 2px; border-radius: 19px 16px 21px 17px / 17px 22px 16px 20px; }
-  .hud-surface .learning-run-journey { padding: 14px 13px 12px; }
-  .hud-surface .learning-run-journey::after { right: -36px; bottom: -52px; width: 110px; height: 110px; border-width: 11px; }
-  .hud-surface .learning-run-journey__state { gap: 4px; font-size: 9px; }
-  .hud-surface .learning-run-journey__state i { width: 5px; height: 5px; box-shadow: 0 0 0 2px rgba(243, 214, 120, 0.13); }
-  .hud-surface .learning-run-journey__kicker { margin-top: 15px; font-size: 9px; }
-  .hud-surface .learning-run-journey h2 { margin-top: 3px; font-size: 14px; }
-  .hud-surface .learning-run-journey dl { margin-top: 14px; }
-  .hud-surface .learning-run-journey dl > div { grid-template-columns: 32px minmax(0, 1fr); gap: 6px; padding: 5px 0; }
-  .hud-surface .learning-run-journey dt { font-size: 9px; }
-  .hud-surface .learning-run-journey dd { font-size: 9px; }
   .hud-surface .learning-run-clock > div:first-child { gap: 5px; font-size: 9px; }
   .hud-surface .learning-run-clock b { font-size: 10px; }
   .hud-surface .learning-run-hint { gap: 4px; margin-top: 9px; padding-top: 7px; font-size: 9px; }
   .hud-surface .learning-run-hint svg { width: 12px; height: 12px; }
   .hud-surface .learning-run-hint--shown { margin-right: -2px; margin-left: -2px; padding: 6px; border-radius: 8px 10px 7px 9px; }
-  .hud-surface .learning-run-stage { padding: 13px 15px 10px; }
-  .hud-surface .learning-run-stage__header { padding-bottom: 9px; }
-  .hud-surface .learning-run-stage__header > div,
-  .hud-surface .learning-run-stage__header small { font-size: 9px; }
-  .hud-surface .learning-run-stage__header h2 { margin-top: 6px; font-size: 15px; }
-  .hud-surface .learning-run-stage__header p { margin-top: 3px; font-size: 9px; }
   .hud-surface .learning-run-response { padding: 10px 2px 8px; }
   .hud-surface .learning-run-response .run-text-editor { grid-template-rows: minmax(95px, 1fr) auto; }
   .hud-surface .learning-run-response .run-text-editor textarea { padding: 0 3px 6px; background-size: auto 16px; font-size: 9px; line-height: 16px; }
-  .hud-surface .learning-run-response .run-text-editor--compact { min-height: 59px; margin-top: 9px; padding-top: 8px; }
-  .hud-surface .learning-run-response .run-text-editor--compact > span { margin-bottom: 4px; font-size: 9px; }
-  .hud-surface .learning-run-response .run-text-editor--compact textarea { min-height: 39px; }
   .hud-surface .run-order-list li { gap: 6px; padding: 6px 3px; font-size: 9px; }
   .hud-surface .run-order-list li > svg { width: 12px; height: 12px; }
   .hud-surface .run-order-controls { gap: 3px; }
@@ -5585,22 +5389,11 @@
   .hud-surface .run-bundle-editor { gap: 11px; }
   .hud-surface .run-bundle-part + .run-bundle-part { padding-top: 11px; }
   .hud-surface .run-bundle-part h4 { margin-bottom: 6px; font-size: 9px; }
-  .hud-surface .run-blocker { gap: 3px; }
-  .hud-surface .run-blocker strong { font-size: 10px; }
-  .hud-surface .run-blocker span { font-size: 9px; }
   .hud-surface .learning-run-dock { gap: 9px; padding-top: 8px; }
   .hud-surface .learning-run-dock__status { max-width: 160px; font-size: 9px; }
   .hud-surface .learning-run-more > summary { min-height: 24px; padding: 0 9px; border-width: 1px; border-radius: 8px 10px 8px 9px; font-size: 9px; }
   .hud-surface .learning-run-more__menu { bottom: calc(100% + 4px); width: 150px; padding: 4px; border-width: 2px; border-radius: 10px 12px 9px 11px; }
   .hud-surface .learning-run-more__menu button { gap: 4px; min-height: 24px; padding: 3px 6px; border-radius: 6px 7px 5px 6px; font-size: 9px; }
-  .hud-surface .learning-run-result-board { grid-template-columns: minmax(130px, 0.31fr) minmax(0, 1fr); }
-  .hud-surface .learning-run-result-summary { padding: 15px 14px 13px; }
-  .hud-surface .learning-run-result-summary__kicker { font-size: 9px; }
-  .hud-surface .learning-run-result-summary__seal { margin-top: 11px; font-size: 19px; }
-  .hud-surface .learning-run-result-summary > p { margin-top: 8px; font-size: 9px; }
-  .hud-surface .learning-run-result-summary dl > div { gap: 6px; padding: 5px 0; }
-  .hud-surface .learning-run-result-summary dt { font-size: 9px; }
-  .hud-surface .learning-run-result-summary dd { font-size: 9px; }
   .hud-surface .learning-run-result-report { padding: 15px 17px 12px; }
   .hud-surface .learning-run-result-report header > span { font-size: 9px; }
   .hud-surface .learning-run-result-report h2 { margin-top: 5px; font-size: 16px; }
@@ -5618,36 +5411,6 @@
   .hud-surface .run-confirmation { width: min(300px, 100%); padding: 11px; border-width: 2px; }
   .hud-surface .run-confirmation h2 { font-size: 10px; }
   .hud-surface .run-confirmation p { font-size: 5px; }
-}
-
-@media (max-width: 760px) {
-  .hud-surface .learning-run-journey__state,
-  .hud-surface .learning-run-journey__kicker,
-  .hud-surface .learning-run-journey dt,
-  .hud-surface .learning-run-journey dd,
-  .hud-surface .learning-run-clock > div:first-child,
-  .hud-surface .learning-run-hint,
-  .hud-surface .learning-run-stage__header > div,
-  .hud-surface .learning-run-stage__header small,
-  .hud-surface .learning-run-stage__header p,
-  .hud-surface .learning-run-dock__status,
-  .hud-surface .learning-run-result-summary__kicker,
-  .hud-surface .learning-run-result-summary > p,
-  .hud-surface .learning-run-result-summary dt,
-  .hud-surface .learning-run-result-report header > span,
-  .hud-surface .learning-run-result-evidence b,
-  .hud-surface .learning-run-result-evidence p,
-  .hud-surface .learning-run-next-step span,
-  .hud-surface .learning-run-next-step p,
-  .hud-surface .run-confirmation p { font-size: 9px; }
-  .hud-surface .learning-run-response .run-text-editor textarea { font-size: 10px; }
-  .hud-surface .run-icon-button { width: 24px; height: 24px; }
-  .hud-surface :is(.run-relation-controls, .run-repair-row) select { min-height: 24px; font-size: 9px; }
-  .hud-surface .learning-run-more > summary { min-height: 26px; font-size: 9px; }
-  .hud-surface .learning-run-more__menu button { min-height: 26px; font-size: 9px; }
-  .hud-surface .learning-run-result-summary dd { font-size: 9px; }
-  .hud-surface .learning-run-next-step strong { font-size: 10px; }
-  .hud-surface .run-confirmation h2 { font-size: 12px; }
 }
 
 /* ---------------------------------------------------------------------------
@@ -5735,7 +5498,7 @@
 
 .hud-surface .version-history h3 {
   margin: 0 0 6px;
-  font: 650 15px/1.4 "Noto Serif SC", "Songti SC", serif;
+  font: 650 15px/1.4 "Noto Serif SC Variable", "Songti SC", serif;
 }
 
 .hud-surface .version-history .small { margin: 0 0 10px; color: var(--hud-soft); }
@@ -5761,7 +5524,7 @@
 
 .hud-surface .version-list .version-no {
   min-width: 46px;
-  font: 700 11px "Noto Serif SC", "Songti SC", serif;
+  font: 700 11px "Noto Serif SC Variable", "Songti SC", serif;
 }
 
 .hud-surface .version-list .version-time { flex: 1 1 auto; color: var(--hud-soft); }
@@ -5837,7 +5600,7 @@
 
 .hud-surface .reveal-slip h3 {
   margin: 0 0 8px;
-  font: 650 15px/1.4 "Noto Serif SC", "Songti SC", serif;
+  font: 650 15px/1.4 "Noto Serif SC Variable", "Songti SC", serif;
 }
 
 .hud-surface .reveal-slip h3 + .small { margin-top: 0; }
@@ -5845,7 +5608,7 @@
 
 .hud-surface .reveal-answer__text {
   margin: 0 0 8px;
-  font: 620 13px/1.7 "Noto Serif SC", "Songti SC", serif;
+  font: 620 13px/1.7 "Noto Serif SC Variable", "Songti SC", serif;
 }
 
 .hud-surface .reveal-answer__list {
@@ -5970,7 +5733,7 @@
   border: 1px solid var(--hud-line-strong);
   border-radius: 12px 15px 11px 14px;
   background: transparent;
-  font: 700 10px "Noto Sans SC Variable", "Noto Sans SC", sans-serif;
+  font: 700 10px "Noto Sans SC Variable", sans-serif;
   cursor: pointer;
   transition: background-color 140ms var(--hud-ease-out), color 140ms var(--hud-ease-out);
 }
@@ -5978,7 +5741,7 @@
 .hud-surface .chip:hover { color: var(--hud-ink); background: rgba(230, 214, 184, 0.5); }
 .hud-surface .chip.on { color: #3e2d22; background: var(--hud-mint); border-color: rgba(91, 115, 93, 0.5); }
 .hud-surface .chip:disabled { cursor: not-allowed; opacity: 0.6; }
-.hud-surface .chip:focus-visible { outline: 2px solid rgba(57, 103, 132, 0.5); outline-offset: 2px; }
+.hud-surface .chip:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
 
 .hud-surface .generation-options > .small { margin: 0; color: var(--hud-soft); }
 
@@ -5999,7 +5762,7 @@
   border: 1px solid var(--hud-line-strong);
   border-radius: 10px 13px 10px 12px;
   background: rgba(255, 255, 255, 0.6);
-  font: 11px "Noto Sans SC Variable", "Noto Sans SC", sans-serif;
+  font: 11px "Noto Sans SC Variable", sans-serif;
   outline: none;
 }
 
@@ -6059,7 +5822,7 @@
   border: 1px solid rgba(73, 47, 29, 0.28);
   background: #d7e1d2;
   color: #3f5a40;
-  font: 750 10px/1 "Noto Serif SC", "Songti SC", serif;
+  font: 750 10px/1 "Noto Serif SC Variable", "Songti SC", serif;
 }
 
 /* 正文缩进对齐页边红线（`:before` 落在 left:32px），与标题同一条左边缘。 */
@@ -6221,7 +5984,7 @@
     transparent 8px 16px
   );
   color: var(--hud-soft);
-  font: 11px "Noto Sans SC Variable", "Noto Sans SC", sans-serif;
+  font: 11px "Noto Sans SC Variable", sans-serif;
   text-align: center;
 }
 
@@ -6458,7 +6221,7 @@
   place-content: center;
   transition:
     opacity 110ms ease-out,
-    transform 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 160ms var(--hud-island-ease),
     width var(--island-motion) var(--island-travel-ease) 80ms,
     margin-inline-start var(--island-motion) var(--island-travel-ease) 80ms,
     background-color 140ms var(--hud-ease-out), color 140ms ease;
@@ -6471,7 +6234,7 @@
   margin-inline-start: var(--island-slot-gap);
   transition:
     opacity 150ms ease-out 65ms,
-    transform 240ms cubic-bezier(0.22, 1, 0.36, 1) 65ms,
+    transform 240ms var(--hud-island-ease) 65ms,
     width var(--island-motion) var(--island-travel-ease),
     margin-inline-start var(--island-motion) var(--island-travel-ease),
     background-color 140ms var(--hud-ease-out), color 140ms ease;
@@ -6559,7 +6322,7 @@
   border-radius: 50%;
   background: #52644f;
   color: #fff8e8;
-  font: 700 13px/1 "Noto Serif SC", "Songti SC", serif;
+  font: 700 13px/1 "Noto Serif SC Variable", "Songti SC", serif;
 }
 
 .hud-surface .room-control .room-control-account__photo {
@@ -6592,7 +6355,7 @@
    新槽位挤进去只会让两边互相打挂。 */
 .hud-surface .room-control[data-expanded="true"] > .room-control-account > .room-control-account__seal,
 .hud-surface .room-control[data-expanded="true"] > .room-control-account > .room-control-account__photo {
-  animation: hud-slot-icon-in 240ms cubic-bezier(0.23, 1, 0.32, 1) backwards;
+  animation: hud-slot-icon-in 240ms var(--hud-ease-out) backwards;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -6648,7 +6411,7 @@
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 252, 235, 0.28) transparent;
 }
-.hud-surface .companion-glance-head h3 { margin: 0; color: var(--companion-glass-ink); font: 750 var(--companion-font-panel)/1.3 "Noto Serif SC", "Songti SC", serif; }
+.hud-surface .companion-glance-head h3 { margin: 0; color: var(--companion-glass-ink); font: 750 var(--companion-font-panel)/1.3 "Noto Serif SC Variable", "Songti SC", serif; }
 .hud-surface .companion-glance-head p { margin: 4px 0 0; color: var(--companion-glass-soft); font-size: var(--companion-font-micro); line-height: 1.5; }
 .hud-surface .companion-glance-list { display: grid; gap: var(--companion-gap-row); }
 .hud-surface .companion-glance-list > button {
@@ -6729,12 +6492,11 @@
    全局 --focus）、`.return-home` 的 `rgb(154,53,29)`。收成一个 token。
    `.return-home` 渲染在 task surface 之外，所以用 :has 认「伴星中心开着」这个条件。 */
 .hud-surface .companion-center {
-  --companion-focus-ring: 3px solid rgba(131, 216, 231, 0.5);
 }
 .hud-surface .companion-center :is(button, input, textarea, [tabindex]):focus-visible,
 .hud-surface:has(.companion-center) .return-home:focus-visible {
-  outline: var(--companion-focus-ring);
-  outline-offset: 2px;
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
 }
 
 /* P16 透明却占布局的边框：实测 43 个，全部来自 `.companion-map-index button` 的
@@ -6807,7 +6569,7 @@
 .hud-surface .companion-date-pick__trigger > span {
   min-width: 84px;
   text-align: center;
-  font: 650 var(--companion-font-title)/1.3 "Noto Serif SC", "Songti SC", serif;
+  font: 650 var(--companion-font-title)/1.3 "Noto Serif SC Variable", "Songti SC", serif;
 }
 
 /* 那张面板原本是为浅色抽屉画的（`--companion-ivory` 底 + 暖墨字）。伴星中心整页是
@@ -6839,7 +6601,7 @@
 }
 
 .hud-surface .companion-center .companion-record__calendar-head strong {
-  font: 650 var(--companion-font-body)/1.3 "Noto Serif SC", "Songti SC", serif;
+  font: 650 var(--companion-font-body)/1.3 "Noto Serif SC Variable", "Songti SC", serif;
   color: var(--companion-glass-ink);
 }
 .hud-surface .companion-center .companion-record__calendar-head button {
@@ -7049,4 +6811,24 @@
   .hud-surface .companion-center[data-active-tab="memory"] .companion-search { grid-column: 1; grid-row: 2; }
   .hud-surface .companion-center[data-active-tab="memory"] .companion-filter-group { grid-column: 2; grid-row: 2; }
   .hud-surface .companion-center[data-active-tab="memory"] .companion-record-list { grid-row: 3; }
+}
+
+/* ── 补全 hover↔按压这一对（本文件末尾追加，照 §第六波补控件按压的同一形状）
+   `scripts/tmp-hud-press-pair.mjs` 实测这 9 个基只有 hover 抬升、按下去 transform 不动。
+   数值照母本 `.button`：`scale(.96)` 与 `transition-duration:110ms` 成对（DESIGN.md
+   「抬手与按压是一对」）。过渡本身不用另补——computed `transitionProperty` 逐个量过，
+   能渲染到的三个都已经带 transform。 */
+.hud-surface :is(
+    .search-command button.tag,
+    .settings-ledger__row,
+    .note-links button,
+    .companion-workbench button,
+    .companion-workbench button.primary,
+    .companion-stage button,
+    .companion-stage button.primary,
+    .companion-map-veil button,
+    .companion-map-selection button
+  ):active:not(:disabled) {
+  transform: scale(0.96);
+  transition-duration: 110ms;
 }

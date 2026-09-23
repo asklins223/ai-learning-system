@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   learningRunPublicSnapshotV2Schema,
@@ -62,6 +62,11 @@ const completedSnapshot = () => learningRunPublicSnapshotV2Schema.parse({
   publishedTargetEligibility: "eligible",
 });
 
+const assessingSnapshot = () => learningRunPublicSnapshotV2Schema.parse({
+  ...completedSnapshot(),
+  phase: "assessing",
+});
+
 const resultWithRubric = (
   rubricLength: number,
   overrides: Record<string, unknown> = {},
@@ -108,7 +113,7 @@ const allCoveredPractice = () => resultWithRubric(4, {
   },
 });
 
-function stubGateway(resultPayload: unknown, rubricLength = 12) {
+function stubGateway(resultPayload: unknown, rubricLength = 12, snapshotPayload = completedSnapshot()) {
   const ok = <T,>(data: T) => ({ ok: true as const, workspaceEpoch: 1, data });
   const result = resultPayload === undefined ? resultWithRubric(rubricLength) : resultPayload;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -120,7 +125,7 @@ function stubGateway(resultPayload: unknown, rubricLength = 12) {
       })),
     },
     learningRun: {
-      get: vi.fn(async () => ok(completedSnapshot())),
+      get: vi.fn(async () => ok(snapshotPayload)),
       getDraft: vi.fn(async () => ok(null)),
       getResult: vi.fn(async () => ok(getLearningRunResultResponseV2Schema.parse({
         version: 2,
@@ -151,17 +156,52 @@ function stubGateway(resultPayload: unknown, rubricLength = 12) {
   };
 }
 
-function renderResult(rubricLength = 12, resultPayload?: unknown) {
+function renderResult(rubricLength = 12, resultPayload?: unknown, onExit = vi.fn(), snapshotPayload = completedSnapshot()) {
   vi.spyOn(document, "hasFocus").mockReturnValue(true);
-  stubGateway(resultPayload, rubricLength);
+  stubGateway(resultPayload, rubricLength, snapshotPayload);
   useRoomStore.setState({ activeRunId: RUN_ID, activeObjectiveId: OBJECTIVE_ID });
-  render(<LearningRunSurface onExit={() => undefined} />);
+  render(<LearningRunSurface onExit={onExit} />);
+  return onExit;
 }
 
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
-  useRoomStore.setState({ activeRunId: null, activeObjectiveId: null, surface: null, returnTarget: null });
+  useRoomStore.setState({ activeRunId: null, activeObjectiveId: null, surface: null, returnTarget: null, masterMuted: false, motionMode: "full", reducedMotion: false });
+});
+
+describe("LearningRunSurface · 新结果过关演出", () => {
+  it("新完成的正式 demonstrated 播放一次，可按 Esc 立即跳过", async () => {
+    renderResult(2, resultWithRubric(2), vi.fn(), assessingSnapshot());
+    await waitFor(() => expect(document.querySelector(".learning-run-ceremony")).not.toBeNull());
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(document.querySelector(".learning-run-ceremony")).toBeNull());
+    expect(document.querySelector(".learning-run-result-board")).not.toBeNull();
+  });
+
+  it("历史 demonstrated 与新完成的 practice_completed 都不播放正式过关", async () => {
+    renderResult(2, resultWithRubric(2));
+    await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
+    expect(document.querySelector(".learning-run-ceremony")).toBeNull();
+    cleanup();
+
+    renderResult(2, allCoveredPractice(), vi.fn(), assessingSnapshot());
+    await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
+    expect(document.querySelector(".learning-run-ceremony")).toBeNull();
+  });
+
+  it("关闭动效或偏好减少动效时直接显示结果，不等待演出", async () => {
+    useRoomStore.setState({ motionMode: "off" });
+    renderResult(2, resultWithRubric(2), vi.fn(), assessingSnapshot());
+    await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
+    expect(document.querySelector(".learning-run-ceremony")).toBeNull();
+    cleanup();
+
+    useRoomStore.setState({ motionMode: "full", reducedMotion: true });
+    renderResult(2, resultWithRubric(2), vi.fn(), assessingSnapshot());
+    await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
+    expect(document.querySelector(".learning-run-ceremony")).toBeNull();
+  });
 });
 
 describe("LearningRunSurface · 结算页结构", () => {
@@ -186,7 +226,8 @@ describe("LearningRunSurface · 结算页结构", () => {
     const board = document.querySelector(".learning-run-result-board");
     const children = [...(board?.children ?? [])].map((el) => el.className.split(" ").at(-1));
     expect(children).toEqual([
-      "learning-run-result-summary",
+      "learning-run-arrival",
+      "learning-run-arrival-evidence",
       "learning-run-result-report",
       "learning-run-result-actions",
     ]);
@@ -201,21 +242,30 @@ describe("LearningRunSurface · 结算页结构", () => {
     expect(buttons[0]?.className).toContain("primary");
   });
 
+  it("结果到达后会留在报告页，只有用户点击出口才离开", async () => {
+    const onExit = renderResult();
+    await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
+
+    expect(onExit).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "返回学习空间" }));
+    expect(onExit).toHaveBeenCalledTimes(1);
+  });
+
   // ---- B1：结算页的反馈必须兑现（31 号文档 P1 / P3 / P6）----
 
-  it("四条判定全说清时，「这次说清了」列出回忆，且不再报任何缺口", async () => {
+  it("四条判定全说清时，直接列出真实评分理由，且不再报任何缺口", async () => {
     renderResult(12, allCoveredPractice());
     await waitFor(() => expect(document.querySelector("[data-role='proved-this-time']")).not.toBeNull());
 
-    expect(document.querySelector("[data-role='proved-this-time']")?.textContent).toContain("回忆");
+    expect(document.querySelector("[data-role='proved-this-time']")?.textContent).toContain("提 那一步说清了。");
     const rows = [...document.querySelectorAll(".learning-run-result-evidence > div")]
       .map((d) => d.textContent ?? "");
     // 「还需补上」里不许出现这次已经说清的 facet——旧行为是同屏四行「说清了」
     // 加一句「还需补上：回忆」。
-    const gapRow = rows.find((text) => text.startsWith("还需补上"));
-    expect(gapRow).toBe("还需补上这次没有留下待补的理解缺口。");
-    expect(document.querySelector(".learning-run-result-summary dl")?.textContent)
-      .toContain("这次说清4 条");
+    const gapRow = rows.find((text) => text.startsWith("还差什么"));
+    expect(gapRow).toBe("还差什么可以按原路线继续正式挑战。");
+    expect(document.querySelector(".learning-run-arrival-evidence")?.textContent)
+      .toContain("提 那一步说清了。");
   });
 
   it("练习结算的解释说清「为什么不写进理解账本」，不再用一句自我否定占位", async () => {
@@ -223,9 +273,62 @@ describe("LearningRunSurface · 结算页结构", () => {
     await waitFor(() => expect(document.querySelector("[data-role='proved-this-time']")).not.toBeNull());
 
     const ledger = [...document.querySelectorAll(".learning-run-result-evidence > div")]
-      .find((d) => d.textContent?.startsWith("算进理解"));
+      .find((d) => d.textContent?.startsWith("本次掌握"));
     expect(ledger?.textContent).toContain("这次是练习，所以不写进理解账本。");
     expect(ledger?.textContent).not.toContain("还没有形成");
+  });
+
+  it("练习结果首屏不再只剩「练习完成」，会直接给出收获、缺口与下一步", async () => {
+    renderResult(12, allCoveredPractice());
+    await waitFor(() => expect(document.querySelector(".learning-run-arrival-evidence")).not.toBeNull());
+
+    expect(document.querySelector(".learning-run-arrival__seal")?.textContent).toBe("练习有收获");
+    expect(screen.getByRole("heading", { name: "这次练习，已经看见你会了什么" })).toBeTruthy();
+    const compact = document.querySelector(".learning-run-arrival-evidence")?.textContent ?? "";
+    expect(compact).toContain("做对了什么提 那一步说清了。");
+    expect(compact).toContain("还差什么可以按原路线继续正式挑战。");
+    expect(compact).toContain("下一步");
+  });
+
+  it("静音时只收起伴星动作口吻，不会把核心学习反馈一起藏掉", async () => {
+    useRoomStore.setState({ masterMuted: true });
+    renderResult(12, allCoveredPractice());
+    await waitFor(() => expect(document.querySelector(".learning-run-arrival-evidence")).not.toBeNull());
+
+    expect(document.querySelector(".learning-run-result-companion")).toBeNull();
+    expect(document.querySelector(".learning-run-arrival-evidence")?.textContent).toContain("提 那一步说清了。");
+
+    fireEvent.click(screen.getByRole("button", { name: /翻开本次发现/ }));
+    expect(document.querySelector(".learning-run-discovery__front")?.textContent).not.toContain("伴星发现");
+    expect(document.querySelector(".learning-run-discovery__front")?.textContent).toContain("来自本次真实评分证据");
+  });
+
+  it("rubric 判定有缺口但 gapFacets 为空时，摘要与明细使用同一结论", async () => {
+    const practiceWithRubricGap = resultWithRubric(1, {
+      outcome: "practice_completed",
+      demonstratedFacets: [],
+      gapFacets: [],
+      scheduleImpact: { kind: "none", reasonCode: "practice_only" },
+      assessment: {
+        source: "assessment_critic",
+        status: "completed",
+        trustClass: "practice_only",
+        rubricResults: [{
+          rubricItemId: "rubric-gap",
+          facet: "boundary",
+          verdict: "missing",
+          userFacingReason: "还没有说明成立边界。",
+        }],
+      },
+    });
+    renderResult(1, practiceWithRubricGap);
+    await waitFor(() => expect(document.querySelector(".learning-run-arrival-evidence")).not.toBeNull());
+
+    expect(document.querySelector(".learning-run-arrival-evidence")?.textContent).toContain("边界");
+    const detail = [...document.querySelectorAll(".learning-run-result-evidence > div")]
+      .find((row) => row.textContent?.startsWith("还差什么"));
+    expect(detail?.textContent).toContain("边界");
+    expect(detail?.textContent).not.toContain("没有留下待补");
   });
 
   it.each([
@@ -241,16 +344,16 @@ describe("LearningRunSurface · 结算页结构", () => {
     }));
     await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
 
-    expect(document.querySelector(".learning-run-result-summary__seal")).toBeNull();
-    expect(document.querySelector(".learning-run-result-summary__quiet")?.textContent).toBe(quietCopy);
+    expect(document.querySelector(".learning-run-arrival__seal")).toBeNull();
+    expect(document.querySelector(".learning-run-arrival__quiet")?.textContent).toBe(quietCopy);
   });
 
   it("真正成立的结果仍然有印章——上面那条不是把印章整个删掉", async () => {
     renderResult();
     await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
 
-    expect(document.querySelector(".learning-run-result-summary__seal")?.textContent).toBe("已理解");
-    expect(document.querySelector(".learning-run-result-summary__quiet")).toBeNull();
+    expect(document.querySelector(".learning-run-arrival__seal")?.textContent).toBe("掌握完成");
+    expect(document.querySelector(".learning-run-arrival__quiet")).toBeNull();
   });
 
   // ---- B3：下次到期不能再读成「刚刚」（31 号文档 P4）----
@@ -259,7 +362,7 @@ describe("LearningRunSurface · 结算页结构", () => {
     renderResult();
     await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
 
-    const band = document.querySelector(".learning-run-result-summary .objective-progress");
+    const band = document.querySelector(".learning-run-arrival .objective-progress");
     expect(band, "结算页没有那条进度带").not.toBeNull();
     expect(band?.getAttribute("data-segment")).toBe("2");
     expect([...band!.querySelectorAll(".objective-progress__seg")].map((s) => s.getAttribute("data-lit")))
@@ -272,7 +375,7 @@ describe("LearningRunSurface · 结算页结构", () => {
     renderResult(12, allCoveredPractice());
     await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
 
-    const band = document.querySelector(".learning-run-result-summary .objective-progress");
+    const band = document.querySelector(".learning-run-arrival .objective-progress");
     expect(band?.getAttribute("data-segment")).toBe("1");
     expect(band?.getAttribute("aria-label")).toContain("练过了");
   });
@@ -282,7 +385,7 @@ describe("LearningRunSurface · 结算页结构", () => {
     await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
 
     const schedule = [...document.querySelectorAll(".learning-run-result-evidence > div")]
-      .find((d) => d.textContent?.startsWith("复习安排"));
+      .find((d) => d.textContent?.startsWith("学习状态变化"));
     expect(schedule?.textContent).toContain("下次到期 3 天后。");
     expect(schedule?.textContent).not.toContain("刚刚");
   });
@@ -294,7 +397,7 @@ describe("LearningRunSurface · 结算页结构", () => {
     await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
 
     const schedule = [...document.querySelectorAll(".learning-run-result-evidence > div")]
-      .find((d) => d.textContent?.startsWith("复习安排"));
+      .find((d) => d.textContent?.startsWith("学习状态变化"));
     expect(schedule?.textContent).toContain("下次到期 明天。");
   });
 });

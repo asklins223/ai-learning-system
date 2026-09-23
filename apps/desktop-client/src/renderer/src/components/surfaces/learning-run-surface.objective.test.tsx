@@ -176,7 +176,7 @@ describe("客观题作答控件", () => {
 
   it("题面标签说人话，不打印交互字面量", async () => {
     await renderWith(CHOICE);
-    expect(screen.getByText("选择题")).toBeTruthy();
+    expect(document.querySelector(".learning-run-paper__question span")?.textContent).toContain("选择题");
     expect(document.body.textContent).not.toContain("single_choice");
   });
 

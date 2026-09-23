@@ -1,21 +1,14 @@
 .desktop-app[data-home-scene-variant="v2"] {
-  --home-v2-paper: #f5e5bd;
   --home-v2-paper-strong: #fff3cf;
   --home-v2-ink: #3a2418;
   --home-v2-muted: #796047;
-  --home-v2-wood: #55341f;
-  --home-v2-clay: #b85b32;
-  --home-v2-magic: #82d9e5;
-  --home-v2-focus: #fff3b0;
   --home-v2-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .desktop-app[data-home-scene-variant="v2"][data-theme="night"] {
-  --home-v2-paper: #e9d7af;
   --home-v2-paper-strong: #fff0c7;
   --home-v2-ink: #302218;
   --home-v2-muted: #725b44;
-  --home-v2-focus: #8fe2e7;
 }
 
 .desktop-app[data-home-scene-variant="v2"] .scene-stage > .room-reference-frame {
@@ -114,7 +107,7 @@
   opacity: 0;
   transform: scaleX(0.438);
   transform-origin: left center;
-  transition: opacity 110ms ease-out, transform 320ms cubic-bezier(0.22, 1, 0.36, 1), border-color 180ms ease-out;
+  transition: opacity 110ms ease-out, transform 320ms var(--hud-island-ease), border-color 180ms ease-out;
 }
 
 .home-v2-hud::after {
@@ -159,29 +152,8 @@
   backdrop-filter: blur(20px) saturate(1.16);
   cursor: pointer;
   pointer-events: auto;
-  transition: color 150ms ease-out, background-color 150ms ease-out, transform 150ms ease-out, border-color 180ms ease-out, box-shadow 180ms ease-out;
+  transition: color 150ms ease-out, background-color 150ms ease-out, transform 150ms var(--hud-ease-out), border-color 180ms ease-out, box-shadow 180ms ease-out;
 }
-
-.home-v2-hud__directory {
-  position: relative;
-  display: grid;
-  width: 44px;
-  height: 44px;
-  flex: 0 0 44px;
-  place-items: center;
-  color: rgba(255, 248, 237, 0.72);
-  border: 1px solid rgba(255, 249, 237, 0.2);
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.08);
-  box-shadow: 0 10px 24px rgba(16, 13, 11, 0.2);
-  backdrop-filter: blur(18px) saturate(1.16);
-  cursor: pointer;
-  pointer-events: auto;
-  transition: color 150ms ease-out, background-color 150ms ease-out, transform 150ms ease-out, border-color 180ms ease-out;
-}
-
-.home-v2-hud__directory:hover { color: #fffaf1; border-color: rgba(255, 249, 237, 0.34); background: rgba(255, 255, 255, 0.14); }
-.home-v2-hud__directory:active { transform: scale(0.94); }
 
 .home-v2-hud--expanded .home-v2-hud__trigger {
   border-color: transparent;
@@ -237,7 +209,7 @@
 
 .home-v2-hud__trigger > svg {
   color: rgba(255, 248, 237, 0.5);
-  transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1), color 150ms ease-out;
+  transition: transform 220ms var(--hud-island-ease), color 150ms ease-out;
 }
 
 .home-v2-hud__trigger:active,
@@ -254,7 +226,7 @@
   opacity: 0;
   pointer-events: none;
   transform: translateX(10px);
-  transition: opacity 140ms ease-out, transform 250ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: opacity 140ms ease-out, transform 250ms var(--hud-island-ease);
 }
 
 .home-v2-hud--expanded .home-v2-hud__panel {
@@ -300,7 +272,7 @@
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.07);
   cursor: pointer;
-  transition: color 150ms ease-out, background-color 150ms ease-out, transform 120ms ease-out;
+  transition: color 150ms ease-out, background-color 150ms ease-out, transform 120ms var(--hud-ease-out);
 }
 
 .home-v2-hud__actions .home-v2-hud__primary {
@@ -317,7 +289,7 @@
 }
 
 .home-v2-hud__actions button:disabled { cursor: wait; opacity: 0.62; }
-.home-v2-hud :is(button):focus-visible { outline: 3px solid #fff1a8; outline-offset: 2px; }
+.home-v2-hud :is(button):focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
 
 @media (hover: hover) and (pointer: fine) {
   .home-v2-hud__trigger:hover {
@@ -428,7 +400,7 @@
 .home-v2-object:disabled { cursor: wait; }
 
 .home-v2-object:focus-visible {
-  outline: 3px solid var(--home-v2-focus);
+  outline: 3px solid var(--focus);
   outline-offset: 3px;
 }
 
@@ -573,33 +545,10 @@
   pointer-events: none;
 }
 
-.home-v2-wide-return {
-  position: absolute;
-  z-index: 5;
-  top: 7%;
-  left: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 44px;
-  min-height: 44px;
-  gap: 7px;
-  padding: 8px 14px 9px;
-  color: #fff0cf;
-  font-weight: 720;
-  border: 1px solid rgba(255, 234, 196, 0.36);
-  border-radius: 2px 10px 2px 2px;
-  background: rgba(70, 43, 27, 0.9);
-  box-shadow: 0 12px 24px rgba(37, 21, 12, 0.23), 0 3px 7px rgba(37, 21, 12, 0.18);
-  cursor: pointer;
-  pointer-events: auto;
-  transform: translateX(-50%) rotate(-1deg);
-}
-
 .home-v2-wide-return:focus-visible,
 .home-v2-compact-nav button:focus-visible,
 .home-v2-catalog :is(button, summary):focus-visible {
-  outline: 3px solid #a95836;
+  outline: 3px solid var(--focus);
   outline-offset: 3px;
 }
 
@@ -685,7 +634,7 @@
   padding: 8px 10px;
   text-align: left;
   border-radius: 11px;
-  transition: background-color 150ms ease-out, border-color 150ms ease-out, transform 120ms ease-out;
+  transition: background-color 150ms ease-out, border-color 150ms ease-out, transform 120ms var(--hud-ease-out);
 }
 
 .home-v2-region-menu__features > button > span { display: grid; min-width: 0; gap: 2px; }
@@ -704,7 +653,7 @@
   white-space: nowrap;
 }
 .home-v2-region-menu__features > button[data-feature-state="pending"] > svg { color: #efc98a; }
-.home-v2-region-menu :is(button):focus-visible { outline: 3px solid #fff1a8; outline-offset: 2px; }
+.home-v2-region-menu :is(button):focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
 
 @media (hover: hover) and (pointer: fine) {
   .home-v2-region-menu :is(button):not(:disabled):hover {
@@ -734,12 +683,15 @@
   padding: 0;
   overflow: hidden;
   color: var(--home-v2-ink, #3a2418);
-  border: 1px solid rgba(84, 51, 30, 0.46);
-  border-radius: 3px 22px 4px 4px;
+  /* 全页最大的纸面，用的却是 1px 细线 + V2 切角 + 一套自写阴影。母本给纸板的
+     语法是 4px 奶油粗边 + 双轴抖动圆角 + `--hud-shadow`。中间那道书脊渐变是
+     这本"打开的两页书"的造型，保留。 */
+  border: 4px solid rgba(255, 252, 235, 0.78);
+  border-radius: 31px 42px 29px 38px/35px 30px 43px 31px;
   background:
     linear-gradient(90deg, rgba(96, 55, 30, 0.08), transparent 3%, transparent 48.8%, rgba(70, 42, 25, 0.12) 49.7%, rgba(255, 251, 230, 0.28) 50.2%, transparent 51.1%, transparent 97%, rgba(96, 55, 30, 0.08)),
     #f2deb6;
-  box-shadow: 0 34px 82px rgba(28, 17, 11, 0.42), 0 6px 18px rgba(28, 17, 11, 0.28);
+  box-shadow: var(--hud-shadow);
 }
 
 .home-v2-catalog::backdrop {
@@ -827,7 +779,7 @@
   padding: 11px 12px 11px 16px;
   color: #fff0d8;
   border: 1px solid rgba(255, 224, 186, 0.26);
-  border-radius: 2px 12px 2px 2px;
+  border-radius:23px 29px 20px 27px/27px 21px 29px 22px;
   background: #6f3b27;
   box-shadow: 0 11px 23px rgba(58, 31, 18, 0.2), 0 3px 7px rgba(58, 31, 18, 0.16);
 }
@@ -840,7 +792,8 @@
 .home-v2-collection {
   margin: 26px 0 0;
   border: 1px solid rgba(91, 58, 36, 0.24);
-  border-radius: 3px 12px 3px 3px;
+  border: 4px solid rgba(255, 252, 235, 0.78);
+  border-radius:31px 42px 29px 38px/35px 30px 43px 31px;
   background: rgba(255, 247, 219, 0.3);
 }
 
@@ -924,7 +877,7 @@
 }
 .home-v2-collection__effects > button[aria-pressed="true"] { color: #f9e9c7; background: #526e61; }
 .home-v2-collection :is(button:disabled) { cursor: wait; opacity: 0.58; }
-.home-v2-collection :is(summary, button):focus-visible { outline: 3px solid #a95836; outline-offset: 3px; }
+.home-v2-collection :is(summary, button):focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
 
 .home-v2-catalog__pages {
   display: grid;
@@ -1019,12 +972,14 @@
 
 .home-v2-feature-notice::backdrop { background: rgba(25, 17, 12, 0.46); }
 
+/* 首页唯一的阻断式弹窗：母本给纸面的语法是 4px 奶油粗边 + 双轴抖动圆角 +
+   `--hud-shadow`，原先是 1px 棕细线 + V2 切角 + 一套自写阴影。 */
 .home-v2-feature-notice__sheet {
   padding: 28px 28px 24px;
-  border: 1px solid rgba(84, 51, 30, 0.42);
-  border-radius: 4px 20px 5px 5px;
-  background: #f4e3ba;
-  box-shadow: 0 28px 68px rgba(28, 17, 11, 0.42), 0 5px 16px rgba(28, 17, 11, 0.24);
+  border: 4px solid rgba(255, 252, 235, 0.78);
+  border-radius: 31px 42px 29px 38px/35px 30px 43px 31px;
+  background: var(--hud-cream);
+  box-shadow: var(--hud-shadow);
 }
 
 .home-v2-feature-notice__status {
@@ -1058,25 +1013,41 @@
   margin-top: 22px;
 }
 
+/* 44px 高的按钮配 8px 均匀圆角，正是 hud-surface.css 自己写下并否掉的那一档
+   （「44px 高的东西用 8–14px 圆角读起来就是方盒」）。这里改用母本的按钮语法：
+   2px 描边 + 四角不等的抖动圆角 + 奶油底 + 抬升/按压。 */
 .home-v2-feature-notice__actions button {
   min-width: 96px;
   min-height: 44px;
   padding: 8px 14px;
   color: #503521;
   font-weight: 720;
-  border: 1px solid rgba(84, 51, 30, 0.28);
-  border-radius: 8px;
-  background: rgba(255, 249, 226, 0.58);
+  border: 2px solid var(--hud-line-strong);
+  border-radius: 17px 21px 16px 19px;
+  background: var(--hud-cream);
+  box-shadow: 0 5px 11px rgba(67, 43, 27, 0.16);
   cursor: pointer;
+  transition: transform 140ms var(--hud-ease-out), box-shadow 140ms ease, background-color 140ms ease;
 }
 
+/* 主按钮在 V3.1 里是浅蜜桃底 + 深墨字，原先是深板绿底 + 白字（极性相反）。 */
 .home-v2-feature-notice__actions .home-v2-feature-notice__primary {
-  color: #fff8e9;
-  border-color: #526e61;
-  background: #526e61;
+  color: #3e2d22;
+  text-shadow: 0 1px rgba(255, 255, 255, 0.32);
+  border-color: #af522c;
+  background: var(--hud-peach);
 }
 
-.home-v2-feature-notice :is(button):focus-visible { outline: 3px solid #a95836; outline-offset: 3px; }
+@media (hover: hover) and (pointer: fine) {
+  .home-v2-feature-notice__actions button:hover {
+    transform: translateY(-2px) scale(1.02);
+    box-shadow: 0 8px 17px rgba(67, 43, 27, 0.2);
+  }
+}
+
+.home-v2-feature-notice__actions button:active { transform: scale(0.96); transition-duration: 110ms; }
+
+.home-v2-feature-notice :is(button):focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
 
 @media (max-width: 920px), (max-height: 720px) {
   .home-v2-catalog {
@@ -1094,10 +1065,8 @@
   .home-v2-catalog__scroll { height: calc(100% - 78px); padding: 14px 16px 22px; }
 }
 
-@media (max-width: 720px), (max-height: 480px) {
-  .home-v2-object,
-  .home-v2-wide-return,
-  .home-v2-room-backdrop { display: none; }
+@media (max-width: 720px), (max-height: 480px) {.home-v2-object,
+  .home-v2-room-backdrop{ display: none; }
 
   .home-v2-compact-nav {
     position: fixed;
@@ -1152,16 +1121,11 @@
 
   .home-v2-compact-nav header strong {
     font: 760 16px/1.3 "Noto Serif SC Variable", "Songti SC", serif;
-  }
-
-  .home-v2-compact-nav__zones,
-  .home-v2-compact-nav__actions {
+  }.home-v2-compact-nav__zones{
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 7px;
   }
-
-  .home-v2-compact-nav__actions { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 
   .home-v2-compact-nav button {
     display: flex;
@@ -1236,7 +1200,6 @@
 
 @media (max-width: 390px) {
   .home-v2-compact-nav__zones { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .home-v2-compact-nav__actions { grid-template-columns: minmax(0, 1fr); }
   .home-v2-compact-nav button { justify-content: flex-start; }
   .home-v2-region-menu__features { grid-template-columns: minmax(0, 1fr); }
   .home-v2-feature-notice__actions { display: grid; grid-template-columns: minmax(0, 1fr); }

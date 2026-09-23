@@ -620,7 +620,7 @@ function drawRoundedLabel(
   alpha: number,
 ) {
   context.save();
-  context.font = '500 12px "Noto Sans SC", "PingFang SC", sans-serif';
+  context.font = '500 12px "Noto Sans SC Variable", "PingFang SC", sans-serif';
   context.textAlign = "center";
   context.textBaseline = "middle";
   // Whole pixels for the plate's straight edges: at 1x a half-pixel offset
@@ -2009,7 +2009,7 @@ export const UnderstandingUniverse = forwardRef<
       // 工作台或右栏底下（伴星中心实测压掉两条）。
       const labelBox = labelSafeBox(width, height, resolvedInsets);
       if (layerContext && labelBudget > 0) {
-        layerContext.font = '500 12px "Noto Sans SC", "PingFang SC", sans-serif';
+        layerContext.font = '500 12px "Noto Sans SC Variable", "PingFang SC", sans-serif';
         for (const screenNode of labelCandidates) {
           if (labelPlacements.length >= labelBudget) break;
           const { node, x, y, radius } = screenNode;

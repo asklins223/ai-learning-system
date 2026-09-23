@@ -77,8 +77,6 @@ export function companionWorldAnchorFromProjectedFoot(
   };
 }
 
-const HOME_ZONES = Object.freeze(Object.keys(COMPANION_HOME_ANCHORS) as CompanionHomeZone[]);
-
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
@@ -153,30 +151,6 @@ export function companionViewportCorrection(
   };
 }
 
-export function companionNormalizedFootAnchor(
-  frame: Rect,
-  companion: Rect,
-): CompanionNormalizedAnchor {
-  const width = frame.right - frame.left;
-  const height = frame.bottom - frame.top;
-  if (width <= 0 || height <= 0) return { x: 0.5, y: 0.5 };
-  return {
-    x: clamp(((companion.left + companion.right) / 2 - frame.left) / width, 0, 1),
-    y: clamp((companion.bottom - frame.top) / height, 0, 1),
-  };
-}
-
-export function companionPositionForNormalizedFootAnchor(
-  anchor: CompanionNormalizedAnchor,
-  frame: Size,
-  companion: Size,
-): CompanionPosition {
-  return {
-    x: frame.width * clamp(anchor.x, 0, 1) - companion.width / 2,
-    y: frame.height * clamp(anchor.y, 0, 1) - companion.height,
-  };
-}
-
 export function companionTranslationBounds(
   position: CompanionPosition,
   frame: Rect,
@@ -191,27 +165,6 @@ export function companionTranslationBounds(
   if (minX > maxX) minX = maxX = position.x + (frame.left + frame.right - companion.left - companion.right) / 2;
   if (minY > maxY) minY = maxY = position.y + (frame.top + frame.bottom - companion.top - companion.bottom) / 2;
   return { minX, maxX, minY, maxY };
-}
-
-export function companionPositionForHomeZone(
-  zone: CompanionHomeZone,
-  frame: Size,
-  companion: Size,
-  safe = 6,
-): CompanionPosition {
-  const anchor = COMPANION_HOME_ANCHORS[zone];
-  return {
-    x: Math.round(clamp(
-      frame.width * anchor.x - companion.width / 2,
-      safe,
-      Math.max(safe, frame.width - companion.width - safe),
-    )),
-    y: Math.round(clamp(
-      frame.height * anchor.y - companion.height,
-      safe,
-      Math.max(safe, frame.height - companion.height - safe),
-    )),
-  };
 }
 
 /**
@@ -289,31 +242,12 @@ export function companionTouchKindAt(clientY: number, top: number, height: numbe
   return (clientY - top) / height < 0.42 ? "head" : "body";
 }
 
-export function pointFallsWithinExpandedRect(point: Point, rect: Rect, margin = 0): boolean {
-  return point.x >= rect.left - margin
-    && point.x <= rect.right + margin
-    && point.y >= rect.top - margin
-    && point.y <= rect.bottom + margin;
-}
-
 export type CompanionCuePriority =
   | "ordinary"
   | "due-review"
   | "active-learning"
   | "interrupted-task"
   | "sync-error";
-
-const CUE_RANK: Readonly<Record<CompanionCuePriority, number>> = Object.freeze({
-  ordinary: 1,
-  "due-review": 2,
-  "active-learning": 3,
-  "interrupted-task": 4,
-  "sync-error": 5,
-});
-
-export function companionCueRank(priority: CompanionCuePriority): number {
-  return CUE_RANK[priority];
-}
 
 /** 主动气泡是谁：与投影合同 `proactiveCue.origin` 同一套。 */
 export type CompanionCueOrigin = "thought" | "reminder" | "system";
@@ -347,16 +281,3 @@ export function companionCueAllowed(input: {
   return input.now - last >= COMPANION_ORDINARY_CUE_DEBOUNCE_MS;
 }
 
-/**
- * A position the user chose by hand is theirs. Reminders may change expression
- * and show a bubble, but may never borrow or replace the world anchor: even a
- * temporary detour reads as a hidden magnet during direct manipulation.
- */
-export function shouldCompanionBorrowPlacement(input: {
-  readonly priority: CompanionCuePriority;
-  readonly placementOwner: "semantic" | "user";
-  readonly dragging: boolean;
-}): boolean {
-  void input;
-  return false;
-}

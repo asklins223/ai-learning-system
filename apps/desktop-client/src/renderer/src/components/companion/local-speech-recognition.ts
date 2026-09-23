@@ -28,6 +28,44 @@ let initReject: ((error: Error) => void) | null = null;
 const pending = new Map<number, DecodePending>();
 let decodeSeq = 0;
 
+/**
+ * 一句说完之后隔多久把整个识别引擎交还内存。
+ *
+ * 为什么必须交：本地 SenseVoice 一个引擎就是那份 228 MB 的 int8 模型——它经
+ * `fetch().arrayBuffer()` 进 JS 堆、再由 `FS.writeFile` 搬进 WASM 堆、最后 onnxruntime
+ * 建图还要自己占一份。而语音是**偶尔**用的功能：以前这条 worker 是模块级单例、只在
+ * 崩溃时 `terminate`，成功路径上永不下线，于是用户说过一句话之后这几百 MB 就一直
+ * 占到应用退出。90s 是"连说几句不用重载"与"说完就走别占着"之间的取值。
+ */
+const ASR_IDLE_RELEASE_MS = 90_000;
+let releaseTimer = 0;
+
+/** 收摊：断 worker、清在途解码，下一次识别从零起（会重付一次模型加载）。 */
+function releaseEngine(): void {
+  worker?.terminate();
+  worker = null;
+  initPromise = null;
+  initReject = null;
+  for (const [, entry] of pending) entry.reject(new Error("asr engine released"));
+  pending.clear();
+}
+
+/**
+ * 重新计时。触发时先看有没有东西还在跑：解码在途（`pending` 非空）或 init 还没落定
+ * （`initReject` 还挂着，`settle()` 清它）都不收，顺延一轮——收了就是把一次正在进行的
+ * 识别踢进"worker 已终止"的错误路径，用户那句话白说了。
+ */
+function armIdleRelease(): void {
+  window.clearTimeout(releaseTimer);
+  releaseTimer = window.setTimeout(() => {
+    if (pending.size > 0 || initReject !== null) {
+      armIdleRelease();
+      return;
+    }
+    releaseEngine();
+  }, ASR_IDLE_RELEASE_MS);
+}
+
 function spawnWorker(): Worker | null {
   if (worker) return worker;
   try {
@@ -109,6 +147,9 @@ async function initLocalEngine(): Promise<void> {
 }
 
 async function decodeLocally(sampleRate: number, samples: Float32Array): Promise<string> {
+  // 有人要用了，先把"空闲就收摊"的表停掉——否则上一句留下的定时器会在这句识别中途
+  // 把 worker 抽走。
+  window.clearTimeout(releaseTimer);
   await initLocalEngine();
   const w = spawnWorker();
   if (!w) throw new Error("worker unavailable");
@@ -116,15 +157,18 @@ async function decodeLocally(sampleRate: number, samples: Float32Array): Promise
   return new Promise<string>((resolve, reject) => {
     const timeout = window.setTimeout(() => {
       pending.delete(id);
+      armIdleRelease();
       reject(new Error("asr decode timeout"));
     }, 30_000);
     pending.set(id, {
       resolve: (text) => {
         window.clearTimeout(timeout);
+        armIdleRelease();
         resolve(text);
       },
       reject: (err) => {
         window.clearTimeout(timeout);
+        armIdleRelease();
         reject(err);
       },
     });
@@ -133,7 +177,7 @@ async function decodeLocally(sampleRate: number, samples: Float32Array): Promise
 }
 
 /** 本地引擎是否值得一试：探测模型清单文件是否存在（HEAD，不下载 239MB）。 */
-export async function probeLocalAsrModel(): Promise<boolean> {
+async function probeLocalAsrModel(): Promise<boolean> {
   try {
     const response = await fetch("/models/asr/tokens.txt", { method: "HEAD" });
     return response.ok;

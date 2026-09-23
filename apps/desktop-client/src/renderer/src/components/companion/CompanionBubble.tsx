@@ -1,43 +1,33 @@
-import { Sparkles } from "lucide-react";
 import "./companion-bubble.css";
 
 /**
- * 伴星内容气泡。
+ * 伴星**主动提示**的气泡。
  *
- * 只负责"长什么样"：定位交给挂载点（`.companion-visual-shell` 头顶、`.companion-page-cue`
- * 页面旁白锚点，或气泡坞），本组件不关心自己站在哪。
+ * 只负责"长什么样"：定位交给挂载点（`.companion-hud` 里那颗可点开的念头气泡，
+ * 或她头顶的通道），本组件不关心自己站在哪。
  *
- * 语气分四档：
- * - cue     主动提示（proactiveCue / 语义安排时的低频说话）；
- * - touch   触碰回应与学习完成庆祝（更暖一点纸色，无默认标签）；
- * - page    页面联动旁白（带 kicker 标签，对应旧「MAO · 页面联动」）；
- * - reply   对话回复（气泡坞，字号略大、可以更长，带朗读指示）。
+ * 语气两档：
+ * - cue    主动提示（念头 / 低频说话）；
+ * - touch  触碰回应与学习完成庆祝（更暖一点纸色）。
  *
- * 2026-09-18 重做：纸面语言换成动森式对话气球——奶油纸色、外层浅描边 + 内层
- * 暗线双描边、大圆角与指向角色头顶的尾巴；控件（麦克风/输入）另走深色玻璃岛，
- * 具体通道位置由统一 HUD 与首页场景样式共同决定。
+ * 2026-09-22 收口：这里原本写着四档（另两档是"页面旁白"与"对话回复"）还带了
+ * `label` 与 `speaking` 两个 prop。它们一个调用点都没有、`reply` 与 `speaking`
+ * 连样式都没人接手（朗读指示是三个没有任何 CSS 的 `<i>`，画不出来），
+ * 而回复气泡实际住的是 `.companion-hud__output`。整条删掉，不留在注释里当合同。
  */
-export type CompanionBubbleTone = "cue" | "touch" | "page" | "reply";
+export type CompanionBubbleTone = "cue" | "touch";
 
 export interface CompanionBubbleProps {
   readonly text: string;
   readonly tone?: CompanionBubbleTone;
-  /** 顶部小标签（页面旁白用）；不传则不渲染标签行。 */
-  readonly label?: string;
   /** 与全局 motionMode 对齐；off 时不播入场动画。 */
   readonly motionMode?: "full" | "lite" | "off";
-  /** 正在朗读这句：尾部给出一个小随声起伏的指示。 */
-  readonly speaking?: boolean;
-  readonly className?: string;
 }
 
 export function CompanionBubble({
   text,
   tone = "cue",
-  label,
   motionMode = "full",
-  speaking = false,
-  className,
 }: CompanionBubbleProps) {
   const trimmed = text.trim();
   if (!trimmed) return null;
@@ -45,8 +35,6 @@ export function CompanionBubble({
     "companion-bubble",
     `companion-bubble--${tone}`,
     motionMode === "off" ? "companion-bubble--static" : "",
-    speaking ? "companion-bubble--speaking" : "",
-    className ?? "",
   ].filter(Boolean).join(" ");
   return (
     <div
@@ -54,20 +42,8 @@ export function CompanionBubble({
       role="status"
       data-tone={tone}
       data-motion={motionMode}
-      data-speaking={speaking || undefined}
     >
-      {label ? (
-        <span className="companion-bubble__label">
-          <Sparkles size={10} aria-hidden="true" />
-          {label}
-        </span>
-      ) : null}
       <span className="companion-bubble__text">{trimmed}</span>
-      {speaking ? (
-        <span className="companion-bubble__voice" aria-hidden="true">
-          <i /><i /><i />
-        </span>
-      ) : null}
     </div>
   );
 }

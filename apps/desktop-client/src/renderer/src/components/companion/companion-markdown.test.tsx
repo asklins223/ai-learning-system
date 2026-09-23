@@ -1,13 +1,22 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { plainCompanionBubbleText, renderCompanionMarkdown } from "./companion-markdown";
+
+/** 打开通道换成记账替身：这个文件只验"点了有没有把地址交出去、交的是哪一条"。 */
+const { opened } = vi.hoisted(() => ({ opened: [] as string[] }));
+vi.mock("./companion-link", () => ({
+  openCompanionExternalLink: (url: string) => { opened.push(url); return Promise.resolve(true); },
+}));
 
 function show(text: string) {
   return render(<div data-testid="root">{renderCompanionMarkdown(text)}</div>);
 }
 
-afterEach(() => cleanup());
+afterEach(() => {
+  opened.length = 0;
+  cleanup();
+});
 
 describe("renderCompanionMarkdown（§4.8：可见正文保留结构，由渲染层排版）", () => {
   it("行内加粗 / 斜体 / 代码变成元素，标记符号不留在文字里", () => {
@@ -66,5 +75,46 @@ describe("renderCompanionMarkdown（§4.8：可见正文保留结构，由渲染
       .toBe("疏散四步\n\n先关燃气，再 带应急包。");
     // 没闭合的标记按字面留着，不吞掉半句话
     expect(plainCompanionBubbleText("这一步要**先关燃气")).toBe("这一步要**先关燃气");
+  });
+});
+
+describe("链接（方案 35 F7）", () => {
+  it("http 链接不再吐 markdown 原文：标签与去处都看得见", () => {
+    show("详见[疏散手册](https://example.com/a)：");
+    const root = screen.getByTestId("root");
+    expect(screen.getByText("疏散手册").tagName).toBe("SPAN");
+    expect(screen.getByText("https://example.com/a").tagName).toBe("SMALL");
+    expect(root.textContent).not.toContain("](");
+    expect(root.querySelector("a")).toBeNull();
+    // 不画 `<a>` 是刻意的：应用内永远不导航出去（主进程 will-navigate 拦外链），
+    // 点了要交给系统浏览器，那是一颗按钮该干的事，不是一条导航链接。
+  });
+
+  /** 画成能点的，是因为真能点开：这条用例钉的就是"点了确实把地址交出去了"。 */
+  it("点击链接：原样的地址交给打开通道，不重新拼、不截断", () => {
+    show("详见[疏散手册](https://example.com/a?x=1&y=2)");
+    const control = screen.getByText("疏散手册").closest("button");
+    expect(control?.tagName).toBe("BUTTON");
+    fireEvent.click(control as HTMLButtonElement);
+    expect(opened).toEqual(["https://example.com/a?x=1&y=2"]);
+  });
+
+  it("非 http(s) 的 scheme 不解析成结构，照字面留成文字", () => {
+    show("坏链接 [点我](javascript:alert(1))");
+    const root = screen.getByTestId("root");
+    expect(root.querySelector(".companion-md__link")).toBeNull();
+    expect(root.textContent).toContain("[点我](javascript:alert(1))");
+  });
+
+  it("链接与加粗混排时两种标记都成立（组号错位会立刻露出来）", () => {
+    show("先**关燃气**，再看[手册](https://e.com/x)");
+    const root = screen.getByTestId("root");
+    expect(screen.getByText("关燃气").tagName).toBe("STRONG");
+    expect(screen.getByText("手册").tagName).toBe("SPAN");
+    expect(root.textContent).toBe("先关燃气，再看手册https://e.com/x");
+  });
+
+  it("气泡那侧仍然只留标签：朗读不该念 URL", () => {
+    expect(plainCompanionBubbleText("详见[疏散手册](https://example.com/a)")).toBe("详见疏散手册");
   });
 });

@@ -1036,9 +1036,14 @@ export function CardGenerationSurface() {
                       {activeReveal.evidencePreviews.length ? (
                         <ul className="reveal-evidence">
                           {activeReveal.evidencePreviews.map((item) => (
-                            <li key={item.evidenceSnapshotId}>
+                            <li key={item.evidenceSnapshotId} data-source-state={item.sourceState}>
                               {item.sourceLabel ? <b>{item.sourceLabel}</b> : null}
-                              <span>{item.preview}</span>
+                              {item.sourceState === "drifted" ? <b>原文已改动</b> : null}
+                              {item.sourceState === "missing" ? <b>原文已不在笔记里</b> : null}
+                              <span>{item.preview || "这段依据现在指不到笔记里的文字了。"}</span>
+                              {item.originalPreview ? (
+                                <span className="reveal-evidence__original">当初那段：{item.originalPreview}</span>
+                              ) : null}
                             </li>
                           ))}
                         </ul>

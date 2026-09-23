@@ -1,7 +1,5 @@
 .desktop-access-gate {
-  --gate-paper: #f8efdc;
   --gate-paper-strong: #fffaf0;
-  --gate-paper-deep: #ead8b9;
   --gate-ink: #2d2119;
   --gate-ink-soft: #625044;
   --gate-ink-faint: #806d5f;
@@ -13,14 +11,10 @@
   --gate-action: #bd542c;
   --gate-action-hover: #98401f;
   --gate-action-text: #a94322;
-  --gate-action-border: #84351c;
-  --gate-action-shadow: 0 11px 24px rgba(103, 42, 20, 0.28), 0 2px 6px rgba(103, 42, 20, 0.18);
-  --gate-action-shadow-hover: 0 14px 30px rgba(103, 42, 20, 0.34), 0 3px 8px rgba(103, 42, 20, 0.2);
-  --gate-focus: #8f3518;
   --gate-success: #526a46;
   --gate-danger: #8c3d26;
   --gate-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-  --gate-ease-standard: cubic-bezier(0.23, 1, 0.32, 1);
+  --gate-ease-standard: var(--hud-ease-out);
   --gate-lamp-control-left: 69%;
   --gate-lamp-control-top: 57%;
   --gate-lamp-control-width: 104px;
@@ -148,7 +142,7 @@
   height: 31px;
   place-items: center;
   color: #fffaf0;
-  border: 1px solid rgba(255, 250, 240, 0.58);
+  border: 1px solid rgba(255, 252, 235, 0.58);
   border-radius: 50%;
   background: rgba(43, 31, 22, 0.55);
   box-shadow: 0 8px 18px rgba(35, 21, 13, 0.22), 0 0 0 7px rgba(255, 247, 230, 0.08);
@@ -242,7 +236,7 @@
   padding: 8px;
   color: var(--gate-ink);
   border: 1px solid rgba(91, 61, 40, 0.28);
-  border-radius: 3px 15px 3px 3px;
+  border-radius: 19px 24px 17px 21px;
   background: rgba(255, 249, 236, 0.8);
   box-shadow: 0 16px 32px rgba(59, 37, 21, 0.17), inset 0 1px 0 rgba(255, 255, 255, 0.75);
   backdrop-filter: blur(12px) saturate(1.08);
@@ -269,7 +263,7 @@
   font: inherit;
   text-align: left;
   border: 1px solid transparent;
-  border-radius: 2px 9px 2px 2px;
+  border-radius: 11px 14px 10px 13px;
   background: transparent;
   cursor: pointer;
   transition: color 150ms var(--gate-ease-standard), border-color 150ms var(--gate-ease-standard), background-color 150ms var(--gate-ease-standard), transform 150ms var(--gate-ease-standard);
@@ -440,9 +434,9 @@
   place-items: center;
   flex: 0 0 auto;
   border: 1px solid var(--gate-line-strong);
-  border-radius: 2px 9px 2px 2px;
+  border-radius: 11px 14px 10px 13px;
   background: rgba(255, 252, 244, 0.74);
-  font-family: "Noto Serif SC Variable", "Noto Serif SC", "Songti SC", serif;
+  font-family: "Noto Serif SC Variable", "Songti SC", serif;
   font-size: 17px;
   font-weight: 760;
   line-height: 1;
@@ -451,7 +445,7 @@
 }
 
 .desktop-access-gate__brand-name {
-  font-family: "Noto Serif SC Variable", "Noto Serif SC", "Songti SC", serif;
+  font-family: "Noto Serif SC Variable", "Songti SC", serif;
   font-size: 16px;
   font-weight: 700;
   letter-spacing: 0.05em;
@@ -480,7 +474,7 @@
   max-width: 100%;
   margin: 0;
   color: var(--gate-ink);
-  font-family: "Noto Serif SC Variable", "Noto Serif SC", "Songti SC", serif;
+  font-family: "Noto Serif SC Variable", "Songti SC", serif;
   font-size: clamp(31px, 3vw, 39px);
   font-weight: 720;
   line-height: 1.28;
@@ -569,7 +563,7 @@
   place-items: center;
   color: var(--gate-danger);
   border: 1px solid currentColor;
-  border-radius: 3px 12px 3px 3px;
+  border-radius: 13px 17px 12px 16px;
   background: rgba(255, 247, 230, 0.62);
   box-shadow: 0 8px 18px rgba(86, 48, 30, 0.11), inset 0 1px 0 rgba(255, 255, 255, 0.64);
 }
@@ -628,6 +622,9 @@
   transition: color 160ms ease-out;
 }
 
+/* 输入框对齐母本的字段语法（`hud-pages.css .write-line` 与 `hud-controls.css
+   .hud-field input` 都是 2px 边界 + 13px 圆角）；原先是 V2 的 1px + 切角
+   `13px 17px 12px 16px`，50px 高的字段配这种小切角读起来是上一代的东西。 */
 .desktop-access-gate__field-control {
   display: grid;
   min-width: 0;
@@ -637,11 +634,11 @@
   gap: 10px;
   padding: 0 14px;
   color: var(--gate-ink-faint);
-  border: 1px solid var(--gate-line);
-  border-radius: 3px 12px 3px 3px;
+  border: 2px solid var(--hud-line);
+  border-radius: 13px;
   background: var(--gate-field);
   box-shadow: inset 0 1px 0 var(--gate-field-shine);
-  transition: color 160ms var(--gate-ease-out), border-color 160ms var(--gate-ease-out), background-color 160ms var(--gate-ease-out), box-shadow 160ms var(--gate-ease-out);
+  transition: color 160ms var(--hud-ease-out), border-color 160ms var(--hud-ease-out), background-color 160ms var(--hud-ease-out), box-shadow 160ms var(--hud-ease-out);
 }
 
 .desktop-access-gate__field-control:focus-within > svg {
@@ -667,7 +664,7 @@
   padding: 0;
   color: var(--gate-ink-faint);
   border: 0;
-  border-radius: 2px 8px 2px 2px;
+  border-radius: 13px 17px 12px 16px;
   background: transparent;
   cursor: pointer;
   transition: color 160ms var(--gate-ease-out), background-color 160ms var(--gate-ease-out);
@@ -716,7 +713,6 @@
   font-weight: 560;
   border: 0;
   border-radius: 0;
-  outline: 0;
   background: transparent;
   caret-color: var(--gate-action);
   transition: color 160ms var(--gate-ease-out), caret-color 160ms var(--gate-ease-out);
@@ -752,8 +748,8 @@
 }
 
 .desktop-access-gate__keep-signed-in input:focus-visible {
-  outline: 3px solid var(--gate-focus);
-  outline-offset: 2px;
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
 }
 
 .desktop-access-gate__keep-signed-in:has(input:disabled) {
@@ -806,6 +802,9 @@
   cursor: pointer;
 }
 
+/* V3.1 的主按钮是「浅蜜桃底 + 深墨字 + 白提亮」，不是深色底白字（母本 `.button.primary`）。
+   这颗原先整个极性反了，还配着 V2 的切角与 1px 描边。三套 `--gate-*` 主题在这里
+   收敛到母本的一档：主行动只该有一个样子。 */
 .desktop-access-gate__primary {
   display: inline-flex;
   width: 100%;
@@ -815,27 +814,28 @@
   justify-content: center;
   gap: 9px;
   padding: 11px 18px;
-  color: #fff9ef;
+  color: #3e2d22;
   font-size: 14px;
   font-weight: 750;
-  border: 1px solid var(--gate-action-border);
-  border-radius: 3px 14px 3px 3px;
-  background-color: var(--gate-action);
-  box-shadow: var(--gate-action-shadow);
-  transition: background-color 180ms var(--gate-ease-out), box-shadow 180ms var(--gate-ease-out), transform 180ms var(--gate-ease-out);
+  text-shadow: 0 1px rgba(255, 255, 255, 0.32);
+  border: 2px solid #af522c;
+  border-radius: 17px 21px 16px 19px;
+  background-color: var(--hud-peach);
+  box-shadow: 0 5px 11px rgba(67, 43, 27, 0.16);
+  transition: background-color 180ms var(--hud-ease-out), box-shadow 180ms var(--hud-ease-out), transform 180ms var(--hud-ease-out);
 }
 
 .desktop-access-gate__primary-arrow {
   transition: transform 180ms var(--gate-ease-out);
 }
 
-.desktop-access-gate__primary:active:not(:disabled) { transform: translateY(0); }
+/* 母本的按压感是 `scale(.96)` + 110ms；原先写成 translateY(0)，按下去没有任何反馈。 */
+.desktop-access-gate__primary:active:not(:disabled) { transform: scale(0.96); transition-duration: 110ms; }
 
 @media (hover: hover) and (pointer: fine) {
   .desktop-access-gate__primary:hover:not(:disabled) {
-    background: var(--gate-action-hover);
-    box-shadow: var(--gate-action-shadow-hover);
-    transform: translateY(-1px);
+    box-shadow: 0 8px 17px rgba(67, 43, 27, 0.2);
+    transform: translateY(-2px) scale(1.02);
   }
 
   .desktop-access-gate__primary:hover:not(:disabled) .desktop-access-gate__primary-arrow {
@@ -888,25 +888,31 @@
 }
 
 .desktop-access-gate button:focus-visible {
-  outline: 3px solid var(--gate-focus);
+  outline: 3px solid var(--focus);
   outline-offset: 3px;
 }
 
+/* 字段的焦点环只画在读者看见的那块板上（.desktop-access-gate__field-control）；板里的
+   输入框自己不能再画一条——它是板内的一列，环会缩在图标右边，读起来像板里又套了一个
+   小框（2026-09-23 实测：环的左内缩正好 46px = 2px 边界 + 14px 内边距 + 20px 图标列
+   + 10px 列间距）。
+   特异性必须到 (0,3,1)：原先的 `.desktop-access-gate input:focus-visible` 只有 (0,2,1)，
+   与 objective-flow.css 的 `.hud-surface :is(button, summary, input, textarea, select):focus-visible`
+   打平，而后者在 main.tsx 里明确排在 hud 层之后（构建产物里也确实在后），平手按顺序取胜，
+   于是这条抑制一直是死声明，输入框照样拿到 3px 环。 */
 .desktop-access-gate__field-control:has(input:focus-visible) {
-  outline: 3px solid var(--gate-focus);
+  outline: 3px solid var(--focus);
   outline-offset: 3px;
 }
 
-.desktop-access-gate input:focus-visible { outline: 0; }
+.desktop-access-gate .desktop-access-gate__field-control input:focus-visible { outline: 0; }
 
 /* Dusk is neither the bright paper daytime state nor the dark night state.
    The wall behind the form sits in a mid-value peach range, so it needs a
    deliberately darker ink ramp, a warm-but-not-white field surface, and a
    cool, muted focus color that does not compete with the brick-red action. */
 .desktop-access-gate[data-gate-visual-theme="dusk"] {
-  --gate-paper: #f4d7b9;
   --gate-paper-strong: #fff7ec;
-  --gate-paper-deep: #d79d70;
   --gate-ink: #2f1b15;
   --gate-ink-soft: #4a2f25;
   --gate-ink-faint: #6d4939;
@@ -918,10 +924,6 @@
   --gate-action: #a44228;
   --gate-action-hover: #81301e;
   --gate-action-text: #87341e;
-  --gate-action-border: #742b1a;
-  --gate-action-shadow: 0 11px 24px rgba(82, 27, 14, 0.28), 0 2px 6px rgba(82, 27, 14, 0.18);
-  --gate-action-shadow-hover: 0 14px 30px rgba(82, 27, 14, 0.36), 0 3px 8px rgba(82, 27, 14, 0.22);
-  --gate-focus: #285d66;
   --gate-success: #386654;
   --gate-danger: #982f22;
   background: #c28d68;
@@ -984,9 +986,7 @@
 .desktop-access-gate[data-gate-visual-theme="dusk"] .desktop-access-gate__time-option[data-selected="true"] span { color: #ffd3a5; }
 
 .desktop-access-gate[data-gate-visual-theme="night"] {
-  --gate-paper: #302925;
   --gate-paper-strong: #3a302a;
-  --gate-paper-deep: #201b18;
   --gate-ink: #f0dfc8;
   --gate-ink-soft: #c7b49b;
   --gate-ink-faint: #b8a68f;
@@ -998,14 +998,13 @@
   --gate-action: #d86d3a;
   --gate-action-hover: #b9542b;
   --gate-action-text: #ee8b52;
-  --gate-action-border: #9e4122;
-  --gate-action-shadow: 0 11px 24px rgba(0, 0, 0, 0.32), 0 2px 6px rgba(0, 0, 0, 0.2);
-  --gate-action-shadow-hover: 0 14px 30px rgba(0, 0, 0, 0.38), 0 3px 8px rgba(0, 0, 0, 0.24);
-  --gate-focus: #83d8e7;
   --gate-success: #9cb28d;
   --gate-danger: #ffb08a;
-  background: #101511;
-  scrollbar-color: rgba(240, 223, 200, 0.38) rgba(3, 5, 6, 0.32);
+  /* 整张夜间盘都是暖的（字段 rgba(24,20,18)、动作 #d86d3a），唯独底色原先是
+     #101511——G 通道偏高的冷黑，和同表的其它值不同族，也和母本夜间岛的
+     rgba(42,31,24,…) 不同族。改成比字段更暗一档的暖黑，滚动条底槽同批。 */
+  background: #151110;
+  scrollbar-color: rgba(240, 223, 200, 0.38) rgba(12, 9, 8, 0.32);
 }
 
 .desktop-access-gate[data-gate-visual-theme="night"] .desktop-access-gate__brand-seal {

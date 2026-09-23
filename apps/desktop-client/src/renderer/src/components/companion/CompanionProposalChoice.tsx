@@ -20,6 +20,22 @@ export interface CompanionProposalChoiceProps {
   readonly state: CompanionProposalUiState | undefined;
   readonly context: "bubble" | "history";
   readonly onDecide: (decision: "confirm" | "reject") => void;
+  /** 快照读不成时才用得上；不给就不画重试（历史里的旧卡不需要）。 */
+  readonly onRetry?: () => void;
+}
+
+/**
+ * 到点就算过期（方案 35 F2）。
+ *
+ * 服务端的 `action.expired` 事件是唯一权威，但那条走的是**回合内**的 SSE 订阅，
+ * 而订阅在回合收尾时就退了；另一台设备作出的决定同样送不到这张卡上。
+ * 于是过期后的卡长期写着"等待你的选择"、两颗按钮都能点，点下去撞 409。
+ * `expiresAt` 在此之前从未参与渲染层的任何判定。
+ */
+export function companionProposalExpired(expiresAt: string | null, now: number = Date.now()): boolean {
+  if (!expiresAt) return false;
+  const at = Date.parse(expiresAt);
+  return Number.isFinite(at) && at <= now;
 }
 
 /**
@@ -33,6 +49,7 @@ export function CompanionProposalChoice({
   state,
   context,
   onDecide,
+  onRetry,
 }: CompanionProposalChoiceProps) {
   if (!state || state.phase === "loading") {
     return (
@@ -58,19 +75,23 @@ export function CompanionProposalChoice({
       >
         <strong>这个选择暂时无法读取</strong>
         <span>{state.message}</span>
+        {onRetry ? (
+          <button type="button" className="companion-choice-card__retry" onClick={onRetry}>重试</button>
+        ) : null}
       </section>
     );
   }
 
   const { proposal, deciding, error } = state;
-  const pending = proposal.status === "pending";
-  const statusLabel = PROPOSAL_STATUS_LABEL[proposal.status];
+  const expired = proposal.status === "pending" && companionProposalExpired(proposal.expiresAt);
+  const pending = proposal.status === "pending" && !expired;
+  const statusLabel = expired ? PROPOSAL_STATUS_LABEL.expired : PROPOSAL_STATUS_LABEL[proposal.status];
 
   return (
     <section
       className="companion-choice-card"
       data-context={context}
-      data-status={proposal.status}
+      data-status={expired ? "expired" : proposal.status}
       data-proposal-id={proposalId}
       role="group"
       aria-label={`${proposal.title}：${statusLabel}`}

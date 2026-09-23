@@ -1,4 +1,6 @@
 import {
+  Suspense,
+  lazy,
   useCallback,
   useEffect,
   useRef,
@@ -70,7 +72,17 @@ import { sceneMotionDuration, type SceneMotionMode } from "../scene/scene-motion
 import { useRoomStore } from "../app/room-store";
 import { HudFirstSpaceScene } from "./hud/HudFirstSpace";
 import { requestSpaceMenu, requestSpaceMenuRefresh } from "./hud/space-menu-events";
-import { AuthAmbientCanvas, type AuthAmbientLampCue } from "./AuthAmbientCanvas";
+/**
+ * 登录页那张氛围画布是**整个渲染层里唯一还在活的 pixi.js 引用**（`scene/*-pixi*` 那条链
+ * 已经没有人 import 了，只剩自己的测试）。它以前静态引入，于是 pixi 的全部运行时被拖进
+ * 首屏那一个 eager chunk 里解析——而这块画布只是好看，不参与任何交互与判据。
+ * 改成 lazy 之后 pixi 离开首包；`fallback={null}` 是刻意的：画布晚到一帧只是没有背景，
+ * 不该在登录界面上闪一块占位。类型仍然静态引入（type-only，编译期就擦掉，不产生运行时边）。
+ */
+const AuthAmbientCanvas = lazy(() =>
+  import("./AuthAmbientCanvas").then((module) => ({ default: module.AuthAmbientCanvas })),
+);
+import type { AuthAmbientLampCue } from "./AuthAmbientCanvas";
 import { MIN_PASSWORD_LENGTH, validateAuthForm } from "./auth-form-validation";
 import {
   AUTH_SCENE_OPTIONS,
@@ -701,7 +713,9 @@ function GateFrame({
       style={style}
     >
       <div className="desktop-access-gate__drag-region" aria-hidden="true" />
-      <AuthAmbientCanvas theme={visualTheme} variant={variant} motionMode={motionMode} lampCue={lampCue} />
+      <Suspense fallback={null}>
+        <AuthAmbientCanvas theme={visualTheme} variant={variant} motionMode={motionMode} lampCue={lampCue} />
+      </Suspense>
       <AuthLampControl
         scene={visibleScene}
         targetScene={requestedScene}
@@ -1466,7 +1480,9 @@ export function DesktopAccessGate({
               ? <LoaderCircle className="desktop-access-gate__button-spinner" size={17} aria-hidden="true" />
               : registering ? <UserPlus size={17} aria-hidden="true" /> : <LogIn size={17} aria-hidden="true" />}
             {formBusy ? registering ? "正在创建账号…" : "正在登录…" : registering ? "创建账号" : "登录"}
-            {!formBusy ? <ArrowRight className="desktop-access-gate__primary-arrow" size={16} aria-hidden="true" /> : null}
+            {/* 登录态不排尾箭头：`→]` 与 `→` 都在说"进入"，而文字已经写了"登录"。
+                尾箭头留着的是注册态——那里前面的图标是 `UserPlus`（讲"新建账号"，不是方向）。 */}
+            {!formBusy && registering ? <ArrowRight className="desktop-access-gate__primary-arrow" size={16} aria-hidden="true" /> : null}
           </button>
           {!registering ? (
             <button

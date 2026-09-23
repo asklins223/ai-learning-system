@@ -21,6 +21,7 @@ import {
   Route,
   Search,
   Target,
+  X,
 } from "lucide-react";
 import type {
   CapabilityProjectionV1,
@@ -143,11 +144,14 @@ function SurfaceDataState({
   );
 }
 
+// 按行调的 formatter 提到模块作用域建一次（同 surface-data，0269 轮 M23）。
+const LIBRARY_MONTH_DAY_FORMAT = new Intl.DateTimeFormat("zh-CN", { month: "short", day: "numeric" });
+
 function formatDate(value: string | null | undefined): string {
   if (!value) return "时间未提供";
   const parsed = new Date(value);
   if (!Number.isFinite(parsed.valueOf())) return "时间未提供";
-  return new Intl.DateTimeFormat("zh-CN", { month: "short", day: "numeric" }).format(parsed);
+  return LIBRARY_MONTH_DAY_FORMAT.format(parsed);
 }
 
 function formatKnowledgeForm(value: ObjectiveListItemV3["knowledgeForm"]): string {
@@ -246,6 +250,7 @@ export function ObjectiveLibrarySurface() {
   const setActiveRunId = useRoomStore((state) => state.setActiveRunId);
   const epochRef = useRef<number | undefined>(undefined);
   const listRef = useRef<HTMLUListElement>(null);
+  const indexToggleRef = useRef<HTMLButtonElement>(null);
   const loadedCursorsRef = useRef(new Set<string>());
   const [page, setPage] = useState<ObjectiveListPageV3 | null>(null);
   const [loading, setLoading] = useState(true);
@@ -257,8 +262,10 @@ export function ObjectiveLibrarySurface() {
   const [primaryFocusId, setPrimaryFocusId] = useState<string | null>(null);
   const [queuePriorityIds, setQueuePriorityIds] = useState<string[]>([]);
   const [compactRegion, setCompactRegion] = useState<ObjectiveQuestRegion>("ready");
+  const [indexOpen, setIndexOpen] = useState(false);
   const [query, setQuery] = useState(() => readObjectiveLibraryView().query);
   const [filter, setFilter] = useState<ObjectiveLibraryFilter>(() => readObjectiveLibraryView().filter);
+  const lastObjectiveId = readObjectiveLibraryView().lastObjectiveId;
   useHudPage("goals");
 
   const load = useCallback(async () => {
@@ -340,12 +347,12 @@ export function ObjectiveLibrarySurface() {
   }, [loadingMore, page?.nextCursor]);
 
   useEffect(() => {
-    if (!page || !listRef.current) return;
+    if (!page || !indexOpen || !listRef.current) return;
     const frame = window.requestAnimationFrame(() => {
       if (listRef.current) listRef.current.scrollTop = readObjectiveLibraryView().scrollTop;
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [page?.items.length]);
+  }, [indexOpen, page?.items.length]);
 
   useEffect(() => {
     writeObjectiveLibraryView({ query, filter });
@@ -388,8 +395,10 @@ export function ObjectiveLibrarySurface() {
     return groups;
   }, [orderedVisibleGoals]);
   const activeMode = activeGoal ? runModePresentation(activeGoal.primaryAction) : null;
+  const recentGoal = page?.items.find((item) => item.objectiveId === lastObjectiveId) ?? null;
 
   const openObjective = (objectiveId: string) => {
+    writeObjectiveLibraryView({ lastObjectiveId: objectiveId });
     setActiveObjectiveId(objectiveId);
     invoke("open-objective");
   };
@@ -407,6 +416,8 @@ export function ObjectiveLibrarySurface() {
       return;
     }
     setStartingFocus(true);
+    writeObjectiveLibraryView({ lastObjectiveId: goal.objectiveId });
+    setActiveObjectiveId(goal.objectiveId);
     try {
       const started = await startObjectiveJourney(goal.primaryAction, {
         epochRef,
@@ -432,6 +443,7 @@ export function ObjectiveLibrarySurface() {
       {!loading && !failure && !activeGoal ? <SurfaceDataState kind="empty" message="还没有活跃目标" detail="从笔记生成或确认目标后，会在这里形成理解路线。" /> : null}
       {!loading && !failure && activeGoal ? (
         <div className="objective-expedition">
+          <div className="objective-expedition__landscape">
           <section className="v3-goal-focus objective-expedition__focus" aria-labelledby="goal-focus-title">
             <div className="objective-expedition__focus-flags" aria-label="本轮模式与状态">
               <span className={`objective-mode-badge objective-mode-badge--${activeMode?.mode ?? "unavailable"}`}>
@@ -456,6 +468,11 @@ export function ObjectiveLibrarySurface() {
               <p className="v3-goal-focus__hint">{primaryActionDescription(activeGoal.primaryAction)}</p>
               {focusFailure ? <p className="v3-goal-focus__error" role="alert">{focusFailure}</p> : null}
               <button type="button" className="v3-goal-focus__detail" onClick={() => openObjective(activeGoal.objectiveId)}>先看挑战简报</button>
+              {recentGoal && recentGoal.objectiveId !== activeGoal.objectiveId ? (
+                <button type="button" className="objective-expedition__recent" onClick={() => openObjective(recentGoal.objectiveId)}>
+                  <History size={16} aria-hidden="true" /><span><small>回到刚才的目标</small><strong>{recentGoal.conceptLabel ?? recentGoal.primaryNoteTitle ?? "未命名理解目标"}</strong></span><ChevronRight size={16} aria-hidden="true" />
+                </button>
+              ) : null}
             </div>
             <p className="v3-goal-focus__source" title={activeGoal.primaryNoteTitle ?? "未关联主笔记"}>
               <BookOpenText size={14} aria-hidden="true" />{activeGoal.primaryNoteTitle ?? "未关联主笔记"}
@@ -485,7 +502,7 @@ export function ObjectiveLibrarySurface() {
                       <span><strong id={`quest-region-${region.key}`}>{region.label}</strong><small>{region.detail} · {nodes.length} 个</small></span>
                     </header>
                     <ol>
-                      {nodes.slice(0, 4).map((item, index) => (
+                      {nodes.slice(0, 2).map((item, index) => (
                         <li key={item.objectiveId}>
                           <button
                             type="button"
@@ -502,18 +519,26 @@ export function ObjectiveLibrarySurface() {
                       ))}
                       {!nodes.length ? <li className="objective-quest-region__empty">这片区域暂时没有目标</li> : null}
                     </ol>
+                    {nodes.length > 2 ? <p className="objective-quest-region__more">另有 {nodes.length - 2} 个目标在远征册</p> : null}
                   </section>
                 );
               })}
             </div>
           </section>
+          </div>
 
-          <details className="v3-goal-ledger objective-expedition__index">
-            <summary>
-              <span><Search size={16} aria-hidden="true" /><strong id="goal-ledger-title">打开远征册</strong></span>
+          <div className="objective-expedition__index" data-open={indexOpen ? "true" : "false"} onKeyDown={(event) => {
+            if (event.key !== "Escape" || !indexOpen) return;
+            event.preventDefault();
+            setIndexOpen(false);
+            indexToggleRef.current?.focus();
+          }}>
+            <button ref={indexToggleRef} type="button" className="objective-expedition__index-toggle" aria-expanded={indexOpen} aria-controls={indexOpen ? "objective-expedition-index-body" : undefined} onClick={() => setIndexOpen((open) => !open)}>
+              <span><Search size={16} aria-hidden="true" /><strong id="goal-ledger-title"><span className="objective-expedition__open-label">打开远征册</span><span className="objective-expedition__close-label">关闭远征册</span></strong></span>
               <small>{page?.nextCursor ? `已载入 ${page.items.length} / ${page.total ?? 0} 条` : `共 ${page?.total ?? 0} 条`}</small>
-            </summary>
-            <div className="objective-expedition__index-body">
+              <X className="objective-expedition__close-icon" size={19} aria-hidden="true" />
+            </button>
+            {indexOpen ? <div id="objective-expedition-index-body" className="objective-expedition__index-body">
               <label className="v3-goal-search">
                 <Search size={14} aria-hidden="true" />
                 <span className="sr-only">搜索理解目标</span>
@@ -551,8 +576,8 @@ export function ObjectiveLibrarySurface() {
                 {page?.nextCursor && !pageFailure ? <li className="v3-goal-list__paging"><button type="button" disabled={loadingMore} onClick={() => void loadMore()}>{loadingMore ? "正在读取…" : `继续读取（还有 ${Math.max(0, page.total - page.items.length)} 条）`}</button></li> : null}
                 {!page?.nextCursor && page && page.items.length > 0 ? <li className="v3-goal-list__end" role="status">已读到全部目标</li> : null}
               </ul>
-            </div>
-          </details>
+            </div> : null}
+          </div>
         </div>
       ) : null}
     </ApprovedSurfaceFrame>
@@ -563,6 +588,16 @@ export function ObjectiveLibrarySurface() {
 function formatRunPhase(phase: string): string {
   return (learningRunPhaseLabels as Record<string, string>)[phase] ?? phase;
 }
+
+const previousResultLabels = {
+  demonstrated: "已证明掌握",
+  partial: "已经说对一部分",
+  needs_repair: "找到了待修补处",
+  not_assessable: "本轮暂无法判定",
+  practice_completed: "练习已完成",
+  skipped: "本轮已跳过",
+  declared_unable: "本轮选择先学习",
+} as const;
 
 export function ObjectiveDetailSurface() {
   const activeObjectiveId = useRoomStore((state) => state.activeObjectiveId);
@@ -621,6 +656,12 @@ export function ObjectiveDetailSurface() {
   const detailState = objective?.personalState.state ?? null;
   const evidenceSnapshotCount = objective?.sources.origins.reduce((sum, origin) => sum + origin.evidenceSnapshotIds.length, 0) ?? 0;
   const detailMode = objective ? runModePresentation(objective.primaryAction) : null;
+  const previousResult = objective?.personal.latestResult;
+  const openPreviousResult = () => {
+    if (!previousResult) return;
+    setActiveRunId(previousResult.runId);
+    invoke("validate");
+  };
   return (
     <ApprovedSurfaceFrame family="workshop" eyebrow="远征简报" headingId="objective-detail-title" title="挑战简报" detail="先看要证明什么，再决定现在是否出发">
       {!activeObjectiveId ? <SurfaceDataState kind="empty" message="还没有选择理解目标" detail="从理解目标库点击目标后，会直接进入完整详情。" /> : null}
@@ -628,49 +669,57 @@ export function ObjectiveDetailSurface() {
       {activeObjectiveId && !loading && failure ? <SurfaceDataState kind="error" message="目标详情暂时不可用" detail={failure} onRetry={() => void load()} /> : null}
       {activeObjectiveId && !loading && !failure && objective && content && detailState ? (
         <div className="objective-brief">
-          <article className="v3-objective-sheet objective-brief__sheet">
-            <header className="objective-brief__hero">
+          <article className="objective-brief__board">
+            <header className="objective-brief__masthead">
               <div className="objective-brief__flags">
                 <span className={`objective-mode-badge objective-mode-badge--${detailMode?.mode ?? "unavailable"}`}>{detailMode?.label}</span>
                 <span className={`v3-objective-state v3-objective-state--${objectiveStateTone(detailState)}`}><CircleDot size={12} aria-hidden="true" />{formatObjectiveState(detailState)}</span>
               </div>
               <h3>{content.conceptLabel ?? "未命名理解目标"}</h3>
               <p className="v3-objective-summary">{content.publicSummary}</p>
-              <div className="objective-brief__facts" aria-label="目标属性">
-                <span>{formatKnowledgeForm(content.knowledgeForm)}</span><span>{formatFreshness(content.freshness)}</span><span>{formatLifecycle(content.lifecycle)}</span>
-              </div>
             </header>
 
-            <section className="objective-brief__proof" aria-labelledby="objective-proof-title">
-              <div className="objective-brief__section-title"><Target size={17} aria-hidden="true" /><h4 id="objective-proof-title">这一关要证明什么</h4></div>
+            <section className="objective-brief__mission" aria-labelledby="objective-proof-title">
+              <div className="objective-brief__mission-heading"><Target size={24} aria-hidden="true" /><h4 id="objective-proof-title">过这一关，需要你证明</h4></div>
               <p>不用背原文。请用自己的话说明这条主张，并给出能让它成立的解释、例子或边界。</p>
               <div className={`objective-brief__mode objective-brief__mode--${detailMode?.mode ?? "unavailable"}`}>
                 <strong>{detailMode?.label}</strong><span>{detailMode?.description}</span>
               </div>
             </section>
 
-            <section className="v3-learning-ledger objective-brief__progress" aria-labelledby="learning-ledger-title">
-              <div className="v3-section-heading"><div><History size={16} aria-hidden="true" /><h4 id="learning-ledger-title">现在走到哪里</h4></div><span>{objective.personal.practiceTrailCount} 次练习</span></div>
-              <ObjectiveProgressBand segment={progressSegmentForState(detailState)} />
-              <dl>
-                <div><dt><CheckCircle2 size={14} aria-hidden="true" />正式验证</dt><dd>{objective.personal.initialValidation ? ({ ready: "现在可以挑战", deferred: "等待开放", idle: "还没开始", completed: "已经答过" } as const)[objective.personal.initialValidation.status] : "还没安排"}</dd><small>{objective.personal.initialValidation?.qualificationNotBefore ? `${formatObjectiveDateTime(objective.personal.initialValidation.qualificationNotBefore)} 开放` : "没有其他等待条件"}</small></div>
-                <div><dt><Clock3 size={14} aria-hidden="true" />当前旅程</dt><dd>{objective.personal.activeRun ? formatRunPhase(objective.personal.activeRun.phase) : "没有进行中的旅程"}</dd><small>{objective.personal.lastCanonicalAt ? `最近正式结果 ${formatObjectiveDateTime(objective.personal.lastCanonicalAt)}` : "还没有正式结果"}</small></div>
-                <div><dt><CalendarClock size={14} aria-hidden="true" />复习安排</dt><dd>{objective.personal.review ? (objective.personal.review.status === "due" ? "已经到期" : "已排入计划") : "尚未排期"}</dd><small>{objective.personal.review ? `${formatObjectiveDateTime(objective.personal.review.dueAt)} · 第 ${objective.personal.review.generation} 轮` : "正式验证后自动安排"}</small></div>
-              </dl>
+            <section className="objective-brief__departure" aria-labelledby="learning-ledger-title">
+              <div className="objective-brief__progress">
+                <div className="objective-brief__progress-heading"><h4 id="learning-ledger-title">你已走到这里</h4><span>{objective.personal.practiceTrailCount} 次练习</span></div>
+                <ObjectiveProgressBand segment={progressSegmentForState(detailState)} />
+                <ul>
+                  <li><CheckCircle2 size={16} aria-hidden="true" /><span>正式验证</span><strong>{objective.personal.initialValidation ? objective.personal.initialValidation.status === "ready" && objective.personal.lastCanonicalAt ? "可以再次挑战" : ({ ready: "现在可以挑战", deferred: "等待开放", idle: "还没开始", completed: "已经答过" } as const)[objective.personal.initialValidation.status] : "还没安排"}</strong></li>
+                  <li><Clock3 size={16} aria-hidden="true" /><span>当前旅程</span><strong>{objective.personal.activeRun ? formatRunPhase(objective.personal.activeRun.phase) : "尚未开始"}</strong></li>
+                  <li><CalendarClock size={16} aria-hidden="true" /><span>复习安排</span><strong>{objective.personal.review ? (objective.personal.review.status === "due" ? "已经到期" : formatObjectiveDateTime(objective.personal.review.dueAt)) : "正式验证后安排"}</strong></li>
+                </ul>
+              </div>
+              <div className="objective-brief__launchpad">
+                <p id="objective-next-action-state">{objectiveStateHint(detailState)}</p>
+                <button type="button" className="objective-brief__launch" disabled={starting || !isActionable(objective.primaryAction)} onClick={() => void startAction()} aria-labelledby="objective-next-action-verb" aria-describedby="objective-next-action-state objective-next-action-why">
+                  <strong id="objective-next-action-verb">{starting ? "正在准备" : previousResult && objective.primaryAction.kind === "create_run" ? "再挑战一次" : primaryActionLabel(objective.primaryAction)}</strong>
+                  <span aria-hidden="true">{starting ? <LoaderCircle size={22} /> : objective.primaryAction.kind === "refresh" ? <RefreshCw size={22} /> : <ArrowRight size={22} />}</span>
+                </button>
+                <small id="objective-next-action-why">{primaryActionDescription(objective.primaryAction)}</small>
+              </div>
             </section>
-
-            <button type="button" className="v3-next-action objective-brief__action" disabled={starting || !isActionable(objective.primaryAction)} onClick={() => void startAction()} aria-labelledby="objective-next-action-verb" aria-describedby="objective-next-action-state objective-next-action-why">
-              <span className="v3-next-action__text">
-                <span className="v3-next-action__label">准备好就从这里出发</span>
-                <strong id="objective-next-action-verb" className="v3-next-action__verb">{starting ? "正在准备" : primaryActionLabel(objective.primaryAction)}</strong>
-                <span id="objective-next-action-state" className="v3-next-action__why">{objectiveStateHint(detailState)}</span>
-                <span id="objective-next-action-why" className="v3-next-action__why">{primaryActionDescription(objective.primaryAction)}</span>
-              </span>
-              <span className="v3-next-action__go" aria-hidden="true">{starting ? <LoaderCircle size={18} /> : objective.primaryAction.kind === "refresh" ? <RefreshCw size={18} /> : <ArrowRight size={18} />}</span>
-            </button>
             {actionFailure ? <p className="v3-action-error" role="alert"><AlertTriangle size={14} aria-hidden="true" />{actionFailure}</p> : null}
 
-            <details className="v3-lineage-ledger objective-brief__dossier">
+            {previousResult ? (
+              <section className="objective-brief__history" aria-labelledby="objective-previous-result-title">
+                <div className="objective-brief__history-copy">
+                  <span><History size={18} aria-hidden="true" /> 上一次留下的学习记录</span>
+                  <h4 id="objective-previous-result-title">{previousResultLabels[previousResult.outcome]}</h4>
+                  <p>{formatObjectiveDateTime(previousResult.completedAt)} · 可以回看当时的作答、判定与解析；重新挑战会生成新的一轮，不会覆盖这份记录。</p>
+                </div>
+                <button type="button" onClick={openPreviousResult}>回看上次结果 <ArrowRight size={18} aria-hidden="true" /></button>
+              </section>
+            ) : null}
+
+            <details className="objective-brief__dossier">
               <summary><span><Layers3 size={16} aria-hidden="true" /><strong>资料卷宗</strong></span><small>{objective.sources.origins.length} 条来源 · {evidenceSnapshotCount} 条原文证据</small></summary>
               <div className="objective-brief__dossier-body">
                 {objective.sources.primaryNote ? <button type="button" className="v3-primary-note" onClick={() => invoke("open-notebook")}><FileText size={17} aria-hidden="true" /><span><small>主笔记</small><strong>{objective.sources.primaryNote.title}</strong></span><ChevronRight size={16} aria-hidden="true" /></button> : <div className="v3-primary-note v3-primary-note--missing"><AlertTriangle size={17} aria-hidden="true" /><span><small>主笔记</small><strong>尚未关联主笔记</strong></span></div>}
@@ -681,7 +730,7 @@ export function ObjectiveDetailSurface() {
                 <footer className="v3-lineage-boundary"><strong>公开边界</strong><p>这里只讲来源关系和学习状态；标准答案、评分依据和原文段落不会提前出现。</p></footer>
               </div>
             </details>
-            <footer className="v3-objective-revision"><span>创建于 {formatObjectiveDateTime(objective.createdAt)} · 更新于 {formatObjectiveDateTime(objective.updatedAt)}</span></footer>
+            <footer className="objective-brief__revision"><span>{formatKnowledgeForm(content.knowledgeForm)} · {formatFreshness(content.freshness)} · {formatLifecycle(content.lifecycle)} · 更新于 {formatObjectiveDateTime(objective.updatedAt)}</span></footer>
           </article>
         </div>
       ) : null}

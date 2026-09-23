@@ -1,6 +1,5 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
-import { randomUUID } from "node:crypto";
+import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { z } from "zod";
 
 /**
@@ -238,18 +237,57 @@ export class FileNoteDocCacheStore implements NoteDocCacheStore {
         } catch {
           // 缺文件、坏 JSON 都走同一条：本机没有缓存。
         }
+        await this.pruneStaleTempFiles();
       })();
     }
     await this.loaded;
+  }
+
+  /**
+   * 收掉历史上带 uuid 的孤儿临时文件（`<file>.<uuid>.tmp`）。固定名之后新流程不会
+   * 再造孤儿，但改法之前留下的那些每人最多 12 MB，没人清就永远躺在 userData 里。
+   * 清失败不影响任何读写路径，所以只吞异常、不打日志刷屏。
+   */
+  private async pruneStaleTempFiles(): Promise<void> {
+    try {
+      const dir = dirname(this.filePath);
+      const base = basename(this.filePath);
+      const names = await readdir(dir);
+      await Promise.all(
+        names
+          .filter((name) => name.startsWith(`${base}.`) && name.endsWith(".tmp") && name !== `${base}.tmp`)
+          .map((name) => rm(join(dir, name), { force: true })),
+      );
+    } catch {
+      // 目录还不存在 = 从来没写过缓存，本来就没得清。
+    }
   }
 
   private flush(): Promise<void> {
     // 写入、清理、切空间可能并发；把"整份快照 + 改名"排队，旧的临时文件永远
     // 赢不了最后一次改名。
     const write = this.flushQueue.then(async () => {
-      const payload = storageSchema.parse({ version: NOTE_DOC_CACHE_VERSION, entries: this.memory.snapshot() });
+      const entries = this.memory.snapshot();
+      /**
+       * 这里以前是 `storageSchema.parse({version, entries})`——把**全部**条目再深度校验
+       * 一遍（含每条的 base64 正则）。但每一条都是走过 `MemoryNoteDocCacheStore.set` 的
+       * `noteDocCacheEntryV1Schema.parse`（:160）或 `load` 的整份校验（:234）才进到内存的，
+       * 所以这一次是纯粹的重复劳动，而它按"每次自动保存一遍整库"计费（草稿 600ms、
+       * 自动保存 1200ms 各戳一次，额度是 48 条 × 2 MB）。
+       * 深度校验摘掉，只留这条 O(1) 的上界守卫——原来那个 `.max()` 挡的就是这个数。
+       */
+      if (entries.length > ENTRY_LIMIT * 2) {
+        throw new Error(`note-doc cache holds ${entries.length} entries, over the ${ENTRY_LIMIT * 2} bound`);
+      }
+      const payload: Storage = { version: NOTE_DOC_CACHE_VERSION, entries };
       await mkdir(dirname(this.filePath), { recursive: true });
-      const temporaryPath = `${this.filePath}.${randomUUID()}.tmp`;
+      /**
+       * 固定名（0269 轮 L8）：以前带 `randomUUID()`，进程在 writeFile 与 rename 之间被杀
+       * 就留下一个孤儿 `.tmp`，最大可到 `FILE_MAX_BYTES`，而**没有任何地方**回收它们。
+       * 固定名下最坏情况只有这一个文件、且下一次 flush 直接覆盖它；`ensureLoaded` 顺手
+       * 清掉升级前那些带 uuid 的旧残留。
+       */
+      const temporaryPath = `${this.filePath}.tmp`;
       await writeFile(temporaryPath, JSON.stringify(payload), { mode: 0o600 });
       await rename(temporaryPath, this.filePath);
     });

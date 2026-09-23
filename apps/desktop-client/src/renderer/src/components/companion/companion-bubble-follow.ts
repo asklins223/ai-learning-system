@@ -17,7 +17,7 @@
  */
 export const COMPANION_BUBBLE_FOLLOW_SLACK_PX = 24;
 
-export interface CompanionBubbleScrollState {
+interface CompanionBubbleScrollState {
   readonly scrollTop: number;
   readonly scrollHeight: number;
   readonly clientHeight: number;

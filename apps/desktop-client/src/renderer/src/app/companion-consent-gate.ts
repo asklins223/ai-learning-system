@@ -16,7 +16,11 @@ import type { WorkspaceAiSettingsV1 } from "@ailearn/shared/desktop-ipc-contract
 export const SETTINGS_ATTENTION_AI_CONSENT = "ai-consent";
 
 /**
- * 缺同意时伴星说的固定台词（气泡与语音共用同一份文本）。
+ * 缺同意时伴星说的固定台词（共用同一份文字，念不念由同意状态决定）。
+ *
+ * 2026-09-22 起 `/voice/tts` 也挂上了同意门（doc 34 L13），而目录里两套合成引擎都在本机之外
+ * ——把"请先签署同意"这句话发给外部服务念出来，本身就是那次未签署的外发。
+ * 所以这句话在未签署时**只显示、不播报**（播报侧的降级见 `companion-voice-playback.ts`）。
  *
  * 语气跟着人设走：先给一句"还差一步"，再说清按哪里；不甩错误码。
  */

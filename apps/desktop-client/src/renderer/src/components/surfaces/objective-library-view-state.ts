@@ -14,10 +14,11 @@ export type ObjectiveLibraryView = {
   query: string;
   filter: ObjectiveLibraryFilter;
   scrollTop: number;
+  lastObjectiveId: string | null;
 };
 
 function emptyView(workspaceId: string | null = null): ObjectiveLibraryView {
-  return { workspaceId, query: "", filter: "all", scrollTop: 0 };
+  return { workspaceId, query: "", filter: "all", scrollTop: 0, lastObjectiveId: null };
 }
 
 let view = emptyView();

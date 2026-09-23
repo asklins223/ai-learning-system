@@ -5,7 +5,7 @@ import {
   companionBubbleHoldMs,
   companionBubbleLineHeights,
   companionBubbleMaxHeightPx,
-  companionBubbleOverflows,
+  companionBubblePreviewText,
   companionBubbleText,
   estimateCompanionReadDurationMs,
 } from "./companion-bubble-reveal";
@@ -40,6 +40,14 @@ describe("companionBubbleText", () => {
   });
 });
 
+describe("companionBubblePreviewText", () => {
+  it("follows the newest revealed characters without exposing unrevealed text", () => {
+    const reply = "甲".repeat(COMPANION_BUBBLE_MAX_CHARS) + "最后一句";
+    expect(companionBubblePreviewText(reply, 3)).toBe("甲甲甲");
+    expect(companionBubblePreviewText(reply, reply.length)).toBe(`…${reply.slice(-COMPANION_BUBBLE_MAX_CHARS)}`);
+  });
+});
+
 describe("estimateCompanionReadDurationMs", () => {
   it("uses the reading cadence in the middle of the range", () => {
     expect(estimateCompanionReadDurationMs(50)).toBe(3_000);
@@ -49,13 +57,6 @@ describe("estimateCompanionReadDurationMs", () => {
     expect(estimateCompanionReadDurationMs(0)).toBe(1_200);
     expect(estimateCompanionReadDurationMs(1)).toBe(1_200);
     expect(estimateCompanionReadDurationMs(10_000)).toBe(12_000);
-  });
-});
-
-describe("companionBubbleOverflows", () => {
-  it("only asks for the drawer entry once the reply really is too long", () => {
-    expect(companionBubbleOverflows("短".repeat(COMPANION_BUBBLE_MAX_CHARS))).toBe(false);
-    expect(companionBubbleOverflows("长".repeat(COMPANION_BUBBLE_MAX_CHARS + 1))).toBe(true);
   });
 });
 

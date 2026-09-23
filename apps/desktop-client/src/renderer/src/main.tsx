@@ -4,7 +4,6 @@ import { App } from "./App";
 import { trackInputModality } from "./app/input-modality";
 import "./styles.css";
 import "./components/home-room.css";
-import "./components/home-room-life.css";
 import "./components/approved-surfaces.css";
 import "./components/hud/hud-pages.css";
 import "./components/hud/hud-surface.css";

@@ -143,6 +143,11 @@ async function setup(session: {
     isDestroyed: () => false,
     // 订阅会绑窗口生命周期（closed / destroyed），假窗口也得能被绑。
     once: () => undefined,
+    // 真 `BrowserWindow` 一定有 `on`（M16 在它上面绑可见性事件），假窗口少这个
+    // 方法会让产品代码在测试里抛 TypeError——那是替身没跟齐，不是缺陷。
+    on: () => undefined,
+    isVisible: () => true,
+    isMinimized: () => false,
     webContents: { isDestroyed: () => false, once: () => undefined, send },
   } as never;
 

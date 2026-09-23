@@ -15,10 +15,6 @@ const LEVEL_EPSILON = 0.02;
 let currentLevel = 0;
 const listeners = new Set<HomeV2VoiceLevelListener>();
 
-export function getHomeV2VoiceLevel(): number {
-  return currentLevel;
-}
-
 export function setHomeV2VoiceLevel(level: number): void {
   const next = Number.isFinite(level) ? Math.min(1, Math.max(0, level)) : 0;
   // Ignore sub-perceptual changes so a quiet passage does not spam subscribers.

@@ -46,8 +46,19 @@ class FakeHost implements CompanionVoiceHost {
   /** 命中即"永远不返回"，用来触发段级截止（方案 29 §4.9）。 */
   hangFor = new Set<string>();
 
+  /**
+   * 命中即带 `rejectCode` 失败，用于验"永久拒绝不重试"（doc 34 L13）。
+   * 码要可换：`ai_consent_required` 是 2026-09-23 从 `forbidden` 里分出去的，
+   * 分的那一刻漏了一个码，"不再重试"就正好在那一条路上丢了。
+   */
+  rejectWithCodeFor = new Set<string>();
+  rejectCode = "forbidden";
+
   synthesize(text: string): Promise<AudioBuffer> {
     this.synthesized.push(text);
+    if (this.rejectWithCodeFor.has(text)) {
+      return Promise.reject(Object.assign(new Error("没有同意"), { code: this.rejectCode }));
+    }
     if (this.failFor.has(text)) return Promise.reject(new Error("合成失败"));
     if (this.hangFor.has(text)) return new Promise<AudioBuffer>(() => undefined);
     return Promise.resolve(buffer(text));
@@ -119,13 +130,31 @@ function flush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+const degradationViolations: string[] = [];
+
 function collect(): CompanionSpeechProgress[] {
   const events: CompanionSpeechProgress[] = [];
-  subscribeCompanionSpeech((progress) => events.push(progress));
+  subscribeCompanionSpeech((progress) => {
+    /**
+     * 不变量：**任何一次降级都必须自带一句给人看的原因**（方案 35 E6）。
+     * 渲染层只念这个字段、不自己编文案，所以文案的归属地就是这里。
+     * 记在账上、由 `afterEach` 统一红：订阅回调里直接 throw 会把播放循环一起打断，
+     * 报出来的错就变成"某个下游断言没过"，看不出真正违约的是哪一条（实测过一次）。
+     */
+    if (progress.phase === "text_only" || progress.phase === "failed") {
+      const reason = progress.failure ?? "";
+      if (!reason || /[a-z]{6,}/.test(reason)) {
+        degradationViolations.push(`${progress.phase} → ${reason || "（没有原因）"}`);
+      }
+    }
+    events.push(progress);
+  });
   return events;
 }
 
 afterEach(() => {
+  expect(degradationViolations, `降级没带人话：${degradationViolations.join("；")}`).toEqual([]);
+  degradationViolations.length = 0;
   resetCompanionVoicePlayback();
 });
 
@@ -391,6 +420,48 @@ describe("beginCompanionSpeechLine", () => {
     expect(events.at(-1)).toMatchObject({ phase: "finished" });
   });
 
+  /** 带某个码被永久拒绝时，第二句究竟被送去合成几次。 */
+  async function attemptsOnPermanentRejectionWith(code: string): Promise<number> {
+    const host = new FakeHost();
+    host.rejectCode = code;
+    host.rejectWithCodeFor.add("第二句。");
+    setCompanionVoiceHost(host);
+    const line = beginCompanionSpeechLine();
+    line.feed("第一句。");
+    line.feed("第二句。");
+    line.finish("");
+    await flush();
+    host.finishSegment();
+    await waitUntil(() => host.synthesized.length >= 2);
+    // 退避窗口再走一遍：若真的重试，这里就会变成 2/3。
+    await new Promise((resolve) => { setTimeout(resolve, 600); });
+    return host.synthesized.filter((t) => t === "第二句。").length;
+  }
+
+  it("永久拒绝（403）不重试，瞬时失败退避重试三次", async () => {
+    // 这一条同时当自己的对照：同一个观测点（"第二句。被送去合成几次"），
+    // 瞬时失败必须看见 3 次（SYNTH_MAX_ATTEMPTS），权限拒绝必须只看见 1 次。
+    // 少了对照那一半，"1 次"可能只是因为压根没进重试环——我第一版就写成了那种假绿。
+    //
+    // 关键是要**等退避跑完**再读计数：重试之间隔 250ms / 500ms，
+    // 提前读两边都会是 1。
+    const transient = new FakeHost();
+    transient.failFor.add("第二句。");
+    setCompanionVoiceHost(transient);
+    const first = beginCompanionSpeechLine();
+    first.feed("第一句。");
+    first.feed("第二句。");
+    first.finish("");
+    await flush();
+    transient.finishSegment();
+    await waitUntil(() => transient.synthesized.filter((t) => t === "第二句。").length === 3);
+
+    // 两个码都走同一张"永久拒绝"表：`ai_consent_required` 是从 `forbidden` 里
+    // 分出来的那一种，只测老的那个就等于没测那次拆分。
+    expect(await attemptsOnPermanentRejectionWith("forbidden")).toBe(1);
+    expect(await attemptsOnPermanentRejectionWith("ai_consent_required")).toBe(1);
+  });
+
   it("keeps speaking later sentences when one queued segment fails to synthesize", async () => {
     // 排队路径同一条语义：中间一段合成反复失败 → 跳过它，第三句照常念，
     // 整轮正常收尾（不再"第一句之后全队沉默"）。
@@ -461,6 +532,10 @@ describe("beginCompanionSpeechLine", () => {
 
       expect(host.played).toEqual([]);
       expect(events.at(-1)).toMatchObject({ phase: "text_only" });
+      // 这条用例同时是上面那个不变量的**正控制**：它必须真的产出一条降级事件，
+      // 否则"每个降级都带人话"那条守则是空转通过的。
+      expect(events.filter((event) => event.phase === "text_only" || event.phase === "failed")).toHaveLength(1);
+      expect(events.at(-1)?.failure).toBe("语音合成超时，已继续显示文字");
     } finally {
       vi.useRealTimers();
     }

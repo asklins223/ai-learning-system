@@ -3,6 +3,7 @@ import { CalendarDays, ChevronLeft, ChevronRight, CornerDownRight } from "lucide
 import type { CompanionContentBlockV1, CompanionMessageV1 } from "@ailearn/shared/companion-conversation-contracts";
 import type { CompanionChatSession } from "../../app/companion-chat-session";
 import { companionMessageText, desktopRouteFromAgentRoute } from "../../app/companion-chat-session";
+import { gatewayErrorMessage } from "../../app/desktop-client";
 import type { CompanionRunTrace } from "../../app/companion-agent-nodes";
 import { CompanionProposalChoice } from "./CompanionProposalChoice";
 import { CompanionRunTraceView } from "./CompanionRunTraceView";
@@ -21,10 +22,13 @@ import "./companion-chat-record.css";
 
 // ─── 与抽屉共享的小工具 ───────────────────────────────────────────────────
 
+// 历史按行渲染，每行每次都新建 formatter 是白烧（0269 轮 M23）；formatter 无状态可复用。
+const MESSAGE_CLOCK_FORMAT = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+
 export function messageTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
-  return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
+  return MESSAGE_CLOCK_FORMAT.format(date);
 }
 
 export function messageDayKey(value: string): string {
@@ -97,17 +101,24 @@ function NavBlockLine({
   readonly block: Extract<CompanionContentBlockV1, { type: "nav" }>;
   readonly chat: CompanionChatSession;
 }) {
+  const [failure, setFailure] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const target = desktopRouteFromAgentRoute(block.route);
   if (!target) {
     return <p className="companion-record__nav companion-record__nav--plain"><span>{block.label}</span></p>;
   }
   return (
-    <p className="companion-record__nav">
-      <button type="button" onClick={() => { void chat.goToRoute(target); }}>
+    <div className="companion-record__nav">
+      <button type="button" disabled={busy} onClick={() => {
+        setBusy(true);
+        setFailure(null);
+        void chat.goToRoute(target).catch((error) => setFailure(gatewayErrorMessage(error))).finally(() => setBusy(false));
+      }}>
         <CornerDownRight size={12} />
         {block.label}
       </button>
-    </p>
+      {failure ? <span className="companion-record__nav-error" role="status">{failure}</span> : null}
+    </div>
   );
 }
 
@@ -188,6 +199,52 @@ export function CompanionQuoteBlock({
   );
 }
 
+/** 消息里的可见结果也用于伴星身旁的即时结果卡。 */
+export function CompanionMessageRichBlocks({
+  blocks,
+  chat,
+}: {
+  readonly blocks: readonly CompanionContentBlockV1[];
+  readonly chat: CompanionChatSession;
+}) {
+  return <>
+    {blocks.filter((block) => block.type === "nav" || block.type === "quote"
+      || block.type === "diagram" || block.type === "card" || block.type === "image")
+      .map((block, index) => (
+        block.type === "nav"
+          ? <NavBlockLine key={`nav-${index}`} block={block} chat={chat} />
+          : block.type === "quote"
+            ? <CompanionQuoteBlock key={`quote-${index}`} block={block} />
+            : block.type === "diagram"
+              ? (
+                  <figure className="companion-record__diagram" key={`diagram-${index}`}>
+                    <figcaption>{block.title}</figcaption>
+                    <ol>
+                      {block.steps.map((step, n) => (
+                        <li key={n}>
+                          <span className="companion-record__step-no">{n + 1}</span>
+                          <span>{step.label}</span>
+                          {step.detail ? <small>{step.detail}</small> : null}
+                        </li>
+                      ))}
+                    </ol>
+                  </figure>
+                )
+              : block.type === "card"
+                ? (
+                    <figure className="companion-record__card" key={`card-${index}`}>
+                      <figcaption>{block.knowledgeForm ? `卡片 · ${block.knowledgeForm}` : "卡片"}</figcaption>
+                      <p>{block.front}</p>
+                      {block.summary ? <small>{block.summary}</small> : null}
+                    </figure>
+                  )
+                : block.type === "image"
+                  ? <CompanionRecordImage key={`image-${index}`} block={block} />
+                  : null
+      ))}
+  </>;
+}
+
 /** 单条消息（时间线 / 某日视图共用）。 */
 export function CompanionChatRecordArticle({
   message,
@@ -196,52 +253,20 @@ export function CompanionChatRecordArticle({
   readonly message: CompanionMessageV1;
   readonly chat: CompanionChatSession;
 }) {
+  const richBlocks = message.role === "assistant"
+    ? message.blocks.filter((block) => block.type === "nav" || block.type === "quote"
+      || block.type === "diagram" || block.type === "card" || block.type === "image")
+    : [];
   const trace = message.role === "assistant"
     ? chat.runTraces.find((item) => item.summary.assistantMessageId === message.id) ?? null
     : null;
   const traceProposalIds = new Set(trace?.nodes.flatMap((node) => node.proposalId ? [node.proposalId] : []) ?? []);
   return (
-    <article data-message-id={message.id} data-role={message.role} data-kind={message.kind} data-cancelled={message.kind === "cancelled" || undefined}>
-      <header><span>{message.role === "user" ? "你" : "Mao"}{message.kind === "voice_transcript" ? " · 语音" : ""}</span><time>{messageTime(message.createdAt)}</time></header>
+    <article className={richBlocks.length > 0 ? "companion-record__rich-turn" : undefined} data-message-id={message.id} data-role={message.role} data-kind={message.kind} data-cancelled={message.kind === "cancelled" || undefined}>
+      <header><span>{message.role === "user" ? "你" : chat.companionName}{message.kind === "voice_transcript" ? " · 语音" : ""}</span><time>{messageTime(message.createdAt)}</time></header>
       {/* 正文从 §4.8 起保留 markdown，由这里排版（抽屉与记录页共用本组件）。 */}
       <div className="companion-record__body">{renderCompanionMarkdown(companionMessageText(message))}</div>
-      {message.role === "assistant"
-        ? message.blocks
-          .filter((block) => block.type === "nav" || block.type === "quote"
-            || block.type === "diagram" || block.type === "card" || block.type === "image")
-          .map((block, index) => (
-            block.type === "nav"
-              ? <NavBlockLine key={`nav-${index}`} block={block} chat={chat} />
-              : block.type === "quote"
-                ? <CompanionQuoteBlock key={`quote-${index}`} block={block} />
-                : block.type === "diagram"
-                  ? (
-                      <figure className="companion-record__diagram" key={`diagram-${index}`}>
-                        <figcaption>{block.title}</figcaption>
-                        <ol>
-                          {block.steps.map((step, n) => (
-                            <li key={n}>
-                              <span className="companion-record__step-no">{n + 1}</span>
-                              <span>{step.label}</span>
-                              {step.detail ? <small>{step.detail}</small> : null}
-                            </li>
-                          ))}
-                        </ol>
-                      </figure>
-                    )
-                  : block.type === "card"
-                    ? (
-                        <figure className="companion-record__card" key={`card-${index}`}>
-                          <figcaption>{block.knowledgeForm ? `卡片 · ${block.knowledgeForm}` : "卡片"}</figcaption>
-                          <p>{block.front}</p>
-                          {block.summary ? <small>{block.summary}</small> : null}
-                        </figure>
-                      )
-                    : block.type === "image"
-                      ? <CompanionRecordImage key={`image-${index}`} block={block} />
-                      : null
-          ))
-        : null}
+      {message.role === "assistant" ? <CompanionMessageRichBlocks blocks={richBlocks} chat={chat} /> : null}
       {message.kind === "cancelled" ? <p className="companion-record__stopped">你在这里停下了{stopSummary(trace)}</p> : null}
       {message.kind === "error" ? <p className="companion-record__stopped">这一轮没能说完{stopSummary(trace)}</p> : null}
       {trace && shouldShowRunTrace(trace) ? (
@@ -249,6 +274,7 @@ export function CompanionChatRecordArticle({
           trace={trace}
           proposalStates={chat.proposalStates}
           onDecideProposal={(proposalId, decision) => { void chat.decideProposal(proposalId, decision); }}
+          onRetryProposal={(proposalId) => { void chat.retryProposal(proposalId); }}
         />
       ) : null}
       {message.role === "assistant"

@@ -23,7 +23,7 @@ import {
 } from "../components/companion/window-live2d-contract";
 
 export type ThemeMode = "system" | "manual";
-export type CompanionMoment = "idle" | "lamp" | "ambient" | "confirm";
+export type CompanionMoment = "idle" | "lamp" | "ambient" | "confirm" | "encourage";
 export type CompanionPosition = { readonly x: number; readonly y: number };
 export type CompanionNormalizedAnchor = { readonly x: number; readonly y: number };
 export type CompanionPlacementOwner = "semantic" | "user";

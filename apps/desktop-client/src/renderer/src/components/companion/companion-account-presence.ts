@@ -70,6 +70,11 @@ export const DEFAULT_QUIET_HOURS = Object.freeze({
 
 export type QuietHoursBoundary = "startLocal" | "endLocal";
 
+export type QuietHoursBoundaryResult =
+  | { readonly ok: true; readonly value: NonNullable<CompanionAccountPatch["quietHours"]> }
+  /** 不成立时给一句能直接摆在界面上的原因，而不是 `null` 让调用方静默什么都不做。 */
+  | { readonly ok: false; readonly reason: string };
+
 /**
  * 勾选/取消静默时段。开启时使用设备时区与默认夜间区间；关闭时显式提交
  * `null`（服务端把它读作"没有静默时段"），而不是省略字段。
@@ -87,17 +92,30 @@ export function quietHoursPatch(
 }
 
 /**
- * 改一端边界时保留另一端与时区。空值（输入框被清空）不产生改动，
- * 避免把半成品时间写进账号状态。
+ * 改一端边界时保留另一端与时区。
+ *
+ * 这里必须**给原因**而不是回一个 `null`：
+ * - 输入框被清空时，回 `null` 的旧写法让界面什么都不做，而受控值把旧时间弹回去 ——
+ *   用户以为"改了没生效"，其实是根本没提交（方案 35 D3）。
+ * - 两端相等更不能悄悄放过：服务端把 `startLocal === endLocal` 判成**全天静默**
+ *   （`companion-proactive-policy.ts:244`，且 `companion-proactive-policy.test.ts:187`
+ *   把这条行为钉成了合同）。那是一个合法取值，但对用户来说等于"她再也不说话"，
+ *   而界面上没有任何一处解释过。所以：不提交，并把原因说在界面上。
  */
 export function quietHoursWithBoundary(
   current: NonNullable<CompanionAccountPatch["quietHours"]>,
   boundary: QuietHoursBoundary,
   value: string,
-): NonNullable<CompanionAccountPatch["quietHours"]> | null {
+): QuietHoursBoundaryResult {
   const next = value.trim();
-  if (!next) return null;
-  return { ...current, [boundary]: next };
+  if (!next) {
+    return { ok: false, reason: "开始与结束两个时间都要填，空着她不知道你要哪一段。" };
+  }
+  const candidate = { ...current, [boundary]: next };
+  if (candidate.startLocal === candidate.endLocal) {
+    return { ok: false, reason: "两个时间写成同一个点，她会理解成一整天都不说话。" };
+  }
+  return { ok: true, value: candidate };
 }
 
 /**

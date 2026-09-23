@@ -2,12 +2,13 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { GatewayResultV1, SessionContextV1, WorkspaceAiSettingsV1 } from "@ailearn/shared/desktop-ipc-contracts";
+import type { DesktopAiAuditItemV1 } from "@ailearn/shared/desktop-surface-contracts";
 import { AI_CONSENT_VERSION } from "@ailearn/shared/desktop-ipc-contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { QWEN_TTS_VOICE_OPTIONS } from "@ailearn/shared/tts-voice-catalog";
 import { useRoomStore } from "../../app/room-store";
 import { SETTINGS_ATTENTION_AI_CONSENT } from "../../app/companion-consent-gate";
-import { SETTINGS_ATTENTION_MS, SettingsSurface } from "./settings-surface";
+import { SETTINGS_ATTENTION_MS, SettingsSurface, summaryOfDissolveCounts } from "./settings-surface";
 import { subscribeGateInvalidation } from "../../app/gate-invalidation";
 import { clearAccountSignOutNotice, peekAccountSignOutNotice } from "../../app/account-signout";
 
@@ -99,8 +100,29 @@ function capabilities(companionAllowed: boolean, dialogueEnabled = false) {
   };
 }
 
+/** 一条外发审计记录：字段按服务端 `listAIAuditLog` 的实际返回写，不按界面想要什么编。 */
+function auditItem(overrides: Partial<DesktopAiAuditItemV1> = {}): DesktopAiAuditItemV1 {
+  return {
+    id: "9f1f2f3f-4444-4aaa-8bbb-ccccdddddddd",
+    provider: "dashscope",
+    modelId: "qwen-plus",
+    operation: "generate_cards",
+    dataCategories: ["note_content", "question"],
+    dataSizeBytes: 4096,
+    costTokens: 320,
+    durationMs: 2100,
+    status: "success",
+    errorMessage: null,
+    createdAt: "2026-09-21T06:12:00.000Z",
+    operator: { userId: "11111111-1111-4111-8111-111111111111", email: "reader@example.com" },
+    ...overrides,
+  };
+}
+
 function installApi(options: {
   readonly role?: "owner" | "member";
+  /** true = 那个协作空间的当前用户是 owner（解散入口只该在这种行上出现）。 */
+  readonly ownerCollaborative?: boolean;
   readonly ai?: WorkspaceAiSettingsV1;
   readonly companionAllowed?: boolean;
   /** 读到就抛：界面必须是"未读到"，不能把 config 默认演成用户的选择。 */
@@ -113,7 +135,11 @@ function installApi(options: {
     readonly explicit: boolean;
     readonly updatedAt: string | null;
   };
+  /** AI 外发审计那一页；"reject" = 读不到，缺省给一条成功记录。 */
+  readonly audit?: { items: DesktopAiAuditItemV1[]; total: number } | "reject";
   readonly switchRejects?: boolean;
+  readonly dissolveRejects?: boolean;
+  readonly transferRejects?: boolean;
   readonly exportResult?: {
     readonly version: 1;
     readonly saved: boolean;
@@ -201,13 +227,33 @@ function installApi(options: {
       list: vi.fn(async () => ok({
         workspaces: [
           { version: 1, workspaceId: OWNER_WORKSPACE, name: "理解空间", role, workspaceType: "personal", isPersonal: true },
-          { version: 1, workspaceId: OTHER_WORKSPACE, name: "协作空间", role: "member", workspaceType: "collaborative", isPersonal: false },
+          { version: 1, workspaceId: OTHER_WORKSPACE, name: "协作空间", role: options.ownerCollaborative ? "owner" : "member", workspaceType: "collaborative", isPersonal: false },
         ],
       })),
       switch: vi.fn(async (input: unknown) => {
         calls.push({ method: "switch", input });
         if (options.switchRejects) throw new Error("switch refused");
         return ok(session(role));
+      }),
+      // 服务端返回的是**逐表计数**（迁移 0276），界面只转述它，不自己估数。
+      transferOwnership: vi.fn(async (input: unknown) => {
+        calls.push({ method: "transferOwnership", input });
+        if (options.transferRejects) throw new Error("transfer refused");
+        return ok({ version: 1 as const, workspaceId: OTHER_WORKSPACE, newOwnerUserId: OTHER_WORKSPACE });
+      }),
+      dissolve: vi.fn(async (input: unknown) => {
+        calls.push({ method: "dissolve", input });
+        if (options.dissolveRejects) throw new Error("dissolve refused");
+        return ok({
+          version: 1 as const,
+          workspaceId: OTHER_WORKSPACE,
+          counts: { notes: 7, learning_cards_v2: 12, _rehomedGlobalMemories: 3, _retiredWorkspaceMemories: 5 },
+        });
+      }),
+      getAiAuditLog: vi.fn(async (input: { limit?: number; offset?: number }) => {
+        calls.push({ method: "getAiAuditLog", input });
+        if (options.audit === "reject") throw new Error("audit log unavailable");
+        return ok(options.audit ?? { items: [auditItem()], total: 1 });
       }),
       getAiSettings: vi.fn(async () => ok(ai)),
       updateAiConsent: vi.fn(async (input: { consentVersion: string }) => {
@@ -785,7 +831,10 @@ it("播放读数跟着音频事件走：接线不能只挂在挂载 effect 上",
   const audio = document.querySelector("audio.settings-voice__source") as HTMLAudioElement;
   Object.defineProperty(audio, "duration", { configurable: true, value: 5.87 });
   Object.defineProperty(audio, "currentTime", { configurable: true, value: 3.59 });
-  const spy = vi.fn();
+  // 替身也必须守浏览器的合同：`play()` 返回 Promise。返回 undefined 会让被测代码里
+  // 那句 `.catch(...)` 抛成一条**未捕获异常**，掉在用例结束之后，只出现在摘要的
+  // `Errors` 里而不影响 exit code。
+  const spy = vi.fn(() => Promise.resolve());
   audio.play = spy;
   const last = QWEN_TTS_VOICE_OPTIONS.length - 1;
   fireEvent.click(screen.getAllByText("试听")[last]);
@@ -812,6 +861,29 @@ async function openVoiceSection(options: Parameters<typeof installApi>[0] = {}) 
   await waitFor(() => expect(screen.getByText("用哪套声音合成")).toBeTruthy());
   return { api, calls };
 }
+
+/**
+ * F9（方案 35）：试听离开页面要真停下来。
+ * 卸载那个 effect 以前只 `removeEventListener`，从不 `pause()` —— 于是切走这一屏之后
+ * 录音还在放，而播放器读数、进度条、那颗「暂停试听」按钮全都跟着界面一起没了，
+ * 用户只剩"哪儿来的声音"。
+ */
+it("试听：离开这一屏要停下来，也不把录音源留在脱离的元素上", async () => {
+  installApi({});
+  const view = render(<SettingsSurface />);
+  await screen.findByText("理解空间", { selector: ".space-identity h3" });
+  openSection("语音与伴星");
+  await waitFor(() => expect(screen.getByText("用哪套声音合成")).toBeTruthy());
+  const audio = document.querySelector("audio.settings-voice__source") as HTMLAudioElement;
+  let playing = false;
+  audio.play = () => { playing = true; return Promise.resolve(); };
+  audio.pause = () => { playing = false; };
+  fireEvent.click(screen.getAllByText("试听")[0]);
+  await waitFor(() => expect(playing).toBe(true));
+  act(() => { view.unmount(); });
+  expect(playing).toBe(false);
+  expect(audio.getAttribute("src")).toBeNull();
+});
 
 it("声音分组：千问下画满目录里的 5 个音色，并在用的那一条标出来", async () => {
   await openVoiceSection();
@@ -896,4 +968,176 @@ it("没读到偏好：不画音色列表，也不把默认值演成用户的选�
   await openVoiceSection({ voiceUnavailable: true });
   expect(screen.getByText("未读到")).toBeTruthy();
   expect(screen.queryByText("试听")).toBeNull();
+});
+
+/**
+ * doc 34 L3 的另一半：`auditLogging` 那行写着"供你回看"，而桌面以前没有任何地方读
+ * 这条审计。下面按"点开了才读、读到什么就说什么"钉住这个读端。
+ */
+async function openAuditSection(options: Parameters<typeof installApi>[0] = {}) {
+  const installed = installApi(options);
+  render(<SettingsSurface />);
+  await screen.findByText("理解空间", { selector: ".space-identity h3" });
+  openSection("AI 数据同意");
+  return installed;
+}
+
+it("外发记录：不点「查看」就不读，点了读到的是服务端那一页", async () => {
+  const { api, calls } = await openAuditSection();
+  expect(calls.filter((c) => c.method === "getAiAuditLog")).toHaveLength(0);
+
+  fireEvent.click(await screen.findByRole("button", { name: "查看" }));
+  await waitFor(() => expect(calls.filter((c) => c.method === "getAiAuditLog")).toHaveLength(1));
+  expect(calls.filter((c) => c.method === "getAiAuditLog")[0]!.input).toMatchObject({ limit: 20, offset: 0 });
+
+  // 供应商与模型是事实；内部枚举名（note_content / question）翻成人话再上屏。
+  await screen.findByText("dashscope · qwen-plus");
+  expect(screen.getByText(/笔记正文/)).toBeTruthy();
+  expect(screen.getByText(/题目/)).toBeTruthy();
+  expect(screen.queryByText(/note_content/)).toBeNull();
+  expect(screen.getByText("已完成")).toBeTruthy();
+});
+
+it("外发记录：还有更早的就给下一页，offset 按已读到的条数往前走", async () => {
+  const page = { items: [auditItem(), auditItem({ id: "8f1f2f3f-4444-4aaa-8bbb-ccccdddddddd" })], total: 21 };
+  const { calls } = await openAuditSection({ audit: page });
+  fireEvent.click(await screen.findByRole("button", { name: "查看" }));
+  fireEvent.click(await screen.findByRole("button", { name: "更早的记录" }));
+  await waitFor(() => expect(calls.filter((c) => c.method === "getAiAuditLog")).toHaveLength(2));
+  expect(calls.filter((c) => c.method === "getAiAuditLog")[1]!.input).toMatchObject({ offset: 2 });
+});
+
+it("外发记录：空清单说没有记录，不是一片空白", async () => {
+  await openAuditSection({ audit: { items: [], total: 0 } });
+  fireEvent.click(await screen.findByRole("button", { name: "查看" }));
+  await screen.findByText("还没有外发记录");
+});
+
+it("外发记录：读失败给可重试的状态，不留一个看着像\"没有\"的空列表", async () => {
+  const { api } = await openAuditSection({ audit: "reject" });
+  fireEvent.click(await screen.findByRole("button", { name: "查看" }));
+  await screen.findByText("外发记录暂时读不到");
+  expect(api.workspace.getAiAuditLog).toHaveBeenCalledTimes(1);
+  fireEvent.click(screen.getByRole("button", { name: "重试" }));
+  await waitFor(() => expect(api.workspace.getAiAuditLog).toHaveBeenCalledTimes(2));
+});
+
+it("外发记录：成员看不到读取入口，但这一行说清了记录仍在写、由所有者回看", async () => {
+  await openAuditSection({ role: "member" });
+  await screen.findByText("外发记录");
+  expect(screen.queryByRole("button", { name: "查看" })).toBeNull();
+  expect(screen.getByText(/这份清单由这个空间的所有者回看/)).toBeTruthy();
+});
+
+// ─── 解散空间（不可逆出口；服务端逐表计数是唯一数字来源）─────────────────────
+
+async function openSpaceLedger(options: Parameters<typeof installApi>[0]) {
+  const installed = installApi(options);
+  render(<SettingsSurface />);
+  await screen.findByText("理解空间", { selector: ".space-identity h3" });
+  openSection("账户与空间");
+  return installed;
+}
+
+it("解散入口只出现在「我是 owner 的协作空间」那一行：member 看不到", async () => {
+  await openSpaceLedger({ ownerCollaborative: false });
+  await new Promise((r) => setTimeout(r, 0));
+  expect(screen.queryByRole("button", { name: "解散 协作空间" })).toBeNull();
+});
+
+it("解散入口出现在 owner 的协作空间那一行", async () => {
+  await openSpaceLedger({ ownerCollaborative: true });
+  expect(await screen.findByRole("button", { name: "解散 协作空间" })).toBeTruthy();
+});
+
+it("确认必须输入空间名；没输对就不发调用", async () => {
+  const { api } = await openSpaceLedger({ ownerCollaborative: true });
+  fireEvent.click(await screen.findByRole("button", { name: "解散 协作空间" }));
+  const confirm = await screen.findByRole("button", { name: "确认解散" });
+  expect((confirm as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(confirm);
+  expect(api.workspace.dissolve).not.toHaveBeenCalled();
+
+  fireEvent.change(screen.getByPlaceholderText("输入空间名"), { target: { value: "协作" } });
+  expect((screen.getByRole("button", { name: "确认解散" }) as HTMLButtonElement).disabled).toBe(true);
+
+  fireEvent.change(screen.getByPlaceholderText("输入空间名"), { target: { value: "协作空间" } });
+  fireEvent.click(screen.getByRole("button", { name: "确认解散" }));
+  await waitFor(() => expect(api.workspace.dissolve).toHaveBeenCalledTimes(1));
+});
+
+it("成功后照服务端计数说话", async () => {
+  await openSpaceLedger({ ownerCollaborative: true });
+  fireEvent.click(await screen.findByRole("button", { name: "解散 协作空间" }));
+  fireEvent.change(screen.getByPlaceholderText("输入空间名"), { target: { value: "协作空间" } });
+  fireEvent.click(screen.getByRole("button", { name: "确认解散" }));
+  // 19 = notes 7 + cards 12；摘要键说的是去处，不进这个总数
+  await screen.findByText(/已解散「协作空间」。清掉了 19 项内容，3 条属于你的记忆已迁回你的个人空间，5 条只属于这个空间的记忆已收掉。/);
+});
+
+it("解散失败时不许写成「已解散」", async () => {
+  const { api } = await openSpaceLedger({ ownerCollaborative: true, dissolveRejects: true });
+  fireEvent.click(await screen.findByRole("button", { name: "解散 协作空间" }));
+  fireEvent.change(screen.getByPlaceholderText("输入空间名"), { target: { value: "协作空间" } });
+  fireEvent.click(screen.getByRole("button", { name: "确认解散" }));
+  await waitFor(() => expect(api.workspace.dissolve).toHaveBeenCalledTimes(1));
+  // 方向要对：失败最坏的后果不是"没提示"，是**看起来像成功了**。
+  expect(screen.queryByText(/已解散「协作空间」/)).toBeNull();
+  // 失败后确认面板**留在原地**（她不必重打空间名），所以这里在的是"确认解散"而不是入口按钮。
+  expect(screen.getByRole("button", { name: "确认解散" })).toBeTruthy();
+  expect((screen.getByRole("button", { name: "确认解散" }) as HTMLButtonElement).disabled).toBe(false);
+});
+
+it("计数句子：摘要键不混进总数，空计数也不编数字", () => {
+  expect(summaryOfDissolveCounts({ notes: 2, _rehomedGlobalMemories: 1 }))
+    .toBe("清掉了 2 项内容，1 条属于你的记忆已迁回你的个人空间。");
+  expect(summaryOfDissolveCounts({})).toBe("清掉了 0 项内容。");
+});
+
+// ─── 转让所有权（owner 唯一体面出口；没有它，owner 既不能退也不能交）───────────
+
+async function openMemberRows(options: Parameters<typeof installApi>[0]) {
+  const installed = installApi({ role: "owner", ...options });
+  render(<SettingsSurface />);
+  await screen.findByText("理解空间", { selector: ".space-identity h3" });
+  // 成员行在「成员与邀请」那一区，不在「账户与空间」。
+  openSection("成员与邀请");
+  return installed;
+}
+
+it("成员行给 owner 一个「设为所有者」", async () => {
+  await openMemberRows({});
+  expect(await screen.findByRole("button", { name: "把 peer@example.com 设为所有者" })).toBeTruthy();
+});
+
+it("member 看不到「设为所有者」，但这一屏不是空白", async () => {
+  installApi({ role: "member" });
+  render(<SettingsSurface />);
+  await screen.findByText("理解空间", { selector: ".space-identity h3" });
+  openSection("成员与邀请");
+  await new Promise((r) => setTimeout(r, 0));
+  expect(screen.queryByRole("button", { name: "把 peer@example.com 设为所有者" })).toBeNull();
+  expect(screen.getAllByRole("button").length).toBeGreaterThan(0);
+});
+
+it("转让是行内二次确认：第一下只变成「确认交出」，不发调用", async () => {
+  const { api } = await openMemberRows({});
+  const trigger = await screen.findByRole("button", { name: "把 peer@example.com 设为所有者" });
+  fireEvent.click(trigger);
+  expect(api.workspace.transferOwnership).not.toHaveBeenCalled();
+  fireEvent.click(await screen.findByRole("button", { name: "把 peer@example.com 设为所有者" }));
+  await waitFor(() => expect(api.workspace.transferOwnership).toHaveBeenCalledTimes(1));
+  const input = (api.workspace.transferOwnership as ReturnType<typeof vi.fn>).mock.calls[0][0] as {
+    workspaceId: string; toUserId: string;
+  };
+  expect(input.toUserId).toBe(OTHER_WORKSPACE);
+  expect(input.workspaceId).toBeTruthy();
+});
+
+it("转让失败时不许说成「已交出」", async () => {
+  const { api } = await openMemberRows({ transferRejects: true });
+  fireEvent.click(await screen.findByRole("button", { name: "把 peer@example.com 设为所有者" }));
+  fireEvent.click(await screen.findByRole("button", { name: "把 peer@example.com 设为所有者" }));
+  await waitFor(() => expect(api.workspace.transferOwnership).toHaveBeenCalledTimes(1));
+  expect(screen.queryByText(/你不再是它的所有者/)).toBeNull();
 });

@@ -6,8 +6,8 @@
  * 与伴星树互相依赖。文本上限 2000 字（与 turn 契约一致）。
  */
 
-export const COMPANION_FEED_EVENT = "ailearn:companion-feed";
-export const COMPANION_OPEN_CHAT_EVENT = "ailearn:companion-open-chat";
+const COMPANION_FEED_EVENT = "ailearn:companion-feed";
+const COMPANION_OPEN_CHAT_EVENT = "ailearn:companion-open-chat";
 
 export const COMPANION_FEED_MAX_CHARS = 2_000;
 

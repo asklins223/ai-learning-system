@@ -35,9 +35,9 @@
   --universe-hairline: rgba(121, 206, 220, 0.13);
   --universe-shadow: rgba(8, 5, 2, 0.6);
   --radius-pill: 999px;
-  --ease-standard: cubic-bezier(0.22, 1, 0.36, 1);
-  --font-ui: "Noto Sans SC Variable", "Noto Sans SC", "PingFang SC", sans-serif;
-  --font-editorial: "Noto Serif SC", "Songti SC", serif;
+  --ease-standard: var(--hud-island-ease);
+  --font-ui: "Noto Sans SC Variable", "PingFang SC", sans-serif;
+  --font-editorial: "Noto Serif SC Variable", "Songti SC", serif;
   --z-header: 50;
   /* Tokens the Web app owned globally and the desktop shell does not declare.
      Without them the ported declarations below are invalid and silently drop
@@ -675,7 +675,7 @@
 
 .universe-canvas-surface:focus-visible,
 .universe-canvas-root:focus-visible {
-  outline: 2px solid var(--color-focus-ring);
+  outline: 3px solid var(--focus);
   outline-offset: -3px;
 }
 
@@ -1296,28 +1296,38 @@
   animation: none;
 }
 
+/* 这张卡住在星图（深色）那一半，所以沿用夜间岛的影子基色；但它原先
+   `border` 与 `background` 同一个色（等于没有描边）、没有阴影、hover 只换底色、
+   按下去完全没反馈——主行动读起来是平的一块。这里补上母本按钮的三件事：
+   可见描边、双层影、抬升 + `scale(.96)` 按压，并换成四角不等的抖动圆角。 */
 .universe-status-card > :is(button, a) {
   display: inline-flex;
   min-height: 44px;
   align-items: center;
   justify-content: center;
   gap: 7px;
-  border: 1px solid var(--color-action);
-  border-radius: var(--radius-pill);
+  border: 2px solid rgba(255, 252, 235, 0.62);
+  border-radius: 17px 21px 16px 19px;
   padding: 0 16px;
   background: var(--color-action);
   color: var(--color-on-action);
+  box-shadow: 0 5px 11px rgba(1, 12, 25, 0.35);
   font-family: var(--font-ui);
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 700;
   text-decoration: none;
   cursor: pointer;
+  transition: transform 140ms var(--hud-ease-out, cubic-bezier(.23, 1, .32, 1)), box-shadow 140ms ease, background-color 140ms ease;
 }
 
 .universe-status-card > :is(button, a):hover {
-  border-color: var(--color-action-hover);
+  border-color: rgba(255, 252, 235, 0.82);
   background: var(--color-action-hover);
+  box-shadow: 0 8px 17px rgba(1, 12, 25, 0.42);
+  transform: translateY(-2px) scale(1.02);
 }
+
+.universe-status-card > :is(button, a):active { transform: scale(0.96); transition-duration: 110ms; }
 
 @keyframes universe-status-orbit {
   to { transform: rotate(1turn); }
@@ -1364,8 +1374,8 @@
 .universe-detail-head > button:focus-visible,
 .universe-detail-actions > :is(button, a):focus-visible,
 .universe-status-card > :is(button, a):focus-visible {
-  outline: 3px solid var(--color-focus-ring);
-  outline-offset: 2px;
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
 }
 
 /* ── Wide: the top row joins the intro card's own top edge ────────
@@ -2053,7 +2063,7 @@
   --color-on-action: #3e2d22;
   /* Warm rust focus on paper (DESIGN.md day focus rule). */
   --color-focus-ring: #8f3518;
-  --universe-ac-shadow: 0 12px 28px rgba(43, 27, 17, 0.22), 0 3px 8px rgba(43, 27, 17, 0.14);
+  --universe-ac-shadow: var(--hud-shadow-small); /* 原为同值重抄，指向母本避免二次漂移 */
   --universe-ac-plate: var(--hud-cream, #fff2cf);
   --universe-ac-plate-deep: var(--hud-paper-deep, #e8d4b1);
   --universe-ac-border: rgba(255, 252, 235, 0.78);

@@ -8,3 +8,18 @@ import { configure } from '@testing-library/react'
  * 默认 1s 会让**单跑通过**的用例随机变红。
  */
 configure({ asyncUtilTimeout: 5_000 })
+
+/**
+ * jsdom 没实现 `HTMLMediaElement` 的 `play()/load()`，而 `play()` 返回的是 `undefined`
+ * ——于是生产代码里那句 `element.play().catch(...)` 在测试环境抛
+ * `Cannot read properties of undefined`。它作为**未捕获异常**落在用例结束之后：
+ * vitest 在摘要里记 `Errors 2`，**exit code 却还是 0**，所以"全绿"里一直藏着两条。
+ *
+ * 补的是真浏览器的语义（返回一个 Promise），不是往生产代码里塞可选链兜底：
+ * 那种写法会让"媒体 API 永远返回 Promise"这个真实合同在代码里消失。
+ * 用例自己往实例上赋 `play` 的（试听与"放不出来"那两条）不受影响——实例属性优先于原型。
+ */
+if (typeof HTMLMediaElement !== "undefined") {
+  HTMLMediaElement.prototype.load = () => undefined
+  HTMLMediaElement.prototype.play = () => Promise.resolve()
+}

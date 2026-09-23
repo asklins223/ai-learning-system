@@ -30,7 +30,7 @@ type CandidateState = {
 
 type PracticeQuota = { requiredCount: number; metCount: number };
 
-function stubGateway(initial: readonly CandidateState[], runOverride: { status?: string; recovery?: unknown; progress?: Record<string, number> | null; practiceQuota?: PracticeQuota | null } = {}) {
+function stubGateway(initial: readonly CandidateState[], runOverride: { status?: string; recovery?: unknown; progress?: Record<string, number> | null; practiceQuota?: PracticeQuota | null; evidencePreviews?: unknown[] } = {}) {
   const state = {
     candidates: initial.map((candidate) => ({ ...candidate })),
     reviewCalls: [] as unknown[],
@@ -165,7 +165,17 @@ function stubGateway(initial: readonly CandidateState[], runOverride: { status?:
               canonicalAnswer: { kind: "text", unit: { unitId: "u1", text: "提取练习强迫大脑重建记忆痕迹。" } },
               explanation: "提取比重复阅读产生更强的记忆痕迹。",
               boundary: "对完全陌生的材料不成立。",
-              evidencePreviews: [{ evidenceSnapshotId: "ev-1", preview: "测试效应在多项研究中被重复。", sourceLabel: "来源第 3 段" }],
+              // 证据项的字段以服务端那一份 schema 为准（sourceState 是三态里的一种），
+              // 不从客户端组件反推，否则"落点变了"这一半在测试里永远不会发生。
+              evidencePreviews: runOverride.evidencePreviews ?? [
+                {
+                  evidenceSnapshotId: "ev-1",
+                  preview: "测试效应在多项研究中被重复。",
+                  sourceLabel: "来源第 3 段",
+                  sourceState: "located" as const,
+                  originalPreview: null,
+                },
+              ],
               exposedAt: new Date().toISOString(),
             },
           };
@@ -494,6 +504,42 @@ describe("CardGenerationSurface · 候选审核", () => {
     await waitFor(() => expect(screen.getByText("答案看过了：激活后要等 24 小时才能正式验证")).toBeTruthy());
     expect(screen.getByText(/不计入正式状态/)).toBeTruthy();
     expect(screen.getByText(/已查看/)).toBeTruthy();
+  });
+
+  it("证据落点变了的时候，界面把「变了」说出来，而不是安静地少一条依据", async () => {
+    const { state } = stubGateway(
+      [
+        { candidateId: "cand-1", statement: "第一张", reviewDecision: "undecided", publishState: "unpublished" },
+      ],
+      {
+        evidencePreviews: [
+          { evidenceSnapshotId: "ev-1", preview: "测试效应在多项研究中被重复。", sourceLabel: null, sourceState: "drifted", originalPreview: "测试效应在原始实验中被重复验证。" },
+          { evidenceSnapshotId: "ev-2", preview: "", sourceLabel: null, sourceState: "missing", originalPreview: null },
+        ],
+      },
+    );
+    useRoomStore.setState({ activeCardGenerationRunId: RUN_ID });
+    render(<CardGenerationSurface />);
+
+    await waitFor(() => expect(screen.getByText("第一张")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: /查看答案与证据/ }));
+    await waitFor(() => expect(state.revealCalls).toEqual(["cand-1"]));
+
+    // 两条都还在列表里：少一条依据必须是看得见的少，不是静默丢掉。
+    const items = document.querySelectorAll(".reveal-evidence li");
+    expect(items.length).toBe(2);
+    expect(screen.getByText("原文已改动")).toBeTruthy();
+    expect(screen.getByText("原文已不在笔记里")).toBeTruthy();
+    // 改过的文字照旧给出来——审核员要看见的是"现在这段"和"它变了"两件事。
+    expect(screen.getByText("测试效应在多项研究中被重复。")).toBeTruthy();
+    expect(items[0].getAttribute("data-source-state")).toBe("drifted");
+    expect(items[1].getAttribute("data-source-state")).toBe("missing");
+    // 冻住的副本要能和"现在的文字"同时看见——这才是 L21 §1 的落点：只说"改过"不够。
+    expect(screen.getByText(/当初那段：测试效应在原始实验中被重复验证。/)).toBeTruthy();
+    // 没有副本的那条不许冒出"当初那段"字样（null 不能编成空副本）
+    expect(items[1].textContent).not.toContain("当初那段");
+    // 指不到原文的那条不留空行：它得说自己指不到，而不是看起来像一条空依据
+    expect(screen.getByText("这段依据现在指不到笔记里的文字了。")).toBeTruthy();
   });
 
   it("一次动作失败不会清空候选卡，只在卡内报错", async () => {

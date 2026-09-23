@@ -12,15 +12,15 @@ describe("理解目标库视图态", () => {
   });
 
   it("跨挂载保留搜索、筛选与滚动——这是它存在的全部理由", () => {
-    writeObjectiveLibraryView({ query: "惯性", filter: "stable", scrollTop: 240 });
-    expect(readObjectiveLibraryView()).toMatchObject({ query: "惯性", filter: "stable", scrollTop: 240 });
+    writeObjectiveLibraryView({ query: "惯性", filter: "stable", scrollTop: 240, lastObjectiveId: "objective-1" });
+    expect(readObjectiveLibraryView()).toMatchObject({ query: "惯性", filter: "stable", scrollTop: 240, lastObjectiveId: "objective-1" });
   });
 
   it("从别的流程跳进来时清空，但别把当前工作区也清掉", () => {
     writeObjectiveLibraryView({ query: "惯性", filter: "stable", scrollTop: 240 });
     resetObjectiveLibraryView();
     expect(readObjectiveLibraryView()).toEqual({
-      workspaceId: "ws-1", query: "", filter: "all", scrollTop: 0,
+      workspaceId: "ws-1", query: "", filter: "all", scrollTop: 0, lastObjectiveId: null,
     });
   });
 
@@ -28,7 +28,7 @@ describe("理解目标库视图态", () => {
     writeObjectiveLibraryView({ query: "惯性", filter: "attention" });
     retargetObjectiveLibraryView("ws-2");
     expect(readObjectiveLibraryView()).toEqual({
-      workspaceId: "ws-2", query: "", filter: "all", scrollTop: 0,
+      workspaceId: "ws-2", query: "", filter: "all", scrollTop: 0, lastObjectiveId: null,
     });
   });
 });

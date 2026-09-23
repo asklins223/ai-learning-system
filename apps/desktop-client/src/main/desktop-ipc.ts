@@ -1,4 +1,4 @@
-import { BrowserWindow, clipboard, dialog, ipcMain, type IpcMainInvokeEvent, type WebContents } from "electron";
+import { BrowserWindow, clipboard, dialog, ipcMain, shell, type IpcMainInvokeEvent, type WebContents } from "electron";
 import { randomBytes } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import { rename, rm, stat, writeFile } from "node:fs/promises";
@@ -18,6 +18,9 @@ import {
   capabilityProjectionSchema,
   companionBridgeStateV1Schema,
   clipboardReadLinksResultSchema,
+  isWebLinkUrl,
+  shellOpenExternalRequestV1Schema,
+  shellOpenExternalResultV1Schema,
   desktopContractSnapshotSchema,
   desktopNamespaceM2Values,
   desktopRouteKindM2Values,
@@ -94,6 +97,8 @@ import {
   type NoteDocDraftClearResultV1,
   type NoteDocWriteResultV1,
   renameWorkspaceResultV1Schema,
+  dissolveWorkspaceResultV1Schema,
+  transferWorkspaceOwnershipResultV1Schema,
   createWorkspaceResultV1Schema,
   searchDriftResultV1Schema,
   searchReindexResultV1Schema,
@@ -113,6 +118,8 @@ import {
   desktopSourceUpdateRequestSchema,
   desktopSourceNoteResultSchema,
   desktopSourceArchiveResultSchema,
+  desktopSourceReparseResultSchema,
+  desktopAiAuditPageV1Schema,
   desktopNoteListPageSchema,
   desktopNoteCreateRequestSchema,
   desktopNoteMutationResultSchema,
@@ -319,6 +326,11 @@ const authJoinWorkspaceInputSchema = z.strictObject({
   inviteToken: inviteTokenSchema,
 });
 const workspaceSwitchInputSchema = z.strictObject({ ...m1InputBase, workspaceId: uuidSchema });
+const workspaceAiAuditLogInputSchema = z.strictObject({
+  ...m1InputBase,
+  limit: z.number().int().min(1).max(100).optional(),
+  offset: z.number().int().min(0).optional(),
+});
 // 设置页的 AI 同意与数据策略：写入由服务端 requireOwner 收口，这里只做形状校验。
 const workspaceAiConsentUpdateInputSchema = z.strictObject({
   ...m1InputBase,
@@ -332,6 +344,11 @@ const companionRoomPatchInputSchema = z.strictObject({
   ...m1InputBase,
   request: companionRoomProfilePatchV1Schema,
 });
+const shellOpenExternalInputSchema = z.strictObject({
+  ...m1InputBase,
+  request: shellOpenExternalRequestV1Schema,
+});
+
 const companionVoiceSpeakInputSchema = z.strictObject({
   ...m1InputBase,
   request: companionVoiceSpeakRequestV1Schema,
@@ -504,6 +521,7 @@ const sourceCreateNoteInputSchema = z.strictObject({
   force: z.boolean().optional()
 });
 const sourceArchiveInputSchema = z.strictObject({ ...m1InputBase, sourceId: uuidSchema });
+const sourceReparseInputSchema = z.strictObject({ ...m1InputBase, sourceId: uuidSchema });
 const sourceImageGetInputSchema = z.strictObject({
   ...m1InputBase,
   request: sourceImageGetRequestV1Schema,
@@ -557,6 +575,15 @@ const noteDocSyncUpdateInputSchema = z.strictObject({
   // 本机文档产生的 yjs 增量（base64）。上限与下行帧同一处定义：两边各写一个数，
   // 迟早一边放行一边拒收。空增量界面就不该发（主进程仍会如实回 `unchanged`）。
   update: z.string().min(1).max(NOTE_DOC_UPDATE_MAX_CHARS),
+});
+const noteDocSyncTitleInputSchema = z.strictObject({
+  ...m1InputBase,
+  commandId: commandIdSchema,
+  noteId: uuidSchema,
+  // 与 `note.save` 那条同一个上限：标题只有一个来源长度，两侧各写一个数迟早一边
+  // 放行一边拒收。空标题由界面自己挡在发起之前，这里仍按 min(1) 收口。
+  title: z.string().min(1).max(200),
+  titleSource: z.enum(["manual", "auto"]),
 });
 const noteSetShareInputSchema = z.strictObject({
   ...m1InputBase,
@@ -686,6 +713,8 @@ const inviteCreateInputSchema = z.strictObject({
 });
 const inviteRevokeInputSchema = z.strictObject({ ...m1InputBase, inviteId: uuidSchema });
 const memberRemoveInputSchema = z.strictObject({ ...m1InputBase, userId: uuidSchema });
+const workspaceDissolveInputSchema = z.strictObject({ ...m1InputBase, workspaceId: uuidSchema });
+const workspaceTransferOwnershipInputSchema = z.strictObject({ ...m1InputBase, workspaceId: uuidSchema, toUserId: uuidSchema });
 // Markdown 导入：内容是 UTF-8 文本（渲染层 File.text()），单篇 500KB、最多 100 篇。
 const markdownImportInputSchema = z.strictObject({
   ...m1InputBase,
@@ -709,6 +738,8 @@ const voicePreferencePatchInputSchema = z.strictObject({
 });
 const revokeOutputSchema = z.strictObject({ revoked: z.literal(true) });
 const memberRemoveOutputSchema = z.strictObject({ removed: z.literal(true) });
+const workspaceDissolveOutputSchema = dissolveWorkspaceResultV1Schema;
+const workspaceTransferOwnershipOutputSchema = transferWorkspaceOwnershipResultV1Schema;
 
 type InputSchema<T> = z.ZodType<T>;
 type ParsedMeta = { readonly meta: RequestMetaV1 };
@@ -1061,6 +1092,14 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
   let companionInboxBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
   let companionInboxBroadcastSeq = 0;
   let companionInboxCursor = 0;
+  /** 伴星两条常连接的身份：重开时要按同一个 account epoch、从同一格 inbox 游标续读。 */
+  type CompanionStreamContext = {
+    readonly generation: number;
+    readonly workspaceEpoch: number;
+    readonly accountEpoch: number;
+  };
+  let companionStreamContext: CompanionStreamContext | null = null;
+  let companionStreamsPaused = false;
   let companionRuntimeFenceTimer: ReturnType<typeof setInterval> | null = null;
   let companionLifecycleGeneration = 0;
   let companionLifecycleWorkspaceEpoch = 0;
@@ -1077,6 +1116,23 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
       if (subscription.topic.kind === "learningRun") return true;
     }
     return false;
+  };
+
+  /**
+   * 此刻**真的有订阅方**的 run id（L9）。
+   *
+   * `trackedLearningRunIds` / `trackedCardGenerationRunIds` 以前只加不减（只有退出
+   * 登录 / 切空间那几处 `clear()`），而每一次 `subscriptions.subscribe` 都会对集合里
+   * **每一个** id 开一条 SSE。于是"这一趟运行里看过多少个 run"直接等于"对本地 API 挂
+   * 多少条常连接"，而且其中绝大部分已经没有任何人在看了。改成以订阅表为准：
+   * 没订阅者的 run 既不再开流，也已开出的流就地停掉。
+   */
+  const subscribedRunIds = (kind: "learningRun" | "cardGeneration"): Set<string> => {
+    const runIds = new Set<string>();
+    for (const subscription of subscriptions.values()) {
+      if (subscription.topic.kind === kind) runIds.add(subscription.topic.runId);
+    }
+    return runIds;
   };
 
   const stopLearningRunStreams = (): void => {
@@ -1124,6 +1180,8 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     companionInboxBroadcastSeq = 0;
     companionLifecycleGeneration += 1;
     companionLifecycleWorkspaceEpoch = 0;
+    companionStreamContext = null;
+    companionStreamsPaused = false;
     stopCompanionAccountEvents?.();
     stopCompanionAccountEvents = null;
     stopCompanionInboxEvents?.();
@@ -1132,6 +1190,103 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     if (companionRuntimeFenceTimer) clearInterval(companionRuntimeFenceTimer);
     companionRuntimeFenceTimer = null;
     gateway.clearCompanionRuntimeState?.();
+  };
+
+  /**
+   * M16：所有窗口都不在前台时，把伴星那两条常连接收掉。
+   *
+   * 只收 SSE，**不收 60 秒一次的 runtime fence 续约**：`renewCompanionRuntimeFence`
+   * 是服务端判断"她此刻在不在"的唯一来源，停掉它就等于把"窗口最小化"当成"用户离线"——
+   * 那是伴星在场语义的产品变更，不是一条性能项该顺带决定的。
+   *
+   * 读不到窗口清单时一律按"没隐藏"处理。这不是防御性摆设：任何一次取窗口失败
+   * （窗口正在销毁、平台差异、测试替身没有这个 API）都不该让伴星更新整趟不再到达。
+   */
+  const allCompanionWindowsHidden = (): boolean => {
+    try {
+      const allWindows = (
+        BrowserWindow as unknown as { getAllWindows?: () => BrowserWindow[] }
+      ).getAllWindows;
+      if (typeof allWindows !== "function") return false;
+      const windows = allWindows.call(BrowserWindow);
+      if (windows.length === 0) return false;
+      return windows.every(
+        (window) => window.isDestroyed()
+          || window.webContents.isDestroyed()
+          || !window.isVisible()
+          || window.isMinimized(),
+      );
+    } catch {
+      return false;
+    }
+  };
+
+  const openCompanionStreams = async (ctx: CompanionStreamContext): Promise<void> => {
+    const { generation, workspaceEpoch, accountEpoch } = ctx;
+    const stale = (): boolean =>
+      generation !== companionLifecycleGeneration || workspaceEpoch !== activeWorkspaceEpoch;
+    companionStreamContext = ctx;
+    companionStreamsPaused = false;
+    stopCompanionAccountEvents = await gateway.watchCompanionAccountEvents(
+      accountEpoch,
+      (event) => {
+        if (stale()) return;
+        stopCompanionChatStreams();
+        stopCompanionLifecycle();
+        emit("runtime", { kind: "snapshot_invalidated", scope: "runtime" }, workspaceEpoch);
+        void event;
+      },
+    );
+    if (stale()) {
+      stopCompanionAccountEvents?.();
+      stopCompanionAccountEvents = null;
+      return;
+    }
+    stopCompanionInboxEvents = await gateway.watchCompanionInboxEvents(
+      companionInboxCursor,
+      (delivery) => {
+        if (stale()) return;
+        companionInboxCursor = Math.max(companionInboxCursor, delivery.inboxSequence);
+        companionInboxBroadcastSeq = Math.max(companionInboxBroadcastSeq, delivery.inboxSequence);
+        if (companionInboxBroadcastTimer) return;
+        companionInboxBroadcastTimer = setTimeout(() => {
+          companionInboxBroadcastTimer = null;
+          const inboxSequence = companionInboxBroadcastSeq;
+          companionInboxBroadcastSeq = 0;
+          if (stale()) return;
+          emit("runtime", { kind: "companion_activity_changed", inboxSequence }, workspaceEpoch);
+        }, 400);
+      },
+    );
+  };
+
+  /** 只收流：游标、generation、fence 定时器都要跨过一次"隐藏"活着。 */
+  const closeCompanionStreams = (): void => {
+    if (companionStreamsPaused) return;
+    companionStreamsPaused = true;
+    stopCompanionAccountEvents?.();
+    stopCompanionAccountEvents = null;
+    stopCompanionInboxEvents?.();
+    stopCompanionInboxEvents = null;
+  };
+
+  /**
+   * 窗口事件与 fence 心跳共用这一道判定。心跳那份是**兜底**：窗口的 show/hide 可能
+   * 因为绑定时机（窗口在本模块注册之后才创建）而漏掉，漏掉的代价不该是"这一趟再也
+   * 收不到伴星更新"，最坏只到 60 秒。
+   */
+  const reconcileCompanionStreamsForVisibility = (): void => {
+    if (!companionStreamContext) return;
+    if (!companionStreamsPaused) {
+      if (allCompanionWindowsHidden()) closeCompanionStreams();
+      return;
+    }
+    if (allCompanionWindowsHidden()) return;
+    const ctx = companionStreamContext;
+    // 补账：inbox 靠保留游标重连续读，但 account 流在隐藏期间丢的那一段（例如 epoch
+    // 变了）没有任何流会补回来，只能显式让渲染层重取一次快照。
+    emit("runtime", { kind: "snapshot_invalidated", scope: "runtime" }, ctx.workspaceEpoch);
+    void openCompanionStreams(ctx).catch(() => undefined);
   };
 
   const startCompanionLifecycle = async (workspaceEpoch: number): Promise<void> => {
@@ -1157,39 +1312,14 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
       if (generation !== companionLifecycleGeneration || workspaceEpoch !== activeWorkspaceEpoch) return;
       companionRuntimeFenceTimer = setInterval(() => {
         if (generation !== companionLifecycleGeneration || workspaceEpoch !== activeWorkspaceEpoch) return;
+        reconcileCompanionStreamsForVisibility();
         void renewFence().catch(() => undefined);
       }, 60_000);
-      stopCompanionAccountEvents = await gateway.watchCompanionAccountEvents(
-        overview.account.epoch,
-        (event) => {
-          if (generation !== companionLifecycleGeneration || workspaceEpoch !== activeWorkspaceEpoch) return;
-          stopCompanionChatStreams();
-          stopCompanionLifecycle();
-          emit("runtime", { kind: "snapshot_invalidated", scope: "runtime" }, workspaceEpoch);
-          void event;
-        },
-      );
-      if (generation !== companionLifecycleGeneration || workspaceEpoch !== activeWorkspaceEpoch) {
-        stopCompanionAccountEvents();
-        stopCompanionAccountEvents = null;
-        return;
-      }
-      stopCompanionInboxEvents = await gateway.watchCompanionInboxEvents(
-        companionInboxCursor,
-        (delivery) => {
-          if (generation !== companionLifecycleGeneration || workspaceEpoch !== activeWorkspaceEpoch) return;
-          companionInboxCursor = Math.max(companionInboxCursor, delivery.inboxSequence);
-          companionInboxBroadcastSeq = Math.max(companionInboxBroadcastSeq, delivery.inboxSequence);
-          if (companionInboxBroadcastTimer) return;
-          companionInboxBroadcastTimer = setTimeout(() => {
-            companionInboxBroadcastTimer = null;
-            const inboxSequence = companionInboxBroadcastSeq;
-            companionInboxBroadcastSeq = 0;
-            if (generation !== companionLifecycleGeneration || workspaceEpoch !== activeWorkspaceEpoch) return;
-            emit("runtime", { kind: "companion_activity_changed", inboxSequence }, workspaceEpoch);
-          }, 400);
-        },
-      );
+      await openCompanionStreams({
+        generation,
+        workspaceEpoch,
+        accountEpoch: overview.account.epoch,
+      });
     } catch {
       if (generation === companionLifecycleGeneration) stopCompanionLifecycle();
       // Companion capability failure must not turn a valid auth session into a
@@ -1222,6 +1352,13 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     windowLifecycleBound.add(window);
     window.once("closed", () => releaseSubscriptionsForWindow(window));
     window.webContents.once("destroyed", () => releaseSubscriptionsForWindow(window));
+    // M16：窗口进出前台立刻收/放伴星那两条常连接。fence 心跳里还有同一道兜底，
+    // 所以漏一次事件（例如窗口在本模块注册之后才创建）最坏只到 60 秒。
+    const onVisibilityChange = (): void => reconcileCompanionStreamsForVisibility();
+    window.on("show", onVisibilityChange);
+    window.on("restore", onVisibilityChange);
+    window.on("hide", onVisibilityChange);
+    window.on("minimize", onVisibilityChange);
   };
 
   const refreshLearningRunSubscription = async (runId: string): Promise<void> => {
@@ -1258,7 +1395,14 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
   };
 
   const ensureTrackedLearningRunStreams = (): void => {
-    for (const runId of trackedLearningRunIds) ensureLearningRunStream(runId);
+    const subscribed = subscribedRunIds("learningRun");
+    for (const runId of [...trackedLearningRunIds]) {
+      if (subscribed.has(runId)) continue;
+      trackedLearningRunIds.delete(runId);
+      learningRunStreams.get(runId)?.();
+      learningRunStreams.delete(runId);
+    }
+    for (const runId of subscribed) ensureLearningRunStream(runId);
   };
 
   const refreshCardGenerationSubscription = async (runId: string, eventCursor: number): Promise<void> => {
@@ -1296,7 +1440,14 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
   };
 
   const ensureTrackedCardGenerationStreams = (): void => {
-    for (const runId of trackedCardGenerationRunIds) ensureCardGenerationStream(runId);
+    const subscribed = subscribedRunIds("cardGeneration");
+    for (const runId of [...trackedCardGenerationRunIds]) {
+      if (subscribed.has(runId)) continue;
+      trackedCardGenerationRunIds.delete(runId);
+      cardGenerationStreams.get(runId)?.();
+      cardGenerationStreams.delete(runId);
+    }
+    for (const runId of subscribed) ensureCardGenerationStream(runId);
   };
 
   /**
@@ -1801,6 +1952,16 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, workspaceAiSettingsV1Schema);
 
   /**
+   * AI 外发审计的一页（doc 34 L3 的另一半：写侧一直在记，桌面以前没有任何地方读）。
+   * Owner 门在服务端那条路由上（`requireOwner`），这里不写第二份——和整库导出同一口径。
+   */
+  installHandler(DESKTOP_IPC_CHANNELS.workspaceAiAuditLog, workspaceAiAuditLogInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.getWorkspaceAiAuditLog(input.limit ?? 20, input.offset ?? 0, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, desktopAiAuditPageV1Schema);
+
+  /**
    * 整库导出。服务端出数据（`requireOwner` 收口），本机负责落盘：读者在系统
    * 保存对话框里自己选位置，主进程写文件。渲染进程只拿到回执——它既看不到
    * 文件系统，也没有任何写文件的通道。
@@ -1931,6 +2092,21 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     return gateway.removeMember(input.userId, input.meta.requestId);
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, memberRemoveOutputSchema);
 
+  // 解散空间：不可逆，所以和邻居们走同一对门（M2 路由 + epoch 断言）。
+  // 逐表计数由服务端带回，界面拿它说明"删了什么"——这里不替它编。
+  installHandler(DESKTOP_IPC_CHANNELS.workspaceDissolve, workspaceDissolveInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.dissolveWorkspace(input.workspaceId, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, workspaceDissolveOutputSchema);
+
+  // 转让所有权：同一对门（M2 路由 + epoch）。服务端 requireOwner 是最终裁判。
+  installHandler(DESKTOP_IPC_CHANNELS.workspaceTransferOwnership, workspaceTransferOwnershipInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.transferWorkspaceOwnership(input.workspaceId, input.toUserId, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, workspaceTransferOwnershipOutputSchema);
+
   // Markdown 批量导入（F-033 幂等，Owner）。
   installHandler(DESKTOP_IPC_CHANNELS.settingsMarkdownImport, markdownImportInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "settings.section");
@@ -2053,6 +2229,21 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     }
     return gateway.archiveSource(input.sourceId, input.meta.requestId);
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, desktopSourceArchiveResultSchema);
+
+  /**
+   * 重新解析一篇来源（doc 34 L7）。门控沿用 `source.update`：重新解析改的是这一篇
+   * 自己的解析结果，与归档同一类 owner-only 写；服务端那边另有 `requireOwner`，
+   * 这里挡的是"点了才知道没权限"。
+   */
+  installHandler(DESKTOP_IPC_CHANNELS.sourceReparse, sourceReparseInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "source.detail");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    const capabilities = await gateway.getCapabilities(input.meta.requestId);
+    if (capabilities.actionCapabilities["source.update"] !== "allowed") {
+      throw new DesktopGatewayFailure("forbidden", "never");
+    }
+    return gateway.reparseSource(input.sourceId, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, desktopSourceReparseResultSchema);
 
   // 站内图片字节：来源详情的正文片段与笔记阅读页都会用到（两者共用同一份
   // `/api/uploads/…` 引用），所以只要其中一个面可达就放行。这里没有 owner 门控
@@ -2606,6 +2797,29 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     return { via: receipt.via, revision: receipt.revision, savedAt: receipt.savedAt };
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, noteDocWriteResultV1Schema);
 
+  /**
+   * 列表里改名。这条通道此前只有契约、preload 转发与网关实现，**主进程没有注册过
+   * handler**——`ipcRenderer.invoke` 直接 reject，界面落到"重命名未确认"那句兜底，
+   * 而测试用一个 `vi.fn()` 替身把它跑绿了（doc 34 L1）。
+   *
+   * 这里不判可写性，与 `syncUpdate` 同一条规矩：判据只在服务端那一处。列表这条路径上
+   * 没有打开的文档（`noteDocStreams` 里通常没有这一篇），所以标题由网关写进本机那份的
+   * `meta` 再走同一个增量口上行；`via` 由网关如实报，不在这儿改写。
+   */
+  installHandler(DESKTOP_IPC_CHANNELS.noteDocSyncTitle, noteDocSyncTitleInputSchema, options, async (_event, _window, input): Promise<NoteDocWriteResultV1> => {
+    requireM2Route(contract, "note.detail");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    const receipt = await gateway.syncNoteDocTitle(
+      input.noteId,
+      input.title,
+      input.titleSource,
+      input.meta.requestId,
+    );
+    // 与正文同一条落盘口径：改名同样可能停在 `queued`，不留在内存里过夜就又没了。
+    await persistNoteDocLocal(input.noteId);
+    return { via: receipt.via, revision: receipt.revision, savedAt: receipt.savedAt };
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, noteDocWriteResultV1Schema);
+
   installHandler(DESKTOP_IPC_CHANNELS.noteSetShare, noteSetShareInputSchema, options, async (_event, _window, input): Promise<NoteShareScopeReceiptV1> => {
     requireM2Route(contract, "note.detail");
     assertEpoch(input.meta, activeWorkspaceEpoch);
@@ -2790,6 +3004,17 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     const text = clipboard.readText().slice(0, 4000);
     return clipboardReadLinksResultSchema.parse({ urls: extractCandidateLinks(text) });
   }, undefined, clipboardReadLinksResultSchema);
+
+  installHandler(DESKTOP_IPC_CHANNELS.shellOpenExternal, shellOpenExternalInputSchema, options, async (_event, _window, input) => {
+    // 唯一的信任边界：这条地址来自模型给的回答，渲染层怎么画都不算，只有这里决定要不要
+    // 交给系统去开。白名单与渲染层共用合同里那一份判定（`isWebLinkUrl`），所以"画成能点"
+    // 与"真能开"不会是两种口径。窗口本身永远不导航出去（`will-navigate` 仍拦外链）。
+    if (!isWebLinkUrl(input.request.url)) {
+      throw new DesktopGatewayFailure("forbidden", "never");
+    }
+    await shell.openExternal(new URL(input.request.url).toString());
+    return { opened: true as const };
+  }, undefined, shellOpenExternalResultV1Schema);
 
   installHandler(DESKTOP_IPC_CHANNELS.subscriptionsSubscribe, subscribeInputSchema, options, (_event, window, input) => {
     if (input.topic.kind !== "runtime" && activeWorkspaceEpoch < 1) {

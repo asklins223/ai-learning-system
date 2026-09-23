@@ -60,6 +60,11 @@ function stubGateway(
     readonly pagedItems?: readonly ReviewItem[];
     readonly pageSize?: number;
     readonly defer?: (input: { meta: unknown; request: { scheduleId: string; scheduleGeneration: number; deferredUntil: string; reasonCode: string } }) => Promise<unknown>;
+    /**
+     * 账号「作答方式」偏好这一条读口的答法。默认 `"any"`（未设置）；给
+     * `"reject"` 就是读不到——开始复习不能因此被挡住。
+     */
+    readonly answerMode?: "voice" | "silent" | "text" | "any" | "reject";
   } = {},
 ) {
   const queueResult = queueFailure
@@ -111,7 +116,29 @@ function stubGateway(
         return { ok: true as const, data: objectiveSurface(objectiveId, label) };
       }),
     },
-    learningRun: { start: vi.fn() },
+    learningRun: {
+      start: vi.fn(async () => ({
+        ok: true as const,
+        workspaceEpoch: 1,
+        data: { runId: "run-1", status: "preparing" as const },
+      })),
+    },
+    companion: {
+      answerMode: {
+        get: vi.fn(async () => {
+          if (options.answerMode === "reject") throw new Error("answer mode read failed");
+          return {
+            ok: true as const,
+            workspaceEpoch: 1,
+            data: {
+              version: 1 as const,
+              preference: options.answerMode ?? "any",
+              updatedAt: "2026-09-20T00:00:00.000Z",
+            },
+          };
+        }),
+      },
+    },
   };
 
   window.ailearn = gateway as unknown as typeof window.ailearn;
@@ -741,5 +768,53 @@ describe("ReviewSurface · 多数据场景", () => {
 
     const restored = await screen.findByRole("group", { name: "复习队列卡叠" });
     await waitFor(() => expect(restored.getAttribute("data-review-id")).toBe("00000003-1111-4111-8111-111111111111"));
+  });
+});
+
+/**
+ * doc 34 L15：`responsePreference` 过去在这一条路径上硬写 `"adaptive"`，设置页那个
+ * 「作答方式」三选对复习从来没生效过。下面按**发出去的启动参数**断言，不按界面文字——
+ * 值只在这一刻有意义（Run 是按它规划的）。
+ */
+describe("ReviewSurface · 账号作答方式偏好（L15）", () => {
+  const ONE = [item("dddddddd-dddd-4ddd-8ddd-dddddddddddd", "objective-d")];
+  const ONE_LABELS = { "objective-d": "提取练习" };
+
+  async function startWith(answerMode: "voice" | "silent" | "text" | "reject") {
+    const gateway = stubGateway(ONE, ONE_LABELS, false, { answerMode });
+    render(<ReviewSurface />);
+    fireEvent.click(await screen.findByRole("button", { name: /开始复习/ }));
+    await waitFor(() => expect(gateway.learningRun.start).toHaveBeenCalledTimes(1));
+    // `vi.fn()` 没有签名，`mock.calls` 推成 `[][0]`；这里按发出去的实际形状取。
+    const [call] = gateway.learningRun.start.mock.calls as unknown as Array<[{
+      request: { responsePreference: string; originV2: Record<string, unknown> };
+    }]>;
+    return call[0];
+  }
+
+  it("偏好是语音时，发出去的启动参数就是语音", async () => {
+    const sent = await startWith("voice");
+    expect(sent.request.responsePreference).toBe("voice");
+  });
+
+  it("「静默结构」映射成 structured，不是文字", async () => {
+    const sent = await startWith("silent");
+    expect(sent.request.responsePreference).toBe("structured");
+  });
+
+  it("未设置的偏好不会替用户决定：读不到就是跟随安排，且照常开始", async () => {
+    const sent = await startWith("reject");
+    expect(sent.request.responsePreference).toBe("adaptive");
+  });
+
+  it("换偏好只换作答模态，不改复习的排程身份", async () => {
+    const sent = await startWith("text");
+    expect(sent.request.responsePreference).toBe("text");
+    expect(sent.request.originV2).toEqual({
+      kind: "review",
+      scheduleId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd-schedule",
+      objectiveId: "objective-d",
+      scheduleGeneration: 1,
+    });
   });
 });

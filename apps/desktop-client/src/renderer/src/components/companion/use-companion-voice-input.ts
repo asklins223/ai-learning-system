@@ -39,6 +39,15 @@ export interface CompanionVoiceInputOptions {
 export interface CompanionVoiceInput {
   readonly phase: CompanionVoicePhase;
   readonly note: string | null;
+  /**
+   * 每发出一条提示就 +1。
+   *
+   * 只有 `note` 字符串本身不够：5 秒的限时提示还没到点时用户又撞上同一个失败，
+   * 字符串没变 → UI 那个 effect 不重跑 → 倒计时不重置，也没有第二次反馈——
+   * 而下面那条注释承诺的"下一次同样的失败仍然算一次新事件"，只有在
+   * `dismissNote` 已经跑过后成立（方案 35 E5）。
+   */
+  readonly noteRevision: number;
   readonly supported: boolean;
   readonly toggle: () => void;
   readonly cancel: () => void;
@@ -67,6 +76,7 @@ function encodeBase64(bytes: Uint8Array): string {
 export function useCompanionVoiceInput(options: CompanionVoiceInputOptions): CompanionVoiceInput {
   const [phase, setPhase] = useState<CompanionVoicePhase>("idle");
   const [note, setNote] = useState<string | null>(null);
+  const [noteRevision, setNoteRevision] = useState(0);
   const [supported] = useState(() => CompanionVoiceRecorder.isSupported());
   const phaseRef = useRef<CompanionVoicePhase>("idle");
   phaseRef.current = phase;
@@ -76,6 +86,15 @@ export function useCompanionVoiceInput(options: CompanionVoiceInputOptions): Com
 
   const emitLevel = useCallback((level: number) => {
     for (const listener of listenersRef.current) listener(level);
+  }, []);
+
+  /**
+   * 发一条系统提示。文本与"这是第几次"一起变，界面才能把 5 秒内的第二次同样失败
+   * 当成新事件重跑一遍计时（见 `noteRevision`）。
+   */
+  const showNote = useCallback((text: string) => {
+    setNote(text);
+    setNoteRevision((value) => value + 1);
   }, []);
 
   const subscribeLevel = useCallback((listener: (level: number) => void) => {
@@ -92,7 +111,7 @@ export function useCompanionVoiceInput(options: CompanionVoiceInputOptions): Com
     const recording = await recorder.stop();
     if (!recording) {
       setPhase("idle");
-      setNote("好像没录到内容，再试一次");
+      showNote("好像没录到内容，再试一次");
       return;
     }
     try {
@@ -117,13 +136,13 @@ export function useCompanionVoiceInput(options: CompanionVoiceInputOptions): Com
         },
       });
       setPhase("idle");
-      setNote(transcription.route === "cloud" ? "云端识别完成，已直接发送" : "本地识别完成，已直接发送；音频没有离开设备");
+      showNote(transcription.route === "cloud" ? "云端识别完成，已直接发送" : "本地识别完成，已直接发送；音频没有离开设备");
       await options.onTranscript({ text: transcription.text, voiceArtifactId: transcription.voiceArtifactId });
     } catch (error) {
       setPhase("idle");
-      setNote(`识别失败：${gatewayErrorMessage(error)}`);
+      showNote(`识别失败：${gatewayErrorMessage(error)}`);
     }
-  }, [emitLevel, options]);
+  }, [emitLevel, options, showNote]);
 
   const finishRef = useRef(finish);
   finishRef.current = finish;
@@ -131,7 +150,7 @@ export function useCompanionVoiceInput(options: CompanionVoiceInputOptions): Com
   const begin = useCallback(async () => {
     if (phaseRef.current !== "idle" || options.disabled) return;
     if (!CompanionVoiceRecorder.isSupported()) {
-      setNote("当前设备没有可用的麦克风");
+      showNote("当前设备没有可用的麦克风");
       return;
     }
     vadRef.current = COMPANION_VAD_INITIAL_STATE;
@@ -143,6 +162,9 @@ export function useCompanionVoiceInput(options: CompanionVoiceInputOptions): Com
           vadRef.current = step.state;
           if (step.verdict === "stop") void finishRef.current();
         },
+        // 录到 60 秒上限：走与"说完自动收尾"完全同一条路，这段音频才会被送去识别。
+        // 以前是录音器自己 `void stop()`，返回值没人接，界面就停在「我在听」上不动了。
+        onLimit: () => { void finishRef.current(); },
       });
       recorderRef.current = recorder;
       await recorder.start();
@@ -156,9 +178,9 @@ export function useCompanionVoiceInput(options: CompanionVoiceInputOptions): Com
     } catch {
       recorderRef.current = null;
       setPhase("idle");
-      setNote("麦克风不可用或未授权");
+      showNote("麦克风不可用或未授权");
     }
-  }, [emitLevel, options.disabled]);
+  }, [emitLevel, options.disabled, showNote]);
 
   const cancel = useCallback(() => {
     const recorder = recorderRef.current;
@@ -167,9 +189,9 @@ export function useCompanionVoiceInput(options: CompanionVoiceInputOptions): Com
     setPhase("idle");
     if (recorder) {
       void recorder.stop();
-      setNote("已取消这次录音");
+      showNote("已取消这次录音");
     }
-  }, [emitLevel]);
+  }, [emitLevel, showNote]);
 
   const toggle = useCallback(() => {
     if (phaseRef.current === "listening") void finishRef.current();
@@ -184,5 +206,5 @@ export function useCompanionVoiceInput(options: CompanionVoiceInputOptions): Com
     if (recorder) void recorder.stop();
   }, []);
 
-  return { phase, note, supported, toggle, cancel, dismissNote, subscribeLevel };
+  return { phase, note, noteRevision, supported, toggle, cancel, dismissNote, subscribeLevel };
 }

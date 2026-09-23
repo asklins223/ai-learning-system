@@ -7,6 +7,8 @@ import react from '@vitejs/plugin-react'
 import { defineConfig } from 'electron-vite'
 import type { Plugin } from 'vite'
 
+import { sharedAlias } from './shared-alias.ts'
+
 // Keep local desktop development aligned with the root Compose .env. The
 // values are consumed by the privileged main process only; they are not
 // injected into renderer import.meta.env or exposed through preload.
@@ -62,20 +64,9 @@ function releasePublicAssetsPlugin(): Plugin {
 }
 
 /**
- * `@ailearn/shared` 的实时源码别名（2026-09-21）。
- *
- * 与 `apps/api`、`workers/ai-worker` 的 tsconfig `paths` 同一个目的：此前桌面端经
- * `node_modules/@ailearn/shared`（pnpm 对 `file:` 依赖的**安装期快照**）解析，改了
- * `packages/shared` 的契约在打包与运行里默认不可见 —— 只能手工 rsync 覆写快照，
- * 否则改动"看起来没生效"。类型侧那一半在 tsconfig.web/node.json 的 paths 里。
- *
- * 子路径全是 `src/*.ts` 平铺文件（桌面端没有 `@ailearn/shared/db-schema` 这类目录导入）。
+ * `@ailearn/shared` 的实时源码别名定义在 `shared-alias.ts`，与 `vitest.config.ts`
+ * 共用同一份（两边解析的不是同一个文件，就有一边在测一份快照）。
  */
-const sharedAlias = [
-  { find: /^@ailearn\/shared$/, replacement: resolve('../../packages/shared/src/index.ts') },
-  { find: /^@ailearn\/shared\/(.*)$/, replacement: resolve('../../packages/shared/src/$1.ts') },
-]
-
 export default defineConfig({
   main: {
     resolve: { alias: sharedAlias },

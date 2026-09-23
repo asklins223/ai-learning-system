@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ObjectiveLibrarySurface } from "./WorkspaceLibrarySurface";
 import { retargetObjectiveLibraryView } from "./objective-library-view-state";
@@ -82,11 +82,21 @@ function rowText(): string {
   return document.querySelector(".v3-goal-row")?.textContent ?? "";
 }
 
+async function openIndex(): Promise<void> {
+  const toggle = await waitFor(() => {
+    const button = document.querySelector<HTMLButtonElement>(".objective-expedition__index-toggle");
+    expect(button).not.toBeNull();
+    return button!;
+  });
+  fireEvent.click(toggle);
+}
+
 describe("理解目标列表行", () => {
   it("状态 tag 说人话，不把服务端枚举原样印到行上", async () => {
     installApi([listItem()]);
     render(<ObjectiveLibrarySurface />);
 
+    await openIndex();
     await waitFor(() => expect(rowText()).toContain("还没正式答过"));
     expect(document.body.textContent).not.toContain("unvalidated");
   });
@@ -104,6 +114,7 @@ describe("理解目标列表行", () => {
     })]);
     render(<ObjectiveLibrarySurface />);
 
+    await openIndex();
     await waitFor(() => expect(rowText()).toContain("已经答对过"));
     expect(rowText()).toContain("正式答过 · 今天");
     expect(rowText()).toContain("复习 5 天后");
@@ -130,6 +141,7 @@ describe("理解目标列表行", () => {
     })]);
     render(<ObjectiveLibrarySurface />);
 
+    await openIndex();
     await waitFor(() => expect(rowText()).toMatch(/后才能正式答/));
     // 时间点必须渲染成"月日 时分"，不能把 ISO 串漏到界面上。
     expect(rowText()).toMatch(/\d+月\d+日 \d{2}:\d{2} 后才能正式答/);

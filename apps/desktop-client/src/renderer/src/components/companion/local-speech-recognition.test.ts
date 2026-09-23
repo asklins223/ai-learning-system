@@ -79,8 +79,7 @@ describe("local speech recognition routing", () => {
     expect(Date.now() - started).toBeLessThan(5_000);
   });
 
-  it("discards the crashed worker so the next attempt spawns a fresh one", async () => {
-    const { transcribeRecording } = await loadModule();
+  it("discards the crashed worker so the next attempt spawns a fresh one", async () => {    const { transcribeRecording } = await loadModule();
     const cloud = vi.fn(async () => ({ text: "云端", voiceArtifactId: "va-2" }));
 
     const first = transcribeRecording(args(cloud));
@@ -101,5 +100,56 @@ describe("local speech recognition routing", () => {
 
     await expect(second).resolves.toEqual({ text: "本地结果", route: "local", voiceArtifactId: null });
     expect(cloud).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * 空闲下线（2026-09-22 性能重扫 H6）。
+   *
+   * 这一层以前只有崩溃才 `terminate`：本地 SenseVoice 一份引擎就是那份 228 MB 的 int8
+   * 模型，用户说过一句话之后它就一直占到应用退出——而语音是偶尔用的。这里锁两件事：
+   * 空闲窗口到点必须下线，且再说一句要能重新拉起（不能下线之后就永久坏掉）。
+   */
+  it("releases the engine after the idle window and re-spawns for the next utterance", async () => {
+    vi.useFakeTimers();
+    try {
+      const flush = async (ms = 0) => {
+        await vi.advanceTimersByTimeAsync(ms);
+      };
+      const { transcribeRecording } = await loadModule();
+      const cloud = vi.fn(async () => ({ text: "云端", voiceArtifactId: "va-3" }));
+
+      const first = transcribeRecording(args(cloud));
+      await flush();
+      expect(FakeWorker.instances).toHaveLength(1);
+      const worker = FakeWorker.instances[0]!;
+      worker.emit({ type: "ready" });
+      await flush();
+      const decode = worker.posted.find((message) => message.type === "decode");
+      expect(decode).toBeTruthy();
+      worker.emit({ type: "result", id: decode!.id, text: "本地结果" });
+      await expect(first).resolves.toMatchObject({ text: "本地结果", route: "local" });
+      expect(worker.terminated).toBe(false);
+
+      // 差一秒不收：说明这条线是"空闲"而不是"用完即弃"，连说几句不用重载模型。
+      await flush(89_000);
+      expect(worker.terminated).toBe(false);
+      await flush(90_000 - 89_000 + 1_000);
+      expect(worker.terminated).toBe(true);
+
+      const second = transcribeRecording(args(cloud));
+      await flush();
+      expect(FakeWorker.instances).toHaveLength(2);
+      const next = FakeWorker.instances[1]!;
+      expect(next).not.toBe(worker);
+      next.emit({ type: "ready" });
+      await flush();
+      const nextDecode = next.posted.find((message) => message.type === "decode");
+      expect(nextDecode).toBeTruthy();
+      next.emit({ type: "result", id: nextDecode!.id, text: "第二句" });
+      await expect(second).resolves.toMatchObject({ text: "第二句", route: "local" });
+      expect(cloud).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

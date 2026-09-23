@@ -3,9 +3,8 @@ import { ArrowLeft } from "lucide-react";
 import { HUD_PAGES, type HudPageId } from "./hud-pages";
 
 /**
- * The shared V3.1 page shell: the mint heading chip and the "return to study"
- * pill that every business page wears, wrapping one page body inside the
- * mockup's `main.content` region.
+ * The shared page shell. The assessment scene owns its own focus header, so it
+ * does not render the room's heading chip behind that scene.
  */
 export function HudPage({
   page,
@@ -20,10 +19,12 @@ export function HudPage({
   const definition = HUD_PAGES[page];
   return (
     <>
-      <div className="task-title">
-        <h1>{definition.title}</h1>
-        <p>{definition.subtitle}</p>
-      </div>
+      {page !== "assessment" ? (
+        <div className="task-title">
+          <h1>{definition.title}</h1>
+          <p>{definition.subtitle}</p>
+        </div>
+      ) : null}
       <main className={`content${wide || definition.wide ? " full" : ""}`}>{children}</main>
     </>
   );

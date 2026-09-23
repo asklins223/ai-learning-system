@@ -11,12 +11,16 @@
  * 已下发前缀之后还会变，任何"猜闭合"的做法都会让文字在用户眼前跳变。
  */
 import type { ReactNode } from "react";
+import { openCompanionExternalLink } from "./companion-link";
 
 /**
  * 行内标记。斜体那条刻意要求星号两侧都不是空白，否则 `长 * 宽 * 高`
  * 这种乘法写法会被吃成 `长  宽  高`——静默改内容比不渲染更坏（旧剥离器踩过）。
+ *
+ * 链接只认 `http(s):`：`javascript:`、`data:` 这类不解析成结构，照原文留成**文本**
+ * （这里没有 `dangerouslySetInnerHTML`，所以它既点不动也执行不了）。
  */
-const INLINE_PATTERN = /(`[^`\n]+`)|(\*\*([^*\n]+?)\*\*)|(?<![\w*])\*([^*\s](?:[^*]*[^*\s])?)\*(?![\w*])/g;
+const INLINE_PATTERN = /(?<code>`[^`\n]+`)|(?<link>\[(?<label>[^\]\n]+)\]\((?<url>https?:[^)\s]*)\))|(?<bold>\*\*(?<boldText>[^*\n]+?)\*\*)|(?<![\w*])\*(?<emText>[^*\s](?:[^*]*[^*\s])?)\*(?![\w*])/g;
 
 function renderInline(text: string, keyBase: string): ReactNode[] {
   const nodes: ReactNode[] = [];
@@ -25,9 +29,28 @@ function renderInline(text: string, keyBase: string): ReactNode[] {
   for (const match of text.matchAll(INLINE_PATTERN)) {
     const at = match.index ?? 0;
     if (at > last) nodes.push(text.slice(last, at));
-    if (match[1]) nodes.push(<code key={`${keyBase}-${index}`}>{match[1].slice(1, -1)}</code>);
-    else if (match[3]) nodes.push(<strong key={`${keyBase}-${index}`}>{match[3]}</strong>);
-    else if (match[4]) nodes.push(<em key={`${keyBase}-${index}`}>{match[4]}</em>);
+    const groups = match.groups ?? {};
+    if (groups.code) nodes.push(<code key={`${keyBase}-${index}`}>{groups.code.slice(1, -1)}</code>);
+    else if (groups.link) {
+      // 画成能点的，是因为**真能点开**：一条只放行 http/https 的 `shell.openExternal`
+      // 通道（方案 35 F7）。协议白名单两边同一份（合同里的 `isWebLinkUrl`），所以不会
+      // 出现"这里画了颗按钮、主进程把它拒了"。`javascript:`、`data:` 这类根本不解析成
+      // 结构，照原文留成文本。
+      // 去处仍然写在下面一行：打不开时（系统没有默认浏览器等）它至少还能被复制。
+      nodes.push(
+        <button
+          type="button"
+          className="companion-md__link"
+          key={`${keyBase}-${index}`}
+          onClick={() => { void openCompanionExternalLink(groups.url); }}
+        >
+          <span>{groups.label}</span>
+          <small>{groups.url}</small>
+        </button>,
+      );
+    }
+    else if (groups.bold) nodes.push(<strong key={`${keyBase}-${index}`}>{groups.boldText}</strong>);
+    else if (groups.emText) nodes.push(<em key={`${keyBase}-${index}`}>{groups.emText}</em>);
     last = at + match[0].length;
     index += 1;
   }

@@ -108,11 +108,11 @@ export function LightboxViewer({
 
   const touchStartX = useRef<number | null>(null);
 
-  // 必须 portal 到 body：`.image-lightbox` 是 `position: fixed; inset: 0`，而伴星抽屉
-  // 带着 `animation: companion-drawer-in … both`——fill-mode 让 transform 一直生效，
-  // 于是抽屉成了 fixed 后代的 containing block，"放大"被关在 406×778 的抽屉里
+  // 全屏形态必须 portal 到 body：`.image-lightbox` 是 `position: fixed; inset: 0`，而
+  // 伴星抽屉带着 `animation: companion-drawer-in … both`——fill-mode 让 transform 一直
+  // 生效，于是抽屉成了 fixed 后代的 containing block，"放大"被关在 406×778 的抽屉里
   // （实机 2026-09-21 用户报"这里图片放大应该全屏放大"，量的就是这个尺寸）。
-  return createPortal(
+  const overlay = (
     <div
       className={variant === "card" ? "image-lightbox image-lightbox--card" : "image-lightbox"}
       data-companion-owned={ownedByCompanion ? "true" : undefined}
@@ -168,9 +168,16 @@ export function LightboxViewer({
       >
         ×
       </button>
-    </div>,
-    document.body,
+    </div>
   );
+
+  // `card` 形态反过来**不能** portal：它的样式是 `position:absolute; inset:0;
+  // border-radius:inherit`，设计意图就是盖住宿主那张纸（notebook-surface 的注释原话：
+  // "遮罩只盖住这张纸面，不铺满整个窗口"）。一旦挂到 body，绝对定位的包含块就变成
+  // 初始包含块 = 整个视口，`inherit` 继承的是 body 的 0 圆角——card 变体和全屏变体
+  // 于是长得一模一样，这个变体等于没实现。留在这里，`.notebook` 是 position:relative，
+  // 遮罩按预期铺满纸面并继承它的抖动圆角。
+  return variant === "card" ? overlay : createPortal(overlay, document.body);
 }
 
 /** 灯箱里的一张站内图：和阅读页正文同一份取字节通道与缓存。 */

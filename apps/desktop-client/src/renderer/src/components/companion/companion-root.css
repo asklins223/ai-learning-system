@@ -147,7 +147,7 @@
   pointer-events: none;
   transform: translate(-50%, -100%);
   transform-origin: 50% 100%;
-  animation: companion-wake-in 180ms cubic-bezier(0.23, 1, 0.32, 1) both;
+  animation: companion-wake-in 180ms var(--hud-ease-out) both;
 }
 
 @keyframes companion-wake-in {

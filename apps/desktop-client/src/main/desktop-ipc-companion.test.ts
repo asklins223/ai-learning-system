@@ -30,12 +30,14 @@ const electronMock = vi.hoisted(() => {
     handle: vi.fn((channel: string, handler: InvokeHandler) => {
       handlers.set(channel, handler);
     }),
+    openExternal: vi.fn(async () => undefined),
   };
 });
 
 vi.mock("electron", () => ({
   BrowserWindow: class BrowserWindow {},
   ipcMain: { handle: electronMock.handle, on: vi.fn() },
+  shell: { openExternal: electronMock.openExternal },
 }));
 
 import { registerM1DesktopIpc } from "./desktop-ipc";
@@ -360,5 +362,40 @@ describe("companion home desktop IPC", () => {
       error: { code: "unsupported_contract" },
       workspaceEpoch: 9,
     });
+  });
+});
+
+// ─── 打开外部链接（方案 35 F7）：主进程是唯一那道闸 ─────────────────────────
+describe("shell.openExternal 桌面 IPC", () => {
+  const event = { sender: {}, senderFrame: { url: "ailearn://renderer/" } };
+
+  async function open(url: string) {
+    electronMock.openExternal.mockClear();
+    const result = await requiredHandler(DESKTOP_IPC_CHANNELS.shellOpenExternal)(
+      event,
+      { meta, request: { url } },
+    );
+    return { result, handedToSystem: electronMock.openExternal.mock.calls.flat() };
+  }
+
+  it("http(s) 交给系统，交出去的是原样地址（不重新拼、不截断）", async () => {
+    const { result, handedToSystem } = await open("https://example.com/a?x=1&y=2");
+    expect(result).toMatchObject({ ok: true, data: { opened: true } });
+    expect(handedToSystem).toEqual(["https://example.com/a?x=1&y=2"]);
+  });
+
+  // 地址来自模型给的回答，所以这一组是安全边界，不是风格偏好。
+  // 断言分两个方向：拒绝（红=放行了）与放行（红=闸门过严），各自独立成立。
+  it.each([
+    "javascript:alert(1)",
+    "data:text/html;base64,PHNjcmlwdD4=",
+    "file:///etc/passwd",
+    "ailearn://renderer/home",
+    "about:blank",
+    "不是一条地址",
+  ])("非 http(s) 一律拒绝，并且一次都不碰系统：%s", async (url) => {
+    const { result, handedToSystem } = await open(url);
+    expect(result).toMatchObject({ ok: false, error: { code: "forbidden" } });
+    expect(handedToSystem).toEqual([]);
   });
 });

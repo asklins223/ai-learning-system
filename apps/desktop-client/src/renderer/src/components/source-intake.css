@@ -43,7 +43,7 @@
 
 .source-intake-dialog__body h2 {
   margin: 0;
-  font-family: "Noto Serif SC", "Songti SC", serif;
+  font-family: "Noto Serif SC Variable", "Songti SC", serif;
   font-size: 22px;
   font-weight: 680;
   line-height: 1.35;
@@ -194,7 +194,7 @@
 
 .source-intake-drop__card h2 {
   margin: 4px 0 0;
-  font-family: "Noto Serif SC", "Songti SC", serif;
+  font-family: "Noto Serif SC Variable", "Songti SC", serif;
   font-size: 21px;
   font-weight: 680;
   letter-spacing: -0.01em;

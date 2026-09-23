@@ -1684,6 +1684,55 @@ describe("DesktopGateway", () => {
       await expect(gateway.createSource({ content: "材料" }))
         .rejects.toMatchObject({ code: "forbidden" } satisfies Partial<DesktopGatewayFailure>);
     });
+
+    /**
+     * doc 34 L13 的下游那一半：`/voice/tts` 走的是取字节那条路，它过去**完全不读**
+     * 失败响应的 body，所以服务端在 403 上回的 `ai_consent_required` 到不了界面，
+     * "没签 AI 使用同意"被说成"这个账号没权限"。
+     */
+    it("语音那条路也认 error token：没签同意说的是没签同意，不是没权限", async () => {
+      const ttsStatus = { value: 403 };
+      const ttsBody = { value: JSON.stringify({ error: "ai_consent_required", message: "服务端那句原文" }) };
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/challenge")) return trustResponse(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        if (url.endsWith("/health")) return healthResponse();
+        return new Response(ttsBody.value, {
+          status: ttsStatus.value,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+
+      const gateway = new DesktopGateway(environment());
+      await gateway.connect();
+      const request = { version: 1 as const, text: "今天还有一张复习卡。" };
+      const failure = await gateway.speakCompanionVoice(request, "request-consent-403").catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(DesktopGatewayFailure);
+      expect(failure).toMatchObject({
+        code: "ai_consent_required",
+        retry: "never",
+      } satisfies Partial<DesktopGatewayFailure>);
+      // 失败体的 message 就是那个码（`DesktopGatewayFailure` 用 `super(code)`），
+      // 所以这一条断的就是"服务端那句原文没有越界"。
+      expect((failure as Error).message).toBe("ai_consent_required");
+
+      // 对照 1：403 上没在名单里的 token 仍然只是 `forbidden`——专用码是白名单，不是"读到了就信"。
+      ttsBody.value = JSON.stringify({ error: "TTS_FAILED" });
+      await expect(gateway.speakCompanionVoice(request, "request-unknown-token"))
+        .rejects.toMatchObject({ code: "forbidden" });
+
+      // 对照 2：登录/邀请那一族的 token 在 403 上**也不算数**。它们的意思是路由内的
+      // （`not_found` 在邀请路上是"邀请码无效"），要是 403 也照表翻，一次取图失败
+      // 就会被说成邀请码问题——这条不是假想，是这次改动被既有用例当场抓到的形状。
+      ttsBody.value = JSON.stringify({ error: "not_found" });
+      await expect(gateway.speakCompanionVoice(request, "request-auth-token-on-403"))
+        .rejects.toMatchObject({ code: "forbidden" });
+
+      // 对照 3：403 空 body（旧行为的那条路）不受这次改动影响。
+      ttsBody.value = "";
+      await expect(gateway.speakCompanionVoice(request, "request-empty-body"))
+        .rejects.toMatchObject({ code: "forbidden" });
+    });
   });
 
   describe("companion learning-run context bridge", () => {

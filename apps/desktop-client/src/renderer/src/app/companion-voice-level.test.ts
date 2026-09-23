@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  getHomeV2VoiceLevel,
   resetHomeV2VoiceLevel,
   setHomeV2VoiceLevel,
   subscribeHomeV2VoiceLevel,
@@ -18,7 +17,6 @@ describe("Home V2 companion voice amplitude", () => {
     setHomeV2VoiceLevel(Number.NaN);
 
     expect(listener.mock.calls.map(([level]) => level)).toEqual([0, 1, 0]);
-    expect(getHomeV2VoiceLevel()).toBe(0);
     unsubscribe();
     setHomeV2VoiceLevel(0.5);
     expect(listener).toHaveBeenCalledTimes(3);

@@ -21,8 +21,10 @@
   transition: background-color 180ms var(--hud-ease-out), box-shadow 180ms ease;
 }
 .hud-surface .switch:disabled { opacity: 0.5; cursor: not-allowed; }
-.hud-surface .switch:hover:not(:disabled):not(.on) { background: #c0ac8c; }
-.hud-surface .switch:hover:not(:disabled).on { background: #6c8569; }
+/* hover 不再各写一个孤儿色：用母本轨道底色（hud-pages.css `.switch` 的 #cbb99b /
+   .on 的 #789177）按 `--hud-ink` 压暗推导出来，底色变了 hover 会自动跟着走。 */
+.hud-surface .switch:hover:not(:disabled):not(.on) { background: color-mix(in srgb, #cbb99b 88%, var(--hud-ink)); }
+.hud-surface .switch:hover:not(:disabled).on { background: color-mix(in srgb, #789177 88%, var(--hud-ink)); }
 /* The confirmation tick is a child element the component remounts per toggle,
    not an `aria-checked` pseudo-element: keyed off the checked state it replayed
    whenever an already-on switch mounted. */
@@ -266,7 +268,7 @@
 .hud-surface .hud-slider__track:focus-visible .hud-slider__thumb { scale: 1.08; }
 
 .hud-surface .hud-slider__readout { display: flex; align-items: baseline; gap: 8px; }
-.hud-surface .hud-slider__readout b { font: 680 15px/1 "Noto Serif SC", "Songti SC", serif; color: #4c664f; }
+.hud-surface .hud-slider__readout b { font: 680 15px/1 "Noto Serif SC Variable", "Songti SC", serif; color: #4c664f; }
 .hud-surface .hud-slider__readout span { color: var(--hud-soft); font-size: 9px; }
 
 /* ── Ledger field ────────────────────────────────────────────────────────── */
@@ -284,9 +286,23 @@
   border: 2px solid rgba(96, 72, 51, 0.2);
   border-radius: 13px;
   background: rgba(255, 255, 255, 0.44);
-  font: 11px/1.5 "Noto Sans SC Variable", "Noto Sans SC", system-ui, sans-serif;
+  font: 11px/1.5 "Noto Sans SC Variable", system-ui, sans-serif;
   outline: 0;
 }
 .hud-surface .hud-field input::placeholder { color: rgba(112, 93, 77, 0.66); }
 .hud-surface .hud-field input:focus { border-color: rgba(96, 72, 51, 0.48); background: rgba(255, 255, 255, 0.7); }
 .hud-surface .hud-field input:disabled { opacity: 0.55; }
+
+/* ── 补全控件的按压反馈 ────────────────────────────────────────────────
+   这一层是"母本只画了静态样品的控件"的补全处（开关 / 分段 / 选择器 / 滑杆），
+   但它原先整文件一条 `:active` 都没有——母本 `.button` 是抬升 + `scale(.96)` 成对
+   出现的（hud-pages.css），所以这些控件按下去是"只变底色不缩"，读起来不像同一个
+   应用里的东西。数值照抄母本，不自新一档。 */
+.hud-surface :is(.switch, .hud-segmented button, .hud-picker__trigger, .hud-picker__option, .hud-slider__thumb):active:not(:disabled) {
+  transform: scale(0.96);
+  transition-duration: 110ms;
+}
+
+/* 开关被按下去时旋钮跟着走母本的位移，避免整块缩而旋钮不动。 */
+.hud-surface .switch:active:not(:disabled) i { transform: scale(0.92); }
+.hud-surface .switch.on:active:not(:disabled) i { transform: translateX(18px) scale(0.92); }

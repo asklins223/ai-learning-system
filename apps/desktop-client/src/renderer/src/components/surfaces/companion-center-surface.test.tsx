@@ -648,3 +648,4 @@ describe("the companion center reads the shell's companion session", () => {
     expect(second).not.toBe(first);
   });
 });
+

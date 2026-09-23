@@ -151,7 +151,9 @@ export function WindowLive2D({
     setStatus("loading");
     driver.setPresentation(presentation);
     driver.setVoiceLevel(voiceLevel);
-    const syncPaused = () => driver.setPaused(pausedRef.current || document.hidden || !document.hasFocus());
+    // 焦点不参与：失焦时她照样站在屏幕上（方案 35 E7）。真正该停的是 `document.hidden`
+    // （最小化 / 隐藏 / 被完全遮挡，Chromium 会把它报成 true）与调用方给的 `paused`。
+    const syncPaused = () => driver.setPaused(pausedRef.current || document.hidden);
     syncPaused();
     void driver.init(modelIdRef.current);
     bootTimer = window.setTimeout(() => {
@@ -162,22 +164,18 @@ export function WindowLive2D({
     }, 15_000);
 
     document.addEventListener("visibilitychange", syncPaused);
-    window.addEventListener("focus", syncPaused);
-    window.addEventListener("blur", syncPaused);
 
     return () => {
       cancelled = true;
       window.clearTimeout(bootTimer);
       document.removeEventListener("visibilitychange", syncPaused);
-      window.removeEventListener("focus", syncPaused);
-      window.removeEventListener("blur", syncPaused);
       driver.destroy();
       if (driverRef.current === driver) driverRef.current = null;
     };
   }, []);
 
   useEffect(() => {
-    driverRef.current?.setPaused(runtimePaused || document.hidden || !document.hasFocus());
+    driverRef.current?.setPaused(runtimePaused || document.hidden);
   }, [runtimePaused, status]);
 
   useEffect(() => {

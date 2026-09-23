@@ -115,6 +115,10 @@ function progressText(
   // 步数——与其猜一个数字，不如先只说工具次数，摘要到了再补上步数。
   const steps = progress ? `${progress.stepCount}/${progress.maxSteps} 步` : null;
   const tools = progress ? `${toolCalls}/${progress.maxToolCalls} 次工具` : `${toolCalls} 次工具`;
+  // 失败必须被**读**出来，不能只靠边框变红（`companion-hud.css:599`）：矮窗口下
+  // `folded = collapsed || tight` 会把出错那一轮也塌成摘要行，届时连"红"都没有了
+  // （方案 35 F4）。用词跟记录里那句「这一轮没能说完」同一口径。
+  if (turnState === "failed") return steps ? `没说完 · ${steps} · ${tools}` : `没说完 · ${tools}`;
   if (turnState === "stopped") return steps ? `已停止 · ${steps} · ${tools}` : `已停止 · ${tools}`;
   return steps ? `${steps} · ${tools}` : tools;
 }
@@ -123,12 +127,15 @@ export function CompanionAgentRail({
   nodes,
   progress,
   turnState,
+  companionName,
   tight = false,
   leaving = false,
 }: {
   readonly nodes: CompanionAgentNodes;
   readonly progress: CompanionAgentRailProgress | null;
   readonly turnState: CompanionAgentRailTurnState;
+  /** 她对自己的称呼：轨道的 aria-label 用，不再写死模型名。 */
+  readonly companionName: string;
   /**
    * 头顶的垂直预算已经不够放「展开态轨道 + 气泡下限」了（判据见 `CompanionHud.tsx` 的
    * 实测 effect）。此时只剩摘要行：轨道越出窗口比"少了三行过程"更糟，而摘要行本来就带
@@ -176,7 +183,7 @@ export function CompanionAgentRail({
       data-leaving={leaving || undefined}
       role="status"
       aria-live="polite"
-      aria-label="Mao 正在做的事"
+      aria-label={`${companionName} 正在做的事`}
     >
       {folded ? (
         <p className="companion-hud__rail-summary">{progressText(progress, toolCalls, turnState)}</p>

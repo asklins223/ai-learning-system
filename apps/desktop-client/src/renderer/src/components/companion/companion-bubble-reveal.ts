@@ -1,12 +1,12 @@
 /**
  * 回复气泡的显现模型（2026-09-18）。
  *
- * 气泡要回答三个问题：现在该露出哪些字、没有语音可播时该停留多久、要不要给出去
- * 抽屉看全文的入口。都是纯计算，放在这里而不是组件里，好让边界（还没开口、念到
- * 一半、超出气泡容量）直接单测。
+ * 气泡要回答两个问题：现在该露出哪些字、没有语音可播时该停留多久。
+ * 都是纯计算，放在这里而不是组件里，好让边界（还没开口、念到一半、
+ * 超出预览容量）直接单测。
  */
 
-/** 超过这个长度就不再让气泡长下去：截断 + 省略号 + 引导去抽屉看全文。 */
+/** 收起态保留的最新文字长度；展开态可以在气泡里滚动阅读全文。 */
 export const COMPANION_BUBBLE_MAX_CHARS = 320;
 
 /**
@@ -94,6 +94,14 @@ export function companionBubbleText(text: string, spokenChars: number): string {
   return `${visible.slice(0, COMPANION_BUBBLE_MAX_CHARS)}…`;
 }
 
+/** 收起态始终跟随最新文字；展开态由调用方直接显示已到达的全文。 */
+export function companionBubblePreviewText(text: string, revealedChars: number): string {
+  const full = text.trim();
+  const visible = revealedChars >= full.length ? full : full.slice(0, Math.max(0, revealedChars));
+  if (visible.length <= COMPANION_BUBBLE_MAX_CHARS) return visible;
+  return `…${visible.slice(-COMPANION_BUBBLE_MAX_CHARS)}`;
+}
+
 /** 纯计时器的停留时长；与 `companionBubbleText` 搭配使用。 */
 export function estimateCompanionReadDurationMs(charCount: number): number {
   const raw = Math.round(Math.max(0, charCount) * COMPANION_READ_MS_PER_CHAR);
@@ -113,9 +121,4 @@ const HOLD_MS_PER_CHAR = 12;
 export function companionBubbleHoldMs(charCount: number): number {
   const extra = Math.max(0, Math.floor(charCount)) * HOLD_MS_PER_CHAR;
   return Math.min(HOLD_MAX_MS, HOLD_BASE_MS + extra);
-}
-
-/** 气泡装不下这条回复：需要给出去抽屉看全文的入口。 */
-export function companionBubbleOverflows(text: string): boolean {
-  return text.trim().length > COMPANION_BUBBLE_MAX_CHARS;
 }

@@ -172,11 +172,19 @@ export function SurfaceDataState({
   );
 }
 
+/**
+ * 构造 `Intl.DateTimeFormat` 是纯 JS 里最贵的一批调用之一，而下面这两个函数都是**按行**
+ * 调的（来源库一次最多铺 500+ 行，每次渲染逐行各建一个）。formatter 本身无状态、可安全
+ * 复用，所以提到模块作用域只建一次（0269 轮 M23）。
+ */
+const MONTH_DAY_FORMAT = new Intl.DateTimeFormat("zh-CN", { month: "short", day: "numeric" });
+const CLOCK_FORMAT = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+
 export function formatDate(value: string | null | undefined): string {
   if (!value) return "时间未提供";
   const parsed = new Date(value);
   if (!Number.isFinite(parsed.valueOf())) return "时间未提供";
-  return new Intl.DateTimeFormat("zh-CN", { month: "short", day: "numeric" }).format(parsed);
+  return MONTH_DAY_FORMAT.format(parsed);
 }
 
 export function formatRelative(value: string | null | undefined): string {
@@ -226,7 +234,7 @@ export function formatSourceStamp(value: string | null | undefined): string {
   if (!value) return "时间未提供";
   const parsed = new Date(value);
   if (!Number.isFinite(parsed.valueOf())) return "时间未提供";
-  const clock = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(parsed);
+  const clock = CLOCK_FORMAT.format(parsed);
   const dayGap = calendarDayGap(parsed, new Date());
   if (dayGap === 0) return `今天 ${clock}`;
   if (dayGap === 1) return `昨天 ${clock}`;

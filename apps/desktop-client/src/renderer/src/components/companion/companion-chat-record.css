@@ -6,7 +6,8 @@
   flex: 1;
   align-items: center;
   gap: 7px;
-  padding: 7px 12px;
+  min-height: 44px;
+  padding: 0 12px;
   color: var(--companion-muted);
   border: 1.5px solid rgba(201, 164, 126, .65);
   border-radius: 16px;
@@ -19,8 +20,10 @@
 }
 
 .companion-record__search input {
+  /* 填满整颗胶囊：以前 input 自己只有 17px 高（实测），点胶囊的空白内边距不聚焦。 */
   flex: 1;
   min-width: 0;
+  min-height: 42px;
   color: var(--companion-ink);
   font-size: 12px;
   /* 内嵌输入必须完全隐身（2026-09-19 用户截图）：外层胶囊自己就是边框，
@@ -37,8 +40,8 @@
 
 .companion-record__search button {
   display: grid;
-  width: 22px;
-  height: 22px;
+  width: 30px;
+  height: 30px;
   flex: none;
   place-items: center;
   padding: 0;
@@ -52,6 +55,7 @@
 
 .companion-record__date-btn {
   display: inline-flex;
+  min-height: 44px;
   align-items: center;
   gap: 5px;
   padding: 7px 11px;
@@ -70,18 +74,28 @@
 }
 
 /* 自绘月历 */
-.companion-record__calendar {
+.companion-record__calendar,
+.companion-record__calendar-status {
   position: absolute;
   top: calc(100% + 8px);
   right: 0;
   z-index: 5;
-  width: 262px;
+  width: min(310px, calc(100vw - 44px));
+  max-height: calc(100vh - 36px);
+  overflow-y: auto;
   padding: 12px;
   border: 2px solid var(--companion-line);
   border-radius: 18px;
   background: var(--companion-ivory);
   box-shadow: 0 12px 30px rgba(91, 62, 39, .18);
   animation: companion-record-pop 160ms var(--ease-out) both;
+}
+
+.companion-record__calendar-status .companion-history__system { margin: 0; }
+
+@media (max-height: 430px) {
+  .companion-record__calendar,
+  .companion-record__calendar-status { top: -80px; }
 }
 
 @keyframes companion-record-pop {
@@ -100,8 +114,8 @@
 
 .companion-record__calendar-head button {
   display: grid;
-  width: 32px;
-  height: 32px;
+  width: 44px;
+  height: 44px;
   place-items: center;
   padding: 0;
   border: 1.5px solid rgba(201, 164, 126, .6);
@@ -125,11 +139,11 @@
 .companion-record__calendar-grid button {
   position: relative;
   display: grid;
-  height: 30px;
+  height: 40px;
   place-items: center;
   padding: 0;
   color: var(--companion-ink);
-  font-size: 11px;
+  font-size: 12px;
   border: 1.5px solid transparent;
   border-radius: 9px;
   background: transparent;
@@ -154,8 +168,8 @@
   position: absolute;
   right: 3px;
   bottom: 1px;
-  color: var(--companion-mint-strong);
-  font-size: 7px;
+  color: var(--companion-muted);
+  font-size: 9px;
   font-style: normal;
 }
 
@@ -166,6 +180,41 @@
 }
 
 /* 搜索命中 */
+/* 查找页刚打开时那一块。以前这里只有一句 11px 说明贴在顶上——实测内容层 68px 高、
+   外面那层列表 651px，90% 是空的，第一眼像坏了（方案 35 §14 观察 3）。
+   两条路径各自说清去哪儿，整块在面板里居中，让它读起来像一个落地位而不是一行提示。 */
+.companion-history__content:has(> .companion-record__landing) { min-height: 100%; }
+
+.companion-record__landing {
+  display: grid;
+  gap: 9px;
+  align-content: center;
+  justify-items: center;
+  margin: auto 0;
+  padding: 8px 6px;
+  text-align: center;
+}
+
+.companion-record__landing > strong {
+  color: var(--companion-ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.companion-record__landing > p {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+}
+
+.companion-record__landing > p b { color: var(--companion-ink); font-size: 12px; }
+
+.companion-record__landing > p span,
+.companion-record__landing > small {
+  color: var(--companion-muted);
+  font-size: 11px;
+}
+
 .companion-record__hit {
   display: grid;
   gap: 4px;
@@ -206,7 +255,7 @@
 }
 
 .companion-record__retry {
-  min-height: 32px;
+  min-height: 44px;
   margin-left: 8px;
   padding: 5px 10px;
   color: var(--companion-ink);
@@ -218,9 +267,25 @@
   cursor: pointer;
 }
 
+/* 较早轮次的选择卡（CompanionChatRecord.tsx:260）。这个类名以前在全部 CSS 里查无此规则，
+   于是那句"原执行节点已不可用"和卡片就裸排在消息里，跟上面那条正文粘成一片。 */
+.companion-history__legacy-proposal {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.companion-history__legacy-proposal > small {
+  color: var(--companion-muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
 /* 她带我去哪儿（方案 29 §4.8）：落点跟在正文下面，属于这条消息本身。 */
 .companion-record__nav {
   display: flex;
+  flex-direction: column;
+  align-items: flex-start;
   margin: 6px 0 0;
 }
 
@@ -228,20 +293,29 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  min-height: 26px;
+  min-height: 40px;
   padding: 3px 9px;
   color: var(--companion-ink);
-  font-size: 10px;
+  font-size: 12px;
   border: 1px solid rgba(201, 164, 126, .66);
   border-radius: 9px;
   background: rgba(255, 241, 207, .54);
   cursor: pointer;
 }
 
+.companion-record__nav button:disabled { opacity: .65; cursor: progress; }
+
+.companion-record__nav-error {
+  margin-top: 5px;
+  color: var(--companion-ink);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 /* 桌面端没有等价形态的落点：留痕，但不给一个点了不会动的按钮。 */
 .companion-record__nav--plain span {
   font-size: 10px;
-  opacity: .68;
+  color: var(--companion-muted);
 }
 
 /* 正文里的 markdown 由渲染层排版（§4.8）。字号/行距跟着消息本身，
@@ -274,6 +348,36 @@
   background: rgba(52, 38, 24, .08);
 }
 
+/* 她给的链接：标签 + 去处两行，点了交给系统浏览器（方案 35 F7）。
+   它是 `<button>` 而不是 `<a>`——应用内永远不导航出去，所以这里要的只是
+   "点了会开"，不是一枚导航链接；按钮样式一律清掉，形态跟着正文。 */
+.companion-md__link {
+  display: inline-grid;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  color: var(--companion-ink);
+  text-align: left;
+  vertical-align: baseline;
+  appearance: none;
+  border: 0;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+}
+
+.companion-md__link:hover > span {
+  color: var(--companion-mint-strong);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.companion-md__link > small {
+  color: var(--companion-muted);
+  font-size: 9.5px;
+  overflow-wrap: anywhere;
+}
+
 .companion-record__body code {
   padding: 0 3px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -286,7 +390,7 @@
 .companion-record__diagram,
 .companion-record__card {
   margin: 8px 0 0;
-  padding: 7px 9px;
+  padding: 10px 12px;
   border-radius: 11px;
   background: rgba(255, 241, 207, .42);
   border: 1px solid rgba(201, 164, 126, .34);
@@ -294,9 +398,9 @@
 
 .companion-record__diagram figcaption,
 .companion-record__card figcaption {
-  font-size: 9.5px;
+  font-size: 11px;
   font-weight: 700;
-  opacity: .74;
+  color: var(--companion-muted);
 }
 
 .companion-record__diagram ol {
@@ -312,16 +416,16 @@
   grid-template-columns: 18px minmax(0, 1fr);
   align-items: baseline;
   gap: 2px 6px;
-  font-size: 11px;
-  line-height: 1.5;
+  font-size: 12.5px;
+  line-height: 1.55;
 }
 
 .companion-record__step-no {
   display: inline-grid;
   place-items: center;
-  width: 17px;
-  height: 17px;
-  font-size: 9.5px;
+  width: 19px;
+  height: 19px;
+  font-size: 11px;
   font-weight: 700;
   color: rgba(60, 42, 24, .82);
   border-radius: 50%;
@@ -331,13 +435,13 @@
 .companion-record__diagram li small,
 .companion-record__card small {
   grid-column: 2;
-  font-size: 10px;
-  opacity: .72;
+  color: var(--companion-muted);
+  font-size: 11px;
 }
 
 .companion-record__card p {
   margin: 4px 0 0;
-  font-size: 11.5px;
+  font-size: 12.5px;
   line-height: 1.55;
 }
 
@@ -351,13 +455,13 @@
 }
 
 .companion-record__quote figcaption {
-  font-size: 9.5px;
-  opacity: .72;
+  font-size: 11px;
+  color: var(--companion-muted);
 }
 
 .companion-record__quote p {
   margin: 3px 0 0;
-  font-size: 11px;
+  font-size: 12.5px;
   line-height: 1.55;
   white-space: pre-wrap;
 }
@@ -373,7 +477,13 @@
  * 宽高比由浏览器自己保。点它是灯箱放大，所以缩着显示不影响看清。
  */
 .companion-record__image {
-  margin: 8px 0 0;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0;
+  padding: 8px;
+  border: 1.5px solid rgba(201, 164, 126, .58);
+  border-radius: 15px;
+  background: var(--companion-cream);
 }
 
 .companion-record__image img {
@@ -387,9 +497,9 @@
 
 .companion-record__image figcaption {
   margin-top: 4px;
-  font-size: 9.5px;
+  color: var(--companion-muted);
+  font-size: 10.5px;
   font-weight: 700;
-  opacity: .74;
 }
 
 .companion-record__image-note {
@@ -397,8 +507,8 @@
   align-items: center;
   gap: 6px;
   margin: 8px 0 0;
+  color: var(--companion-muted);
   font-size: 10.5px;
-  opacity: .8;
 }
 
 /*
@@ -423,16 +533,25 @@
 
 /* 这层没有通用的 .companion-record button 规则，不写就是浏览器默认按钮的样子。 */
 .companion-record__quote button {
+  /* 内联在正文里的文字动作，按"列表行 ≥32"那一档；不是独立按钮母本。 */
+  min-height: 32px;
   margin-top: 5px;
   padding: 0;
   border: 0;
   background: none;
   color: inherit;
   font: inherit;
+  color: var(--companion-muted);
   font-size: 10px;
   font-weight: 700;
-  opacity: .78;
   cursor: pointer;
   text-decoration: underline;
   text-underline-offset: 2px;
+}
+
+.companion-record__rich-turn > .companion-record__quote,
+.companion-record__rich-turn > .companion-record__diagram,
+.companion-record__rich-turn > .companion-record__card,
+.companion-record__rich-turn > .companion-record__nav {
+  margin-top: 0;
 }

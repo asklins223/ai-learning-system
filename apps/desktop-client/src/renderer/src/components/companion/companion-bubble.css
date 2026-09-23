@@ -43,17 +43,6 @@
   transform: translate(-50%, -6px) rotate(45deg);
 }
 
-.companion-bubble__label {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  margin-bottom: 3px;
-  color: var(--accent-deep);
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-}
-
 .companion-bubble__text {
   display: block;
 }
@@ -67,11 +56,6 @@
   background: var(--hud-butter, #f3d678);
 }
 
-/* 页面旁白是陈述句，正文字重回落。 */
-.companion-bubble--page {
-  font-weight: 400;
-}
-
 /* 窄窗口下的折行保护（沿用旧 home-cue 的断点）。 */
 @media (max-width: 1247px) {
   .companion-bubble {
@@ -82,7 +66,7 @@
 /* 入场：一句轻快的上浮 + 收缩弹出，与 home-v2 HUD 同一缓动曲线。 */
 @media (prefers-reduced-motion: no-preference) {
   .companion-bubble:not(.companion-bubble--static) {
-    animation: companion-bubble-in 240ms var(--hud-ease-out, cubic-bezier(0.22, 1, 0.36, 1)) both;
+    animation: companion-bubble-in 240ms var(--hud-ease-out, var(--hud-island-ease)) both;
   }
 
   .companion-bubble--static {
@@ -107,35 +91,91 @@
   }
 }
 
-/* ── 页面旁白锚点 ──────────────────────────────────────────────────────
-   v2 首页：站在她头顶正上方（与主动提示、回复气泡共用同一条气泡通道），尾巴落回
-   气泡底边中点指向她的头。旧版把它钉在包围盒的右上角并上移 8vh，角色一走开，它就
-   飘到半个房间之外，尾巴指着一片空地。
-   v1 HUD 首页保留原来的角落位置（左右随 comp-left 翻转）。 */
-.companion-page-cue {
+/* 念头气泡可点击态（切片④）：按钮自己站到气泡通道上，气泡在它内部转 static。
+   原来这两层是反的——absolute 的气泡挂在一个零内高、纯 block 的按钮里，按钮盒子
+   塌成 0×0（`scripts/companion-ui-css-probe.mjs` 实测：actor 0×0、可见中心的
+   `elementFromPoint` 命中到 `.desktop-app`、真点击不触发），于是"点开和她聊"
+   这条邀请最长挂 30 秒却一次都点不到。定位链现在归按钮，视觉皮肤仍归气泡。
+   祖先链整层是 `pointer-events:none`（`styles.css:352`），所以这里必须自己接回来。 */
+button.companion-cue-open {
   position: absolute;
-  z-index: 4;
+  z-index: 6;
   bottom: var(--companion-lane-bubble, calc(100% + 60px));
   left: 50%;
-  width: min(240px, 30vw);
+  display: block;
+  width: max-content;
+  max-width: min(240px, 30vw);
+  margin: 0;
+  padding: 0;
+  appearance: none;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: inherit;
   transform: translateX(-50%);
-  transform-origin: bottom center;
+  pointer-events: auto;
+  cursor: pointer;
 }
 
-.companion-page-cue .companion-bubble {
+button.companion-cue-open .companion-bubble {
   position: static;
   width: 100%;
   max-width: none;
   transform: none;
 }
 
+button.companion-cue-open:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+  border-radius: 24px;
+}
+
+.companion-cue-error {
+  position: absolute;
+  z-index: 7;
+  bottom: calc(100% - 24px);
+  left: 50%;
+  width: min(280px, 56vw);
+  padding: 9px 11px;
+  border: 1px solid var(--line, #d9d1c4);
+  border-radius: 12px;
+  background: var(--paper, #fffaf0);
+  color: var(--ink, #342c25);
+  box-shadow: 0 8px 24px rgb(30 24 15 / 16%);
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+  transform: translateX(-50%);
+  pointer-events: auto;
+}
+
+.companion-cue-error button {
+  display: block;
+  margin: 5px auto 0;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.companion-cue-error button:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* 通道已经由按钮负责居中，气泡在这条链里只做竖直入场，不再重复 translateX。 */
 @media (prefers-reduced-motion: no-preference) {
-  .companion-page-cue .companion-bubble:not(.companion-bubble--static) {
-    animation-name: companion-bubble-in-static;
+  button.companion-cue-open .companion-bubble:not(.companion-bubble--static) {
+    animation-name: companion-bubble-in-in-place;
   }
 }
 
-@keyframes companion-bubble-in-static {
+@keyframes companion-bubble-in-in-place {
   from {
     opacity: 0;
     transform: translateY(8px);
@@ -147,46 +187,9 @@
   }
 }
 
-/* v1 HUD 首页：角落位置，尾巴挪到靠右一侧（那里离她的头更近）。 */
-.desktop-app.hud-surface:not([data-home-scene-variant="v2"]) .companion-page-cue {
-  top: 6px;
-  bottom: auto;
-  width: min(220px, 28vw);
-  transform: none;
-}
-
-.desktop-app.hud-surface:not([data-home-scene-variant="v2"]) .companion-page-cue .companion-bubble::after {
-  left: auto;
-  right: 16px;
-  transform: translate(0, -7px) rotate(45deg);
-}
-
-.desktop-app.hud-surface.comp-left:not([data-home-scene-variant="v2"]) .companion-page-cue {
-  left: 0;
-  right: auto;
-}
-
-.desktop-app.hud-surface:not([data-home-scene-variant="v2"]):not(.comp-left) .companion-page-cue {
-  right: -8px;
-  left: auto;
-}
-
-/* 念头气泡可点击态（切片④）：按钮本体零样式，视觉全部交给 CompanionBubble。 */
-button.companion-cue-open {
-  appearance: none;
-  border: none;
-  background: none;
-  padding: 0;
-  margin: 0;
-  font: inherit;
-  color: inherit;
-  text-align: inherit;
-  cursor: pointer;
-  display: block;
-}
-
-button.companion-cue-open:focus-visible {
-  outline: 2px solid var(--accent-deep, #8f3518);
-  outline-offset: 3px;
-  border-radius: 4px;
+/* 窄窗口下的折行保护（与 `.companion-bubble` 那条同值，按容器改挂到按钮上）。 */
+@media (max-width: 1247px) {
+  button.companion-cue-open {
+    max-width: min(210px, 54vw);
+  }
 }

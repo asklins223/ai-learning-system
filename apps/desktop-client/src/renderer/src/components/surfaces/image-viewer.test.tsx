@@ -36,6 +36,32 @@ describe("ZoomableReadingImage · 点击放大", () => {
     expect(lightbox.hasAttribute("data-companion-owned")).toBe(false);
   });
 
+  // 上一条钉住全屏形态必须出走；这条钉住**反方向**：card 形态一旦也 portal，它的
+  // `position:absolute; inset:0` 就以整个视口为包含块、`border-radius:inherit` 继承
+  // body 的 0，"只盖这张纸"这个变体等于不存在——而类名断言照样是绿的。
+  it("variant=\"card\" 不 portal：留在宿主纸面里才盖得住那张纸", () => {
+    const host = document.createElement("div");
+    host.className = "notebook";
+    document.body.appendChild(host);
+    try {
+      render(
+        <ImageGalleryLightbox
+          images={[{ kind: "resolved", src: "blob:a", alt: "甲" }]}
+          index={0}
+          variant="card"
+          onClose={vi.fn()}
+          onIndexChange={vi.fn()}
+        />,
+        { container: host },
+      );
+      const lightbox = document.querySelector(".image-lightbox--card")!;
+      expect(lightbox.parentElement).toBe(host);
+      expect(lightbox.parentElement).not.toBe(document.body);
+    } finally {
+      host.remove();
+    }
+  });
+
   it("onError 只在声明可重试时透传（blob 失效兜底）", () => {
     const onRetry = vi.fn();
     const { rerender } = render(<ZoomableReadingImage src="blob:x" alt="图" onRetry={onRetry} />);

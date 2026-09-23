@@ -55,13 +55,15 @@ describe("HUD companion surface policies", () => {
     }
   });
 
-  it("keeps task pages quiet and on demand", () => {
+  it("keeps task pages quiet and hides the companion throughout the objective challenge before results", () => {
     for (const page of EXPECTED_PAGES.filter((id) => !["home", "login", "register"].includes(id))) {
       const policy = HUD_PAGES[page].companion;
       expect(policy.proactive).toBe("silent");
-      expect(policy.interaction).toBe(page === "assessment" ? "none" : "on-demand");
+      expect(policy.interaction).toBe(["goals", "goal-detail", "assessment"].includes(page) ? "none" : "on-demand");
       expect(policy.draggable).toBe(false);
     }
+    expect([HUD_PAGES.goals, HUD_PAGES["goal-detail"], HUD_PAGES.assessment].map((page) => page.companion.mode)).toEqual(["hidden", "hidden", "hidden"]);
+    expect(HUD_PAGES.result.companion.mode).toBe("assessment");
   });
 
   it("uses compact fail-closed assessment policies", () => {

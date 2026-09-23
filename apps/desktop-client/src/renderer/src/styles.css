@@ -6,28 +6,32 @@
   font-family: "Noto Sans SC Variable", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-  --ink: #30231a;
-  --ink-soft: #6d5746;
-  --paper: #f7ecd5;
-  --paper-strong: #fff8e9;
-  --paper-deep: #e8d4b1;
+  /* ── 衬底 token 指向 V3.1 母本 ────────────────────────────────────────
+     这几条与 `--hud-*` 要么逐字节相同（`--ink` #30231a、`--paper-deep` #e8d4b1），
+     要么是 1–5 通道偏差的近义重抄。两套名字描述同一层纸、同一条线、同一个影子，
+     就是第二份真理源：改母本不会传到这里。改成引用后，衬底全站只有一个来源。
+     自定义属性在计算值时解析，不受 main.tsx 里 styles.css 先于 hud-pages.css 加载
+     的影响。 */
+  --ink: var(--hud-ink);
+  --ink-soft: var(--hud-soft);
+  --paper: var(--hud-paper);
+  --paper-strong: var(--hud-paper-light);
+  --paper-deep: var(--hud-paper-deep);
+  --accent: var(--hud-clay);
+  --line: var(--hud-line);
+  --line-strong: var(--hud-line-strong);
+  --paper-shadow: var(--hud-shadow);
+  --soft-shadow: var(--hud-shadow-small);
+  /* 以下保留自有取值：它们是各自独立的语义，不是母本的重抄——
+     `--focus` 是全站焦点环的唯一 token（HUD 层也反过来读它，不是重复）；
+     `--accent-deep` 是比 clay 更深的动作色；`--sage`/`--sage-deep` 是草绿两档；
+     `--glass-*`/`--control-*` 是深色浮层的描边与文字。 */
+  --accent-deep: #8e391d;
   --sage: #64745b;
   --sage-deep: #435442;
-  --wood: #7d4c29;
-  --accent: #bd5b2d;
-  --accent-deep: #8e391d;
-  --star: #73cadc;
-  --line: rgba(76, 49, 30, 0.24);
-  --line-strong: rgba(64, 40, 24, 0.42);
   --focus: #9a351d;
-  --paper-shadow: 0 25px 58px rgba(45, 27, 16, 0.25), 0 4px 12px rgba(45, 27, 16, 0.16);
-  --soft-shadow: 0 14px 34px rgba(38, 24, 16, 0.2), 0 2px 8px rgba(38, 24, 16, 0.13);
-  --glass-bg: rgba(28, 24, 22, 0.68);
   --glass-line: rgba(255, 247, 235, 0.24);
   --glass-text: #fff8ee;
-  --glass-shadow: 0 18px 44px rgba(24, 16, 11, 0.28), 0 3px 10px rgba(24, 16, 11, 0.2);
-  --control-bg: rgba(31, 27, 24, 0.78);
-  --control-text: #fff8ee;
 }
 
 * {
@@ -131,7 +135,6 @@ button:disabled {
 .desktop-app[data-theme="night"] {
   color-scheme: dark;
   --focus: #7ad2df;
-  --control-bg: rgba(16, 20, 28, 0.82);
 }
 
 .skip-link {
@@ -146,7 +149,7 @@ button:disabled {
   border-radius: 8px;
   box-shadow: var(--soft-shadow);
   transform: translateY(calc(-100% - 18px));
-  transition: transform 160ms ease-out;
+  transition: transform 160ms var(--hud-ease-out);
 }
 
 .skip-link:focus-visible {
@@ -283,65 +286,6 @@ button:disabled {
   opacity: 1;
 }
 
-.window-atmosphere {
-  position: absolute;
-  z-index: 2;
-  top: 3%;
-  left: 40.4%;
-  width: 20.8%;
-  height: 47%;
-  overflow: hidden;
-  opacity: 0;
-  pointer-events: none;
-}
-
-.window-atmosphere__glow {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(135deg, rgba(255, 252, 229, 0.12), transparent 42%);
-  mix-blend-mode: screen;
-}
-
-[data-theme="night"] .window-atmosphere__glow {
-  background: radial-gradient(circle at 52% 15%, rgba(155, 190, 231, 0.17), transparent 56%);
-}
-
-.window-atmosphere__dust {
-  position: absolute;
-  width: 3px;
-  height: 3px;
-  border-radius: 50%;
-  background: rgba(255, 243, 199, 0.8);
-  box-shadow: 22px 15px 0 rgba(255, 243, 199, 0.32), -16px 35px 0 rgba(255, 243, 199, 0.42);
-  opacity: 0.18;
-  will-change: transform, opacity;
-}
-
-.window-atmosphere__dust--one {
-  top: 48%;
-  left: 35%;
-}
-
-.window-atmosphere__dust--two {
-  top: 69%;
-  left: 68%;
-}
-
-.lamp-local-pool {
-  position: absolute;
-  z-index: 3;
-  right: -2%;
-  bottom: -5%;
-  width: 51%;
-  height: 49%;
-  pointer-events: none;
-  opacity: 0;
-  background: radial-gradient(ellipse at 67% 16%, rgba(255, 203, 113, 0.33), rgba(255, 190, 82, 0.08) 38%, transparent 70%);
-  mix-blend-mode: screen;
-  transform-origin: 68% 20%;
-  will-change: transform, opacity;
-}
-
 .window-drag-region {
   position: absolute;
   z-index: 28;
@@ -359,329 +303,6 @@ button:disabled {
 .desktop-app[data-platform="win32"] .window-drag-region, .desktop-app[data-platform="linux"] .window-drag-region {
   right: calc(var(--native-caption-width) + 182px);
   left: 0;
-}
-
-.action-rail::after, .onboarding-card::before, .scene-status::before {
-  position: absolute;
-  inset: 1px 12% auto;
-  height: 1px;
-  content: "";
-  border-radius: 999px;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.68), transparent);
-  opacity: 0.52;
-  pointer-events: none;
-}
-
-/* First-entry media is the only intentional scene-covering layer. */
-.onboarding-layer {
-  position: absolute;
-  z-index: 50;
-  inset: 0;
-  overflow: hidden;
-  pointer-events: auto;
-}
-
-.onboarding-video {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.onboarding-card {
-  position: absolute;
-  right: auto;
-  bottom: 24px;
-  left: 50%;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  width: min(820px, calc(100vw - 48px));
-  min-height: 82px;
-  align-items: center;
-  gap: 20px;
-  padding: 13px 52px 13px 20px;
-  color: var(--glass-text);
-  border: 1px solid var(--glass-line);
-  border-radius: 28px;
-  background: rgba(25, 22, 20, 0.64);
-  box-shadow: var(--glass-shadow);
-  backdrop-filter: blur(28px) saturate(1.22);
-  transform: translateX(-50%);
-  pointer-events: auto;
-}
-
-.onboarding-copy {
-  min-width: 0;
-}
-
-.onboarding-card h2 {
-  margin: 0 0 4px;
-  font-family: "Noto Sans SC Variable", "PingFang SC", sans-serif;
-  font-size: 15px;
-  font-weight: 720;
-  line-height: 1.3;
-  letter-spacing: 0;
-}
-
-.onboarding-card p {
-  margin: 0;
-  overflow: hidden;
-  color: rgba(255, 243, 228, 0.72);
-  font-size: 11px;
-  line-height: 1.5;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.onboarding-skip {
-  position: absolute;
-  top: 50%;
-  right: 10px;
-  display: grid;
-  width: 34px;
-  height: 34px;
-  place-items: center;
-  color: rgba(255, 244, 230, 0.78);
-  border: 0;
-  border-radius: 50%;
-  background: transparent;
-  cursor: pointer;
-  transform: translateY(-50%);
-}
-
-.onboarding-skip:hover { background: rgba(255, 255, 255, 0.1); }
-
-.onboarding-actions {
-  display: flex;
-  flex-wrap: nowrap;
-  gap: 8px;
-  margin-top: 0;
-}
-
-.guide-button {
-  display: inline-flex;
-  min-height: 36px;
-  align-items: center;
-  gap: 7px;
-  padding: 0 12px;
-  color: #fff5e8;
-  font-size: 11px;
-  border: 1px solid rgba(255, 242, 224, 0.2);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-  cursor: pointer;
-}
-
-.guide-button--sound {
-  color: #2a1d16;
-  border-color: rgba(255, 223, 197, 0.72);
-  background: #ffd1ad;
-}
-
-.guide-button--quiet {
-  color: rgba(255, 244, 230, 0.78);
-  border-color: transparent;
-  background: transparent;
-}
-
-/* Scene hotspots sit on the illustrated physical objects. */
-.hotspot-layer {
-  position: absolute;
-  z-index: 7;
-  inset: 0;
-  pointer-events: none;
-}
-
-.hotspot {
-  position: absolute;
-  display: grid;
-  width: 104px;
-  height: 78px;
-  place-items: center;
-  padding: 0;
-  color: #fffaf0;
-  border: 0;
-  background: transparent;
-  cursor: pointer;
-  pointer-events: auto;
-  transform: translate(-50%, -50%);
-}
-
-.hotspot--notebook { left: 50%; top: 58%; }
-.hotspot--calendar { left: 36.7%; top: 55%; }
-.hotspot--lamp { left: 64%; top: 43%; }
-.hotspot--shelf { left: 17%; top: 40%; }
-.hotspot--graph { left: 77.8%; top: 31%; }
-
-.hotspot__pin {
-  display: grid;
-  width: 31px;
-  height: 31px;
-  place-items: center;
-  border: 1px solid rgba(255, 250, 240, 0.58);
-  border-radius: 50%;
-  background: rgba(43, 31, 22, 0.55);
-  box-shadow: 0 8px 18px rgba(35, 21, 13, 0.22), 0 0 0 7px rgba(255, 247, 230, 0.08);
-  backdrop-filter: blur(8px);
-  transition: background-color 150ms ease-out, box-shadow 150ms ease-out, transform 100ms ease-out;
-}
-
-.hotspot__label {
-  position: absolute;
-  top: calc(50% + 22px);
-  left: 50%;
-  padding: 5px 9px;
-  color: #fffaf2;
-  font-size: 11px;
-  line-height: 1;
-  white-space: nowrap;
-  border: 1px solid rgba(255, 246, 230, 0.18);
-  border-radius: 999px;
-  background: rgba(35, 27, 22, 0.72);
-  opacity: 0;
-  transform: translateX(-50%) translateY(-3px);
-  transition: opacity 140ms ease-out, transform 140ms ease-out;
-}
-
-.hotspot:hover .hotspot__pin, .hotspot:focus-visible .hotspot__pin {
-  background: rgba(148, 72, 36, 0.84);
-  box-shadow: 0 8px 18px rgba(35, 21, 13, 0.25), 0 0 0 9px rgba(255, 239, 207, 0.13);
-}
-
-.hotspot:hover .hotspot__label, .hotspot:focus-visible .hotspot__label, .hotspot__label--always {
-  opacity: 1;
-  transform: translateX(-50%) translateY(0);
-}
-
-.hotspot:active .hotspot__pin {
-  background: rgba(125, 57, 30, 0.92);
-  box-shadow: 0 4px 10px rgba(35, 21, 13, 0.24), 0 0 0 6px rgba(255, 239, 207, 0.1);
-  transform: translateY(2px) scale(0.96);
-}
-
-.hotspot:active .hotspot__label {
-  transform: translateX(-50%) translateY(2px);
-}
-
-.action-rail {
-  position: absolute;
-  z-index: 18;
-  bottom: 18px;
-  left: 18px;
-  display: flex;
-  width: auto;
-  max-width: calc(100vw - 36px);
-  height: 58px;
-  align-items: center;
-  gap: 0;
-  padding: 4px;
-  overflow: visible;
-  color: var(--glass-text);
-  border: 1px solid var(--glass-line);
-  border-radius: 999px;
-  background: var(--glass-bg);
-  box-shadow: var(--glass-shadow);
-  backdrop-filter: blur(26px) saturate(1.25);
-  translate: 0 0;
-  transform-origin: 50% 100%;
-  will-change: transform, opacity;
-}
-
-.desktop-app[data-theme="night"] .action-rail {
-  color: var(--glass-text);
-  border-color: var(--glass-line);
-  background: rgba(16, 19, 25, 0.72);
-}
-
-.rail-action {
-  display: grid;
-  min-width: 0;
-  height: 48px;
-  min-height: 48px;
-  grid-template-columns: 32px auto;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 10px;
-  color: inherit;
-  text-align: left;
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  cursor: pointer;
-  transition: background-color 150ms ease-out, border-color 150ms ease-out;
-}
-
-.rail-action:hover {
-  background: rgba(255, 255, 255, 0.1);
-}
-
-.rail-action--primary {
-  width: 188px;
-  border-right: 1px solid rgba(255, 248, 238, 0.14);
-}
-
-.rail-action--primary:hover {
-  background: rgba(255, 255, 255, 0.1);
-}
-
-.rail-action__icon {
-  display: grid;
-  width: 32px;
-  height: 32px;
-  place-items: center;
-  color: #ffe6cd;
-  border: 1px solid rgba(255, 239, 219, 0.24);
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.08);
-  box-shadow: none;
-}
-
-.rail-action--primary .rail-action__icon {
-  color: #fff7eb;
-  background: color-mix(in srgb, var(--accent) 72%, transparent);
-}
-
-.rail-action__copy {
-  display: grid;
-  gap: 2px;
-  white-space: nowrap;
-}
-
-.rail-action__copy strong {
-  color: #fff8ef;
-  font-family: "Noto Sans SC Variable", "PingFang SC", sans-serif;
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.rail-action__copy span {
-  max-width: 142px;
-  overflow: hidden;
-  color: rgba(255, 242, 225, 0.66);
-  font-size: 9px;
-  text-overflow: ellipsis;
-}
-
-.rail-action kbd {
-  display: none;
-}
-
-.rail-action:not(.rail-action--primary) {
-  width: 46px;
-  grid-template-columns: 32px;
-  justify-content: center;
-  padding-inline: 7px;
-}
-
-.rail-action:not(.rail-action--primary) .rail-action__copy {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
 }
 
 /* The companion is a persistent scene resident, never a task modal. */
@@ -724,22 +345,6 @@ button:disabled {
   will-change: transform;
 }
 
-.companion-invite-label {
-  position: absolute;
-  right: 50%;
-  bottom: 8px;
-  padding: 5px 9px;
-  color: #fff9ee;
-  font-size: 10px;
-  white-space: nowrap;
-  border: 1px solid rgba(255, 247, 231, 0.23);
-  border-radius: 999px;
-  background: rgba(39, 31, 26, 0.68);
-  box-shadow: 0 7px 15px rgba(28, 17, 12, 0.18);
-  transform: translateX(50%);
-  pointer-events: none;
-}
-
 .companion-whisper {
   position: absolute;
   right: 76%;
@@ -770,34 +375,6 @@ button:disabled {
   transform: rotate(45deg);
 }
 
-.companion-whisper__close {
-  position: absolute;
-  z-index: 4;
-  top: 10px;
-  right: 10px;
-  display: grid;
-  width: 30px;
-  height: 30px;
-  place-items: center;
-  color: #6b5140;
-  border: 0;
-  border-radius: 50%;
-  background: transparent;
-  cursor: pointer;
-}
-
-.companion-whisper__close:hover { background: rgba(93, 62, 43, 0.08); }
-
-.companion-whisper__kicker {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--accent-deep);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-}
-
 .companion-whisper h2 {
   margin: 8px 28px 7px 0;
   font-family: "Noto Serif SC Variable", "Songti SC", serif;
@@ -812,12 +389,6 @@ button:disabled {
   line-height: 1.7;
 }
 
-.companion-whisper__actions {
-  display: flex;
-  gap: 7px;
-  margin-top: 13px;
-}
-
 .companion-action {
   min-height: 35px;
   padding: 0 11px;
@@ -827,12 +398,6 @@ button:disabled {
   border-radius: 8px;
   background: rgba(255, 252, 244, 0.56);
   cursor: pointer;
-}
-
-.companion-action--primary {
-  color: #fff9ef;
-  border-color: var(--accent-deep);
-  background: var(--accent-deep);
 }
 
 /* 唯一形态下的失败态说明（2026-09-16 裁决：不回退替身形象，就地说明）。
@@ -901,39 +466,6 @@ button:disabled {
   will-change: auto;
 }
 
-.task-surface__header {
-  position: absolute;
-  z-index: 5;
-  top: 55px;
-  left: clamp(28px, 5vw, 82px);
-  display: flex;
-  width: min(600px, calc(100vw - 190px));
-  min-height: 60px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 22px;
-  padding: 11px 12px 11px 17px;
-  border: 1px solid rgba(75, 48, 29, 0.32);
-  border-inline-start: 1px solid var(--sage);
-  border-radius: 5px 13px 5px 5px;
-  background: rgba(247, 235, 212, 0.94);
-  box-shadow: 0 12px 28px rgba(43, 26, 15, 0.18);
-}
-
-.task-surface__header h2 {
-  margin: 0;
-  font-family: "Noto Serif SC Variable", "Songti SC", serif;
-  font-size: clamp(17px, 1.45vw, 22px);
-  line-height: 1.25;
-  letter-spacing: -0.02em;
-}
-
-.task-surface__header p {
-  margin: 3px 0 0;
-  color: var(--ink-soft);
-  font-size: 10px;
-}
-
 .surface-close {
   display: inline-flex;
   min-height: 36px;
@@ -972,14 +504,6 @@ button:disabled {
 
 .surface-primary:hover { background: linear-gradient(180deg, #c45e2c, #9e4021); }
 
-.surface-secondary {
-  color: #503b2c;
-  border: 1px solid rgba(73, 47, 29, 0.3);
-  background: rgba(255, 252, 244, 0.54);
-}
-
-.surface-secondary:hover { background: rgba(255, 252, 244, 0.9); }
-
 .text-action {
   min-height: 34px;
   padding-inline: 8px;
@@ -989,27 +513,6 @@ button:disabled {
 }
 
 .text-action:hover { text-decoration: underline; text-underline-offset: 3px; }
-
-.surface-action-pair {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-}
-
-.prototype-note {
-  position: absolute;
-  z-index: 6;
-  bottom: 10px;
-  left: clamp(24px, 5vw, 80px);
-  max-width: min(620px, 62vw);
-  margin: 0;
-  color: rgba(255, 249, 238, 0.78);
-  font-size: 9px;
-  line-height: 1.5;
-  text-shadow: 0 1px 4px rgba(32, 20, 13, 0.74);
-  pointer-events: none;
-}
 
 .surface-return-control {
   position: absolute;
@@ -1025,7 +528,7 @@ button:disabled {
   font-size: 11px;
   font-weight: 700;
   border: 1px solid rgba(255, 236, 205, 0.28);
-  border-radius: 7px 12px 7px 7px;
+  border-radius:23px 29px 20px 27px/27px 21px 29px 22px ;
   background: rgba(51, 36, 27, 0.86);
   box-shadow: 0 10px 24px rgba(30, 18, 11, 0.28);
   cursor: pointer;
@@ -1047,23 +550,23 @@ button:disabled {
  * .review-stack/.review-ratings、.graph-stage/.graph-list/.validation-*、
  * .search-surface/.shelf-*、.card-generation-candidate/.card-generation-list、
  * .companion-frosted-card/.companion-center-*、.directory-rail__*，以及页 14/15
- * 上一代的工作台 .study-workbench*/.study-notebook*/.review-workbench*/
- * .review-ledger*/.review-scene*（页 14 现在是 .day-route，页 15 是 .queue-desk）。
+ * 上一代的工作台 .study-workbench*、.study-notebook*、.review-workbench*、
+ * .review-ledger*、.review-scene*（页 14 现在是 .day-route，页 15 是 .queue-desk）。
+ * 这一族过去用斜杠做分隔符，于是通配符 `*` 后面紧跟了一个斜杠——那一对字符就是
+ * 注释终止符，本块因此在列举到一半时提前闭合、下面 `.evidence-slip` 的基规则被当成
+ * 非法选择器整条丢掉（构建产物里查不到）。在注释里列举带通配符的类名时，一律用「、」。
  *
  * 复核方式：`git log -S".review-workbench"` 可以取回旧几何；要重新引入任何一族，
  * 先在渲染端恢复它的类名，再补回样式。
  * ------------------------------------------------------------------------- */
 
-.evidence-slip {
-  grid-column: 2;
-  grid-row: 1 / 3;
-  align-self: start;
-  padding: 17px;
-  border: 1px solid rgba(105, 83, 48, 0.22);
-  border-radius: 3px 10px 4px 4px;
-  background: #e7dca9;
-  box-shadow: 0 8px 16px rgba(51, 35, 21, 0.12);
-}
+/* `.evidence-slip` 的基皮肤原先写在上面那段注释闭合之后，被注释吃掉多年。
+   修好注释后没有把它放回来：它的位置属性（grid-column: 2 / grid-row: 1 / 3）服务的是
+   `.card-editor` 那套 V2 网格，而 `.card-editor` 在渲染端已无生产者；纸面外观
+   （`#e7dca9`、`3px 10px 4px 4px`、1px 描边）也整体早于 V3.1，现在由
+   `.hud-surface .evidence-slip`（hud-pages.css）与 `.hud-surface .evidence-slip`
+   同族的奶油粗边规则负责。所以这里是刻意留空的，不要再补一份第二皮肤。
+   下面三条子规则是今天真实生效的排版，保留原样。 */
 
 .evidence-slip strong { font-size: 11px; }
 .evidence-slip p { margin: 10px 0; color: #5b4937; font-size: 12px; line-height: 1.65; }
@@ -1103,28 +606,6 @@ button:disabled {
   align-content: start;
 }
 
-.objective-detail__main {
-  display: grid;
-  align-content: start;
-  gap: 12px;
-  min-width: 0;
-}
-
-.objective-detail__main h3 {
-  margin: 0;
-  font-family: "Noto Serif SC Variable", "Songti SC", serif;
-  font-size: clamp(24px, 2.4vw, 38px);
-  line-height: 1.35;
-}
-
-.objective-detail__summary {
-  max-width: 38em;
-  margin: 0;
-  color: #5f4a39;
-  font-size: 13px;
-  line-height: 1.8;
-}
-
 .objective-detail blockquote {
   display: grid;
   gap: 5px;
@@ -1138,35 +619,6 @@ button:disabled {
 .objective-detail blockquote strong { color: var(--sage-deep); font-size: 11px; }
 .objective-detail blockquote span { font-size: 13px; font-weight: 700; }
 .objective-detail blockquote small { color: var(--ink-soft); font-size: 10px; line-height: 1.65; }
-
-.objective-detail__facts {
-  display: grid;
-  align-content: start;
-  gap: 15px;
-  min-width: 0;
-  padding-left: 18px;
-  border-left: 1px solid rgba(78, 49, 29, 0.2);
-}
-
-.objective-detail__facts dl { display: grid; gap: 10px; margin: 0; }
-.objective-detail__facts dl > div { display: grid; grid-template-columns: 5em minmax(0, 1fr); gap: 9px; align-items: baseline; }
-.objective-detail__facts dt { color: var(--ink-soft); font-size: 10px; }
-.objective-detail__facts dd { min-width: 0; margin: 0; overflow: hidden; color: #463329; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.objective-detail__unavailable { margin: 0; color: #75442c; font-size: 10px; line-height: 1.65; }
-
-.objective-detail__state {
-  display: grid;
-  grid-column: 1 / -1;
-  place-items: center;
-  align-content: center;
-  gap: 10px;
-  min-height: 260px;
-  text-align: center;
-}
-
-.objective-detail__state > svg { color: var(--sage-deep); }
-.objective-detail__state strong { font-family: "Noto Serif SC Variable", "Songti SC", serif; font-size: 22px; }
-.objective-detail__state p { max-width: 34em; margin: 0 0 6px; color: var(--ink-soft); font-size: 12px; line-height: 1.7; }
 .objective-detail__state .surface-primary { margin-top: 4px; }
 
 .card-editor label {
@@ -1206,61 +658,25 @@ button:disabled {
   width: min(310px, 28vw);
 }
 
-.scene-status {
-  position: absolute;
-  z-index: 46;
-  right: 18px;
-  bottom: 18px;
-  display: flex;
-  max-width: 330px;
-  min-height: 46px;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 15px;
-  color: rgba(255, 247, 237, 0.86);
-  border: 1px solid var(--glass-line);
-  border-radius: 999px;
-  background: var(--glass-bg);
-  box-shadow: var(--glass-shadow);
-  backdrop-filter: blur(24px) saturate(1.2);
-  pointer-events: auto;
-  animation: status-island-in 280ms cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-.scene-status__spinner { animation: none; }
-.scene-status__copy { display: grid; min-width: 0; gap: 1px; }
-.scene-status__copy strong { font-size: 11px; font-weight: 700; }
-.scene-status__copy small { overflow: hidden; color: rgba(255, 239, 220, 0.66); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
-.scene-status__dismiss { display: grid; width: 28px; height: 28px; margin-right: -7px; place-items: center; color: rgba(255, 242, 227, 0.76); border: 0; border-radius: 50%; background: transparent; cursor: pointer; }
-.scene-status__dismiss:hover { color: #fff8ee; background: rgba(255, 255, 255, 0.1); }
-
 @keyframes status-island-in {
   from { opacity: 0; transform: translateY(8px) scale(0.96); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 @media (max-width: 1180px) {
-  .rail-action__copy span, .rail-action kbd { display: none; }
-  .rail-action--primary { grid-template-columns: 32px auto; min-width: 118px; }
   .companion-scene-anchor { left: 54%; }
   .companion-whisper { width: min(340px, 42vw); }
 }
 
 @media (max-width: 900px), (max-height: 660px) {
-  .task-surface__header { top: 45px; min-height: 53px; }
-  .task-surface__header p { display: none; }
   .surface-close span { display: none; }
   .card-editor { left: 10%; width: 65vw; }
-  .action-rail { bottom: 15px; }
-  .rail-action { min-width: 50px; width: 52px; padding: 0; grid-template-columns: 1fr; place-items: center; }
-  .rail-action__copy, .rail-action kbd { display: none; }
   .companion-scene-anchor { top: 31%; left: 54%; width: 220px; height: 330px; }
   .companion-whisper { right: 70%; width: 330px; }
 }
 
 @media (max-width: 720px) {
   .window-drag-region { left: 72px; right: 76px; }
-  .hotspot__label { display: none; }
-  .task-surface__header { left: 18px; width: calc(100vw - 100px); }
   .card-editor { left: 4%; width: 79vw; }
   .evidence-slip { display: none; }
   .notebook-actions { grid-column: 1; }
@@ -1268,17 +684,26 @@ button:disabled {
   .companion-whisper { right: 20%; bottom: 8%; width: min(280px, calc(100vw - 30px)); }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .scene-status, .run-recovery-notice, .skip-link, .hotspot__pin, .hotspot__label, .rail-action, .scene-depth-band, .room-scene-foreground {
-    transition-duration: 1ms !important;
-    animation: none !important;
-    will-change: auto;
-  }
-}
-
 .desktop-app[data-motion-mode="off"] .scene-status, .desktop-app[data-motion-mode="off"] .run-recovery-notice, .desktop-app[data-motion-mode="off"] .run-spinner {
   animation: none !important;
 }
+
+/* Off 档的全站兜底（DESIGN.md:146：off 与系统减弱都要「即时完成状态转换」）。
+   以前每个界面各写自己的 Off 规则，写漏了就继续在动——审计数下来有九个文件一条都没有，
+   所以这里给一条总的，界面自己那些更严的 `animation: none` 仍然照常生效。
+   用 1ms 而不是 none：多处界面靠 animationend / transitionend 收尾（HUD 岛形变、
+   伴星留痕），直接掐掉动画会让那些回调永远不来。
+   iteration-count 必须一起压成 1，否则 `… infinite` 的加载环会变成每毫秒转一圈。 */
+.desktop-app[data-motion-mode="off"] *,
+.desktop-app[data-motion-mode="off"] *::before,
+.desktop-app[data-motion-mode="off"] *::after {
+  animation-duration: 1ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 1ms !important;
+}
+
+/* 同一条理由适用于系统的 prefers-reduced-motion：凡是把时长压到 1ms 的地方，
+   都要连带把迭代次数收成 1（approved-surfaces.css 的 reduce 块原先漏了这一步）。 */
 
 /* First Golden: server-proved LearningRun recovery, never a local resume guess. */
 .run-recovery-stack {
@@ -1344,7 +769,7 @@ button:disabled {
 .run-recovery-notice__secondary { justify-content: space-between; color: var(--ink); background: rgba(255, 255, 255, 0.42); }
 .run-recovery-notice__primary:hover { background: var(--accent-deep); }
 .run-recovery-notice__secondary:hover { background: rgba(255, 255, 255, 0.72); }
-.run-recovery-notice__primary:focus-visible, .run-recovery-notice__secondary:focus-visible { outline: 2px solid var(--sage-deep); outline-offset: 3px; }
+.run-recovery-notice__primary:focus-visible, .run-recovery-notice__secondary:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
 .run-recovery-notice__secondary small { margin-left: auto; color: var(--ink-soft); font-size: 10px; font-weight: 600; }
 
 @media (max-width: 720px) {
@@ -1369,9 +794,6 @@ button:disabled {
 }
 .card-generation-recovery strong { color: var(--accent-deep); font-size: 12px; }
 .card-generation-recovery p { margin: 0; color: var(--ink-soft); font-size: 11px; line-height: 1.55; }
-
-@media (max-width: 900px) {
-}
 
 @media (max-width: 720px) {
   .notebook-actions { grid-column: 1; }
@@ -1443,17 +865,11 @@ button:disabled {
   line-height: 1.65;
   border-radius: 7px;
 }
-
-.run-blocker { flex-direction: column; border: 1px solid rgba(189, 91, 45, 0.24); background: rgba(189, 91, 45, 0.08); }
-.run-blocker strong { color: var(--accent-deep); }
 .run-inline-error { margin: 0; color: var(--accent-deep); font-size: 11px; line-height: 1.6; }
 
 .run-confirmation { flex-wrap: wrap; align-items: center; border: 1px solid rgba(189, 91, 45, 0.3); background: rgba(255, 244, 224, 0.94); box-shadow: var(--soft-shadow); }
 .run-confirmation h2 { flex: 1 1 100%; margin: 0; color: var(--accent-deep); font-family: "Noto Serif SC Variable", "Songti SC", serif; font-size: 13px; }
 .run-confirmation p { flex: 1 1 100%; margin: 0; }
-
-@media (max-width: 1180px) {
-}
 
 @media (max-width: 720px) {
   .run-relation-controls { grid-template-columns: 1fr 1fr; }
@@ -1471,50 +887,6 @@ button:disabled {
    quiet authored layer; all readable content remains DOM-owned. */
 .task-surface__spatial-layer {
   isolation: isolate;
-}
-
-.task-surface__header {
-  top: clamp(64px, 9vh, 104px);
-  left: clamp(30px, 5vw, 84px);
-  width: min(560px, calc(100vw - 168px));
-  min-height: 68px;
-  align-items: flex-start;
-  padding: 13px 13px 12px 18px;
-  border: 1px solid rgba(255, 243, 218, 0.19);
-  border-inline-start: 2px solid rgba(217, 166, 104, 0.8);
-  border-radius: 6px 17px 6px 6px;
-  color: #fff6e9;
-  background: rgba(31, 25, 21, 0.72);
-  box-shadow: 0 16px 38px rgba(25, 15, 10, 0.24);
-  backdrop-filter: blur(18px) saturate(1.08);
-}
-
-.task-surface__header::after {
-  position: absolute;
-  right: 12px;
-  bottom: 7px;
-  left: 18px;
-  height: 1px;
-  content: "";
-  background: linear-gradient(90deg, rgba(255, 235, 200, 0.24), transparent 75%);
-  pointer-events: none;
-}
-
-.task-surface__header-copy {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  min-width: 0;
-  gap: 2px;
-}
-
-.task-surface__header h2 {
-  color: #fff7ea;
-  font-size: clamp(18px, 1.5vw, 24px);
-}
-
-.task-surface__header p {
-  color: rgba(255, 242, 222, 0.67);
 }
 
 .surface-close {
@@ -1558,37 +930,6 @@ button:disabled {
   z-index: 1;
 }
 
-.action-rail {
-  height: 50px;
-  gap: 2px;
-  padding: 3px;
-  border-color: rgba(255, 239, 215, 0.28);
-  background: rgba(27, 24, 21, 0.76);
-}
-
-.rail-action, .rail-action--primary, .rail-action:not(.rail-action--primary) {
-  width: 44px !important;
-  min-width: 44px;
-  height: 42px;
-  min-height: 42px;
-  grid-template-columns: 32px;
-  justify-content: center;
-  padding: 4px 6px;
-  border-right: 0;
-}
-
-.rail-action__copy {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-}
-
-.rail-action__icon { width: 30px; height: 30px; }
-
 .companion-scene-anchor {
   top: 35%;
   left: 44%;
@@ -1617,10 +958,6 @@ button:disabled {
   border-color: rgba(255, 240, 213, 0.19);
   background: #37302a;
 }
-
-.companion-whisper__close { color: rgba(255, 244, 225, 0.7); }
-.companion-whisper__close:hover { color: #fff8ed; background: rgba(255, 255, 255, 0.1); }
-.companion-whisper__kicker { color: #f1c47e; }
 .companion-whisper h2 { color: #fff8ed; font-size: 18px; }
 .companion-whisper > p { color: rgba(255, 239, 216, 0.7); }
 
@@ -1632,8 +969,6 @@ button:disabled {
 }
 
 .companion-action:hover { background: rgba(255, 248, 232, 0.16); }
-.companion-action--primary { color: #2d2118; border-color: #f0bd73; background: #f0bd73; }
-.companion-action--primary:hover { background: #ffd18d; }
 
 .companion-unavailable-notice, .companion-restore-chip {
   color: rgba(255, 239, 216, 0.86);
@@ -1647,91 +982,15 @@ button:disabled {
   background: rgba(255, 248, 232, 0.12);
 }
 
-.companion-whisper__footer {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 9px;
-  padding-top: 8px;
-  color: rgba(255, 239, 216, 0.48);
-  font-size: 9px;
-  border-top: 1px solid rgba(255, 240, 215, 0.12);
-}
-
-.companion-reset-position {
-  display: inline-flex;
-  min-height: 24px;
-  align-items: center;
-  gap: 4px;
-  margin-left: auto;
-  padding: 0 6px;
-  color: rgba(255, 240, 215, 0.78);
-  font-size: 9px;
-  border: 1px solid rgba(255, 240, 215, 0.18);
-  border-radius: 999px;
-  background: transparent;
-  cursor: pointer;
-}
-
-.companion-reset-position:hover { background: rgba(255, 255, 255, 0.1); }
-
 @media (max-width: 900px), (max-height: 660px) {
-  .task-surface__header { width: min(500px, calc(100vw - 140px)); }
   .companion-scene-anchor { top: 33%; left: 45%; width: 230px; height: 330px; }
   .companion-whisper { width: min(320px, 38vw); }
 }
 
 @media (max-width: 720px) {
-  .task-surface__header { left: 18px; width: calc(100vw - 100px); }
-  .task-surface__header p { display: none; }
   .companion-scene-anchor { top: 31%; left: 52%; width: 205px; height: 250px; }
   .companion-whisper { right: 15%; width: min(290px, calc(100vw - 30px)); }
 }
-
-/* Owner repair: compact home islands and a lamp-measured companion anchor. */
-.action-rail {
-  height: 58px;
-  gap: 0;
-  padding: 4px;
-  border-color: rgba(255, 239, 215, 0.28);
-  background: rgba(27, 24, 21, 0.76);
-}
-
-.rail-action, .rail-action--primary, .rail-action:not(.rail-action--primary) {
-  height: 48px;
-  min-height: 48px;
-}
-
-.rail-action--primary {
-  width: 188px !important;
-  min-width: 188px;
-  grid-template-columns: 32px minmax(0, 1fr);
-  justify-content: start;
-  padding: 4px 10px;
-  border-right: 1px solid rgba(255, 248, 238, 0.14);
-}
-
-.rail-action--primary .rail-action__copy {
-  position: static;
-  display: grid;
-  width: auto;
-  height: auto;
-  margin: 0;
-  overflow: hidden;
-  clip: auto;
-  gap: 2px;
-}
-
-.rail-action:not(.rail-action--primary) {
-  width: 44px !important;
-  min-width: 44px;
-  grid-template-columns: 32px;
-  justify-content: center;
-  padding: 4px 6px;
-  border-right: 0;
-}
-
-.rail-action__icon { width: 32px; height: 32px; }
 
 .companion-scene-anchor {
   /* Inline pixel coordinates are measured from the live lamp hotspot. */
@@ -1753,19 +1012,7 @@ button:disabled {
 
 .companion-whisper::after { bottom: 42px; }
 
-.companion-whisper__close {
-  top: -11px;
-  right: -11px;
-  width: 44px;
-  height: 44px;
-  color: #fff6e8;
-  border: 1px solid rgba(255, 240, 215, 0.2);
-  background: rgba(31, 27, 24, 0.92);
-}
-
 .companion-whisper__kicker, .companion-whisper h2, .companion-whisper > p { grid-column: 1; min-width: 0; }
-
-.companion-whisper__kicker { padding-left: 4px; }
 
 .companion-whisper h2 {
   margin: 2px 0 0 4px;
@@ -1786,130 +1033,12 @@ button:disabled {
   -webkit-line-clamp: 2;
 }
 
-.companion-whisper__actions {
-  display: grid;
-  grid-column: 2;
-  grid-row: 1 / span 3;
-  align-content: center;
-  gap: 6px;
-  margin: 0;
-}
-
 .companion-action {
   width: 100%;
   min-height: 44px;
   padding-inline: 10px;
   border-radius: 999px;
 }
-
-.companion-whisper__settings {
-  grid-column: 1 / -1;
-  margin: 1px 4px 0;
-  border-top: 1px solid rgba(255, 240, 215, 0.12);
-}
-
-.companion-whisper__settings > summary {
-  display: flex;
-  min-height: 44px;
-  align-items: center;
-  gap: 8px;
-  color: rgba(255, 239, 216, 0.66);
-  font-size: 9px;
-  cursor: pointer;
-  list-style: none;
-}
-
-.companion-whisper__settings > summary::-webkit-details-marker { display: none; }
-.companion-whisper__settings > summary::before { content: "+"; color: #f1c47e; font-size: 13px; }
-.companion-whisper__settings[open] > summary::before { content: "−"; }
-.companion-whisper__settings > summary small { margin-left: auto; color: rgba(255, 239, 216, 0.48); font-size: 9px; }
-
-.companion-reset-position { min-height: 44px; }
-
-.companion-presence-controls {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 12px;
-  padding-top: 10px;
-  border-top: 1px solid rgba(79, 51, 32, 0.13);
-}
-
-.companion-presence-controls button {
-  display: inline-flex;
-  min-height: 28px;
-  align-items: center;
-  padding: 0 9px;
-  color: #5b4433;
-  font-size: 10px;
-  border: 1px solid rgba(79, 51, 32, 0.22);
-  border-radius: 7px;
-  background: rgba(255, 252, 244, 0.56);
-  cursor: pointer;
-}
-
-.companion-presence-controls button[aria-pressed="true"] {
-  color: #3d3027;
-  border-color: rgba(76, 50, 32, 0.28);
-  background: rgba(107, 127, 94, 0.18);
-}
-
-/* 账号级 presence（2026-09-16 裁决 3）：跨设备同步的三项设置，写盘走 main 的
- * revision CAS；页面级打扰控制仍是会话级的 .companion-presence-controls。 */
-.companion-account-controls {
-  display: grid;
-  gap: 6px;
-  margin-top: 12px;
-  padding-top: 10px;
-  border-top: 1px solid rgba(79, 51, 32, 0.13);
-}
-
-.companion-account-controls__title {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  color: #5b4433;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-}
-
-.companion-account-controls__title small {
-  color: rgba(91, 68, 51, 0.72);
-  font-weight: 500;
-  letter-spacing: 0;
-}
-
-.companion-account-controls .companion-presence-controls {
-  margin-top: 0;
-  padding-top: 0;
-  border-top: 0;
-}
-
-.companion-quiet-hours {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: #5b4433;
-  font-size: 10px;
-}
-
-.companion-quiet-hours label { display: inline-flex; align-items: center; gap: 5px; }
-
-.companion-quiet-hours input[type="time"] {
-  min-height: 26px;
-  padding: 0 6px;
-  color: #5b4433;
-  font-size: 10px;
-  border: 1px solid rgba(79, 51, 32, 0.22);
-  border-radius: 7px;
-  background: rgba(255, 252, 244, 0.56);
-}
-
-.companion-account-controls__failure { margin: 0; color: #8a4a34; font-size: 10px; }
-
-.companion-whisper__footer { margin-top: 3px; padding-top: 4px; }
 
 .run-recovery-stack {
   top: 64px;
@@ -1974,15 +1103,6 @@ button:disabled {
     grid-template-columns: 1fr;
     border-radius: 22px;
   }
-
-  .companion-whisper__actions {
-    grid-column: 1;
-    grid-row: auto;
-    grid-template-columns: 1fr 1fr;
-    margin-top: 6px;
-  }
-
-  .companion-whisper__settings { grid-column: 1; }
 }
 
 @media (max-width: 900px), (max-height: 660px) {
@@ -2022,14 +1142,8 @@ button:disabled {
   perspective: none;
 }
 
-@media (max-width: 1180px) and (min-height: 661px) {
-}
-
 @media (max-width: 900px), (max-height: 660px) {
   .desktop-app[data-surface-open="true"] .companion-presence[data-surface="review"] { display: none; }
-}
-
-@media (max-width: 560px) {
 }
 
 /* Review owner repair V4: the generated backplate owns only the blank spatial
@@ -2064,321 +1178,10 @@ button:disabled {
   perspective: none;
 }
 
-/* The page is visibly bowed, so the semantic copy stays in the DOM while the
-   paint layer follows four measured ruled-line paths.  A straight HTML line
-   can be projected onto a plane;
+/* 曲面板校验器（.surface-calibrator / data-surface-calibration-base）已连同
+   scene/SurfaceCalibrator.tsx 一起删除：该组件在全仓没有任何引用者，那个
+   data 属性也没有任何写入方。要用时连同组件一起重新引入，不要只补样式。 */
 
-html[data-surface-calibration-base="false"] :is(.room-depth-layer, [data-scene-surface-base]) {
-  opacity: 0 !important;
-}
-
-.surface-calibrator, .surface-calibrator__geometry {
-  position: absolute;
-  z-index: 50;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-}
-
-.surface-calibrator__geometry {
-  z-index: 0;
-  overflow: visible;
-}
-
-.surface-calibrator__clip, .surface-calibrator__centerline, .surface-calibrator__baseline {
-  fill: rgba(255, 165, 81, 0.035);
-  stroke: rgba(255, 213, 163, 0.38);
-  stroke-width: 1;
-  vector-effect: non-scaling-stroke;
-}
-
-.surface-calibrator__clip {
-  fill: none;
-  stroke: #f4df88;
-  stroke-dasharray: 5 4;
-}
-
-.surface-calibrator__centerline {
-  fill: none;
-  stroke: rgba(133, 211, 190, 0.8);
-  stroke-dasharray: 3 4;
-}
-
-.surface-calibrator__baseline {
-  fill: none;
-  stroke: rgba(255, 171, 102, 0.92);
-}
-
-.surface-calibrator__handle {
-  position: absolute;
-  z-index: 2;
-  display: grid;
-  width: 28px;
-  height: 28px;
-  place-items: center;
-  padding: 0;
-  color: #fff6e9;
-  font: 760 9px/1 "Noto Sans SC Variable", "PingFang SC", sans-serif;
-  border: 1px solid rgba(255, 244, 225, 0.9);
-  border-radius: 50%;
-  background: #a94e2f;
-  box-shadow: 0 3px 9px rgba(35, 20, 12, 0.42);
-  cursor: grab;
-  pointer-events: auto;
-  touch-action: none;
-  transform: translate(-50%, -50%);
-}
-
-.surface-calibrator__handle:hover, .surface-calibrator__handle:focus-visible {
-  color: #3b281d;
-  outline: 2px solid rgba(255, 224, 178, 0.94);
-  outline-offset: 2px;
-  background: #ffd29d;
-}
-
-.surface-calibrator__handle:active {
-  cursor: grabbing;
-}
-
-.surface-calibrator__launcher {
-  position: absolute;
-  z-index: 48;
-  top: 2.4%;
-  right: 2.2%;
-  min-height: 34px;
-  padding: 0 11px;
-  color: #fff2df;
-  font: 690 11px/1 "Noto Sans SC Variable", "PingFang SC", sans-serif;
-  border: 1px solid rgba(255, 235, 204, 0.28);
-  border-radius: 4px;
-  background: rgba(54, 37, 28, 0.9);
-  box-shadow: 0 6px 18px rgba(30, 18, 12, 0.24);
-  cursor: pointer;
-  pointer-events: auto;
-}
-
-.surface-calibrator__launcher:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
-
-.surface-calibrator__launcher:focus-visible, .surface-calibrator__panel button:focus-visible, .surface-calibrator__panel select:focus-visible, .surface-calibrator__panel input:focus-visible {
-  outline: 2px solid #ffc17f;
-  outline-offset: 2px;
-}
-
-.surface-calibrator__panel {
-  position: absolute;
-  z-index: 3;
-  top: 2.4%;
-  right: 2.2%;
-  width: min(308px, 32vw);
-  max-height: 94%;
-  padding: 14px;
-  overflow: auto;
-  color: #f7ead8;
-  color-scheme: dark;
-  font-family: "Noto Sans SC Variable", "PingFang SC", sans-serif;
-  border: 1px solid rgba(255, 232, 200, 0.27);
-  border-radius: 6px;
-  background: rgba(48, 33, 25, 0.97);
-  box-shadow: 0 16px 38px rgba(28, 16, 10, 0.42);
-  pointer-events: auto;
-}
-
-.surface-calibrator__panel-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  padding-bottom: 11px;
-  border-bottom: 1px solid rgba(255, 231, 197, 0.16);
-}
-
-.surface-calibrator__panel-header div {
-  display: grid;
-  gap: 3px;
-}
-
-.surface-calibrator__panel-header strong {
-  font-family: "Noto Serif SC Variable", "Songti SC", serif;
-  font-size: 17px;
-}
-
-.surface-calibrator__panel-header span {
-  color: #cdb9a1;
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
-}
-
-.surface-calibrator__panel button, .surface-calibrator__panel select {
-  min-height: 32px;
-  color: #f8ead5;
-  font: 650 11px/1.2 "Noto Sans SC Variable", "PingFang SC", sans-serif;
-  border: 1px solid rgba(255, 229, 193, 0.22);
-  border-radius: 4px;
-  background: rgba(255, 245, 228, 0.06);
-}
-
-.surface-calibrator__panel button {
-  padding: 0 9px;
-  cursor: pointer;
-}
-
-.surface-calibrator__panel button:hover:not(:disabled) {
-  background: rgba(255, 239, 214, 0.12);
-}
-
-.surface-calibrator__panel button:disabled {
-  opacity: 0.42;
-  cursor: not-allowed;
-}
-
-.surface-calibrator__field {
-  display: grid;
-  gap: 6px;
-  margin-top: 12px;
-  color: #d5c1aa;
-  font-size: 10px;
-}
-
-.surface-calibrator__field select {
-  width: 100%;
-  padding: 0 8px;
-}
-
-.surface-calibrator__modes {
-  display: grid;
-  margin: 12px 0 0;
-  padding: 0;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-  border: 0;
-}
-
-.surface-calibrator__modes legend {
-  grid-column: 1 / -1;
-  margin-bottom: 1px;
-  padding: 0;
-  color: #d5c1aa;
-  font-size: 10px;
-}
-
-.surface-calibrator__modes label {
-  display: grid;
-  min-width: 0;
-  gap: 5px;
-  color: #d9c8b2;
-  font-size: 9px;
-}
-
-.surface-calibrator__modes select {
-  width: 100%;
-  min-width: 0;
-  padding: 0 5px;
-  font-size: 9px;
-}
-
-.surface-calibrator__mode-note {
-  margin: 9px 0 0;
-  color: #bfae99;
-  font-size: 9px;
-  line-height: 1.45;
-}
-
-.surface-calibrator__layers {
-  display: grid;
-  margin: 12px 0 0;
-  padding: 0;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 5px;
-  border: 0;
-}
-
-.surface-calibrator__layers legend {
-  margin-bottom: 6px;
-  padding: 0;
-  color: #d5c1aa;
-  font-size: 10px;
-}
-
-.surface-calibrator__layers label {
-  display: grid;
-  min-height: 30px;
-  place-items: center;
-  gap: 3px;
-  color: #ead9c2;
-  font-size: 9px;
-  border: 1px solid rgba(255, 232, 200, 0.13);
-  border-radius: 3px;
-  cursor: pointer;
-}
-
-.surface-calibrator__layers input {
-  width: 13px;
-  height: 13px;
-  margin: 0;
-  accent-color: #c8663e;
-}
-
-.surface-calibrator__coordinates {
-  display: grid;
-  margin-top: 12px;
-  gap: 4px;
-}
-
-.surface-calibrator__coordinates p {
-  display: grid;
-  min-height: 25px;
-  margin: 0;
-  padding: 0 7px;
-  grid-template-columns: 30px 1fr 1fr;
-  align-items: center;
-  color: #d9c8b2;
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
-  border-bottom: 1px solid rgba(255, 232, 200, 0.09);
-}
-
-.surface-calibrator__coordinates p[data-active="true"] {
-  color: #ffd29d;
-  background: rgba(200, 102, 62, 0.13);
-}
-
-.surface-calibrator__coordinates strong {
-  color: #f3e2cd;
-}
-
-.surface-calibrator__validation, .surface-calibrator__copy-status {
-  margin: 10px 0 0;
-  color: #cfbea9;
-  font-size: 10px;
-  line-height: 1.45;
-}
-
-.surface-calibrator__actions {
-  display: grid;
-  margin-top: 11px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 5px;
-}
-
-.surface-calibrator__actions .surface-calibrator__apply {
-  grid-column: 1 / -1;
-  color: #fff3e4;
-  border-color: rgba(220, 115, 70, 0.58);
-  background: rgba(184, 82, 48, 0.48);
-}
-
-.surface-calibrator__actions .surface-calibrator__copy {
-  color: #fff3e4;
-  border-color: rgba(220, 115, 70, 0.58);
-  background: rgba(184, 82, 48, 0.48);
-}
-
-@media (max-width: 1180px) and (min-width: 901px) and (min-height: 661px) {
-}
 
 @media (max-width: 900px), (max-height: 660px) {
   .task-surface--review {
@@ -2407,36 +1210,21 @@ html[data-surface-calibration-base="false"] :is(.room-depth-layer, [data-scene-s
   pointer-events: auto;
 }
 
-@media (max-width: 1000px) {
-}
-
-@media (max-width: 720px), (max-height: 660px) {
-}
-
-@media (prefers-reduced-motion: reduce) {
-}
-
 /* The directory's bottom island shares the Home V2 HUD when the home scene
  * is visible. On task surfaces it remains its own compact island; the same
  * explicit width transition lets the content reclaim the rail smoothly. */
 .desktop-app[data-directory-rail] #main-content {
   padding-left: 0;
-  transition: padding-left 360ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: padding-left 360ms var(--hud-island-ease);
 }
 
 .desktop-app[data-directory-rail="expanded"] #main-content {
   padding-left: clamp(216px, 16vw, 246px);
-  transition: padding-left 360ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: padding-left 360ms var(--hud-island-ease);
 }
 
 @media (max-width: 900px) {
   .desktop-app[data-directory-rail="expanded"] #main-content { padding-left: 76px; }
-}
-
-@media (max-width: 560px) {
-}
-
-@media (max-width: 560px) {
 }
 
 @media (max-width: 900px), (max-height: 660px) {
@@ -2458,12 +1246,6 @@ html[data-surface-calibration-base="false"] :is(.room-depth-layer, [data-scene-s
   .desktop-app[data-surface-open="true"] .companion-presence[data-surface="notebook"] {
     display: none;
   }
-}
-
-@media (max-width: 560px) {
-}
-
-@media (prefers-reduced-motion: reduce) {
 }
 
 /* Search owns a separate archive-room backplate. The poster is the scene
@@ -2503,12 +1285,6 @@ html[data-surface-calibration-base="false"] :is(.room-depth-layer, [data-scene-s
   }
 }
 
-@media (max-width: 560px) {
-}
-
-@media (prefers-reduced-motion: reduce) {
-}
-
 .card-generation-recovery, .run-order-list li, .run-relation-list li, .run-bundle-part, .run-blocker, .run-confirmation {
   background: transparent;
   box-shadow: none;
@@ -2542,12 +1318,6 @@ html[data-surface-calibration-base="false"] :is(.room-depth-layer, [data-scene-s
 }
 
 .run-icon-button:hover:not(:disabled) { background: rgba(101, 126, 88, 0.08); }
-
-@media (max-width: 900px) {
-}
-
-@media (max-width: 720px) {
-}
 
 /* V1 material pass: the remaining task routes use the same authored paper
    object. Keep the DOM as ink and controls so no pale application panel
@@ -2605,9 +1375,6 @@ html[data-surface-calibration-base="false"] :is(.room-depth-layer, [data-scene-s
   }
 }
 
-@media (max-width: 900px), (max-height: 660px) {
-}
-
 /* Align the objective ink with the same rotated top sheet used by the
    Card Generation surface. The authored asset owns paper;
    these wrappers own only readable content and controls. */
@@ -2652,10 +1419,6 @@ html[data-surface-calibration-base="false"] :is(.room-depth-layer, [data-scene-s
 @media (max-width: 720px) {
   .task-surface .card-editor.objective-detail {
     height: 61vh;
-  }
-
-  .task-surface .card-editor.objective-detail > .objective-detail__content {
-    grid-template-columns: 1fr;
   }
 }
 
@@ -2776,9 +1539,6 @@ html[data-surface-calibration-base="false"] :is(.room-depth-layer, [data-scene-s
 @media (max-width: 900px), (max-height: 660px) {
 }
 
-@media (max-width: 560px) {
-}
-
 /* The home recovery notice is persistent context, not a second hero panel. */
 @media (min-width: 901px) {
   .run-recovery-stack {
@@ -2793,51 +1553,6 @@ html[data-surface-calibration-base="false"] :is(.room-depth-layer, [data-scene-s
   .run-recovery-notice__copy p { font-size: 10px; }
 }
 
-@media (max-width: 720px) {
-  .task-surface .task-surface__header {
-    width: calc(100vw - 100px);
-    padding-left: 12px;
-  }
-
-  .task-surface .task-surface__header p { display: none; }
-
-  .task-surface .card-editor.objective-detail > .objective-detail__content {
-    inset: 15% 12% 24% 11%;
-  }
-}
-
-@media (max-width: 900px), (max-height: 660px) {
-  /* Compact LearningRun is a readable flow surface. The 2.5D paper stack is
-     intentionally replaced by a flat paper fallback so the action edge can
-     follow the editor without covering the prompt or relying on coordinates
-     that only work at the desktop aspect ratio. */
-  .task-surface--validation {
-    overflow-x: hidden;
-    overflow-y: auto;
-    pointer-events: auto;
-    overscroll-behavior: contain;
-    scrollbar-gutter: stable;
-    scroll-padding-block: 18px 28px;
-  }
-
-  .task-surface--validation .task-surface__spatial-layer {
-    position: relative;
-    inset: auto;
-    min-height: 100%;
-    padding: 62px clamp(12px, 4vw, 28px) 86px;
-    pointer-events: auto;
-    perspective: none;
-  }
-
-  .task-surface--validation .task-surface__header {
-    position: relative;
-    top: auto;
-    left: auto;
-    width: 100%;
-    min-height: 0;
-    margin: 0 auto 14px;
-  }
-}
 
 @media (max-width: 900px), (max-height: 660px) {
   /* Card Generation uses the same single-scroll fallback as LearningRun.
@@ -2860,22 +1575,6 @@ html[data-surface-calibration-base="false"] :is(.room-depth-layer, [data-scene-s
     padding: 62px clamp(12px, 4vw, 28px) 86px;
     pointer-events: auto;
     perspective: none;
-  }
-
-  .task-surface--card-generation .task-surface__header {
-    position: relative;
-    top: auto;
-    left: auto;
-    width: 100%;
-    min-height: 0;
-    margin: 0 auto 14px;
-  }
-
-  .task-surface--card-generation > .task-surface__spatial-layer > .prototype-note {
-    position: relative;
-    inset: auto;
-    max-width: 100%;
-    margin: 16px auto 0;
   }
 }
 
@@ -2931,7 +1630,7 @@ html[data-surface-calibration-base="false"] :is(.room-depth-layer, [data-scene-s
   gap: 14px;
   max-width: 100%;
   color: #f3e9d8;
-  font: 12px/1.6 "Noto Sans SC Variable", "Noto Sans SC", sans-serif;
+  font: 12px/1.6 "Noto Sans SC Variable", sans-serif;
 }
 
 .image-lightbox-counter {
@@ -2950,7 +1649,7 @@ html[data-surface-calibration-base="false"] :is(.room-depth-layer, [data-scene-s
   border-radius: 10px;
   background: rgb(24 18 10 / 55%);
   color: #f3e9d8;
-  font: 400 28px/1 "Noto Sans SC Variable", "Noto Sans SC", sans-serif;
+  font: 400 28px/1 "Noto Sans SC Variable", sans-serif;
   cursor: pointer;
 }
 
@@ -2976,7 +1675,7 @@ html[data-surface-calibration-base="false"] :is(.room-depth-layer, [data-scene-s
   border-radius: 50%;
   background: rgb(24 18 10 / 55%);
   color: #f3e9d8;
-  font: 400 18px/1 "Noto Sans SC Variable", "Noto Sans SC", sans-serif;
+  font: 400 18px/1 "Noto Sans SC Variable", sans-serif;
   cursor: pointer;
 }
 
@@ -2989,7 +1688,7 @@ html[data-surface-calibration-base="false"] :is(.room-depth-layer, [data-scene-s
   gap: 10px;
   justify-items: center;
   color: #f3e9d8;
-  font: 13px/1.7 "Noto Sans SC Variable", "Noto Sans SC", sans-serif;
+  font: 13px/1.7 "Noto Sans SC Variable", sans-serif;
 }
 
 @media (max-width: 760px) {

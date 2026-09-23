@@ -26,6 +26,10 @@ import {
   markdownImportResultV1Schema,
   memberListResultV1Schema,
   renameWorkspaceResultV1Schema,
+  dissolveWorkspaceResultV1Schema,
+  transferWorkspaceOwnershipResultV1Schema,
+  type DissolveWorkspaceResultV1,
+  type TransferWorkspaceOwnershipResultV1,
   createWorkspaceResultV1Schema,
   searchDriftResultV1Schema,
   searchReindexResultV1Schema,
@@ -274,11 +278,14 @@ import {
   type DesktopSourceNoteResult,
   type DesktopSourceUpdateRequest,
   type DesktopSourceArchiveResult,
+  type DesktopSourceReparseResult,
   type DesktopNoteListPage,
   type DesktopNoteCreateRequest,
   type DesktopNoteMutationResult,
   type DesktopNoteVersionList,
   type DesktopSearchPage,
+  type DesktopAiAuditPageV1,
+  desktopAiAuditPageV1Schema,
 } from "@ailearn/shared/desktop-surface-contracts";
 import { objectiveListPageV3Schema, learningObjectiveSurfaceV3Schema, type ObjectiveListPageV3, type LearningObjectiveSurfaceV3 } from "@ailearn/shared/learning-objective-surface-contracts";
 import { understandingTopologySnapshotV3Schema, type UnderstandingTopologySnapshotV3 } from "@ailearn/shared/understanding-topology-v3-contracts";
@@ -568,6 +575,13 @@ function retryFor(code: GatewayErrorCode): DesktopGatewayFailure["retry"] {
  * 所以这里保持 unavailable，设置页读渲染层上报的真实状态（room-store 的
  * `live2dStatus`），不拿这个字段冒充。
  */
+/**
+ * 能力投影的本地有效期（M12）。取值 5 秒的判据：它要长到盖住"用户连着点几个受控按钮"
+ * 这一整段（每个按钮前面那次往返就是这么被省掉的），又要短到运维在服务端翻一个
+ * feature flag 之后，最坏情况只需要等一次呼吸就能在新一轮操作里生效。
+ */
+const CAPABILITY_CACHE_TTL_MS = 5_000;
+
 const NATIVE_CAPABILITY_CHANNELS: Readonly<Record<keyof NativeCapabilityProjectionV1, string | null>> = {
   filePicker: null,
   clipboard: DESKTOP_IPC_CHANNELS.clipboardReadLinks,
@@ -666,6 +680,34 @@ export function parseCompanionInboxSseFrame(block: string): AssistantDeliveryV2 
 
 function waitForStreamRetry(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+/**
+ * SSE 断线重连的阶梯（0269 轮 M17）。
+ *
+ * 以前 5 条流（account / inbox / 学习轮 / 制卡 / 伴星对话）在"流自然结束"和"抛错"两条
+ * 出口上都写死固定 1000 毫秒：本地 API 一停，主进程就变成每秒最多 5 次
+ * 重连，而每一次 `ensureConnected()` 会把整套 HMAC 信任握手 + `/health` 再走一遍——
+ * 那正好是服务在恢复期最需要喘息的时候。退避到 30s 封顶，并带 ±25% 抖动，避免五条流
+ * 永远在同一毫秒一起撞上去。
+ *
+ * 归零点在"真的读到一帧"上（见各 watcher 里的 `streamRetryAttempt = 0`）：能收到帧就
+ * 说明这条线是通的，不该再背着失败历史。
+ */
+/** 只为读出一个 `error` token 而碰失败响应的 body，给它一个比任何正常响应都小的上限。 */
+const DOMAIN_ERROR_BODY_MAX_BYTES = 4_096;
+
+const STREAM_RETRY_BASE_MS = 1_000;
+const STREAM_RETRY_CEILING_MS = 30_000;
+
+function streamRetryDelayMs(attempt: number): number {
+  const exponential = Math.min(
+    STREAM_RETRY_CEILING_MS,
+    STREAM_RETRY_BASE_MS * 2 ** Math.max(0, Math.min(attempt, 10)),
+  );
+  // ±25% 抖动：五条流同时断开时不该同时重连。
+  const jitter = 0.75 + Math.random() * 0.5;
+  return Math.round(exponential * jitter);
 }
 
 function roomActiveGenerationErrorReason(error: unknown): "upstream_unavailable" | "unsupported_contract" | "permission_denied" | "stale_workspace" | "route_not_available" {
@@ -901,6 +943,9 @@ export class DesktopGateway {
     this.token = parsed.data.token;
     this.workspaceEpoch = 1;
     this.roomProjectionCache = null;
+    // 能力投影与房间投影同生命周期：换身份/换空间之后它必须重来，不能靠 epoch 相等蒙过去
+    // （两处都会把 workspaceEpoch 复位成 1，复位之后"和缓存里的 epoch 一样"是必然成立）。
+    this.forgetCapabilities();
     await this.persistCredential(persist);
     return this.loadSession(requestId);
   }
@@ -920,6 +965,9 @@ export class DesktopGateway {
     this.token = parsed.data.token;
     this.workspaceEpoch = 1;
     this.roomProjectionCache = null;
+    // 能力投影与房间投影同生命周期：换身份/换空间之后它必须重来，不能靠 epoch 相等蒙过去
+    // （两处都会把 workspaceEpoch 复位成 1，复位之后"和缓存里的 epoch 一样"是必然成立）。
+    this.forgetCapabilities();
     await this.persistCredential(persist);
     return this.loadSession(requestId);
   }
@@ -1205,6 +1253,59 @@ export class DesktopGateway {
   }
 
   /**
+   * DELETE /workspaces/:id：解散一个协作空间（迁移 0276 的出口）。
+   *
+   * 服务端把"逐表删了多少行"原样带回来，这里只做形状校验：
+   * 界面要靠这份计数说明后果，不能自己编一句"已删除"。
+   * 解散掉的是**当前会话所在的空间**时会留下一个已失效的 session，
+   * 所以和 rename 一样清掉本地缓存，让下一次调用重新拿上下文。
+   */
+  async dissolveWorkspace(workspaceId: string, requestId?: string): Promise<DissolveWorkspaceResultV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request(`/workspaces/${workspaceId}`, {
+      method: "DELETE",
+    }, true, true, requestId);
+    const payload = (result.body ?? {}) as Record<string, unknown>;
+    const parsed = dissolveWorkspaceResultV1Schema.safeParse({
+      version: 1,
+      workspaceId,
+      counts: payload.counts ?? {},
+    });
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    this.currentSession = null;
+    this.roomProjectionCache = null;
+    return parsed.data;
+  }
+
+  /**
+   * POST /workspaces/:id/transfer-ownership：把所有者交给某个成员。
+   *
+   * 服务端已经用 `requireOwner` + 会话身份收口，这里只把 `newOwnerUserId` 原样带回去：
+   * 界面要说清"现在谁是所有者"，不能只说"操作成功"。
+   */
+  async transferWorkspaceOwnership(
+    workspaceId: string,
+    toUserId: string,
+    requestId?: string,
+  ): Promise<TransferWorkspaceOwnershipResultV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request(`/workspaces/${workspaceId}/transfer-ownership`, {
+      method: "POST",
+      body: JSON.stringify({ toUserId }),
+    }, true, true, requestId);
+    const payload = (result.body ?? {}) as Record<string, unknown>;
+    const parsed = transferWorkspaceOwnershipResultV1Schema.safeParse({
+      version: 1,
+      workspaceId,
+      newOwnerUserId: payload.newOwnerUserId,
+    });
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    this.currentSession = null;
+    this.roomProjectionCache = null;
+    return parsed.data;
+  }
+
+  /**
    * POST /workspaces：新建协作空间，并**进入它**。
    *
    * 为什么要顺手进入：邀请端点认的是"当前 session 所在的空间"（`POST /invites`
@@ -1434,17 +1535,40 @@ export class DesktopGateway {
   }
 
   async getCapabilities(requestId?: string): Promise<CapabilityProjectionV1> {
+    /**
+     * 0269 轮 M12：这条以前**每次**都打服务端。它自己是幂等只读的，代价在它的使用方式上
+     * ——`requireActionCapability()` 在每个受控动作前都要读它一次（制卡的 11 个通道、建/删/
+     * 存笔记、上传图像……），于是"点一个按钮"变成"先一次往返确认能不能点，再真正那一次"。
+     * 实测这个端点平均 51.5 ms，也就是说每个按钮前面白垫半秒之内的延迟。
+     *
+     * 缓存按 `workspaceEpoch` 失效：切空间、重登都会把它复位或推进，那一刻能力必然要重算。
+     * 再加一条 5s TTL 兜住"运维在服务端翻了 feature flag 但没有任何 epoch 变化"这种情况
+     * ——那类翻转的传播延迟上限从"直到下次切空间"变成 5 秒。
+     */
+    const cached = this.cachedCapabilities;
+    if (cached && cached.epoch === this.workspaceEpoch && Date.now() - cached.atMs < CAPABILITY_CACHE_TTL_MS) {
+      return cached.projection;
+    }
     await this.ensureConnected(requestId);
     const result = await this.request("/auth/capabilities/v1", { method: "GET" }, true, true, requestId);
     const parsed = capabilityProjectionSchema.safeParse(result.body);
     if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
     // 本机能力属于桌面壳，服务端只能给 fail-closed 占位；真正的值在这里覆盖，
     // 让「设置 → 本机能力 / 半身形象」显示的是这台机器的事实而不是猜测。
-    return capabilityProjectionSchema.parse({
+    const projection = capabilityProjectionSchema.parse({
       ...parsed.data,
       workspaceEpoch: this.workspaceEpoch,
       nativeCapabilities: nativeCapabilities(),
     });
+    this.cachedCapabilities = { atMs: Date.now(), epoch: this.workspaceEpoch, projection };
+    return projection;
+  }
+
+  /** 能力投影只在本机这一份缓存里活着；任何 epoch 变化或连接重来都不该再用它。 */
+  private cachedCapabilities: { atMs: number; epoch: number; projection: CapabilityProjectionV1 } | null = null;
+
+  private forgetCapabilities(): void {
+    this.cachedCapabilities = null;
   }
 
   /**
@@ -1489,6 +1613,31 @@ export class DesktopGateway {
       body: JSON.stringify(policy),
     }, true, true, requestId);
     return this.getWorkspaceAiSettings(requestId);
+  }
+
+  /**
+   * AI 外发审计日志的一页（doc 34 L3 的另一半）。服务端那条路由是 `requireOwner`，
+   * 所以这条方法对成员就是 403 —— 门由服务端把，界面那侧的"是不是显示"不算门。
+   * `limit/offset` 走整数化后交给服务端 clamp，客户端不自建第二套上限。
+   */
+  async getWorkspaceAiAuditLog(
+    limit: number,
+    offset: number,
+    requestId?: string,
+  ): Promise<DesktopAiAuditPageV1> {
+    await this.ensureConnected(requestId);
+    const safeLimit = Math.max(1, Math.min(100, Math.trunc(limit) || 20));
+    const safeOffset = Math.max(0, Math.trunc(offset) || 0);
+    const result = await this.request(
+      `/workspace/ai-audit-log?limit=${encodeURIComponent(String(safeLimit))}&offset=${encodeURIComponent(String(safeOffset))}`,
+      { method: "GET" },
+      true,
+      true,
+      requestId,
+    );
+    const parsed = desktopAiAuditPageV1Schema.safeParse(result.body);
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
   }
 
   clearCredential(): void {
@@ -1707,6 +1856,26 @@ export class DesktopGateway {
     await this.ensureConnected(requestId);
     await this.request(`/sources/${this.safeUuid(sourceId)}`, { method: "DELETE" }, true, true, requestId);
     return { sourceId, status: "archived" };
+  }
+
+  /**
+   * `POST /sources/:id/reparse`（doc 34 L7）：把一篇卡住的来源重新排去解析。
+   *
+   * 409 有两种，服务端分开报：已经有任务在跑（`reparse_in_flight`）与已归档。
+   * 前者**不能**当成失败告诉用户"再点一次试试"——那正是重复付钱的路径，
+   * 所以这里把它原样抛出去，由界面回一句"已经在排了"。
+   */
+  async reparseSource(sourceId: string, requestId?: string): Promise<DesktopSourceReparseResult> {
+    await this.ensureConnected(requestId);
+    const response = await this.request(
+      `/sources/${this.safeUuid(sourceId)}/reparse`,
+      { method: "POST" },
+      true,
+      true,
+      requestId,
+    );
+    if (response.status === 409) throw new DesktopGatewayFailure("conflict", "user_action", { httpStatus: response.status });
+    return { sourceId, status: "draft" };
   }
 
   async listNotes(options: { cursor?: string; limit?: number; trashed?: boolean } = {}, requestId?: string): Promise<DesktopNoteListPage> {
@@ -1979,6 +2148,7 @@ export class DesktopGateway {
       closed = true;
       controller.abort();
     };
+    let streamRetryAttempt = 0;
     const run = async (): Promise<void> => {
       while (!closed) {
         try {
@@ -1999,6 +2169,8 @@ export class DesktopGateway {
           let buffer = "";
           while (!closed) {
             const chunk = await reader.read();
+            // 读到帧 = 这条线是通的，退避阶梯归零；下一次意外断开从 1 秒重新起。
+            streamRetryAttempt = 0;
             if (chunk.done) break;
             buffer += decoder.decode(chunk.value, { stream: true });
             const blocks = buffer.split(/\r?\n\r?\n/);
@@ -2010,12 +2182,12 @@ export class DesktopGateway {
               await onEvent(event);
             }
           }
-          if (!closed) await waitForStreamRetry(1000);
+          if (!closed) await waitForStreamRetry(streamRetryDelayMs(streamRetryAttempt++));
         } catch (error) {
           if (closed || (error instanceof Error && error.name === "AbortError")) return;
           onError?.(error);
           if (error instanceof DesktopGatewayFailure && ["api_untrusted", "auth_required", "reauth_required", "forbidden", "not_found", "unsupported_contract"].includes(error.code)) return;
-          await waitForStreamRetry(1000);
+          await waitForStreamRetry(streamRetryDelayMs(streamRetryAttempt++));
         }
       }
     };
@@ -2040,6 +2212,7 @@ export class DesktopGateway {
       closed = true;
       controller.abort();
     };
+    let streamRetryAttempt = 0;
     const run = async (): Promise<void> => {
       while (!closed) {
         try {
@@ -2059,6 +2232,8 @@ export class DesktopGateway {
           let buffer = "";
           while (!closed) {
             const chunk = await reader.read();
+            // 读到帧 = 这条线是通的，退避阶梯归零；下一次意外断开从 1 秒重新起。
+            streamRetryAttempt = 0;
             if (chunk.done) break;
             buffer += decoder.decode(chunk.value, { stream: true });
             const blocks = buffer.split(/\r?\n\r?\n/);
@@ -2070,12 +2245,12 @@ export class DesktopGateway {
               await onDelivery(delivery);
             }
           }
-          if (!closed) await waitForStreamRetry(1000);
+          if (!closed) await waitForStreamRetry(streamRetryDelayMs(streamRetryAttempt++));
         } catch (error) {
           if (closed || (error instanceof Error && error.name === "AbortError")) return;
           onError?.(error);
           if (error instanceof DesktopGatewayFailure && ["api_untrusted", "auth_required", "reauth_required", "forbidden", "not_found", "unsupported_contract"].includes(error.code)) return;
-          await waitForStreamRetry(1000);
+          await waitForStreamRetry(streamRetryDelayMs(streamRetryAttempt++));
         }
       }
     };
@@ -3675,6 +3850,7 @@ export class DesktopGateway {
       controller.abort();
     };
 
+    let streamRetryAttempt = 0;
     const run = async (): Promise<void> => {
       while (!closed) {
         try {
@@ -3701,6 +3877,8 @@ export class DesktopGateway {
           let buffer = "";
           while (!closed) {
             const chunk = await reader.read();
+            // 读到帧 = 这条线是通的，退避阶梯归零；下一次意外断开从 1 秒重新起。
+            streamRetryAttempt = 0;
             if (chunk.done) break;
             buffer += decoder.decode(chunk.value, { stream: true });
             const blocks = buffer.split(/\r?\n\r?\n/);
@@ -3719,12 +3897,12 @@ export class DesktopGateway {
             cursor = sequence;
             await onSequence(sequence);
           }
-          if (!closed) await waitForStreamRetry(1000);
+          if (!closed) await waitForStreamRetry(streamRetryDelayMs(streamRetryAttempt++));
         } catch (error) {
           if (closed || (error instanceof Error && error.name === "AbortError")) return;
           onError?.(error);
           if (error instanceof DesktopGatewayFailure && ["api_untrusted", "auth_required", "reauth_required", "forbidden", "not_found", "unsupported_contract"].includes(error.code)) return;
-          await waitForStreamRetry(1000);
+          await waitForStreamRetry(streamRetryDelayMs(streamRetryAttempt++));
         }
       }
     };
@@ -3747,6 +3925,7 @@ export class DesktopGateway {
       controller.abort();
     };
 
+    let streamRetryAttempt = 0;
     const run = async (): Promise<void> => {
       while (!closed) {
         try {
@@ -3771,6 +3950,8 @@ export class DesktopGateway {
           let buffer = "";
           while (!closed) {
             const chunk = await reader.read();
+            // 读到帧 = 这条线是通的，退避阶梯归零；下一次意外断开从 1 秒重新起。
+            streamRetryAttempt = 0;
             if (chunk.done) break;
             buffer += decoder.decode(chunk.value, { stream: true });
             const blocks = buffer.split(/\r?\n\r?\n/);
@@ -3789,12 +3970,12 @@ export class DesktopGateway {
             cursor = sequence;
             await onSequence(sequence);
           }
-          if (!closed) await waitForStreamRetry(1000);
+          if (!closed) await waitForStreamRetry(streamRetryDelayMs(streamRetryAttempt++));
         } catch (error) {
           if (closed || (error instanceof Error && error.name === "AbortError")) return;
           onError?.(error);
           if (error instanceof DesktopGatewayFailure && ["api_untrusted", "auth_required", "reauth_required", "forbidden", "not_found", "unsupported_contract"].includes(error.code)) return;
-          await waitForStreamRetry(1000);
+          await waitForStreamRetry(streamRetryDelayMs(streamRetryAttempt++));
         }
       }
     };
@@ -3831,6 +4012,7 @@ export class DesktopGateway {
       controller.abort();
     };
 
+    let streamRetryAttempt = 0;
     const run = async (): Promise<void> => {
       while (!closed) {
         try {
@@ -3870,6 +4052,8 @@ export class DesktopGateway {
           let buffer = "";
           while (!closed) {
             const chunk = await reader.read();
+            // 读到帧 = 这条线是通的，退避阶梯归零；下一次意外断开从 1 秒重新起。
+            streamRetryAttempt = 0;
             if (chunk.done) break;
             buffer += decoder.decode(chunk.value, { stream: true });
             const blocks = buffer.split(/\r?\n\r?\n/);
@@ -3887,12 +4071,12 @@ export class DesktopGateway {
             cursor = tail.seq;
             await onEvent(tail);
           }
-          if (!closed) await waitForStreamRetry(1000);
+          if (!closed) await waitForStreamRetry(streamRetryDelayMs(streamRetryAttempt++));
         } catch (error) {
           if (closed || (error instanceof Error && error.name === "AbortError")) return;
           onError?.(error);
           if (error instanceof DesktopGatewayFailure && ["api_untrusted", "auth_required", "reauth_required", "forbidden", "not_found", "unsupported_contract"].includes(error.code)) return;
-          await waitForStreamRetry(1000);
+          await waitForStreamRetry(streamRetryDelayMs(streamRetryAttempt++));
         }
       }
     };
@@ -4676,7 +4860,13 @@ export class DesktopGateway {
         this.connection = { version: 1, kind: "api_untrusted", reason: "wrong_service" };
         throw new DesktopGatewayFailure("api_untrusted", "user_action");
       }
-      if (!response.ok) throw this.mapResponseError(response.status, response.headers);
+      if (!response.ok) {
+        // 只有 403 才去碰失败体：那条路上唯一值得区分的就是"没签 AI 使用同意"。
+        // 其余状态维持"按状态码分类"，取图那条 404 不会因为服务端也带了一个
+        // `error` 字符串就被说成邀请码问题（这个回归是真被既有用例抓到的）。
+        const errorBody = response.status === 403 ? await this.errorBodyForDomainCode(response) : undefined;
+        throw this.mapResponseError(response.status, response.headers, undefined, errorBody);
+      }
       const contentType = response.headers.get("content-type")?.trim().toLowerCase() ?? "";
       if (!contentType.startsWith(policy.contentTypePrefix)) {
         // 服务端失败体（JSON error）永远不进入 renderer。
@@ -4838,6 +5028,24 @@ export class DesktopGateway {
     return parsed.data;
   }
 
+  /**
+   * 失败响应的 body 只为"读出一个 `error` token"而读：上限 4 KB；没有 body、超限、
+   * 不是 JSON 一律当"没有 token"，回落到按状态码分类。
+   *
+   * 二进制那条路（`requestBinaryBytes`）此前**完全不读** body，所以服务端在 403 上回的
+   * `ai_consent_required` 到不了界面——"没签 AI 使用同意"和"这个账号没权限"被说成同一句
+   * 话，而前一件是用户自己在设置页点一下就能解的（doc 34 L13 的下游那一半）。
+   * 服务端那句原文依旧永不上屏：`mapResponseError` 只认白名单里的 token。
+   */
+  private async errorBodyForDomainCode(response: Response): Promise<unknown> {
+    try {
+      const bytes = await this.readBytesWithinCap(response, DOMAIN_ERROR_BODY_MAX_BYTES);
+      return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+    } catch {
+      return undefined;
+    }
+  }
+
   private async readBytesWithinCap(response: Response, maxBytes: number): Promise<Uint8Array> {
     const body = response.body;
     if (!body) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
@@ -4884,9 +5092,10 @@ export class DesktopGateway {
   private mapResponseError(status: number, headers: Headers, unauthorizedCode?: GatewayErrorCode, body?: unknown): DesktopGatewayFailure {
     const retryAfter = retryAfterFromHeaders(headers);
     const options = { httpStatus: status, ...(retryAfter ? { retryAfter } : {}) };
-    const domainCode = authDomainErrorCode(status, body);
+    const domainCode = domainErrorCode(status, body);
     if (domainCode) return new DesktopGatewayFailure(domainCode, "never", options);
     if (status === 401) return new DesktopGatewayFailure(unauthorizedCode ?? (this.token ? "reauth_required" : "auth_required"), "user_action", options);
+    // 403 上只有白名单里那一种 token 会被翻成专用码，其余一律还是 `forbidden`。
     if (status === 403) return new DesktopGatewayFailure("forbidden", "never", options);
     if (status === 404) return new DesktopGatewayFailure("not_found", "never", options);
     if (status === 409) return new DesktopGatewayFailure("conflict", "never", options);
@@ -4897,10 +5106,15 @@ export class DesktopGateway {
 }
 
 /**
- * The identity API answers auth failures with a small, machine-readable `error`
- * token. Only that token crosses the IPC boundary — never the server's prose —
- * and only for the tokens listed here, so an unexpected body still falls back to
- * the status-based mapping instead of inventing a category.
+ * The API answers some failures with a small, machine-readable `error` token.
+ * Only that token crosses the IPC boundary — never the server's prose — and only
+ * for the tokens listed here, so an unexpected body still falls back to the
+ * status-based mapping instead of inventing a category.
+ *
+ * 这张表只覆盖登录/邀请那一族，且只在 400/404/409/410 上生效——那些 token 的意思
+ * 是路由内的（`not_found` 在邀请路上是"邀请码无效"，在取图路上是"文件没了"）。
+ * 403 上另有一套：只认 `ai_consent_required` 这一个 token（见下面 `CONSENT_REQUIRED_TOKEN`），
+ * 其余的 403 一律还是 `forbidden`（doc 34 L13 的下游那一半）。
  */
 const AUTH_DOMAIN_ERROR_CODES: Record<string, GatewayErrorCode> = {
   email_exists: "email_exists",
@@ -4913,11 +5127,18 @@ const AUTH_DOMAIN_ERROR_CODES: Record<string, GatewayErrorCode> = {
   already_member: "already_member",
 };
 
-function authDomainErrorCode(status: number, body: unknown): GatewayErrorCode | null {
-  if (status !== 400 && status !== 404 && status !== 409 && status !== 410) return null;
+/** 403 上唯一被翻成专用码的 token（doc 34 L13：没签同意不是没权限）。 */
+const CONSENT_REQUIRED_TOKEN = "ai_consent_required";
+
+function domainErrorCode(status: number, body: unknown): GatewayErrorCode | null {
   if (!body || typeof body !== "object" || !("error" in body)) return null;
   const token = (body as { error?: unknown }).error;
   if (typeof token !== "string") return null;
+  // 403 上只认这一个 token：登录那一族的字符串是**路由内**的约定
+  // （`not_found` 在邀请那条路上意思是"邀请码无效"，在取图上意思是"文件没了"）。
+  // 把它们放到 403 上一起认，就会把一次取图失败说成邀请码问题。
+  if (status === 403) return token === CONSENT_REQUIRED_TOKEN ? "ai_consent_required" : null;
+  if (status !== 400 && status !== 404 && status !== 409 && status !== 410) return null;
   return AUTH_DOMAIN_ERROR_CODES[token] ?? null;
 }
 
