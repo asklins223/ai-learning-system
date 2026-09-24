@@ -138,7 +138,19 @@ function stubGateway(resultPayload: unknown, rubricLength = 12, snapshotPayload 
         result,
       }))),
       getReturnContract: vi.fn(async () => ok(null)),
-      revealTarget: vi.fn(async () => ok({})),
+      revealTarget: vi.fn(async () => ok({
+        version: 2,
+        runId: RUN_ID,
+        snapshotId: SNAPSHOT_ID,
+        objectiveId: OBJECTIVE_ID,
+        objectiveRevision: 1,
+        cardId: CARD_ID,
+        cardRevision: 1,
+        answerText: "地球绕太阳一圈大约 365 天。",
+        support: { explanation: "周期由轨道半径与太阳质量决定。" },
+        exposureId: "55555555-5555-4555-8555-555555555555",
+        exposedAt: "2026-09-24T00:00:00.000Z",
+      })),
       recordActivityLease: vi.fn(async () => ok({ activeSecondsUsed: 96, runRevision: 3 })),
     },
     subscriptions: {
@@ -486,6 +498,23 @@ describe("LearningRunSurface · 结算页结构", () => {
     expect(practice).toContain("本次属于练习，不改变复习");
     expect(practice).not.toContain("无法评估");
     expect(practice).not.toContain("还差");
+  });
+
+  it("拿不到本轮正文时，那颗按钮只承诺它真给的东西（审计 F29）", async () => {
+    // `lockedAnswer` 是纯内存态：刷新、从历史重进、结算后再进来，客户端手里没有
+    // 本轮正文（服务端从来没送过）。此前按钮一律写"看这次的答案与解释"，展开后
+    // 只有参考要点——一句做不到的承诺。
+    renderResult();
+    await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
+
+    const button = screen.getByRole("button", { name: "看参考答案与解释" });
+    expect(button.textContent).not.toContain("这次的答案");
+
+    fireEvent.click(button);
+    await waitFor(() => expect(document.querySelector(".learning-run-result-reveal__body")).not.toBeNull());
+    const body = document.querySelector(".learning-run-result-reveal__body")?.textContent ?? "";
+    expect(body).toContain("这次想考的是");
+    expect(body).not.toContain("你提交的回答");
   });
 
   it("拿不到逐条判定时，facet_only 的兜底那句也不念内部词", async () => {

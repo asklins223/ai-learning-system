@@ -2674,8 +2674,14 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
             {result ? (
               <div className="learning-run-result-reveal">
                 {targetReveal.kind === "idle" ? (
+                  /**
+                   * 审计 F29：这颗按钮写的是"看这次的答案与解释"，而展开后只有参考
+                   * 要点——本轮提交的正文只在内存里（`lockedAnswer`），刷新或从历史
+                   * 重进就没了，客户端从没向服务端取过"这一轮交过什么"。在服务端把
+                   * 正文送出来之前，按钮只能说它真的给的东西。
+                   */
                   <button type="button" className="button" onClick={loadTargetReveal}>
-                    看这次的答案与解释
+                    {lockedAnswer ? "看这次的答案与解释" : "看参考答案与解释"}
                   </button>
                 ) : null}
                 {targetReveal.kind === "loading" ? <p className="small">正在读取答案…</p> : null}
