@@ -191,7 +191,26 @@ function formatOriginKind(value: LearningObjectiveSurfaceV3["sources"]["origins"
 }
 
 function formatOriginIntegrity(value: LearningObjectiveSurfaceV3["sources"]["origins"][number]["integrity"]): string {
-  return value === "verified" ? "链路已核对" : "旧链路待复核";
+  // 审计 F10：这四个字以前写"链路已核对"，而它就排在"0 条原文证据"旁边——
+  // 于是状态词替学习主张作了一个它没做过的保证。核对过的是**来源关系**
+  // （这条出处指得回哪一份快照），不是"原文证实了你这句话"。
+  return value === "verified" ? "来源关系已确认" : "旧链路待复核";
+}
+
+/**
+ * 可追溯程度的三档，各说各的话（F10 的验收就是这三档要分得开）。
+ *
+ * 以前这一句判的是 `sourceSnapshotId` 有没有，却没判引用有没有留下——于是
+ * "有当时那份来源、但没留下引用到的原文"被说成"留了当时引用的原文"，
+ * 恰好是三种情况里最容易看错的那一种。
+ */
+function formatOriginTrace(origin: {
+  readonly sourceSnapshotId: string | null;
+  readonly evidenceSnapshotIds: readonly string[];
+}): string {
+  if (origin.evidenceSnapshotIds.length > 0) return "留了当时引用的原文";
+  if (origin.sourceSnapshotId) return "有当时那份来源，但没留下引用到的原文";
+  return "没有留当时引用的原文";
 }
 
 function formatSupportGrade(value: LearningObjectiveSurfaceV3["sources"]["origins"][number]["supportGrade"]): string {
@@ -744,7 +763,7 @@ export function ObjectiveDetailSurface() {
                 {objective.sources.primaryNote ? <button type="button" className="v3-primary-note" onClick={() => openPrimaryNote(objective.sources.primaryNote!)}><FileText size={17} aria-hidden="true" /><span><small>主笔记</small><strong>{objective.sources.primaryNote.title}</strong></span><ChevronRight size={16} aria-hidden="true" /></button> : <div className="v3-primary-note v3-primary-note--missing"><AlertTriangle size={17} aria-hidden="true" /><span><small>主笔记</small><strong>尚未关联主笔记</strong></span></div>}
                 {objective.sources.missingOrigin ? <p className="v3-lineage-warning"><AlertTriangle size={14} aria-hidden="true" />部分来源还没对上，验证前建议先补齐。</p> : null}
                 <div className="v3-origin-list">
-                  {objective.sources.origins.length ? objective.sources.origins.map((origin, index) => <article key={origin.originId} className="v3-origin-row"><span className="v3-origin-row__index">{String(index + 1).padStart(2, "0")}</span><div><div><strong>{formatOriginKind(origin.kind)}</strong><span>{formatSupportGrade(origin.supportGrade)}</span></div><p>{formatOriginIntegrity(origin.integrity)}{origin.evidenceSnapshotIds.length ? ` · ${origin.evidenceSnapshotIds.length} 条原文证据` : ""}</p><small>{origin.kind === "imported" ? `导入批次 ${origin.importBatchRef}` : origin.sourceSnapshotId ? "留了当时引用的原文" : "没有留当时引用的原文"}</small></div></article>) : <div className="v3-origin-empty"><FolderOpen size={19} aria-hidden="true" /><strong>还没有可公开的出处</strong><span>这里不会用示例证据填充空白。</span></div>}
+                  {objective.sources.origins.length ? objective.sources.origins.map((origin, index) => <article key={origin.originId} className="v3-origin-row"><span className="v3-origin-row__index">{String(index + 1).padStart(2, "0")}</span><div><div><strong>{formatOriginKind(origin.kind)}</strong><span>{formatSupportGrade(origin.supportGrade)}</span></div><p>{formatOriginIntegrity(origin.integrity)}{origin.evidenceSnapshotIds.length ? ` · ${origin.evidenceSnapshotIds.length} 条原文证据` : ""}</p><small>{origin.kind === "imported" ? `导入批次 ${origin.importBatchRef}` : formatOriginTrace(origin)}</small></div></article>) : <div className="v3-origin-empty"><FolderOpen size={19} aria-hidden="true" /><strong>还没有可公开的出处</strong><span>这里不会用示例证据填充空白。</span></div>}
                 </div>
                 <footer className="v3-lineage-boundary"><strong>公开边界</strong><p>这里只讲来源关系和学习状态；标准答案、评分依据和原文段落不会提前出现。</p></footer>
               </div>

@@ -21,13 +21,13 @@ import { useRoomStore } from "../../app/room-store";
 const OBJECTIVE_ID = "00000000-0000-4000-8000-000000000001";
 const ok = <T,>(data: T) => ({ ok: true as const, workspaceEpoch: 1, data });
 
-function origin(evidenceSnapshotIds: string[]) {
+function origin(evidenceSnapshotIds: string[], sourceSnapshotId: string | null = null) {
   return {
     originId: "00000000-0000-4000-8000-00000000000c",
     kind: "note",
     noteId: "00000000-0000-4000-8000-00000000000d",
     noteVersionId: "00000000-0000-4000-8000-00000000000e",
-    sourceSnapshotId: null,
+    sourceSnapshotId,
     evidenceSnapshotIds,
     integrity: "verified",
     supportGrade: "primary",
@@ -114,6 +114,39 @@ describe("证据栏在没有原文引用时", () => {
     expect(occurrences, `整栏说了 ${occurrences} 次「0 条原文证据」：${text}`).toBe(1);
     // 来源行仍然要说清它自己那条事实，不能被一起删掉。
     expect(text).toContain("没有留当时引用的原文");
+  });
+
+  /**
+   * 审计 F10：可追溯程度分三档，每档一句不同的话。
+   * 判据原来是 `sourceSnapshotId` 有没有——**没判引用留没留**，所以中间那一档
+   * （有当时的来源、没留下引用到的原文）会被说成"留了当时引用的原文"。
+   */
+  it("三档可追溯程度各说各的话：有引用 / 有来源没引用 / 连来源快照都没有", async () => {
+    useRoomStore.setState({ invoke: vi.fn(), activeObjectiveId: OBJECTIVE_ID });
+    installApi(detail([
+      origin(SNAPSHOT_IDS, "00000000-0000-4000-8000-0000000000aa"),
+      origin([], "00000000-0000-4000-8000-0000000000ab"),
+      origin([]),
+    ]));
+    render(<ObjectiveDetailSurface />);
+    await ledgerText();
+
+    const rows = [...document.querySelectorAll(".v3-origin-row")].map((el) => el.textContent ?? "");
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toContain("留了当时引用的原文");
+    expect(rows[1]).toContain("有当时那份来源，但没留下引用到的原文");
+    expect(rows[1]).not.toContain("留了当时引用的原文");
+    expect(rows[2]).toContain("没有留当时引用的原文");
+  });
+
+  it("状态词只承诺它真做过的事：核对的是来源关系，不是「原文证实了这句话」", async () => {
+    useRoomStore.setState({ invoke: vi.fn(), activeObjectiveId: OBJECTIVE_ID });
+    installApi(detail([origin([])]));
+    render(<ObjectiveDetailSurface />);
+
+    const text = await ledgerText();
+    expect(text).toContain("来源关系已确认");
+    expect(text).not.toContain("链路已核对");
   });
 
   it("真有原文引用时，来源行照旧报出自己的条数", async () => {
