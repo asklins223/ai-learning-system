@@ -54,6 +54,42 @@ const ANOMALY_MAX = 12;
 /** 学习旅程超过这么久没有更新（且不是 paused）即视为卡住。 */
 const STUCK_RUN_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * 今日记录里那条 run 挂在哪个理解目标上（审计 F22）。
+ *
+ * V2 的每一种 origin 都带顶层 `objectiveId`；V1 的没有——那时返回 null，
+ * 记录照实说"当时没有关联理解目标"，而不是拿别的目标顶上。
+ */
+function runObjectiveId(origin: unknown): string | null {
+  if (origin && typeof origin === "object") {
+    const objectiveId = (origin as { objectiveId?: unknown }).objectiveId;
+    if (typeof objectiveId === "string" && objectiveId.length > 0) return objectiveId;
+  }
+  return null;
+}
+
+/** 缺目标的历史记录照实说（审计 F22：不装成完整体验）。 */
+const HISTORY_WITHOUT_SUBJECT = "这条历史记录当时没有关联理解目标，只能看到这一轮本身。";
+
+/** 这一轮的结论，用一句人话说清（与结果页同一个 outcome 集合）。 */
+const RUN_OUTCOME_LABELS: Record<string, string> = {
+  demonstrated: "这次证明到位了",
+  partial: "这次只证明了一部分",
+  needs_repair: "这次有需要修补的地方",
+  not_assessable: "这次没有形成可记录的结论",
+  practice_completed: "这次是练习，没有改变复习安排",
+  skipped: "这一轮提前结束了",
+  declared_unable: "这次承认暂时不会",
+};
+
+function runOutcomeLine(result: unknown): string | null {
+  if (result && typeof result === "object") {
+    const outcome = (result as { outcome?: unknown }).outcome;
+    if (typeof outcome === "string" && RUN_OUTCOME_LABELS[outcome]) return RUN_OUTCOME_LABELS[outcome];
+  }
+  return null;
+}
+
 const RUN_GOAL_LABELS: Record<string, string> = {
   stabilize: "巩固",
   clarify: "澄清",
@@ -201,7 +237,17 @@ export async function getTodayActivity(
       ))
       .limit(SOURCE_LIMIT),
     tx
-      .select({ id: learningRuns.id, goal: learningRuns.goal, phase: learningRuns.phase, createdAt: learningRuns.createdAt, updatedAt: learningRuns.updatedAt })
+      .select({
+        id: learningRuns.id,
+        goal: learningRuns.goal,
+        phase: learningRuns.phase,
+        createdAt: learningRuns.createdAt,
+        updatedAt: learningRuns.updatedAt,
+        // 审计 F22：今日记录此前不带目标与结果，于是"完成学习旅程"八条长得一模一样、
+        // 也没有可点的地方。origin 里有 objectiveId，result 里有这一轮的结论。
+        origin: learningRuns.origin,
+        result: learningRuns.result,
+      })
       .from(learningRuns)
       .where(and(
         eq(learningRuns.workspaceId, ctx.workspaceId),
@@ -289,6 +335,30 @@ export async function getTodayActivity(
       .orderBy(sql`${learningRuns.updatedAt} desc`)
       .limit(ANOMALY_SOURCE_LIMIT),
   ]);
+  // 今日记录要说出"哪一件事"（审计 F22）：按 run 的 objectiveId 批量取当前修订的概念名。
+  // 带上与其它读点同一道可见性判据——目标不可见就留空，记录本身还在（它是用户自己的行）。
+  const runObjectiveIds = [...new Set(runRows.flatMap((row) => {
+    const objectiveId = runObjectiveId(row.origin);
+    return objectiveId ? [objectiveId] : [];
+  }))];
+  const runObjectiveLabelRows = runObjectiveIds.length > 0
+    ? await tx
+        .select({ objectiveId: learningObjectivesV2.objectiveId, conceptLabel: learningObjectiveRevisionsV2.conceptLabel })
+        .from(learningObjectivesV2)
+        .innerJoin(
+          learningObjectiveRevisionsV2,
+          and(
+            eq(learningObjectiveRevisionsV2.workspaceId, learningObjectivesV2.workspaceId),
+            eq(learningObjectiveRevisionsV2.objectiveRevisionId, learningObjectivesV2.currentObjectiveRevisionId),
+          ),
+        )
+        .where(and(
+          eq(learningObjectivesV2.workspaceId, ctx.workspaceId),
+          inArray(learningObjectivesV2.objectiveId, runObjectiveIds),
+          visibleObjectivesCondition(ctx.userId, learningObjectivesV2.objectiveId),
+        ))
+    : [];
+  const objectiveLabelById = new Map(runObjectiveLabelRows.map((row) => [row.objectiveId, row.conceptLabel]));
 
   const truncated = noteRows.length >= SOURCE_LIMIT
     || sourceRows.length >= SOURCE_LIMIT
@@ -345,15 +415,21 @@ export async function getTodayActivity(
   }
   for (const row of runRows) {
     const goalLabel = RUN_GOAL_LABELS[row.goal] ?? row.goal;
+    // 审计 F22：这一轮是哪件事、结论是什么，都要落在记录上——否则"完成巩固学习旅程"
+    // 八条除了时间没有可辨差异，也没有一处能点开。
+    const conceptLabel = objectiveLabelById.get(runObjectiveId(row.origin) ?? "");
+    const subject = conceptLabel ?? null;
+    const outcomeLine = runOutcomeLine(row.result);
+    const runTarget = { kind: "learning_run" as const, id: row.id, noteVersionId: null };
     if (row.createdAt >= from && row.createdAt < to && row.phase !== "completed") {
       events.push({
         id: `learning_run.started:${row.id}`,
         at: row.createdAt.toISOString(),
         kind: "learning_run",
         verb: "learning_run.started",
-        title: `开始${goalLabel}学习旅程`,
-        detail: null,
-        target: null,
+        title: subject ? `开始${goalLabel}学习旅程 · ${subject}` : `开始${goalLabel}学习旅程`,
+        detail: subject === null ? HISTORY_WITHOUT_SUBJECT : null,
+        target: runTarget,
       });
     }
     if (row.phase === "completed" && row.updatedAt >= from && row.updatedAt < to) {
@@ -362,9 +438,9 @@ export async function getTodayActivity(
         at: row.updatedAt.toISOString(),
         kind: "learning_run",
         verb: "learning_run.completed",
-        title: `完成${goalLabel}学习旅程`,
-        detail: null,
-        target: null,
+        title: subject ? `完成${goalLabel}学习旅程 · ${subject}` : `完成${goalLabel}学习旅程`,
+        detail: subject === null ? HISTORY_WITHOUT_SUBJECT : outcomeLine,
+        target: runTarget,
       });
     }
   }
