@@ -765,6 +765,14 @@ export const gatewayErrorCodeValues = [
   "invite_consumed",
   "workspace_limit",
   "already_member",
+  /**
+   * 个人空间不能邀请成员：服务端在 `POST /invites` 上回 409 +
+   * `error: "personal_workspace_not_shareable"`（`identity/invite-service.ts`）。
+   *
+   * 以前这个 token 不在表里，于是落进通用的 `conflict`，被翻成"这条学习状态已经
+   * 发生变化，请先同步后再继续"——离那个按钮十万八千里，说的还不是这件事（审计 F31）。
+   */
+  "personal_workspace_not_shareable",
 ] as const;
 export const gatewayErrorCodeSchema = z.enum(gatewayErrorCodeValues);
 export type GatewayErrorCode = (typeof gatewayErrorCodeValues)[number];

@@ -108,6 +108,14 @@ export function gatewayErrorMessage(error: unknown): string {
       return "工作区已经变化，请重新加载当前学习队列。";
     case "conflict":
       return "这条学习状态已经发生变化，请先同步后再继续。";
+    case "personal_workspace_not_shareable":
+      // 审计 F31：这件事与"学习状态"无关——个人空间本来就没有名册可管。
+      return "个人空间不能邀请成员。要一起学，先新建一个协作空间，进去之后再邀请。";
+    // 笔记这一条不是"学习状态变了"：要的是重新取一次这一篇的编辑起点。**不能**承诺
+    // "刚敲的字还能接回来"——那种错位下本机这份与重取到的那份没有共同历史，草稿并进去
+    // 也落不到正文上（会挂成进不来的结构）。所以这句只说下一步做什么，不说做不到的事。
+    case "note_doc_stale":
+      return "这篇笔记的编辑起点已经过期（本机这份和服务端对不上），这次改动没有存进去。退出这篇重新打开就能继续写。";
     case "result_unknown":
       return "上一动作的结果尚未确认；请先同步当前学习状态，客户端不会重复提交。";
     case "rate_limited": {

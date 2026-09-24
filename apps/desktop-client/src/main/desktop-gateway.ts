@@ -5159,6 +5159,23 @@ const AUTH_DOMAIN_ERROR_CODES: Record<string, GatewayErrorCode> = {
   concurrent_consumption: "invite_consumed",
   workspace_limit_reached: "workspace_limit",
   already_member: "already_member",
+  personal_workspace_not_shareable: "personal_workspace_not_shareable",
+};
+
+/**
+ * 409 上按 token 认的**笔记**那一族，与登录那族分开写。
+ *
+ * 混进上面那张表迟早串味：那里的键是**路由内**的约定（同一个 `not_found` 在邀请路上
+ * 是"邀请码无效"、在取图路上是"文件没了"），而这里认的是笔记文档那一件事。
+ *
+ * `doc_identity_mismatch` = 上行的增量与本机这份文档不是同一份历史，服务端一个字都
+ * 没写（见 `apps/api/src/modules/note/collaboration.ts` 的 `applyAndReportLanded`）。不并进
+ * `conflict`：那句"学习状态变了"给的下一步是同步学习队列，而这里要的是重新取一次
+ * 这一篇的编辑起点。这一格存在的意义是**不许再静默**——2026-09-23 那次丢字，服务端
+ * 当时回的是一句 200。
+ */
+const NOTE_DOMAIN_ERROR_CODES: Record<string, GatewayErrorCode> = {
+  doc_identity_mismatch: "note_doc_stale",
 };
 
 /** 403 上唯一被翻成专用码的 token（doc 34 L13：没签同意不是没权限）。 */

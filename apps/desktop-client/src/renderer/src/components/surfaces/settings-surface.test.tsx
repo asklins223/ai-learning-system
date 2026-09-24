@@ -23,7 +23,7 @@ import { clearAccountSignOutNotice, peekAccountSignOutNotice } from "../../app/a
 const OWNER_WORKSPACE = "22222222-2222-4222-8222-222222222222";
 const OTHER_WORKSPACE = "33333333-3333-4333-8333-333333333333";
 
-function session(role: "owner" | "member"): SessionContextV1 {
+function session(role: "owner" | "member", options: { readonly collaborative?: boolean } = {}): SessionContextV1 {
   return {
     version: 1,
     status: "authenticated",
@@ -33,8 +33,8 @@ function session(role: "owner" | "member"): SessionContextV1 {
       workspaceId: OWNER_WORKSPACE,
       name: "理解空间",
       role,
-      workspaceType: "personal",
-      isPersonal: true,
+      workspaceType: options.collaborative ? "collaborative" : "personal",
+      isPersonal: !options.collaborative,
       workspaceEpoch: 7,
     },
     membership: { role },
@@ -137,6 +137,11 @@ function installApi(options: {
   };
   /** AI 外发审计那一页；"reject" = 读不到，缺省给一条成功记录。 */
   readonly audit?: { items: DesktopAiAuditItemV1[]; total: number } | "reject";
+  /**
+   * true = 当前空间是协作空间。邀请/名册/转让这些面板只该在协作空间里出现
+   * （审计 F17：个人空间不摆做不到的按钮），所以这一族用例必须站在协作空间上。
+   */
+  readonly collaborativeSpace?: boolean;
   readonly switchRejects?: boolean;
   readonly dissolveRejects?: boolean;
   readonly transferRejects?: boolean;
@@ -153,8 +158,8 @@ function installApi(options: {
   const calls: { method: string; input: unknown }[] = [];
   const api = {
     auth: {
-      getState: vi.fn(async () => ok(session(role))),
-      joinWorkspace: vi.fn(async () => ok(session(role))),
+      getState: vi.fn(async () => ok(session(role, { collaborative: options.collaborativeSpace }))),
+      joinWorkspace: vi.fn(async () => ok(session(role, { collaborative: options.collaborativeSpace }))),
       getProfile: vi.fn(async () => ok({ version: 1 as const, displayName: "读者", avatarUrl: null })),
       logout: vi.fn(async (input: unknown): Promise<GatewayResultV1<{ loggedOut: true; serverRevoked: boolean }>> => {
         calls.push({ method: "logout", input });
@@ -531,7 +536,7 @@ describe("AI consent is a real control, not a display", () => {
 
 describe("owner invite and member management (旧版设置页回补)", () => {
   it("creates an invite through the gateway and shows the one-time code", async () => {
-    const { api, calls } = installApi();
+    const { api, calls } = installApi({ collaborativeSpace: true });
     render(<SettingsSurface />);
     await screen.findByText("理解空间", { selector: ".space-identity h3" });
 
@@ -550,7 +555,7 @@ describe("owner invite and member management (旧版设置页回补)", () => {
   });
 
   it("does not claim an invite was copied when the clipboard write fails", async () => {
-    installApi();
+    installApi({ collaborativeSpace: true });
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: { writeText: vi.fn(async () => { throw new Error("permission denied"); }) },
@@ -568,7 +573,7 @@ describe("owner invite and member management (旧版设置页回补)", () => {
   });
 
   it("loads the member roster even when the invite ledger fails", async () => {
-    const { api } = installApi();
+    const { api } = installApi({ collaborativeSpace: true });
     api.invites.list.mockRejectedValueOnce(new Error("invite ledger offline"));
     render(<SettingsSurface />);
     await screen.findByText("理解空间", { selector: ".space-identity h3" });
@@ -579,7 +584,7 @@ describe("owner invite and member management (旧版设置页回补)", () => {
   });
 
   it("removes a member only after the inline confirmation", async () => {
-    const { api } = installApi();
+    const { api } = installApi({ collaborativeSpace: true });
     render(<SettingsSurface />);
     await screen.findByText("理解空间", { selector: ".space-identity h3" });
 
@@ -594,7 +599,7 @@ describe("owner invite and member management (旧版设置页回补)", () => {
   });
 
   it("tells a member why the roster is missing instead of deleting the block", async () => {
-    installApi({ role: "member" });
+    installApi({ role: "member", collaborativeSpace: true });
     render(<SettingsSurface />);
     await screen.findByText("理解空间", { selector: ".space-identity h3" });
 
@@ -611,6 +616,47 @@ describe("owner invite and member management (旧版设置页回补)", () => {
     expect(detail.textContent).toMatch("复习");
     expect(detail.textContent).toMatch("所有者发起");
     expect(detail.textContent).not.toMatch(/可以读写|能读写资料/);
+  });
+});
+
+describe("个人空间的成员与邀请（审计 F17 / F31）", () => {
+  it("个人空间不摆「生成邀请」：说清边界，并指向真正能做的地方", async () => {
+    installApi(); // 默认夹具就是个人空间
+    render(<SettingsSurface />);
+    await screen.findByText("理解空间", { selector: ".space-identity h3" });
+
+    openSection("成员与邀请");
+
+    expect(screen.queryByRole("button", { name: "生成邀请" })).toBeNull();
+    const row = (await screen.findByText("个人空间不邀请别人")).closest(".settings-row") as HTMLElement;
+    // 说明本身要可执行：新建协作空间在哪、之后在哪邀请。
+    expect(within(row).getByText(/新建协作空间/)).toBeTruthy();
+    expect(within(row).getByText(/空间胶囊/)).toBeTruthy();
+  });
+
+  it("协作空间里的同类拒绝：说的就是这件事，且提示贴在触发它的那张卡里（审计 F31）", async () => {
+    const { api } = installApi({ collaborativeSpace: true });
+    api.invites.create = vi.fn(async () => ({
+      ok: false as const,
+      workspaceEpoch: 1,
+      error: {
+        code: "personal_workspace_not_shareable" as const,
+        safeMessageKey: "error.personal_workspace_not_shareable" as const,
+        retry: "never" as const,
+      },
+    }));
+    render(<SettingsSurface />);
+    await screen.findByText("理解空间", { selector: ".space-identity h3" });
+
+    openSection("成员与邀请");
+    fireEvent.click(await screen.findByRole("button", { name: "生成邀请" }));
+
+    // 文案说的是"个人空间不能邀请"，不是"学习状态已经变化"。
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("个人空间不能邀请成员");
+    expect(alert.textContent).not.toMatch(/学习状态/);
+    // 位置：紧挨着触发它的那张卡（邀请那一组），不是页尾那条通用提示。
+    expect(alert.closest(".settings-group")?.textContent).toContain("生成邀请");
   });
 });
 
@@ -854,7 +900,7 @@ it("播放读数跟着音频事件走：接线不能只挂在挂载 effect 上",
 
 async function openVoiceSection(options: Parameters<typeof installApi>[0] = {}) {
   // installApi 自己会把桩挂到 window.ailearn（那个属性不可重新赋值），用例只改它的成员。
-  const { api, calls } = installApi(options);
+  const { api, calls } = installApi({ ...options, collaborativeSpace: true });
   render(<SettingsSurface />);
   await screen.findByText("理解空间", { selector: ".space-identity h3" });
   openSection("语音与伴星");
@@ -1097,7 +1143,8 @@ it("计数句子：摘要键不混进总数，空计数也不编数字", () => {
 // ─── 转让所有权（owner 唯一体面出口；没有它，owner 既不能退也不能交）───────────
 
 async function openMemberRows(options: Parameters<typeof installApi>[0]) {
-  const installed = installApi({ role: "owner", ...options });
+  // 名册/转让只存在于协作空间（审计 F17）：站在协作空间上开这一屏。
+  const installed = installApi({ role: "owner", collaborativeSpace: true, ...options });
   render(<SettingsSurface />);
   await screen.findByText("理解空间", { selector: ".space-identity h3" });
   // 成员行在「成员与邀请」那一区，不在「账户与空间」。

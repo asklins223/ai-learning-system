@@ -418,6 +418,11 @@ export function SettingsSurface() {
   const [switching, setSwitching] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [failureNotice, setFailureNotice] = useState<string | null>(null);
+  /**
+   * 邀请动作自己的失败（审计 F31）：它要贴在「生成邀请」那张卡里，而不是页尾那条
+   * 通用提示——那里离按钮很远，而这条错误的下一步动作就在这张卡上（换个入口）。
+   */
+  const [inviteFailure, setInviteFailure] = useState<string | null>(null);
   const [inviteCode, setInviteCode] = useState("");
   const [joining, setJoining] = useState(false);
   const [aiSaving, setAiSaving] = useState<string | null>(null);
@@ -897,6 +902,7 @@ export function SettingsSurface() {
     setOwnerBusy("create");
     setNotice(null);
     setFailureNotice(null);
+    setInviteFailure(null);
     try {
       const response = await window.ailearn.invites.create({
         meta: createRequestMeta(epochRef.current),
@@ -907,7 +913,7 @@ export function SettingsSurface() {
       const listResponse = await window.ailearn.invites.list({ meta: createRequestMeta(epochRef.current) });
       setInvites(unwrapGatewayResult(listResponse));
     } catch (error) {
-      setFailureNotice(gatewayErrorMessage(error));
+      setInviteFailure(gatewayErrorMessage(error));
     } finally {
       setOwnerBusy(null);
     }
@@ -1299,6 +1305,8 @@ export function SettingsSurface() {
   const features = capabilities?.featureAvailability;
 
   const isOwner = currentRole === "owner";
+  /** 个人空间没有"成员"这回事（审计 F17）：邀请/名册/转让都不该在这里出现。 */
+  const spaceIsPersonal = currentWorkspace?.isPersonal === true;
   const personalWorkspace = useMemo(
     () => workspaces.find((workspace) => workspace.isPersonal) ?? null,
     [workspaces],
@@ -1784,7 +1792,22 @@ export function SettingsSurface() {
             Member 侧不是整块消失，而是留一个说清边界的锁定块：看不见不等于知道
             自己不能做，审查里「只读没有常驻表达」正是从这里来的。
             「谁能改政策」不在这一页说：它已经归到「AI 数据同意」的账号级设置里。 */}
-        {isOwner ? (
+        {isOwner && spaceIsPersonal ? (
+          /* 审计 F17：个人空间此前照样摆着"生成邀请"，点下去必吃 409
+             （服务端 `personal_workspace_not_shareable`）——一个做不到的按钮比没有更糟。
+             这里说清边界，并指向真正能做的那件事（空间胶囊 → 新建协作空间）。 */
+          <section className="settings-group">
+            <h3 className="settings-group__title">成员与邀请</h3>
+            <div className="settings-rows">
+              <SettingRow
+                title="个人空间不邀请别人"
+                detail="这里只有你一个人：资料、笔记与排程都是你自己的。要和别人一起学，先新建一个协作空间——点右上角的空间胶囊，选「新建协作空间」，进去之后再邀请成员。"
+              >
+                <span className="tag">个人空间</span>
+              </SettingRow>
+            </div>
+          </section>
+        ) : isOwner ? (
           <>
             <section className="settings-group">
               <h3 className="settings-group__title">发出邀请</h3>
@@ -1816,6 +1839,9 @@ export function SettingsSurface() {
                   </button>
                 </SettingRow>
               </div>
+              {inviteFailure ? (
+                <p className="settings-notice settings-notice--error" role="alert">{inviteFailure}</p>
+              ) : null}
               {createdInvite ? (
                 <div className="settings-invite-receipt" role="status">
                   <span>
@@ -1926,9 +1952,11 @@ export function SettingsSurface() {
         )}
       </>
     ),
-    footerNote: isOwner
-      ? "邀请与成员管理只对当前空间生效；AI 同意与数据政策在你的账号上，在「AI 数据同意」里改。"
-      : "加入协作空间需要空间所有者发出的邀请码；AI 同意与数据政策始终由你本人签署，不看这里的角色。",
+    footerNote: isOwner && spaceIsPersonal
+      ? "个人空间没有名册可管；要一起学就新建协作空间。AI 同意与数据政策在你的账号上，在「AI 数据同意」里改。"
+      : isOwner
+        ? "邀请与成员管理只对当前空间生效；AI 同意与数据政策在你的账号上，在「AI 数据同意」里改。"
+        : "加入协作空间需要空间所有者发出的邀请码；AI 同意与数据政策始终由你本人签署，不看这里的角色。",
   });
 
 

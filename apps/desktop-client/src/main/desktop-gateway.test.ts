@@ -193,6 +193,7 @@ const ROOM_DASHBOARD = learningDashboardV2Schema.parse({
   snapshotAt: "2026-08-23T00:00:00.000Z",
   dashboardRevision: "dashboard-rev-1",
   counts: { notes: 0, activeObjectives: 0, activeRuns: 0, reviewsDue: 0, needsRepair: 0 },
+  activeRuns: [],
   mode: "first_use",
   primaryFocus: null,
   queue: [],
@@ -481,6 +482,9 @@ describe("DesktopGateway", () => {
     [410, "expired", "invite_expired"],
     [409, "workspace_limit_reached", "workspace_limit"],
     [409, "already_member", "already_member"],
+    // 审计 F31：这个 token 以前不在表里，落进通用 conflict，被翻成"这条学习状态
+    // 已经发生变化"——说的不是这件事。现在它有自己的码与文案。
+    [409, "personal_workspace_not_shareable", "personal_workspace_not_shareable"],
   ];
 
   it.each(authDomainCases)("maps register %i/%s onto the %s auth code", async (status, token, code) => {
