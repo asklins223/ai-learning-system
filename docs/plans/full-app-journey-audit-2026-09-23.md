@@ -619,6 +619,11 @@
 | **F42** | ✅ 已修（注销声明） | 账户区加「删除账号」：说明当前不提供自助删除、怎么才能删、删后不可恢复 | settings 57/57。**未做**：空间动作收口到一行（布局重构） |
 | **F31** | ✅ 已修 | `personal_workspace_not_shareable` 进码表（合同 + 网关按 token 认 + 渲染层人话），邀请失败改写在触发它的那张卡里 | 网关域码表补一行（变异检验：摘掉映射即红）；界面新增"同类拒绝的文案与位置"用例（`alert` 必须落在「生成邀请」那一组内） |
 | **F34** | ✅ 已修 | `deriveSourceTitle` 按句读收尾 | 5 条用例（含真实调用点），变异检验：退回 `slice(0,60)` → 报出审计现场那串以「而」结尾的标题 |
+| **F14** | ✅ 已修 | `today-log.ts` 的 `isActionableAnomaly`（有可跳转对象或恢复路径才算待处理）；`buildTodayVerdict` 的 `pending` 只数这一类并新增 `background` 计数；`StudySurface.tsx` 把后台失败另起「系统异常 · 不需要你处理」一块，主按钮只在 `pending>0` 时出现 | `StudySurface.test.tsx`；**变异检验**：`pending` 改回 `anomalies.length` 即红；today/study 两套 45/45 |
+| **F22** | ✅ 已修 | `activity/service.ts` 查 run 时带上 `origin`/`result`，`runObjectiveId` + 同一道可见性判据取目标名；标题「完成巩固学习旅程 · <目标名>」、`detail` 说结论（`RUN_OUTCOME_LABELS`）、`target` 指向那一轮的只读结果页；缺目标的历史行照实说 | 实机：`activity/today` 昨天窗口 14 条 run 记录、**7 个不同标题**（此前全同名），逐条带目标名+结论+可点开的 target；api 全量 0 失败 |
+| **F19** | ✅ 已修 | `governance.ts` 的 `GovernedProviderAuditContext.dataCategories` 原样透传给 `logAICall`；**由 6 个调用点声明**类别（对话/兜底 user_answer+note_content、念头、记忆抽取、日记、V2 制卡） | 活体：新落审计行的 `data_categories` 为 `{user_answer,note_content}` / `{user_answer}`，此前全是 `{}`；客户端 `AUDIT_DATA_LABELS` 不用改 |
+| **F48** | ✅ 已修 | `note-library-surface.tsx`：恢复成功给同规格状态行「已把《X》恢复到笔记列表。」（`role="status"` + 已有 `index-foot`）；回收站视图区域名改 `回收站 · N 篇` | `note-library-surface.test.tsx` 9/9；**变异检验**：去掉回执那一行即红 |
+| **F51** | ✅ 闸门本来就在，补了用例并把文件接进 CI | `run-service.ts:3065` 的 `run.phase !== "active"` 就是终态计时闸；本条补的是证据：`learning-runs-postgres.integration.ts` 新增"终态 run 续租必须被拒、`activeSecondsUsed`/`runRevision` 不许再动"，并把 16 处裸 `sql` 校验改走 `scoped()`、接入 `ci.yml` 的 fresh-migrations job（受限角色） | **变异检验**：摘掉那句相位闸 → 红在「实际 204」；三种连接口径（超级用户 / `ailearn_api` / `ailearn_api`+`ailearn_worker`）各 21/21 绿。顺带修掉 F28 之后一直陈旧的 E08 与"P4 单槽正控制"两条期望，并给正控制补 `seedFrozenEvidence()`（此前那条正控制与 E08 断同一件事，单槽规则实际无人守） |
 
 **F28 的差异说明（要产品点头的一条）**：方案 ① 写的是"不满足证据完备性的目标不进复习队列"，
 落地的是**留在队列里 + 说明原因 + 不占主操作**（`review-deck.ts` 的"做这张只能当练习，
