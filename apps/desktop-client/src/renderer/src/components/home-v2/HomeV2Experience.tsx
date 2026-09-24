@@ -329,15 +329,21 @@ export function HomeV2Provider({ children }: { readonly children: ReactNode }) {
         break;
       case "today-review":
         detail = home.reviewLabel;
-        meta = home.dueCount === null ? "数量 —" : `${home.dueCount} 项待复习`;
+        // 同一条（审计 F25）：读不到时不要用"数量 —"冒充加载态——它在同步和读失败之间
+        // 长得一样。两种状态各说各的。
+        meta = home.dueCount !== null
+          ? `${home.dueCount} 项待复习`
+          : home.reviewState === "syncing" ? "正在读取…" : "暂时读不到";
         break;
       case "current-notebook":
         detail = home.note?.title ?? "还没有存好的研究册";
-        meta = home.noteCount === null ? "数量 —" : `${home.noteCount} 本`;
+        // 审计 F25：投影不含全量总数（`noteCount` 恒为 null），此前卡片附注写"数量 —"，
+        // 读起来像"还没加载完"。这一格要说的是"点进去能做什么"，不是全库有多少。
+        meta = home.note ? "继续阅读" : "从一份材料开始";
         break;
       case "current-target":
         detail = home.hasFocus ? "今天的主目标已经定下" : "还没定下今天的主目标";
-        meta = home.objectiveCount === null ? "数量 —" : `${home.objectiveCount} 个目标`;
+        meta = home.hasFocus ? "查看这个目标" : "去理解地图定一个";
         break;
       case "companion-center":
         detail = companionHome.projection?.profileSummary.name
