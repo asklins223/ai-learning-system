@@ -796,7 +796,7 @@ async function composeDiary(
     createProvider(textRes.providerName, withThinkingDisabled(textRes.providerConfig)),
     govCtx,
     job.workspaceId,
-    { userId, operation: "companion_daily_diary", jobId: job.id },
+    { userId, operation: "companion_daily_diary", jobId: job.id, dataCategories: ["note_content"] },
   );
 
   let rejection: string | null = null;

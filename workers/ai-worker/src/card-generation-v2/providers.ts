@@ -1453,7 +1453,7 @@ export async function buildCardGenerationProviders(input: {
         // AI P0-8（2026-09-15 审计）：V2 是本系统最重的 LLM 消费者，同样接上
         // ai_audit_log 的唯一写入口（userId 为 null 时按契约不写审计行）。
         input.userId
-          ? { userId: input.userId, operation: "card_generation_v2" }
+          ? { userId: input.userId, operation: "card_generation_v2", dataCategories: ["note_content"] }
           : undefined,
       )
     : rawProvider;

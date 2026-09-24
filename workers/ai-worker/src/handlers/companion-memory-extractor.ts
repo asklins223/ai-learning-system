@@ -273,7 +273,7 @@ export async function runCompanionMemoryExtract(job: JobPayload): Promise<void> 
     // AI P0-8（2026-09-15 审计）：接上 ai_audit_log 的唯一写入口（此前零调用）。
     // ai_audit_log.user_id 是 NOT NULL，故 payload 未带可信 actor 时不写审计行。
     userId
-      ? { userId, operation: "companion_memory_extract", jobId: job.id }
+      ? { userId, operation: "companion_memory_extract", jobId: job.id, dataCategories: ["user_answer"] }
       : undefined,
   );
 

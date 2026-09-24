@@ -658,6 +658,16 @@ export interface GovernedProviderAuditContext {
   userId: string;
   /** 能力/操作名前缀（如 "companion_agent"），与方法名合成 operation 落库。 */
   operation: string;
+  /**
+   * 这一次外发带出去的是哪类内容（审计 F19）。
+   *
+   * 取值用 `ai_audit_log.data_categories` 声明的那套词汇（note_content / user_answer /
+   * question / claim / quote）。**由调用点声明**：只有发起这次调用的人知道送出去的是
+   * 用户的回答、笔记正文还是一段引用；治理层能算的只有"文本/图像"这种结构事实。
+   * 不写这一格时审计行的类别就是空的——设置页那条"带出去的内容："后面什么都没有，
+   * 于是"把哪类内容发给了哪家模型"这句承诺落不了地。
+   */
+  dataCategories?: readonly string[];
   jobId?: string | null;
 }
 
@@ -691,6 +701,7 @@ export function createGovernedProvider(
         provider: provider.id,
         modelId: provider.modelId,
         operation: `${audit.operation}:${method}`,
+        dataCategories: audit.dataCategories ? [...audit.dataCategories] : undefined,
         costTokens: outcome.costTokens ?? null,
         durationMs: Math.round(performance.now() - startedAt),
         status: outcome.status ?? "success",

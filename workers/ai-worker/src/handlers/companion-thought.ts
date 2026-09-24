@@ -846,7 +846,7 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
       createProvider(textRes.providerName, withThinkingDisabled(textRes.providerConfig)),
       govCtx,
       job.workspaceId,
-      { userId, operation: "companion_thought", jobId: job.id },
+      { userId, operation: "companion_thought", jobId: job.id, dataCategories: ["user_answer"] },
     );
   };
 

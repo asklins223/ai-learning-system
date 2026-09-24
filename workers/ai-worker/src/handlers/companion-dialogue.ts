@@ -433,7 +433,7 @@ export async function runCompanionDialogue(
     // AI P0-8（2026-09-15 审计）：接上 ai_audit_log 的唯一写入口 logAICall——
     // 此前全仓零生产调用，而 DEFAULT_AI_DATA_POLICY.auditLogging 默认为 true，
     // 等于审计/成本记录完全空转。只写元数据，不写内容。
-    { userId: read.userId, operation: "companion_agent", jobId: ctx.id },
+    { userId: read.userId, operation: "companion_agent", jobId: ctx.id, dataCategories: ["user_answer", "note_content"] },
   );
   // 思考档备用 provider（2026-09-19 退化回复闸）：主链路关思考时，网关/模型退化
   // 窗口会把答案缩成一两个词且自我复制进历史。agent loop 检测到退化答案时用它
@@ -442,7 +442,7 @@ export async function runCompanionDialogue(
     createProvider(textRes.providerName, textRes.providerConfig),
     govCtx,
     ctx.workspaceId,
-    { userId: read.userId, operation: "companion_agent", jobId: ctx.id },
+    { userId: read.userId, operation: "companion_agent", jobId: ctx.id, dataCategories: ["user_answer", "note_content"] },
   );
   /**
    * 跨模型兜底 provider（方案 29 §9.6 / B8）。
@@ -461,7 +461,7 @@ export async function runCompanionDialogue(
       ),
       govCtx,
       ctx.workspaceId,
-      { userId: read.userId, operation: "companion_agent_fallback", jobId: ctx.id },
+      { userId: read.userId, operation: "companion_agent_fallback", jobId: ctx.id, dataCategories: ["user_answer", "note_content"] },
     )
     : undefined;
 
