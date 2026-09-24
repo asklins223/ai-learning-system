@@ -2339,22 +2339,40 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
     onExit({ route: { kind: "room.home" }, objectiveId: snapshot.target.objectiveId });
   };
 
-  if (loading && !snapshot) {
-    return <SurfaceDataState kind="loading" message="正在读取 LearningRun" detail="正在读取这一轮学到哪了。" />;
-  }
+  // 审计 F26：这三块边界必须**现在就**给出退路。曾经的现场是点了恢复之后任务区
+  // 一直空白——既没有题目也没有错误态，屏上没有一个可点的东西（>15 秒），而唯一
+  // 的出路是一枚不在这一屏里的返回胶囊。
+  const leaveToHome = (
+    <button type="button" className="button" onClick={() => { void onExit({ route: { kind: "room.home" } }); }}>
+      先离开，回书桌
+    </button>
+  );
 
-  if (failure && !snapshot) {
+  if (!snapshot) {
+    if (loading) {
+      return (
+        <SurfaceDataState
+          kind="loading"
+          message="正在打开这一轮"
+          detail="正在读取这一轮学到哪了；读到了就直接接着作答。"
+          action={leaveToHome}
+        />
+      );
+    }
+    // 原来这条路径是 `return null`：一旦落到"没报错也没内容"，任务区就是一块
+    // 合法的空白。现在它与失败态走同一个节点，退路一定在。
     return (
       <SurfaceDataState
         kind="error"
-        message="暂时无法打开这条学习旅程"
-        detail={failure.message}
-        onRetry={failure.retryable ? requestSnapshotRefresh : undefined}
+        message={failure ? "暂时无法打开这条学习旅程" : "这一轮没有打开"}
+        detail={failure
+          ? failure.message
+          : "读取已经结束，但没有拿到可继续的状态。可以先回书桌，再重新进来一次。"}
+        onRetry={!failure || failure.retryable ? requestSnapshotRefresh : undefined}
+        action={leaveToHome}
       />
     );
   }
-
-  if (!snapshot) return null;
 
   const activeTask = snapshot.activeTask;
   const result = resultState.kind === "result" ? resultState.value.result : null;
@@ -3006,7 +3024,12 @@ export function LearningRunSurface({ onExit }: LearningRunSurfaceProps = {}) {
         <SurfaceDataState
           kind="empty"
           message="还没有进行中的学习旅程"
-          detail="从理解目标、复习队列或今日学习开始后，系统会冻结真实目标并在这里继续作答。"
+          detail="从理解目标、复习队列或今日学习里开始一轮，题目会在这一屏接着走。"
+          action={(
+            <button type="button" className="button primary" onClick={() => invoke("home")}>
+              回书桌
+            </button>
+          )}
         />
       )}
     </HudPage>

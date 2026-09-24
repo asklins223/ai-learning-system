@@ -73,6 +73,17 @@ export function RunRecoveryNotice() {
   const setActiveCardGenerationRunId = useRoomStore((state) => state.setActiveCardGenerationRunId);
   const { projection, loading, failure, reload } = useHomeProjection();
   const runs = projection ? activeRunsFromProjection(projection) ?? [] : [];
+  /**
+   * 审计 F26 余项：徽标以前数的是"这一屏列出了几行"（`items.length`），而同一次
+   * 读取里服务端另外给了 `activeCount`（真实总数；投影一节最多带 20 条）。34 项
+   * 时徽标写 20、首页那张卡写 34——两个数出自同一份投影却互相不认识。这里统一
+   * 用服务端那个总数；被截断这件事必须写在屏上，并留一条通往完整清单的出口。
+   */
+  const activeRunTotal = projection?.activeRunSummary.state === "data"
+    ? projection.activeRunSummary.data.activeCount
+    : null;
+  const runCount = activeRunTotal ?? runs.length;
+  const runsTruncated = activeRunTotal !== null && runs.length < activeRunTotal;
   const generation = projection ? activeGenerationFromProjection(projection) : null;
   const projectionFailure = failure ?? (projection?.activeRunSummary.state === "error" ? activeRunErrorMessage(projection.activeRunSummary) : null);
   const generationFailure = projection?.activeGenerationSummary.state === "error" ? activeGenerationErrorMessage(projection.activeGenerationSummary) : null;
@@ -105,7 +116,7 @@ export function RunRecoveryNotice() {
 
   return (
     <details className="home-recovery" key={recoveryFailure ? "error" : "ready"}>
-      <summary><RotateCcw size={15} aria-hidden="true" /><span>{recoveryFailure ? "恢复信息需要重新读取" : "继续未完成的学习"}</span><small>{runs.length + (generation ? 1 : 0) || "重试"}</small></summary>
+      <summary><RotateCcw size={15} aria-hidden="true" /><span>{recoveryFailure ? "恢复信息需要重新读取" : "继续未完成的学习"}</span><small>{runCount + (generation ? 1 : 0) || "重试"}</small></summary>
       <div className="run-recovery-stack">
       {recoveryFailure ? <aside className="run-recovery-notice run-recovery-notice--error" role="alert" aria-label="恢复状态暂时不可用">
         <span className="run-recovery-notice__mark" aria-hidden="true"><CircleAlert size={18} /></span>
@@ -122,8 +133,11 @@ export function RunRecoveryNotice() {
       {runs.length > 0 ? <aside className="run-recovery-notice" aria-label="可恢复的学习旅程">
         <span className="run-recovery-notice__mark" aria-hidden="true"><RotateCcw size={18} /></span>
         <div className="run-recovery-notice__copy">
-          <strong>{runs.length === 1 ? "继续未完成的学习旅程" : `有 ${runs.length} 条进行中的学习`}</strong>
+          <strong>{runs.length === 1 ? "继续未完成的学习旅程" : `有 ${runCount} 条进行中的学习`}</strong>
           <p>{runs.length === 1 ? "上次的进度还在，可以从停下的地方继续。" : "选一项，从上次停下的地方继续。"}</p>
+          {runsTruncated ? (
+            <p className="small">先列出 {runs.length} 项，共 {activeRunTotal} 项；其余的去完整清单看。</p>
+          ) : null}
         </div>
         <div className="run-recovery-notice__actions">
           {runs.length === 1 ? (
@@ -137,6 +151,9 @@ export function RunRecoveryNotice() {
               </button>
             ))
           )}
+          <button type="button" className="run-recovery-notice__secondary" onClick={() => invoke("open-resumable")}>
+            看全部<ArrowRight size={14} aria-hidden="true" />
+          </button>
         </div>
       </aside> : null}
       {generation ? <aside className="run-recovery-notice run-recovery-notice--generation" aria-label="可恢复的学习卡生成任务">

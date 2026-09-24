@@ -192,6 +192,22 @@ async function submitButton() {
   return await screen.findByRole("button", { name: /提交回答/ }) as HTMLButtonElement;
 }
 
+/**
+ * 等待某个按钮出现——**必须自己抛错**。
+ *
+ * `waitFor` 的语义是"回调不抛错就结束"，而 `Array.find` 找不到只返回 undefined。
+ * 于是 `await waitFor(() => label(X))` 实际含义是"第一次检查时 X 就得在"，渲染层
+ * 多一个节点、少一个节点都会挪动微任务次序，用例就随机红（2026-09-24 给作答面
+ * 的加载边界加一条退路按钮时，三条提示用例就是这样红的）。
+ */
+async function waitedLabel(text: RegExp) {
+  return waitFor(() => {
+    const found = screen.getAllByRole("button").find((button) => text.test(button.textContent ?? ""));
+    if (!found) throw new Error(`还没有按钮文案匹配 ${text}`);
+    return found;
+  });
+}
+
 async function confirmHintDowngrade() {
   const dialog = await screen.findByRole("alertdialog", { name: "看提示后，本轮会转为练习" });
   expect(dialog.textContent).toContain("不会写入正式掌握");
@@ -222,7 +238,7 @@ describe("LearningRunSurface · 动作区", () => {
     const { state } = renderRun();
     const label = (text: RegExp) => screen.getAllByRole("button").find((button) => text.test(button.textContent ?? ""));
 
-    const first = await waitFor(() => label(/^给我一点提示/));
+    const first = await waitedLabel(/^给我一点提示/);
     expect(first).toBeTruthy();
     // 第二级不再是另一个按钮，也不藏在「更多选择」里。
     expect(label(/第 2 级提示/)).toBeUndefined();
@@ -232,7 +248,7 @@ describe("LearningRunSurface · 动作区", () => {
     await confirmHintDowngrade();
     await waitFor(() => expect(state.actions[0]).toEqual({ kind: "request_hint", level: 1 }));
 
-    const second = await waitFor(() => label(/^再看一层提示/));
+    const second = await waitedLabel(/^再看一层提示/);
     expect(second).toBeTruthy();
     // 两级同框：第一层的话术仍在屏上。
     expect(document.body.textContent).toContain("第 1 层提示");
@@ -241,7 +257,7 @@ describe("LearningRunSurface · 动作区", () => {
     await waitFor(() => expect(state.actions[1]).toEqual({ kind: "request_hint", level: 2 }));
     expect(document.body.textContent).toContain("第 2 层提示");
 
-    const done = await waitFor(() => label(/提示已经给完/));
+    const done = await waitedLabel(/提示已经给完/);
     expect(done).toBeTruthy();
     expect((done as HTMLButtonElement).disabled).toBe(true);
     expect(state.actions.filter((action) => action.kind === "request_hint")).toHaveLength(2);
@@ -251,7 +267,7 @@ describe("LearningRunSurface · 动作区", () => {
     const { state } = renderRun();
     const label = (text: RegExp) => screen.getAllByRole("button").find((button) => text.test(button.textContent ?? ""));
 
-    fireEvent.click((await waitFor(() => label(/^给我一点提示/)))!);
+    fireEvent.click(await waitedLabel(/^给我一点提示/));
     await confirmHintDowngrade();
     await waitFor(() => expect(state.actions[0]).toEqual({ kind: "request_hint", level: 1 }));
 
@@ -420,7 +436,7 @@ describe("LearningRunSurface · 动作区", () => {
 
   it("看过提示就当场说明计分降级，不再事后才知道", async () => {
     renderRun();
-    const button = await waitFor(() => screen.getAllByRole("button").find((item) => /^给我一点提示/.test(item.textContent ?? "")));
+    const button = await waitedLabel(/^给我一点提示/);
     fireEvent.click(button!);
     await confirmHintDowngrade();
     await waitFor(() => expect(document.body.textContent).toContain("只计练习分"));
