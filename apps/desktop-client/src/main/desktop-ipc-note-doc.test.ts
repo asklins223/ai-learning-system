@@ -345,6 +345,55 @@ describe("笔记协同的 IPC 通道", () => {
     expect(uploadNoteDocUpdate).not.toHaveBeenCalled();
   });
 
+  it("连接掉了之后写入退回 HTTP，重连鉴权后再回到流", async () => {
+    // 可写的那句答复只在鉴权那一刻来一次，而连接会掉。掉了还留着 `read-write`，写入就
+    // 继续并进那条**发不出去**的文档：provider 的 `send` 在 socket 不是 open 时静默丢弃
+    // （`readyState === Open` 才发），界面上照样"● 已写入，正在同步"，而正文只活在主进程
+    // 那份内存文档里——离开这一篇（transport 被销毁）就没了。所以掉线必须让 `via` 变回
+    // `uploaded`（HTTP 那条同一个增量口，服务端一样收到）。
+    const { event, watchNoteDocument, syncViaGateway, uploadNoteDocUpdate } = await setup({
+      workspaceType: "collaborative",
+      role: "owner",
+    });
+    await handler(DESKTOP_IPC_CHANNELS.subscriptionsSubscribe)(event, {
+      meta,
+      topic: { kind: "noteDoc", noteId: NOTE_ID },
+    });
+    await settle();
+    const onEvent = watchNoteDocument.mock.calls[0][1] as (e: unknown) => void | Promise<void>;
+    await onEvent({ noteId: NOTE_ID, type: "status", status: "authenticated", authorizedScope: "read-write" });
+
+    // 正向对照：连着的时候确实走流。
+    const onStream = await handler(DESKTOP_IPC_CHANNELS.noteDocSyncUpdate)(event, {
+      meta,
+      commandId: "command-before-drop",
+      noteId: NOTE_ID,
+      update: makeUpdate("before-drop"),
+    });
+    expect(onStream).toMatchObject({ ok: true, data: { via: "stream" } });
+
+    await onEvent({ noteId: NOTE_ID, type: "status", status: "disconnected" });
+    const afterDrop = await handler(DESKTOP_IPC_CHANNELS.noteDocSyncUpdate)(event, {
+      meta,
+      commandId: "command-after-drop",
+      noteId: NOTE_ID,
+      update: makeUpdate("after-drop"),
+    });
+    expect(afterDrop).toMatchObject({ ok: true, data: { via: "uploaded" } });
+    expect(syncViaGateway).toHaveBeenCalledTimes(1);
+    expect(uploadNoteDocUpdate).not.toHaveBeenCalled();
+
+    // 重连并再次鉴权之后回到流那条路：掉一次不等于永久退化。
+    await onEvent({ noteId: NOTE_ID, type: "status", status: "authenticated", authorizedScope: "read-write" });
+    const reconnected = await handler(DESKTOP_IPC_CHANNELS.noteDocSyncUpdate)(event, {
+      meta,
+      commandId: "command-after-reconnect",
+      noteId: NOTE_ID,
+      update: makeUpdate("after-reconnect"),
+    });
+    expect(reconnected).toMatchObject({ ok: true, data: { via: "stream" } });
+  });
+
   it("服务端还没答复可写之前，写入退回 HTTP（不把没落盘的东西报成 stream）", async () => {
     const { event, streamHandle, watchNoteDocument, syncViaGateway } = await setup({
       workspaceType: "collaborative",

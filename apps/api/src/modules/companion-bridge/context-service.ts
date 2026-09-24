@@ -30,7 +30,7 @@ export interface BridgeScope {
 const HYDRATABLE_TABLES = new Set([
   "sources",
   "notes",
-  // 当前卡片与学习目标实体使用 learning_cards_v2 / learning_objectives_v2。
+  // 当前卡片与学习卡实体使用 learning_cards_v2 / learning_objectives_v2。
   "learning_cards_v2",
   "learning_objectives_v2",
   "evidence_snapshots_v2",
@@ -134,6 +134,7 @@ export async function publishContext(
     graph: (input.page.graph ?? null) as never,
     capabilityHints: input.page.capabilityHints as never,
     sensitivity: input.page.sensitivity,
+    readableView: (input.page.readableView ?? null) as never,
     issuedAt,
     expiresAt,
     createdAt: issuedAt,

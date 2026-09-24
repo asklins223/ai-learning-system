@@ -27,6 +27,7 @@ import {
   runStreamingAgentStep,
   safeArgumentsHash,
   taskQueueToolResult,
+  currentPageToolResult,
 } from "./companion-agent-runtime.ts";
 import { NOTE_SEARCH_MAX_TERMS, noteSearchTerms } from "./companion-dialogue-content.ts";
 import { CompanionStreamStoppedError } from "./companion-dialogue-stream.ts";
@@ -655,4 +656,102 @@ test("noteSearchTerms：词数封顶", () => {
 test("noteSearchTerms：空检索词返回空数组（调用方据此短路，不许放 %% 进 SQL）", () => {
   assert.deepEqual(noteSearchTerms("   "), []);
   assert.deepEqual(noteSearchTerms("%%% ___"), []);
+});
+
+/**
+ * `companion_read_current_page`（doc 37：通用读页面）。
+ *
+ * 这一组用例钉的不是"能不能读到"，而是**读不到的时候她说什么**。触发它的实机事故：
+ * 用户问"为啥第四张学习卡这么慢"，她调了 `list_task_queue`（查 `learning_tasks`，
+ * 与卡片生成那套 `card_generation_*` 表毫无关系）拿到"当前没有排着的任务"，
+ * 于是把一个真而无关的读数推成"系统这边没在跑东西，慢在模型/网络"。
+ * 所以这里每条否定式断言都在钉：没有页面证据时不许给出结论性说法。
+ */
+
+const GENERATING_VIEW = {
+  pageId: "card_generation_progress",
+  title: "把《IndexTTS 2.5 让声音跨越语言》整理成学习卡",
+  statusLine: "正在编写候选 · 正在生成 · 写完一批一次给齐",
+  metrics: [{ label: "进度", value: "已写出 3 / 4 张候选" }],
+  items: [
+    { ordinal: 1, label: "提取线索", state: "卡型 · 主动回忆" },
+    { ordinal: 2, label: "重传触发", state: "卡型 · 机制解释" },
+    { ordinal: 3, label: "多语言覆盖", state: "卡型 · 机制解释" },
+  ],
+};
+
+function pageRow(overrides: Partial<{
+  page_kind: string;
+  sensitivity: string;
+  readable_view: unknown;
+  content_age_seconds: number;
+}> = {}) {
+  return {
+    page_kind: "note",
+    sensitivity: "normal",
+    readable_view: GENERATING_VIEW,
+    content_age_seconds: 7,
+    ...overrides,
+  };
+}
+
+test("read_current_page：这一页没登记可读内容时，说的是「读不到」而不是「没在跑」", () => {
+  const empty = currentPageToolResult(null);
+  assert.equal(empty.value.available, false);
+  assert.equal(empty.value.reason, "no_live_page");
+  assert.match(empty.safeSummary, /没有可读的内容/);
+  // 上一次错就错在她把"队列里没有任务"当成了"这一屏没在跑东西"——这一行里
+  // 不许出现任何关于队列/任务/系统状态的断言。
+  assert.ok(!/任务|队列|没在跑|没有跑/.test(empty.safeSummary), empty.safeSummary);
+});
+
+test("read_current_page：屏上的序号与「已写出 3 / 4」原样带出，第四张能落地成条目", () => {
+  const result = currentPageToolResult(pageRow());
+  assert.equal(result.value.available, true);
+  const items = result.value.items as Array<{ ordinal: number; label: string }>;
+  assert.deepEqual(items.map((item) => item.ordinal), [1, 2, 3]);
+  // 用户说的"第四张"必须能从这份数据里被说出来：屏上只有 3 条、计划 4 条。
+  assert.equal(items.length, 3);
+  assert.equal((result.value.metrics as Array<{ value: string }>)[0].value, "已写出 3 / 4 张候选");
+  assert.equal(result.value.contentAgeSeconds, 7);
+  assert.match(result.safeSummary, /正在看「/);
+});
+
+test("read_current_page：正式作答页只报条目数，题目正文由服务端丢掉", () => {
+  const result = currentPageToolResult(pageRow({
+    page_kind: "learning_run",
+    sensitivity: "formal_assessment",
+  }));
+  assert.equal(result.value.available, true);
+  assert.equal(result.value.items, undefined, "服务端必须丢条目正文，而不是指望客户端不发");
+  assert.equal(result.value.itemsOmitted, true);
+  assert.equal(result.value.itemCount, 3);
+});
+
+test("read_current_page：凭证页整块拒读", () => {
+  const result = currentPageToolResult(pageRow({ sensitivity: "credential_surface" }));
+  assert.equal(result.value.available, false);
+  assert.equal(result.value.reason, "blocked_surface");
+  assert.equal(result.value.title, undefined);
+});
+
+test("read_current_page：落库的视图对不上合同时按「没登记」处理，不递半份形状", () => {
+  const broken = currentPageToolResult(pageRow({
+    readable_view: { pageId: "x", title: "缺 items 上限外的字段", unexpected: "leak" },
+  }));
+  assert.equal(broken.value.available, false);
+  assert.equal(broken.value.reason, "page_not_readable");
+  assert.equal(broken.value.unexpected, undefined);
+  assert.match(broken.safeSummary, /还没有登记可读内容/);
+});
+
+test("read_current_page：工具已注册、是读类、只读权限下也给她", () => {
+  const definition = getCompanionAgentTool("companion_read_current_page");
+  assert.ok(definition, "工具没进注册表");
+  assert.equal(definition.riskClass, "read");
+  assert.equal(definition.requiresConfirmation, false);
+  assert.ok(
+    resolveAllCompanionAgentTools("read_only").some((tool) => tool.name === "companion_read_current_page"),
+    "只读权限下也应该能读页面",
+  );
 });

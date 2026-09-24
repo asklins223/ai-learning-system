@@ -93,7 +93,7 @@ export const HOME_FEATURE_REGISTRY_V1: readonly HomeFeatureDefinitionV1[] = Obje
   pending({ id: "global-search", title: "搜索", purpose: "搜索笔记、来源与全部目标", icon: "search", region: "shelf", group: "explore", regionOrder: 3, catalogOrder: 2, pendingTitle: "搜索尚未接入新版页面", pendingDetail: "跨来源、笔记与目标的统一搜索仍在接入桌面端。" }),
   Object.freeze({ id: "catalog", title: "魔法目录", purpose: "查看小屋里的全部功能", icon: "catalog", region: "shelf", group: "system", regionOrder: 6, catalogOrder: 99, availability: "native", catalogVisible: false }),
 
-  pending({ id: "current-target", title: "当前学习目标", purpose: "查看正在推进的目标与下一步", icon: "target", region: "window", group: "today", regionOrder: 0, catalogOrder: 2, pendingTitle: "当前学习目标尚未接入新版页面", pendingDetail: "目标状态来自服务器上的真实进度；新版目标页面完成前不会打开旧学习卡。" }),
+  pending({ id: "current-target", title: "当前学习卡", purpose: "查看正在推进的目标与下一步", icon: "target", region: "window", group: "today", regionOrder: 0, catalogOrder: 2, pendingTitle: "当前学习卡尚未接入新版页面", pendingDetail: "目标状态来自服务器上的真实进度；新版学习卡页面完成前不会打开旧版卡片页。" }),
   // 星图页已经在 Home V2 里接线（见 HomeV2Experience 的 understanding-graph 分支），
   // 所以这里不再需要 pending 文案——那段「尚未接入新版页面」的说明只会在
   // 「新版页面尚未接入」弹窗里出现，而那个弹窗永远不会为这个入口打开。

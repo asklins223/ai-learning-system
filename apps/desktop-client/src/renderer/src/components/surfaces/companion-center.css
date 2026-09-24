@@ -83,6 +83,7 @@
     var(--hud-paper);
   box-shadow: 0 22px 54px rgba(33, 21, 15, .3), inset 0 0 0 1px rgba(84, 56, 31, .16);
   color: var(--hud-ink);
+  color-scheme: light;
 }
 
 .hud-surface .companion-center--state { display: grid; place-items: center; padding: 28px; }
@@ -214,7 +215,7 @@
 .hud-surface .companion-memory-view .companion-panel-heading h3 { font-size: 18px; }
 .hud-surface .companion-memory-view .companion-panel-heading p { display: none; }
 .hud-surface .companion-memory-view .companion-record-list { max-width: 76ch; }
-.hud-surface .companion-center__panel--memory :is(.companion-heading-actions, .companion-action-row, .companion-inline-form, .companion-empty-with-action) button:not(.companion-select__trigger):not(.companion-search__clear) {
+.hud-surface .companion-center__panel--memory :where(.companion-heading-actions, .companion-action-row, .companion-inline-form, .companion-empty-with-action) button:where(:not(.companion-select__trigger):not(.companion-search__clear)) {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   min-height: 40px; padding: 7px 13px; border: 1px solid var(--hud-line-strong);
   border-radius: 12px; background: var(--hud-paper-light); color: var(--hud-ink);
@@ -222,6 +223,18 @@
 }
 .hud-surface .companion-center__panel--memory :is(.companion-heading-actions, .companion-action-row, .companion-inline-form, .companion-empty-with-action) button.primary { background: var(--hud-clay); border-color: #9f4224; color: #fff9eb; }
 .hud-surface .companion-center__panel--memory :is(.companion-heading-actions, .companion-action-row, .companion-inline-form, .companion-empty-with-action) button:disabled { opacity: .55; cursor: wait; }
+.hud-surface .companion-center .companion-inline-form textarea {
+  width: 100%;
+  min-width: 0;
+  border: 2px solid rgba(171, 140, 101, .52);
+  background: #fffaf0;
+  color: var(--hud-ink);
+  caret-color: var(--hud-clay);
+}
+.hud-surface .companion-center .companion-inline-form textarea:focus {
+  border-color: #8aa98f;
+  background: #fffdf6;
+}
 
 .hud-surface .companion-map-view { display: grid; grid-template-rows: auto auto minmax(320px, 1fr) auto; gap: 14px; min-height: 580px; }
 .hud-surface .companion-map-view__head { align-items: end; padding-bottom: 14px; border-bottom: 1px solid var(--hud-line); }

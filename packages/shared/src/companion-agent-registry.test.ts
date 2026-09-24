@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { allowedMainRouteV2Schema } from "./companion-bridge-contracts.ts";
 import {
+  COMPANION_AGENT_TOOL_DEFINITIONS,
   COMPANION_AGENT_TOOL_NAMES,
   validateCompanionAgentToolArguments,
 } from "./companion-agent-registry.ts";
@@ -32,4 +34,24 @@ test("注册表名字唯一（同名工具会让参数校验表静默覆盖前�
   });
   assert.deepEqual(duplicates, []);
   assert.ok(COMPANION_AGENT_TOOL_NAMES.length > 20);
+});
+
+test("她报得出的页面 = 路由白名单里不需要实体 id 的那一批", () => {
+  // 判据从 `allowedMainRouteV2Schema` 现读，不再抄第二份名字清单：
+  // 以前枚举手抄成七个，于是「今日」「设置」服务端发得出来、桌面端却没有落点，
+  // 而笔记库/理解目标/查找三页她压根叫不出名字，只能被就近塞进来源库和星图。
+  const noArgKinds = allowedMainRouteV2Schema.options
+    .filter((option) => Object.entries(option.shape)
+      .every(([field, schema]) => field === "kind" || schema.isOptional()))
+    .map((option) => option.shape.kind.value);
+  // 正控制：判据自己得先读到东西。白名单形状变了，这条就要重看一遍。
+  assert.equal(noArgKinds.length, 10);
+  const definition = COMPANION_AGENT_TOOL_DEFINITIONS
+    .find((item) => item.name === "companion_open_page");
+  assert.ok(definition);
+  const properties = definition.parameters.properties as { page: { enum: string[] } };
+  assert.deepEqual([...properties.page.enum].sort(), [...noArgKinds].sort());
+  // safeLabel 的上限是 240，而 `companion-agent-contracts.test.ts` 把整份描述原样当
+  // safeLabel 过 schema。词表再加页面就会撞上，这里先把这条约束写在名字里。
+  assert.ok(definition.description.length <= 240, `页面描述 ${definition.description.length} 字，超了 safeLabel 上限`);
 });

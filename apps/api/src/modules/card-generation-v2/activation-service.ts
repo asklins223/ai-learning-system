@@ -1112,7 +1112,7 @@ async function createOrUpdateObjectiveAndCard(
         ))
         .limit(1);
       if (objRows.length === 0) {
-        throw new CardGenerationV2ServiceError("objective_not_found", 404, "学习目标不存在");
+        throw new CardGenerationV2ServiceError("objective_not_found", 404, "学习卡不存在");
       }
       const objCurrent = objRows[0];
 
@@ -1240,7 +1240,7 @@ async function createOrUpdateObjectiveAndCard(
         ))
         .limit(1);
       if (objRows.length === 0) {
-        throw new CardGenerationV2ServiceError("objective_not_found", 404, "学习目标不存在");
+        throw new CardGenerationV2ServiceError("objective_not_found", 404, "学习卡不存在");
       }
       const obj = objRows[0];
 
@@ -1671,7 +1671,7 @@ async function createOrUpdateObjectiveAndCard(
         ))
         .limit(1);
       if (oldObjRows.length === 0) {
-        throw new CardGenerationV2ServiceError("objective_not_found", 404, "被替换的学习目标不存在");
+        throw new CardGenerationV2ServiceError("objective_not_found", 404, "被替换的学习卡不存在");
       }
       const oldObj = oldObjRows[0];
 
@@ -1939,7 +1939,7 @@ async function handleExistingLifecycleAction(
     .limit(1);
 
   if (objRows.length === 0) {
-    throw new CardGenerationV2ServiceError("objective_not_found", 404, "学习目标不存在");
+    throw new CardGenerationV2ServiceError("objective_not_found", 404, "学习卡不存在");
   }
 
   const obj = objRows[0];

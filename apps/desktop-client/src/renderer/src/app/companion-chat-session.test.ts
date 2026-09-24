@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { CompanionMessageV1 } from "@ailearn/shared/companion-conversation-contracts";
 import type { CompanionAgentRouteEventV1 } from "@ailearn/shared/companion-chat-desktop-contracts";
 import type { DesktopRouteV1 } from "@ailearn/shared/desktop-ipc-contracts";
+import { allowedMainRouteV2Schema } from "@ailearn/shared/companion-bridge-contracts";
 import type { RoomIntent } from "./room-machine";
 import { useRoomStore } from "./room-store";
 import {
@@ -67,9 +68,15 @@ describe("navChipsStillOutsideMessages（§4.8：消息里的落点取代游离 
     expect(navChipsStillOutsideMessages(chips, messages)).toEqual([]);
   });
 
-  it("桌面端没有等价形态的落点也不重复（消息里已留一行字，chip 只会再说一遍）", () => {
+  it("消息里已经落了同一个落点，chip 换个说法也不重复（判据是路由不是文案）", () => {
     const messages = [messageWithNav("去今日", { kind: "today" })];
-    expect(navChipsStillOutsideMessages([chip("去今日", null)], messages)).toEqual([]);
+    expect(navChipsStillOutsideMessages([chip("今日学习在这儿", { kind: "room.today" })], messages)).toEqual([]);
+  });
+
+  it("只有回执文字、没有落点的 chip 不被消息里的路由吃掉（它俩不是同一件事）", () => {
+    const messages = [messageWithNav("去今日", { kind: "today" })];
+    const pending = chip("第四张卡在写", null);
+    expect(navChipsStillOutsideMessages([pending], messages)).toEqual([pending]);
   });
 
   it("消息里还没有的落点留着：确认后直接给出的落点、以及正在跑的这一轮", () => {
@@ -95,21 +102,22 @@ describe("navChipsStillOutsideMessages（§4.8：消息里的落点取代游离 
  * 少一次 `invoke` 就是一次空转（两条 IPC 都成功、无报错、页面纹丝不动）。
  * 2026-09-22 实测 `learningRun.detail` 正是这样：它只 `setActiveRunId`，而页面切换的
  * 唯一开关是 `invoke`；仓库里另外 7 处开同一页的入口全都成对写。
- * 表是从函数里现读的，所以以后新增一种可映射落点却没写落点，这条会直接少一条断言 ——
- * 因此另有一条"表必须覆盖映射函数的全部 kind"的自检。
+ *
+ * 2026-09-24 判据改成从 `allowedMainRouteV2Schema` 现读。此前这里是一份**手抄的九条**，
+ * 而 `today`/`settings` 恰好不在抄来的清单里——那份手抄把"新增 kind 却没写落点会红"
+ * 这句话兑成了空话：白名单加 kinds、映射表漏分支、测试全绿，用户那边是她说"到今日了"
+ * 而那颗按钮根本不渲染。现在每一条路由都由白名单喂进来，漏一个 case 就红一条。
  */
-describe("applyRouteToRoom（每种可映射落点都必须真正换页）", () => {
-  const MAPPED_ROUTES = [
-    { kind: "room.home" },
-    { kind: "review.queue" },
-    { kind: "understanding.graph" },
-    { kind: "source.library" },
-    { kind: "source.detail", sourceId: NOTE_ID },
-    { kind: "note.detail", noteId: NOTE_ID },
-    { kind: "learningRun.detail", runId: NOTE_ID },
-    { kind: "objective.detail", objectiveId: NOTE_ID },
-    { kind: "companion.center", tab: "dialogue" },
-  ] as const satisfies readonly DesktopRouteV1[];
+describe("applyRouteToRoom（白名单里每种路由都必须真正换页）", () => {
+  // 带必填 id 的 kind 补一个能过 zod 的最小形状；这里要量的是"有没有落点"，不是 id 归属。
+  const agentRoutes = allowedMainRouteV2Schema.options.map((option) => {
+    const route: Record<string, unknown> = { kind: option.shape.kind.value };
+    for (const [field, schema] of Object.entries(option.shape)) {
+      if (field === "kind" || schema.isOptional()) continue;
+      route[field] = NOTE_ID;
+    }
+    return route as CompanionAgentRouteEventV1["route"];
+  });
 
   const invokePage = async (route: DesktopRouteV1) => {
     const store = useRoomStore;
@@ -124,27 +132,25 @@ describe("applyRouteToRoom（每种可映射落点都必须真正换页）", () 
     }
   };
 
-  for (const route of MAPPED_ROUTES) {
-    it(`${route.kind}：换页请求真的发出去了`, async () => {
-      const { applied, intents } = await invokePage(route);
+  it("正控制：白名单确实读到了这十三个 kind（读空了整个循环就是空跑）", () => {
+    expect(agentRoutes.map((route) => route.kind).sort()).toEqual([
+      "card", "conversation", "home", "learning_run", "note", "note_library", "objective_library",
+      "review", "search", "settings", "source", "star_map", "today",
+    ]);
+  });
+
+  for (const agentRoute of agentRoutes) {
+    it(`${agentRoute.kind}：映射得出落点，且换页请求真的发出去了`, async () => {
+      const target = desktopRouteFromAgentRoute(agentRoute);
+      expect(target, "服务端发得出的路由，客户端不能映射成 null").not.toBeNull();
+      const { applied, intents } = await invokePage(target as DesktopRouteV1);
       expect(applied).toBe(true);
       expect(intents.length).toBeGreaterThan(0);
     });
   }
 
-  it("九种可映射落点与映射函数的产出一一对应（新增 kind 却没写落点时这条会红）", async () => {
-    const agentRoutes: CompanionAgentRouteEventV1["route"][] = [
-      { kind: "home" }, { kind: "review" }, { kind: "star_map" }, { kind: "learning_run", runId: NOTE_ID },
-      { kind: "note", noteId: NOTE_ID }, { kind: "source", sourceId: NOTE_ID }, { kind: "source" },
-      { kind: "card", cardId: NOTE_ID, objectiveId: NOTE_ID }, { kind: "conversation" },
-    ];
-    const produced = agentRoutes.map((route) => desktopRouteFromAgentRoute(route)?.kind);
-    expect(produced.filter((kind) => kind !== undefined).length).toBe(agentRoutes.length);
-    expect(new Set(produced)).toEqual(new Set(MAPPED_ROUTES.map((route) => route.kind)));
-  });
-
-  it("桌面端没有等价页面的落点如实返回 false，不假装跳过了", async () => {
-    const { applied } = await invokePage({ kind: "note.library" } as DesktopRouteV1);
+  it("桌面端确实没有等价页面的落点如实返回 false，不假装跳过了", async () => {
+    const { applied } = await invokePage({ kind: "companion.drawer", focus: "voice" });
     expect(applied).toBe(false);
   });
 });

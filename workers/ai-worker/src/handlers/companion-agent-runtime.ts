@@ -11,6 +11,7 @@ import {
   COMPANION_AGENT_TOOL_TIMEOUT_MS,
   companionAgentSettingsV1Schema,
   allowedMainRouteV2Schema,
+  companionPageLabelV2,
   getCompanionAgentTool,
   isVisionGatedCompanionTool,
   resolveAllCompanionAgentTools,
@@ -25,13 +26,14 @@ import {
   type ChatMessage,
 } from "@ailearn/shared";
 import { canonicalJsonV1, sha256Utf8V1 } from "@ailearn/shared/content-hash";
+import { pageReadableV1Schema } from "@ailearn/shared/companion-bridge-contracts";
 import { noteVisibleSqlText } from "@ailearn/shared/note-visibility";
 import { buildAgentTurnMessages } from "../lib/providers/json-response.ts";
 import { createCompanionEnvelopeDecoder } from "./companion-dialogue-envelope.ts";
 import { companionNeedsTool } from "./companion-tool-intent.ts";
 import { CompanionStreamStoppedError } from "./companion-dialogue-stream.ts";
-import { withWorkerWorkspaceTransaction } from "../db.ts";
-import { ageLabel, readLearningStats, summarizeLearningStats, tzSubquery, visibleCompanionCardSourceCondition, visibleCompanionDueReviewCondition } from "./companion-here-and-now.ts";
+import { withWorkerWorkspaceTransaction, type WorkerTransaction } from "../db.ts";
+import { ageLabel, PAGE_KIND_LABELS, readLearningStats, summarizeLearningStats, tzSubquery, visibleCompanionCardSourceCondition, visibleCompanionDueReviewCondition } from "./companion-here-and-now.ts";
 import { createEmbeddingProvider, createProvider } from "../lib/ai-provider.ts";
 import {
   AIDataPolicyDeniedError,
@@ -515,16 +517,6 @@ export const READ_IMAGE_TOOL_TIMEOUT_MS = 45_000;
 const VISION_EGRESS_DENIED_MESSAGE = "「允许发送图片内容」没有开启，图片留在本机，我看不到图里的内容";
 
 /** 无实体页面的中文名，只用于 safeSummary（它会进她的可见轨迹）。 */
-const PAGE_LABELS: Record<string, string> = {
-  home: "首页",
-  today: "今日",
-  review: "复习",
-  star_map: "知识图谱",
-  conversation: "对话",
-  source: "书架",
-  settings: "设置",
-};
-
 interface NoteSearchRow extends Record<string, unknown> {
   id: string;
   title: string;
@@ -684,6 +676,107 @@ interface DueReviewRow extends Record<string, unknown> {
   overdue_hours: number;
 }
 
+/**
+ * `companion_read_current_page` 的结果（纯函数，便于测）。
+ *
+ * 三件事是这条工具的存在理由，缺一条它就会重新变成"真而无关的答案"：
+ *
+ * 1. **读不到就明说读不到。** 这次事故里她不是沉默，是拿 `list_task_queue`
+ *    （查 `learning_tasks`，与卡片生成毫无关系）的"队列是空的"推出了
+ *    "系统没在跑东西"。`available:false` 必须是一个她看得懂、而且不会再去找
+ *    替代数字的答复。
+ * 2. **裁剪在服务端做，不信客户端自报的 sensitivity。** 正式作答页的条目正文就是
+ *    题目本身，只丢 `items`；凭证页整块不给。
+ * 3. **新鲜度只有一个来源。** 视图里没有时间戳，"这份内容多久没变"由服务端从
+ *    `issued_at` 算——否则她嘴里的"6 分钟前"和屏幕上的"6 分钟前"会是两个数。
+ */
+export interface PageContextRow extends Record<string, unknown> {
+  page_kind: string;
+  sensitivity: string;
+  readable_view: unknown;
+  content_age_seconds: number;
+}
+
+export function currentPageToolResult(row: PageContextRow | null): {
+  value: Record<string, unknown>;
+  safeSummary: string;
+} {
+  if (!row) {
+    return {
+      value: { available: false, reason: "no_live_page" },
+      safeSummary: "这一页现在没有可读的内容",
+    };
+  }
+  if (row.sensitivity === "credential_surface") {
+    return {
+      value: { available: false, reason: "blocked_surface", pageKind: row.page_kind },
+      safeSummary: "这一页的内容不能读",
+    };
+  }
+  const parsed = pageReadableV1Schema.safeParse(row.readable_view);
+  if (!parsed.success) {
+    // 落库的视图对不上合同（旧行、或页面登记错了形状）——按"这页没登记可读内容"
+    // 处理，而不是把半份形状递给她去猜。
+    const label = PAGE_KIND_LABELS[row.page_kind] ?? row.page_kind;
+    return {
+      value: { available: false, reason: "page_not_readable", pageKind: row.page_kind },
+      safeSummary: `这一页还没有登记可读内容（${label}）`,
+    };
+  }
+  const view = parsed.data;
+  const isFormalAssessment = row.sensitivity === "formal_assessment";
+  const ageSeconds = Math.max(0, Number(row.content_age_seconds));
+  const value: Record<string, unknown> = {
+    available: true,
+    pageKind: row.page_kind,
+    pageId: view.pageId,
+    title: view.title,
+    contentAgeSeconds: ageSeconds,
+    ...(view.statusLine ? { statusLine: view.statusLine } : {}),
+    ...(view.metrics?.length ? { metrics: view.metrics } : {}),
+    ...(view.notice ? { notice: view.notice } : {}),
+    ...(view.filters?.length ? { filters: view.filters } : {}),
+    // 正式作答页的条目正文就是题目：只给"这页在作答、有几项"，正文不给。
+    ...(isFormalAssessment
+      ? { itemsOmitted: true, itemCount: view.items?.length ?? 0 }
+      : view.items?.length ? { items: view.items } : {}),
+  };
+  const itemCount = view.items?.length ?? 0;
+  return {
+    value,
+    safeSummary: itemCount > 0
+      ? `正在看「${view.title}」· 屏上 ${itemCount} 项`
+      : `正在看「${view.title}」`,
+  };
+}
+
+/**
+ * 取"这一屏"那一条 context 行（集测直接调它做跨空间守卫的往返验证）。
+ *
+ * workspace_id / user_id 必须在 SQL 里显式过滤：这张表的 RLS 守卫对
+ * `ailearn_worker` 是**放行**的（`CURRENT_USER = 'ailearn_worker' OR ...`），
+ * 也就是说行级隔离在这条路径上不存在，漏一个条件就是跨账号读到别人的屏。
+ */
+export async function readLatestPageContextRow(
+  tx: WorkerTransaction,
+  scope: { workspaceId: string; userId: string },
+): Promise<PageContextRow | null> {
+  const rows = await tx.execute<PageContextRow>(sql`
+    SELECT page_kind,
+           sensitivity,
+           readable_view,
+           EXTRACT(EPOCH FROM (now() - issued_at))::int AS content_age_seconds
+    FROM assistant_page_contexts
+    WHERE workspace_id = ${scope.workspaceId}
+      AND user_id = ${scope.userId}
+      AND revoked_at IS NULL
+      AND expires_at > now()
+    ORDER BY issued_at DESC, id
+    LIMIT 1
+  `);
+  return Array.isArray(rows) ? rows[0] ?? null : null;
+}
+
 async function executeReadTool(
   event: AgentEventContext,
   definition: CompanionAgentToolDefinitionV1,
@@ -721,6 +814,16 @@ async function executeReadTool(
         },
       );
       return { value: result, safeSummary: "已读取当前学习上下文" };
+    }
+    case "companion_read_current_page": {
+      const row = await withWorkerWorkspaceTransaction(
+        { workspaceId: event.ctx.workspaceId, userId: event.read.userId },
+        (tx) => readLatestPageContextRow(tx, {
+          workspaceId: event.ctx.workspaceId,
+          userId: event.read.userId,
+        }),
+      );
+      return currentPageToolResult(row);
     }
     case "companion_read_history": {
       const limit = typeof args.limit === "number" ? Math.min(20, Math.max(1, args.limit)) : 10;
@@ -1177,11 +1280,12 @@ async function executeReadTool(
       // 与 allowedMainRouteV2Schema 对齐的无参页面；带实体的（note/card/learning_run）
       // 各有专门工具去做归属校验，这里不接受 id，避免"任意 UUID 构造导航 route"。
       const route = { kind: page };
+      const label = companionPageLabelV2(page);
       return {
         value: { route },
         route,
-        routeLabel: `去${PAGE_LABELS[page] ?? page}`,
-        safeSummary: `已定位到${PAGE_LABELS[page] ?? page}页面`,
+        routeLabel: `去${label}`,
+        safeSummary: `已定位到${label}页面`,
       };
     }
     case "companion_get_learning_stats": {

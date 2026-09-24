@@ -467,6 +467,11 @@ export function useNoteDocLiveView(
   const flush = useCallback(async (): Promise<"stream" | "uploaded" | "queued" | "unchanged" | null> => {
     const api = window.ailearn;
     if (!api || !noteId || !api.note?.doc?.syncUpdate || pendingRef.current.length === 0) return null;
+    // 交出去的是**这一刻**攒下的那几条。往返期间敲进来的字会继续往队尾堆，所以回执
+    // 回来时不能整条清空——那正是"敲了五六行、只存下来一点点"的另一半：一次自动保存
+    // 要等一次服务端往返（实测 40–170ms，慢的时候更久），这期间敲的字被清出队列，
+    // 既没交出去、也不再算"未提交"，而同一刻清掉的草稿本来是它们唯一的副本。
+    const submittedCount = pendingRef.current.length;
     const merged = Y.mergeUpdates(pendingRef.current.map((item) => unB64(item)));
     const submitted = await api.note.doc.syncUpdate({
       meta: createRequestMeta(epochRef?.current ?? undefined),
@@ -482,18 +487,21 @@ export function useNoteDocLiveView(
     const via = unwrapGatewayResult(submitted).via;
     // queued 要留着这一批：没网时它们是"改完还没交出去"的全部内容，清了就是丢掉。
     if (via && via !== "queued") {
-      pendingRef.current = [];
+      // 只摘掉这一次真的交出去的那几条（队列是按时间追加的，交出去的是前 `submittedCount` 条）。
+      pendingRef.current = pendingRef.current.slice(submittedCount);
       blockRef.current = null;
-      setDirty(false);
-      // 确认交出去了就清草稿，判据与上面清 `pendingRef` 用的是**同一个** `via`：
+      // 队列空了才叫干净：往返期间敲的字还在队里，那时它仍然是「草稿」。
+      setDirty(pendingRef.current.length > 0);
+      // 草稿只在**队列空了**的时候清，判据与上面清 `pendingRef` 用的是**同一个** `via`：
       //  - `uploaded`：服务端回了 revision，已经落盘；
       //  - `stream`：增量并进了主进程那份共享文档、由 provider 送出去（界面这一侧从此
       //    不再是它唯一的副本）；
       //  - `unchanged`：那份文档本来就已经有这几个操作。
       // `queued`（没网，只攒在本机）与 null（什么都没交）不算——那几句字此刻只有本机
       // 这一份草稿，留着才对。留着也不会变成"旧的盖新的"：接回来走 CRDT 合并，而且
-      // 重挂载时还会先判一次"是不是已经并进这份文档了"。
-      clearDraft(noteId);
+      // 重挂载时还会先判一次"是不是已经并进这份文档了"。队里还有没交出去的（上面那次
+      // 往返期间敲的）同理：它们是草稿里唯一的那一份，清掉就真没了。
+      if (pendingRef.current.length === 0) clearDraft(noteId);
     }
     return via;
   }, [clearDraft, noteId]);

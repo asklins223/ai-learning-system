@@ -60,7 +60,7 @@ const MEMORY_PIN_OPTIONS: ReadonlyArray<CompanionSelectOption<"all" | "pinned" |
 const JOURNEY_STEP_LABEL: Record<string, string> = {
   boundary_intro: "了解使用边界",
   preference_capture: "记录学习偏好",
-  goal_capture: "确认学习目标",
+  goal_capture: "确认学习卡",
   choose_start: "选择开始方式",
   first_source: "添加第一份材料",
   source_processing: "整理材料",

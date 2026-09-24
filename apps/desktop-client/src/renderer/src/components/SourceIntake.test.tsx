@@ -3,7 +3,11 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ClipboardLinkPrompt, GlobalDropOverlay } from "./SourceIntake";
-import { SOURCE_CAPTURED_EVENT, type SourceCapturedDetail } from "../app/source-intake";
+import {
+  NOTE_PAPER_IMAGE_DROP_ATTR,
+  SOURCE_CAPTURED_EVENT,
+  type SourceCapturedDetail,
+} from "../app/source-intake";
 import { useRoomStore } from "../app/room-store";
 
 /**
@@ -149,5 +153,60 @@ describe("GlobalDropOverlay", () => {
     await screen.findByText("这次没收进来");
     expect(screen.getByText("deck.pdf")).toBeTruthy();
     expect(calls.create).toHaveLength(0);
+  });
+
+  /**
+   * 笔记编辑页的纸面：`notebook-surface` 在编辑态挂上归属属性，采集器只认它。
+   * 这里不渲染整个 surface，只要那一格 DOM 长得对。
+   */
+  function withNotePaper() {
+    const paper = document.createElement("div");
+    paper.setAttribute(NOTE_PAPER_IMAGE_DROP_ATTR, "");
+    const spot = document.createElement("span");
+    paper.appendChild(spot);
+    document.body.appendChild(paper);
+    return {
+      spot,
+      dispose: () => { paper.remove(); },
+      transferFor: (name: string, type: string) => ({
+        files: [new File(["内容"], name, { type })],
+        types: ["Files"],
+        getData: () => "",
+        dropEffect: "copy" as const,
+      }),
+    };
+  }
+
+  it("图片落在笔记纸面上不 arm，同一处落点的文本文件照收", async () => {
+    const calls = stubGateway();
+    render(<GlobalDropOverlay />);
+    const { spot, dispose, transferFor } = withNotePaper();
+    try {
+      fireEvent.dragEnter(spot, { dataTransfer: transferFor("截屏.png", "image/png") });
+      expect(screen.queryByText("松开，收进来源库")).toBeNull();
+      // 判据跟着拖拽内容走：纸面只认领整份图片，换成 Markdown 就该说"收进来源库"。
+      fireEvent.dragEnter(spot, { dataTransfer: transferFor("note.md", "text/markdown") });
+      expect(await screen.findByText("松开，收进来源库")).toBeTruthy();
+      expect(calls.create).toHaveLength(0);
+    } finally {
+      dispose();
+    }
+  });
+
+  it("松手那一下被纸面接走时，「松开」那句要收回去", async () => {
+    const calls = stubGateway();
+    render(<GlobalDropOverlay />);
+    const { spot, dispose, transferFor } = withNotePaper();
+    try {
+      const image = transferFor("截屏.png", "image/png");
+      // 从别处拖起来，浮层已经 arm。
+      fireEvent.dragEnter(document.body, { dataTransfer: image });
+      expect(await screen.findByText("松开，收进来源库")).toBeTruthy();
+      fireEvent.drop(spot, { dataTransfer: image });
+      expect(screen.queryByText("松开，收进来源库")).toBeNull();
+      expect(calls.create).toHaveLength(0);
+    } finally {
+      dispose();
+    }
   });
 });

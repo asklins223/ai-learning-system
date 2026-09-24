@@ -20,7 +20,8 @@ import type {
   CompanionChatProposalGetResultV1,
 } from "@ailearn/shared/companion-chat-desktop-contracts";
 import type { DesktopRouteV1 } from "@ailearn/shared/desktop-ipc-contracts";
-import type { MainPageContextInputV2 } from "@ailearn/shared/companion-bridge-contracts";
+import type { MainPageContextInputV2, PageReadableV1 } from "@ailearn/shared/companion-bridge-contracts";
+import { companionPageRouteV2, SETTINGS_SECTION_IDS_V2 } from "@ailearn/shared/companion-bridge-contracts";
 import { useRoomStore } from "./room-store";
 import type { HudPageId } from "../components/hud/hud-pages";
 import { createRequestMeta, gatewayErrorMessage, requireWorkspaceEpoch, unwrapGatewayResult, RendererGatewayError } from "./desktop-client";
@@ -276,25 +277,38 @@ export interface CompanionChatSession {
   goToRoute(route: DesktopRouteV1): Promise<void>;
 }
 
-/** V2 路由 → 桌面路由的诚实映射：没有等价形态的 kind 返回 null，不伪造。 */
+/**
+ * V2 路由 → 桌面路由的诚实映射：没有等价形态的 kind 返回 null，不伪造。
+ *
+ * 页面类落点一律查 `COMPANION_PAGE_DESTINATIONS_V2`（服务端能发什么，这里就落什么）；
+ * 只有需要实体 id 的路由才在 switch 里各写一条。曾经 `today`/`settings` 在这里没有分支，
+ * 于是服务端一句"已定位到今日页面"、她一句"到了"，而客户端那颗按钮根本不会渲染出来。
+ */
 export function desktopRouteFromAgentRoute(route: CompanionAgentRouteEventV1["route"]): DesktopRouteV1 | null {
   switch (route.kind) {
-    case "home":
-      return { kind: "room.home" };
-    case "review":
-      return { kind: "review.queue" };
-    case "star_map":
-      return { kind: "understanding.graph" };
-    case "learning_run":
-      return { kind: "learningRun.detail", runId: route.runId };
+    case "settings":
+      return route.section
+        ? { kind: "settings.section", section: route.section }
+        : companionPageRouteV2("settings");
+    case "source":
+      return route.sourceId
+        ? { kind: "source.detail", sourceId: route.sourceId }
+        : companionPageRouteV2("source");
     case "note":
       return { kind: "note.detail", noteId: route.noteId };
-    case "source":
-      return route.sourceId ? { kind: "source.detail", sourceId: route.sourceId } : { kind: "source.library" };
     case "card":
       return { kind: "objective.detail", objectiveId: route.objectiveId };
+    case "learning_run":
+      return { kind: "learningRun.detail", runId: route.runId };
+    case "home":
+    case "today":
+    case "note_library":
+    case "objective_library":
+    case "review":
+    case "search":
+    case "star_map":
     case "conversation":
-      return { kind: "companion.center", tab: "dialogue" };
+      return companionPageRouteV2(route.kind);
     default:
       return null;
   }
@@ -329,11 +343,28 @@ export async function applyRouteToRoom(route: DesktopRouteV1): Promise<boolean> 
     case "room.home":
       room.invoke("home");
       return true;
+    case "room.today":
+      // 目录栏上「今日学习」那颗用的就是 continue（room-machine 把它解析成 study 页）。
+      room.invoke("continue");
+      return true;
     case "review.queue":
       room.invoke("review");
       return true;
     case "understanding.graph":
       room.invoke("graph");
+      return true;
+    case "search.global":
+      room.invoke("search");
+      return true;
+    case "note.library":
+      room.invoke("open-notes");
+      return true;
+    case "objective.library":
+      room.invoke("open-objectives");
+      return true;
+    case "settings.section":
+      room.setSettingsSection(route.section);
+      room.invoke("open-settings");
       return true;
     case "source.library":
       room.invoke("open-sources");
@@ -469,8 +500,14 @@ function bridgePageContext(input: {
   activeSourceId: string | null;
   activeReviewScheduleId: string | null;
   settingsSection: string;
+  readableView: PageReadableV1 | null;
 }): MainPageContextInputV2 {
-  const base: Pick<MainPageContextInputV2, "interactionState" | "capabilityHints" | "sensitivity"> = {
+  const sensitivity: MainPageContextInputV2["sensitivity"] = input.hudPage === "assessment"
+    ? "formal_assessment" as const
+    : input.hudPage === "login" || input.hudPage === "register"
+      ? "credential_surface" as const
+      : "normal" as const;
+  const base: Pick<MainPageContextInputV2, "interactionState" | "capabilityHints" | "sensitivity" | "readableView"> = {
     interactionState: input.hudPage === "note-edit"
       ? "editing" as const
       : input.hudPage === "assessment"
@@ -479,11 +516,11 @@ function bridgePageContext(input: {
           ? "processing" as const
           : "idle" as const,
     capabilityHints: ["open_route"],
-    sensitivity: input.hudPage === "assessment"
-      ? "formal_assessment" as const
-      : input.hudPage === "login" || input.hudPage === "register"
-        ? "credential_surface" as const
-        : "normal" as const,
+    sensitivity,
+    // 凭证页不带任何可读内容（这一层只是少发，真正的裁剪在服务端按 sensitivity 做）。
+    // 挂在 base 上是因为下面每个分支都 `...base`——逐个 return 挂会漏掉某一条分支，
+    // 而漏掉的那条正好是"她偶尔读不到"的那种红。
+    readableView: sensitivity === "credential_surface" ? undefined : (input.readableView ?? undefined),
   };
   if (input.hudPage === "today") return { ...base, routeRef: { kind: "today" }, pageKind: "today", entityRefs: [] };
   if (input.hudPage === "sources") return { ...base, routeRef: { kind: "source" }, pageKind: "source", entityRefs: [] };
@@ -508,14 +545,19 @@ function bridgePageContext(input: {
     return { ...base, routeRef: { kind: "learning_run", runId: input.activeRunId }, pageKind: "learning_run", entityRefs: [{ kind: "learning_run", runId: input.activeRunId }] };
   }
   if (input.hudPage === "companion") return { ...base, routeRef: { kind: "conversation" }, pageKind: "conversation", entityRefs: [] };
+  if (input.hudPage === "notes") {
+    return { ...base, routeRef: { kind: "note_library" }, pageKind: "note", entityRefs: [] };
+  }
+  if (input.hudPage === "goals") {
+    return { ...base, routeRef: { kind: "objective_library" }, pageKind: "objective", entityRefs: [] };
+  }
+  if (input.hudPage === "search") {
+    return { ...base, routeRef: { kind: "search" }, pageKind: "other", entityRefs: [] };
+  }
   if (input.hudPage === "settings") {
-    const section = input.settingsSection === "companion"
-      ? "companion" as const
-      : input.settingsSection === "data" || input.settingsSection === "management"
-        ? "privacy" as const
-        : input.settingsSection === "appearance"
-          ? "accessibility" as const
-          : undefined;
+    // 分区 id 直接沿用设置页那一套（词表在共享合同里）：以前这里把六个分区压成
+    // "privacy"/"accessibility" 两个界面上不存在的名字，她据此说不出你在哪一节。
+    const section = SETTINGS_SECTION_IDS_V2.find((id) => id === input.settingsSection);
     return { ...base, routeRef: { kind: "settings", ...(section ? { section } : {}) }, pageKind: "settings", entityRefs: [] };
   }
   return { ...base, routeRef: { kind: "home" }, pageKind: "other", entityRefs: [] };
@@ -534,6 +576,7 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
   const activeSourceId = useRoomStore((state) => state.activeSourceId);
   const activeReviewScheduleId = useRoomStore((state) => state.activeReviewTarget?.scheduleId ?? null);
   const settingsSection = useRoomStore((state) => state.settingsSection);
+  const pageReadableView = useRoomStore((state) => state.pageReadableView);
   const workspaceScopeRevision = useRoomStore((state) => state.workspaceScopeRevision);
   const pageInstanceIdRef = useRef(crypto.randomUUID());
   useEffect(() => {
@@ -546,7 +589,8 @@ export function CompanionChatProvider({ children }: { readonly children: ReactNo
     activeSourceId,
     activeReviewScheduleId,
     settingsSection,
-  }), [activeNoteId, activeReviewScheduleId, activeRunId, activeSourceId, hudPage, settingsSection]);
+    readableView: pageReadableView?.view ?? null,
+  }), [activeNoteId, activeReviewScheduleId, activeRunId, activeSourceId, hudPage, settingsSection, pageReadableView]);
   useEffect(() => {
     let cancelled = false;
     const timer = window.setTimeout(() => {

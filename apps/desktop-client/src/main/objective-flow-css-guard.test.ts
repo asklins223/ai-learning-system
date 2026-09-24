@@ -225,3 +225,35 @@ describe("复习队列的成句文字有地板（§11 收尾）", () => {
     });
   }
 });
+
+describe("作答页题面的字号层级", () => {
+  const css = stripComments(read("src/renderer/src/components/objective-flow.css"));
+
+  // 组件测试钉的是"哪句话进 h2"，这里钉的是"进了 h2 的那句到底大不大"。
+  // 两边各缺一半：JSX 换回来那边不红，CSS 掉档这边不红。
+  const largestPx = (selector: string) => {
+    const blocks = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)].filter((rule) =>
+      (rule[1] as string).split(",").some((s) => s.trim() === selector));
+    expect(blocks.length, `没有规则接手 ${selector}`).toBeGreaterThan(0);
+    const body = blocks[blocks.length - 1]![2];
+    const decl = /(?:^|;)\s*(?:font-size|font):\s*([^;]+)/.exec(body);
+    expect(decl, `${selector} 的接手规则没写 font/font-size`).not.toBeNull();
+    const px = [...decl![1].matchAll(/([0-9.]+)px/g)].map((m) => Number(m[1]));
+    expect(px.length, `${selector} 的 font 声明里量不到 px：${decl![1]}`).toBeGreaterThan(0);
+    return Math.max(...px);
+  };
+
+  const heading = largestPx(".hud-surface .learning-run-paper__question h2");
+  const instruction = largestPx(".hud-surface .learning-run-paper__question p");
+  const railTopic = largestPx(".hud-surface .learning-run-focus__target strong");
+
+  it("题面主位至少是副行的两倍——36:14 那种倒挂不许回来", () => {
+    expect(heading).toBeGreaterThanOrEqual(instruction * 2);
+  });
+
+  it("绿栏那句重复的主题，得比题面副行还小", () => {
+    // 它和题面主位是同一句话（rail 与题面都取 publicSummary），
+    // 两处都做大字号等于同一屏把标题读两遍。
+    expect(railTopic).toBeLessThan(instruction);
+  });
+});

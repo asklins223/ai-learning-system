@@ -723,7 +723,7 @@ export async function createRunV2(
     // server error. Keep the boundary typed and fail closed without exposing
     // target-snapshot internals or leaving a visible skeleton run behind.
     if (error instanceof TargetSnapshotError) {
-      throw contextStale("学习目标已变化或当前不可用，请刷新复习队列");
+      throw contextStale("学习卡已变化或当前不可用，请刷新复习队列");
     }
     throw error;
   }

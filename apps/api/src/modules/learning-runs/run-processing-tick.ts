@@ -1672,7 +1672,7 @@ async function processCommitCommand(
       outcome: result.outcome,
       trustOutcome: result.outcome,
       // Plan 23 CS-05：Pet/Companion 不再用 claim/summary 拼标题。
-      // 从 Objective revision 查 conceptLabel 作为学习目标标签。
+      // 从 Objective revision 查 conceptLabel 作为学习卡标签。
       keyPointClaim: await (async () => {
         try {
           const revRows = await tx

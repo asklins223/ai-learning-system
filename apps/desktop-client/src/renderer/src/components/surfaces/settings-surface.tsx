@@ -2567,7 +2567,7 @@ export function SettingsSurface() {
             </div>
             <div className="settings-stat" data-loading={inventoryLoading ? "true" : undefined}>
               <b>{inventory ? inventory.objectives : "—"}</b>
-              <span>理解目标</span>
+              <span>学习卡</span>
             </div>
           </div>
           {inventoryFailure ? (
@@ -2606,7 +2606,7 @@ export function SettingsSurface() {
               <SettingRow
                 title="导出工作区（只读存档）"
                 detail={currentRole === "owner"
-                  ? "把当前空间的来源、笔记、理解目标与版本写成一个 JSON 文件，用来留档或自己分析；保存位置由你在系统对话框里选择。**这份文件目前导不回来**——要恢复内容，请在原空间里操作。"
+                  ? "把当前空间的来源、笔记、学习卡与版本写成一个 JSON 文件，用来留档或自己分析；保存位置由你在系统对话框里选择。**这份文件目前导不回来**——要恢复内容，请在原空间里操作。"
                   : "整库导出只对空间所有者开放，你在这个空间是成员。"}
               >
                 <button

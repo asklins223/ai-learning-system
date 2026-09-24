@@ -215,20 +215,24 @@ async function importItems(
           );
           // 批次 4.1：导入"确实拥有整篇"，所以走文档而不是直接插行。
           // 快照落盘 + 投影成这个版本的 note_blocks 都在同一个入口里完成。
+          //
+          // 第五个参数（`preload`）不是省事：这一篇是刚刚在这一条事务里建出来的，谁都还
+          // 没读过它的编辑起点，而内容全在手上。不传的话 `applyNoteDocUpdate` 会先
+          // `loadNoteDoc` 补齐一份空文档再被整篇覆盖——多一次无用的读，且补齐那条路会
+          // 先把"补齐出来的那一份"定成快照（revision 1），紧接着这次写入又把它推到 2。
+          const importedBlocks = blocksWithAssets.map((b) => ({
+            type: b.type,
+            content: b.content,
+            ...(b.imageAssetId ? { imageAssetId: b.imageAssetId } : {}),
+          }));
           await applyNoteDocUpdate(
             itemTx as Parameters<typeof applyNoteDocUpdate>[0],
             { workspaceId, noteId: note.id, userId },
             version.id,
             (doc) => {
-              writeFragmentBlocks(
-                doc,
-                blocksWithAssets.map((b) => ({
-                  type: b.type,
-                  content: b.content,
-                  ...(b.imageAssetId ? { imageAssetId: b.imageAssetId } : {}),
-                })),
-              );
+              writeFragmentBlocks(doc, importedBlocks);
             },
+            importedBlocks,
           );
         }
 

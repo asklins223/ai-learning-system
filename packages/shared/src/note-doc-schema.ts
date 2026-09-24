@@ -58,20 +58,42 @@ const blockAttrs = { sourceRef: { default: null }, imageAssetId: { default: null
  * `Node.fromJSON` 会**忽略**它不认识的类型，症状是服务端整篇写入把对端的换行、编号列表、
  * 表格线写成别的形状。它与编辑器的真实 schema 由 `note-doc-schema.test.ts` 里那条
  * 名字清单钉住——两边各写一份就是这批一路在消灭的"两个真相"。
+ *
+ * **位置也要对得上，光名字对不上不行**（2026-09-24 实测，两份 schema 的声明逐条打出来比过）：
+ * 编辑器的段落是 `content: "inline*"`、图片是 `inline: true, group: "inline"`，所以
+ * 编辑器写出的形状是 `paragraph > image`。规格这边以前写的是段落 `text*` + 图片 `group: "block"`，
+ * 于是服务端整篇写入（导入、来源转笔记、恢复历史版本）遇到段落里的一张图，只能把它写成
+ * **一个装着 `![配图](/api/uploads/a.png)` 的文本节点**——症状不是丢字，是编辑器把那串
+ * 标记当正文显示出来（与行内标记当年那条一模一样）。
+ *
+ * 现在两边同形：段落与标题收 `inline*`，图片挂在 `inline` 组，块级图片写的是
+ * `paragraph > image`（编辑器本来产出的就是这一种）。**存的块类型没跟着变**：
+ * `note_blocks.type` 上挂着一条数据库约束
+ * （`0046_card_generation_image_pipeline.sql`：`CHECK (image_asset_id IS NULL OR type = 'image')`），
+ * 服务端另有十处按 `type === "image"` 分叉（搜索索引、卡片图片管线、导出、正文摘要…），
+ * 所以"整段就一张图"在投影那一侧认回 `image`（见 `pmNodesToNoteBlocks`），
+ * 一张图夹在字里才归段落。
+ *
+ * 顺带一条实测：`group: "block inline"`（想同时允许两种位置）会被 prosemirror-model 直接拒掉，
+ * 报 `Mixing inline and block content`——图片不能既算块又算行内。
  */
 export const noteDocSchemaSpec = {
   nodes: {
     doc: { content: "block+" },
-    paragraph: { content: "text*", group: "block", attrs: blockAttrs },
-    heading: { content: "text*", group: "block", attrs: { level: { default: 2 }, ...blockAttrs } },
+    paragraph: { content: "inline*", group: "block", attrs: blockAttrs },
+    heading: { content: "inline*", group: "block", attrs: { level: { default: 2 }, ...blockAttrs } },
     code_block: { content: "text*", group: "block", code: true, attrs: blockAttrs },
     blockquote: { content: "block+", group: "block", attrs: blockAttrs },
     bullet_list: { content: "list_item+", group: "block", attrs: blockAttrs },
     ordered_list: { content: "list_item+", group: "block", attrs: blockAttrs },
     list_item: { content: "paragraph+" },
-    image: { group: "block", attrs: { src: { default: "" }, alt: { default: "" }, ...blockAttrs } },
+    image: { inline: true, group: "inline", attrs: { src: { default: "" }, alt: { default: "" }, ...blockAttrs } },
     hr: { group: "block" },
-    hardbreak: { group: "inline" },
+    // `inline: true` 不是装饰：prosemirror-model 判行内只看 `!(spec.inline || name=="text")`，
+    // **组名不参与**。少写它，`hardbreak` 就是个块类型，段落那句 `inline*` 当场报
+    // `Mixing inline and block content`。以前它挂着 `group:"inline"` 也没出事，只是因为
+    // 那两份规格里从没有哪个 content 表达式真的引用过 `inline` 组。
+    hardbreak: { inline: true, group: "inline" },
     text: { group: "inline" },
   },
   marks: {
@@ -107,11 +129,24 @@ export type NoteDocInlineSegment =
   | { readonly kind: "text"; readonly text: string }
   | { readonly kind: "strong"; readonly text: string }
   | { readonly kind: "em"; readonly text: string }
+  | { readonly kind: "strike"; readonly text: string }
   | { readonly kind: "code"; readonly text: string }
-  | { readonly kind: "link"; readonly text: string; readonly href: string };
+  | { readonly kind: "link"; readonly text: string; readonly href: string }
+  /**
+   * 行内图片。它**没有** `text`：图片是原子节点，不占一个字符，画出来占的是格线
+   * 之外的一块。阅读页的「概念句」偏移量按显示文本算，给图片塞进 alt 会让后面所有
+   * 字符整体错位——所以这里刻意不给，让每个消费方自己决定怎么对待它。
+   */
+  | { readonly kind: "image"; readonly alt: string; readonly src: string };
 
+/**
+ * 图片那一支必须**在解析器里存在**，而不是只靠链接那一支：`![a](b)` 少了它，解析结果
+ * 是「一个 `!` 字符 + 一个链接 `[a](b)`」——图凭空没了，还多出一个感叹号。两支不会在
+ * 同一个起点上相撞（一个以 `!` 开头、一个以 `[` 开头），所以先后不是正确性问题，
+ * 只是让"更长的形状在前"这条读起来和跑起来一致。
+ */
 const INLINE_PATTERN =
-  /(\*\*[^*\n]+\*\*)|(\*[^*\n]+\*)|(`[^`\n]+`)|(\[[^\]\n]*\]\([^)\s]+\))/g;
+  /(\*\*[^*\n]+\*\*)|(~~[^~\n]+~~)|(\*[^*\n]+\*)|(`[^`\n]+`)|(!\[[^\]\n]*\]\(([^)\s]+)\))|(\[[^\]\n]*\]\([^)\s]+\))/g;
 
 export function parseInlineMarkdown(value: string): NoteDocInlineSegment[] {
   const segments: NoteDocInlineSegment[] = [];
@@ -122,8 +157,13 @@ export function parseInlineMarkdown(value: string): NoteDocInlineSegment[] {
     const token = match[0];
     if (token.startsWith("**")) {
       segments.push({ kind: "strong", text: token.slice(2, -2) });
+    } else if (token.startsWith("~~")) {
+      segments.push({ kind: "strike", text: token.slice(2, -2) });
     } else if (token.startsWith("`")) {
       segments.push({ kind: "code", text: token.slice(1, -1) });
+    } else if (token.startsWith("![")) {
+      const image = /^!\[([^\]]*)\]\(([^)\s]+)\)$/.exec(token);
+      segments.push({ kind: "image", alt: image?.[1] ?? "", src: image?.[2] ?? "" });
     } else if (token.startsWith("[")) {
       const link = /^\[([^\]]*)\]\(([^)\s]+)\)$/.exec(token);
       segments.push({ kind: "link", text: link?.[1] ?? token, href: link?.[2] ?? "" });
@@ -139,15 +179,22 @@ export function parseInlineMarkdown(value: string): NoteDocInlineSegment[] {
 const MARK_BY_SEGMENT: Partial<Record<NoteDocInlineSegment["kind"], string>> = {
   strong: "strong",
   em: "emphasis",
+  strike: "strike_through",
   // 编辑器的行内代码 mark 叫 `inlineCode`（实测出的名字清单），不是 `code`。
   code: "inlineCode",
 };
 
 function segmentToPmText(segment: NoteDocInlineSegment): PmJson {
-  const mark = MARK_BY_SEGMENT[segment.kind];
   if (segment.kind === "link") {
     return { type: "text", text: segment.text, marks: [{ type: "link", attrs: { href: segment.href } }] };
   }
+  if (segment.kind === "image") {
+    // 图片是原子节点：地址与说明在**属性**上，不在文本里。写成文本节点的话，编辑器
+    // 画出来的就是一串 `![配图](/api/uploads/a.png)`——那是 2026-09-24 实测到的改前形状
+    // （导入、来源转笔记、恢复历史版本三条服务端整篇写入都会踩到）。
+    return { type: "image", attrs: { src: segment.src, alt: segment.alt } };
+  }
+  const mark = MARK_BY_SEGMENT[segment.kind];
   return mark
     ? { type: "text", text: segment.text, marks: [{ type: mark }] }
     : textNode(segment.text);
@@ -182,10 +229,21 @@ function parseImageLine(content: string): { src: string; alt: string } {
   return { src: content.trim(), alt: "" };
 }
 
-/** 一个块的正文 → 放进 PM 节点里的行内容（空块不给 content，PM 要的是"没有子节点"）。 */
+/**
+ * 一个块的正文 → 放进 PM 节点里的行内容（空块不给 content，PM 要的是"没有子节点"）。
+ *
+ * 图片是**原子行内节点**：没有文本、也没有子节点，走到最后那行 `content.map(...)`
+ * 只会得到空串。编辑器里那张图在、投影回来却一个字都没有——那是整块内容凭空消失，
+ * 而这条投影同时喂着服务端的 `note_blocks`，所以丢的那半不止是预览看不见。
+ */
 function collectInline(node: PmJson | undefined): string {
   if (!node) return "";
   if (node.type === "hardbreak") return "\n";
+  if (node.type === "image") {
+    const alt = String(node.attrs?.alt ?? "");
+    const src = String(node.attrs?.src ?? "");
+    return alt ? `![${alt}](${src})` : `![](${src})`;
+  }
   if (typeof node.text === "string") return applyMarks(node.text, node.marks ?? []);
   return (node.content ?? []).map(collectInline).join("");
 }
@@ -231,7 +289,12 @@ const ROWS: Record<string, true> = { table_row: true, table_header_row: true };
  */
 function tableToMarkdown(node: PmJson): string {
   const rows = (node.content ?? []).filter((row) => ROWS[row.type]);
-  const cellsOf = (row: PmJson) => (row.content ?? []).filter((cell) => CELLS[cell.type]).map(collectInline);
+  // 一格必须**只占一行**：`parseMarkdownTable` 是按行认表的（每行都要以 `|` 开头结尾），
+  // 单元里带进一个换行，那一行就不再像表格线，整张表退回成竖线散文。
+  // `|` 同理：它是分隔符，不转义就会凭空多出一列。读侧的反转义在显示那一步做。
+  const cellsOf = (row: PmJson) => (row.content ?? [])
+    .filter((cell) => CELLS[cell.type])
+    .map((cell) => collectInline(cell).replace(/\n+/g, " ").replace(/\|/g, "\\|"));
   const body = rows.map((row) => `| ${cellsOf(row).join(" | ")} |`);
   if (body.length === 0) return "";
   const hasHeader = rows.some((row) => row.type === "table_header_row");
@@ -272,6 +335,7 @@ export function pmNodesToNoteBlocks(nodes: readonly PmJson[]): NoteDocBlockSpec[
           ...extras,
         };
       case "image": {
+        // 老数据与跨进程向量里那份字节：图片**就是**一个顶层节点。仍然投成 `image`。
         const src = String(node.attrs?.src ?? "");
         const alt = String(node.attrs?.alt ?? "");
         return { type: "image", content: alt ? `![${alt}](${src})` : `![](${src})`, ...extras };
@@ -283,8 +347,15 @@ export function pmNodesToNoteBlocks(nodes: readonly PmJson[]): NoteDocBlockSpec[
         return { type: "paragraph", content: tableToMarkdown(node), ...extras };
       case "html":
         return { type: "paragraph", content: String(node.attrs?.value ?? ""), ...extras };
-      default:
+      default: {
+        // "整段就一张图"是块级图片在文档里的形状（编辑器里图片是行内节点，写不出顶层图片块），
+        // 但它存的仍然是 `image`：那条数据库约束与服务端十处分叉都认这个类型。
+        const only = (node.content ?? [])[0];
+        if (node.type === "paragraph" && (node.content ?? []).length === 1 && only?.type === "image") {
+          return { type: "image", content: collectInline(only), ...extras };
+        }
         return { type: "paragraph", content: collectInline(node), ...extras };
+      }
     }
   });
 }
@@ -323,8 +394,14 @@ export function noteBlocksToPmNodes(blocks: readonly NoteDocBlockSpec[]): PmJson
       case "image": {
         // 图片块的 content 就是它的 Markdown（`![说明](地址)`），与 `note-blocks.ts`
         // 存的约定一致；地址与说明从 Markdown 里取，因为 PM 的 image 节点是属性不是文本。
+        // 写出去的形状是 `paragraph > image`——编辑器里图片只有这一个位置（它是行内节点），
+        // 规格把图片挂在 `inline` 组上，顶层放不下。投影那一侧再把"整段一张图"认回 `image`。
         const parsed = parseImageLine(block.content);
-        return { type: "image", attrs: { src: parsed.src, alt: parsed.alt, ...attrs } };
+        return {
+          type: "paragraph",
+          attrs,
+          content: [{ type: "image", attrs: { src: parsed.src, alt: parsed.alt } }],
+        };
       }
       default:
         return { type: "paragraph", attrs, content: inlineContent(block.content) };

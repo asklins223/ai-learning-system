@@ -146,6 +146,14 @@
   padding: 28px;
   background: rgba(30, 20, 12, 0.45);
   animation: source-intake-drop-veil 200ms var(--hud-ease-out) both;
+  /* armed 与进度这两档只是一句提示，不是投放格：这一层一旦吃掉事件，
+     底下那块真正的编辑器就再也收不到松手那一下（实测浮层盖住了正文编辑区）。
+     只有报告是模态，要留下按钮可点。 */
+  pointer-events: none;
+}
+
+.source-intake-drop[data-phase="report"] {
+  pointer-events: auto;
 }
 
 @keyframes source-intake-drop-veil {

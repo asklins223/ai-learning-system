@@ -177,7 +177,7 @@ describe("GraphSurface · Web 成熟版 Understanding Universe 移植", () => {
     // 适配只重置相机；恢复默认布局（清除手动拖拽）是独立的破坏性动作。
     expect(screen.getByRole("button", { name: "适配全部星图" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "清除手动拖拽并恢复默认布局" })).toBeTruthy();
-    expect(screen.getByLabelText("按理解目标状态筛选星图")).toBeTruthy();
+    expect(screen.getByLabelText("按学习卡状态筛选星图")).toBeTruthy();
     expect(screen.getByLabelText("控制知识宇宙图层")).toBeTruthy();
   });
 
@@ -227,7 +227,7 @@ describe("GraphSurface · Web 成熟版 Understanding Universe 移植", () => {
     render(<GraphSurface />);
 
     expect(await screen.findByText("这片宇宙还没有星体")).toBeTruthy();
-    expect(screen.getByText(/先从来源写下笔记并形成理解目标/)).toBeTruthy();
+    expect(screen.getByText(/先从来源写下笔记并形成学习卡/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "查看来源库" }));
     expect(invoke).toHaveBeenCalledWith("open-sources");
   });

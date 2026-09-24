@@ -180,6 +180,16 @@ describe("客观题作答控件", () => {
     expect(document.body.textContent).not.toContain("single_choice");
   });
 
+  it("题面主位是主题，那句作答指令只能当副行", async () => {
+    // recall 题的 prompt 为 §7.3 泄题防护故意不含内容（run-planner.ts:210），
+    // 全仓一字不变。它一旦回到 h2，纸面最大的字就落在零信息的那句上，
+    // 而这张卡唯一会变的主题被挤到 14px——用户原话是"第一眼没看到题目"。
+    await renderWith(CHOICE);
+    const question = document.querySelector(".learning-run-paper__question");
+    expect(question?.querySelector("h2")?.textContent).toBe("灭火器使用四步顺序");
+    expect(question?.querySelector("p")?.textContent).toBe("灭火器使用口诀的四个动作，哪个先做？");
+  });
+
   it("排序题每一行都带位置编号（P24）", async () => {
     // 排序题的全部认知负荷在「谁在第几位」。此前 <ol> 的 list-style 被关掉、也没有
     // 别的编号，屏幕上没有任何位置标记，而移动按钮在 500px 外的最右端。

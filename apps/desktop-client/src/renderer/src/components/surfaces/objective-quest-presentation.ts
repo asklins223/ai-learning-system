@@ -17,6 +17,8 @@ export type RunModePresentation = Readonly<{
 export type LearningRunFeedbackViewModel = Readonly<{
   tone: "success" | "progress" | "practice" | "neutral";
   seal: string;
+  /** 演出圆章那两个字。`seal` 是整词，108px 的圆章装不下，所以单独一支。 */
+  stamp: string;
   headline: string;
   achievement: string;
   gap: string;
@@ -186,6 +188,7 @@ export function learningRunFeedback(result: LearningRunResultV2): LearningRunFee
     return {
       tone: "success",
       seal: "掌握完成",
+      stamp: "通关",
       headline: "这一关，你真的说明白了",
       achievement: reasonSummary(coveredReasons, facets(result.demonstratedFacets, "这次回答已经形成足够的理解证据。")),
       gap: reasonSummary(improvementReasons, facets(result.gapFacets, "没有留下新的理解缺口。")),
@@ -199,6 +202,7 @@ export function learningRunFeedback(result: LearningRunResultV2): LearningRunFee
     return {
       tone: "practice",
       seal: covered.length ? "练习有收获" : "练习已留痕",
+      stamp: covered.length ? "收获" : "留痕",
       headline: covered.length ? "这次练习，已经看见你会了什么" : "这次练习留下了可复盘的线索",
       achievement: reasonSummary(coveredReasons, covered.length
         ? `这次已经说清：${facets(covered, "")}`
@@ -216,6 +220,7 @@ export function learningRunFeedback(result: LearningRunResultV2): LearningRunFee
     return {
       tone: "progress",
       seal: result.outcome === "partial" ? "推进一段" : "发现缺口",
+      stamp: result.outcome === "partial" ? "推进" : "修补",
       headline: result.outcome === "partial" ? "已经证明了一部分" : "找到下一处要修补的地方",
       achievement: reasonSummary(coveredReasons, facets(result.demonstratedFacets.length ? result.demonstratedFacets : covered, "这次尚未形成可写入的正式证据。")),
       gap: reasonSummary(improvementReasons, facets(result.gapFacets.length ? result.gapFacets : missing, "查看逐条反馈，补上最关键的一处。")),
@@ -231,10 +236,30 @@ export function learningRunFeedback(result: LearningRunResultV2): LearningRunFee
   return {
     tone: "neutral",
     seal: result.outcome === "declared_unable" ? "先去补给" : "暂存路线",
+    stamp: "放回",
     headline: neutralCopy,
     achievement: "这次不会扣除任何学习进度。",
     gap: reasonSummary(improvementReasons, facets(result.gapFacets, "按下一步建议继续即可。")),
     strengths: coveredReasons,
     improvements: improvementReasons,
   };
+}
+
+/**
+ * 演出眉标的前半截。不取界面那枚 `runModeLabel`：结构题的 ceiling 在服务端被钳成
+ * practice，快照的 `publishedTargetEligibility` 却仍是 eligible（run-planner.ts:462），
+ * 拿它拼练习结算会得到「正式挑战 · 练习有收获」这种自相矛盾的印子。
+ */
+const ceremonyModeLabel: Record<LearningRunFeedbackViewModel["tone"], string> = {
+  success: "正式挑战",
+  practice: "练习旅程",
+  progress: "理解推进",
+  neutral: "学习留痕",
+};
+
+export function ceremonyPresentation(feedback: LearningRunFeedbackViewModel): {
+  stamp: string;
+  eyebrow: string;
+} {
+  return { stamp: feedback.stamp, eyebrow: `${ceremonyModeLabel[feedback.tone]} · ${feedback.seal}` };
 }

@@ -36,7 +36,7 @@ export function edgeEndpointKey(ref: UnderstandingEdgeProjectionV3["from"]): str
 const KIND_LABEL: Record<GraphNodeKind, string> = {
   source: "来源",
   note: "笔记",
-  objective: "理解目标",
+  objective: "学习卡",
   evidence: "证据",
 };
 

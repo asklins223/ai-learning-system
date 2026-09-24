@@ -1,5 +1,10 @@
 import { z } from "zod";
 import {
+  COMPANION_PAGE_DESTINATIONS_V2,
+  companionPageKindValuesV2,
+  type CompanionPageKindV2,
+} from "./companion-bridge-contracts.ts";
+import {
   COMPANION_AGENT_CONTRACT_VERSION,
   companionAgentToolDefinitionV1Schema,
   isVisionGatedCompanionTool,
@@ -56,8 +61,23 @@ function tool(
   };
 }
 
+const companionPageKindSchemaV2 = z.enum(
+  companionPageKindValuesV2 as [CompanionPageKindV2, ...CompanionPageKindV2[]],
+);
+
+/** 页面名与别名都取自词表：她嘴里的那个页面，必须是桌面端真有的一页。 */
+function companionOpenPageDescriptionV2(): string {
+  // 整条描述要 ≤240 字：`agent.tool` 的 safeLabel 上限就是 240，而那条测试把
+  // description 原样当 safeLabel 过 schema。超了不会报"描述太长"，只会让 SSE 事件解析失败。
+  const pages = COMPANION_PAGE_DESTINATIONS_V2.map(
+    (page) => `${page.label}=${page.kind}(${page.aliases.join("/")})`,
+  ).join("；");
+  return `跳到某个页面：${pages}。用户说的页面不在列里时别硬挑相近的，问他在哪儿看到的。`;
+}
+
 const REGISTERED_TOOLS: readonly RegisteredTool[] = [
   tool("companion_read_context", "读取当前用户在当前 workspace 的学习上下文。", "read", false, emptyParameters, emptyArguments),
+  tool("companion_read_current_page", "读取用户此刻屏幕上正显示的内容：页面标题、状态行、计数器、按屏幕顺序编号的条目、空态与当前筛选。用户说「这一页」「第N张」「为什么这么慢/卡住」时先调它——别用别的工具的数字代替眼前这屏。返回 available=false 表示这一页没有可读内容，要问她是在哪儿看到的，不要据此推断系统没问题。", "read", false, emptyParameters, emptyArguments),
   tool("companion_read_history", "读取当前伴星对话的有限历史摘要。", "read", false, { type: "object", properties: { limit: { type: "integer", minimum: 1, maximum: 20 } }, additionalProperties: false }, z.object({ limit: z.number().int().min(1).max(20).optional() }).strict()),
   // 系统敞开面（方案 29 §4.2，抱怨 #5/#6「连跳到某个笔记都做不到、看不到学习数据、
   // 看不到任务队列」）。这些不是"锦上添花的工具"：没有它们，她能说的只有闲聊。
@@ -65,7 +85,11 @@ const REGISTERED_TOOLS: readonly RegisteredTool[] = [
   tool("companion_search_notes", "按关键词搜用户的笔记标题与正文，返回笔记 id/标题/时间。用户问「我之前记过什么」或要跳到某篇笔记时先用它。", "read", false, { type: "object", properties: { query: { type: "string", minLength: 1, maxLength: 120 }, limit: { type: "integer", minimum: 1, maximum: 10 } }, required: ["query"], additionalProperties: false }, z.object({ query: z.string().min(1).max(120), limit: z.number().int().min(1).max(10).optional() }).strict()),
   tool("companion_read_note", "读出一篇笔记的正文内容（截断到几千字）。要引用、总结或核对用户写过什么时必须先读，不要凭标题猜内容。", "read", false, { type: "object", properties: { noteId: { type: "string", format: "uuid" } }, required: ["noteId"], additionalProperties: false }, z.object({ noteId: uuid }).strict()),
   tool("companion_open_note", "跳到用户的一篇笔记（在应用里打开它）。", "read", false, { type: "object", properties: { noteId: { type: "string", format: "uuid" } }, required: ["noteId"], additionalProperties: false }, z.object({ noteId: uuid }).strict()),
-  tool("companion_open_page", "跳到应用里的某个页面。用户说「打开复习」「去看看星图」时调用；「书架」「资料库」「来源」都对应 source 页面。", "read", false, { type: "object", properties: { page: { type: "string", enum: ["home", "today", "review", "star_map", "conversation", "source", "settings"] } }, required: ["page"], additionalProperties: false }, z.object({ page: z.enum(["home", "today", "review", "star_map", "conversation", "source", "settings"]) }).strict()),
+  // 页面词表由 `COMPANION_PAGE_DESTINATIONS_V2`（companion-bridge-contracts）一处定义：
+  // 枚举、中文页名、用户的口语别名都从同一张表生成，桌面端有落点的页面才进得了这里。
+  // 以前这份枚举手抄一遍，结果「今日」「设置」服务端能发、客户端没有分支，
+  // 而笔记库/学习卡/查找三页她根本说不出名字，只能被就近塞进来源库和星图。
+  tool("companion_open_page", companionOpenPageDescriptionV2(), "read", false, { type: "object", properties: { page: { type: "string", enum: [...companionPageKindValuesV2] } }, required: ["page"], additionalProperties: false }, z.object({ page: companionPageKindSchemaV2 }).strict()),
   tool("companion_get_learning_stats", "读取学习数据统计：今天/本周学了多久、到期复习数、活跃卡片数、笔记数等（与首页同一口径）。**只在用户问自己学了多久/进度如何时调用**；她跟你打招呼、闲聊、或只是接着上一个话题时不要调，也不要把这些数字主动报给用户。", "read", false, emptyParameters, emptyArguments),
   tool("companion_list_task_queue", "列出当前学习运行里排着的任务（含进度和第几步）。用户问「我接下来要做什么」「还有什么任务」时调用。", "read", false, emptyParameters, emptyArguments),
   tool("companion_list_due_reviews", "列出到期（或快到期）的复习卡，带卡片标题和到期时间。用户问「有什么要复习的」时调用。", "read", false, { type: "object", properties: { limit: { type: "integer", minimum: 1, maximum: 20 } }, additionalProperties: false }, z.object({ limit: z.number().int().min(1).max(20).optional() }).strict()),

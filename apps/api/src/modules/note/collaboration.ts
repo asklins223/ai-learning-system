@@ -237,6 +237,40 @@ export function handleNoteDocConnection(socket: WsSocket, request: import("node:
 }
 
 /**
+ * 文档里有没有"进不来"的结构（Yjs 的 `pendingStructs`）。
+ *
+ * 为什么不用"编一遍看多大"：`encodeStateAsUpdate` 连**删除集**一起写，于是
+ * "字节数超过常数"量到的是"这篇删过东西"，不是"有挂起的结构"（实测：一篇正常编辑过的
+ * 笔记编出来 10 字节，被误判成有挂起）。`doc.store.pendingStructs` 是 Yjs 类型声明里
+ * 就有的字段，问它才是问对了地方。
+ */
+function hasPendingStructs(doc: Y.Doc): boolean {
+  return doc.store.pendingStructs !== null || doc.store.pendingDs !== null;
+}
+
+/**
+ * 把这条增量应用进文档，并回答"它真的进去了吗"。
+ *
+ * `Y.applyUpdate` 对"缺依赖"的增量**不报错**：它把那些结构挂进 `pendingStructs`，
+ * 文档一个字不变、一个 update 事件都不发。判据因此不是"内容有没有变"（幂等重发也不会
+ * 变），而是"**这一次应用有没有让文档多出进不来的结构**"：本来干净、应用完不干净了
+ * = 这条增量与这份文档不是同一份历史。
+ *
+ * 文档本来就挂着东西时这一格判不了（那些结构既不在状态向量里、也不是新来的）——那时
+ * 一律放行。误报会把用户正常的保存拒掉，比漏报更坏；而这类残留本身是修之前攒下的。
+ *
+ * 为什么值得单独判一次：判错的样子不是报错，而是"200 + revision+1，正文一个字没动"。
+ * 2026-09-23 的丢字现场（补齐出来的文档每次一个新身份）就是从这里静默过去的；身份那
+ * 一侧已经在 `document-state.ts` 的 `materializeBackfilledNoteDoc` 收口，这里是**兜底**。
+ * 桌面端 `note-doc-state.ts` 里那份同名判据管的是另一半（上行之前）。
+ */
+function applyAndReportLanded(document: Y.Doc, update: Uint8Array): boolean {
+  const cleanBefore = !hasPendingStructs(document);
+  Y.applyUpdate(document, update);
+  return !cleanBefore || !hasPendingStructs(document);
+}
+
+/**
  * 上送一条 yjs 增量（批次 4.3 的 HTTP 通道，personal 空间与离线队列重连走这里）。
  *
  * 为什么不另写一套"读快照→改→存"：那正是这次要消灭的第二事实源。`openDirectConnection`
@@ -256,6 +290,7 @@ export async function applyUploadedDocUpdate(input: {
   | { status: "ok"; revision: number; savedAt: string }
   | { status: "not_found" }
   | { status: "no_version" }
+  | { status: "identity_mismatch" }
 > {
   const scope = { workspaceId: input.workspaceId, userId: input.userId };
   const note = await withWorkspaceTransaction(scope, (tx) =>
@@ -282,15 +317,19 @@ export async function applyUploadedDocUpdate(input: {
   };
 
   const connection = await noteCollaboration.openDirectConnection(documentNameForNote(input.noteId), context);
+  let landed = true;
   try {
     await connection.transact((document) => {
-      Y.applyUpdate(document, input.update);
+      landed = applyAndReportLanded(document, input.update);
     });
   } finally {
     // `disconnect` 才是"落盘"这一步：它会跑 storeDocumentHooks，并且只在没有任何
     // WS 连接时才卸载文档，所以并进来的增量不会把在线协作者的文档踢掉。
     await connection.disconnect();
   }
+  // 没进去就说没进去。以前这里照样往下走去读 revision，回一份 200——那条路径在界面上
+  // 读起来和"已保存"一模一样，而库里一个字没动（丢字现场见 `applyAndReportLanded`）。
+  if (!landed) return { status: "identity_mismatch" };
 
   const [stored, flushedNote] = await Promise.all([
     withWorkspaceTransaction(scope, (tx) =>

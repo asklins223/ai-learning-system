@@ -55,10 +55,10 @@ const ANOMALY_MAX = 12;
 const STUCK_RUN_MS = 24 * 60 * 60 * 1000;
 
 /**
- * 今日记录里那条 run 挂在哪个理解目标上（审计 F22）。
+ * 今日记录里那条 run 挂在哪个学习卡上（审计 F22）。
  *
  * V2 的每一种 origin 都带顶层 `objectiveId`；V1 的没有——那时返回 null，
- * 记录照实说"当时没有关联理解目标"，而不是拿别的目标顶上。
+ * 记录照实说"当时没有关联学习卡"，而不是拿别的目标顶上。
  */
 function runObjectiveId(origin: unknown): string | null {
   if (origin && typeof origin === "object") {
@@ -69,7 +69,7 @@ function runObjectiveId(origin: unknown): string | null {
 }
 
 /** 缺目标的历史记录照实说（审计 F22：不装成完整体验）。 */
-const HISTORY_WITHOUT_SUBJECT = "这条历史记录当时没有关联理解目标，只能看到这一轮本身。";
+const HISTORY_WITHOUT_SUBJECT = "这条历史记录当时没有关联学习卡，只能看到这一轮本身。";
 
 /** 这一轮的结论，用一句人话说清（与结果页同一个 outcome 集合）。 */
 const RUN_OUTCOME_LABELS: Record<string, string> = {
@@ -217,7 +217,7 @@ export async function getTodayActivity(
       .from(sources)
       .where(and(eq(sources.workspaceId, ctx.workspaceId), gte(sources.createdAt, from), lt(sources.createdAt, to)))
       .limit(SOURCE_LIMIT),
-    // 理解目标：active 目标当天建立；概念名来自当前修订。
+    // 学习卡：active 目标当天建立；概念名来自当前修订。
     tx
       .select({ objectiveId: learningObjectivesV2.objectiveId, createdAt: learningObjectivesV2.createdAt, conceptLabel: learningObjectiveRevisionsV2.conceptLabel, statement: learningObjectiveRevisionsV2.objectiveStatement })
       .from(learningObjectivesV2)
@@ -408,7 +408,7 @@ export async function getTodayActivity(
       at: row.createdAt.toISOString(),
       kind: "objective",
       verb: "objective.created",
-      title: row.conceptLabel ?? row.statement ?? "未命名理解目标",
+      title: row.conceptLabel ?? row.statement ?? "未命名学习卡",
       detail: null,
       target: { kind: "objective", id: row.objectiveId, noteVersionId: null },
     });

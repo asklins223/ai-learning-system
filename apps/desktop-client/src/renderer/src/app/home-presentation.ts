@@ -84,7 +84,7 @@ export function homePresentation(projection: RoomProjectionV1 | null, loading: b
     primaryIntent = null;
   } else if (primaryFailed) {
     title = "学习记录暂未送达";
-    detail = failure || "主学习目标暂时无法读取";
+    detail = failure || "主学习卡暂时无法读取";
     primaryLabel = retry ? "重新读取" : "查看学习空间目录";
     primaryIntent = null;
   } else if (focusTitle) {

@@ -249,7 +249,7 @@ const PERSONAL_BUCKETS = [
 ] as const satisfies ReadonlyArray<{ key: Exclude<ObjectiveLibraryFilter, "all">; label: string; hint: string }>;
 
 const FILTER_BUCKETS = [
-  { key: "all", label: "全部", hint: "这个工作区里全部的理解目标" },
+  { key: "all", label: "全部", hint: "这个工作区里全部的学习卡" },
   ...PERSONAL_BUCKETS,
 ] as const satisfies ReadonlyArray<{ key: ObjectiveLibraryFilter; label: string; hint: string }>;
 
@@ -457,9 +457,9 @@ export function ObjectiveLibrarySurface() {
   };
 
   return (
-    <ApprovedSurfaceFrame family="workshop" eyebrow="理解远征" headingId="objective-library-title" title="理解地图" detail="沿着真实学习证据，一关一关走到真正掌握">
-      {loading ? <SurfaceDataState kind="loading" message="正在读取理解目标" detail="状态和进度都来自服务器，不是本机推算的。" /> : null}
-      {!loading && failure ? <SurfaceDataState kind="error" message="理解目标暂时不可用" detail={failure} onRetry={() => void load()} /> : null}
+    <ApprovedSurfaceFrame family="workshop" eyebrow="学习证据" headingId="objective-library-title" title="学习卡" detail="沿着真实学习证据，一关一关走到真正掌握">
+      {loading ? <SurfaceDataState kind="loading" message="正在读取学习卡" detail="状态和进度都来自服务器，不是本机推算的。" /> : null}
+      {!loading && failure ? <SurfaceDataState kind="error" message="学习卡暂时不可用" detail={failure} onRetry={() => void load()} /> : null}
       {!loading && !failure && !activeGoal ? <SurfaceDataState kind="empty" message="还没有活跃目标" detail="从笔记生成或确认目标后，会在这里形成理解路线。" /> : null}
       {!loading && !failure && activeGoal ? (
         <div className="objective-expedition">
@@ -476,7 +476,7 @@ export function ObjectiveLibrarySurface() {
             </div>
             <div className="objective-expedition__focus-copy">
               <span className="objective-expedition__next"><Flag size={16} aria-hidden="true" />{serverFocus ? "下一关" : "推荐下一关"}</span>
-              <h3 id="goal-focus-title">{activeGoal.conceptLabel ?? activeGoal.primaryNoteTitle ?? "未命名理解目标"}</h3>
+              <h3 id="goal-focus-title">{activeGoal.conceptLabel ?? activeGoal.primaryNoteTitle ?? "未命名学习卡"}</h3>
               <blockquote>{activeGoal.publicSummary}</blockquote>
               <ObjectiveProgressBand
                 segment={progressSegmentForState(activeGoal.personalState.state)}
@@ -494,7 +494,7 @@ export function ObjectiveLibrarySurface() {
               <button type="button" className="v3-goal-focus__detail" onClick={() => openObjective(activeGoal.objectiveId)}>先看挑战简报</button>
               {recentGoal && recentGoal.objectiveId !== activeGoal.objectiveId ? (
                 <button type="button" className="objective-expedition__recent" onClick={() => openObjective(recentGoal.objectiveId)}>
-                  <History size={16} aria-hidden="true" /><span><small>回到刚才的目标</small><strong>{recentGoal.conceptLabel ?? recentGoal.primaryNoteTitle ?? "未命名理解目标"}</strong></span><ChevronRight size={16} aria-hidden="true" />
+                  <History size={16} aria-hidden="true" /><span><small>回到刚才的目标</small><strong>{recentGoal.conceptLabel ?? recentGoal.primaryNoteTitle ?? "未命名学习卡"}</strong></span><ChevronRight size={16} aria-hidden="true" />
                 </button>
               ) : null}
             </div>
@@ -532,11 +532,11 @@ export function ObjectiveLibrarySurface() {
                             type="button"
                             className="objective-quest-node"
                             data-primary={item.objectiveId === activeGoal.objectiveId ? "true" : "false"}
-                            title={item.conceptLabel ?? item.primaryNoteTitle ?? "未命名理解目标"}
+                            title={item.conceptLabel ?? item.primaryNoteTitle ?? "未命名学习卡"}
                             onClick={() => openObjective(item.objectiveId)}
                           >
                             <span className="objective-quest-node__step" aria-hidden="true">{index + 1}</span>
-                            <span><strong>{item.conceptLabel ?? item.primaryNoteTitle ?? "未命名理解目标"}</strong><small>卡型 · {cardStrategyLabel(item.cardStrategy)}　{formatObjectiveState(item.personalState.state)}</small></span>
+                            <span><strong>{item.conceptLabel ?? item.primaryNoteTitle ?? "未命名学习卡"}</strong><small>卡型 · {cardStrategyLabel(item.cardStrategy)}　{formatObjectiveState(item.personalState.state)}</small></span>
                             <ChevronRight size={15} aria-hidden="true" />
                           </button>
                         </li>
@@ -565,10 +565,10 @@ export function ObjectiveLibrarySurface() {
             {indexOpen ? <div id="objective-expedition-index-body" className="objective-expedition__index-body">
               <label className="v3-goal-search">
                 <Search size={14} aria-hidden="true" />
-                <span className="sr-only">搜索理解目标</span>
-                <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={page?.nextCursor ? "搜索已载入目标" : "搜索全部理解目标"} />
+                <span className="sr-only">搜索学习卡</span>
+                <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={page?.nextCursor ? "搜索已载入的卡" : "搜索全部学习卡"} />
               </label>
-              <div className="v3-goal-filters" role="group" aria-label="筛选理解目标">
+              <div className="v3-goal-filters" role="group" aria-label="筛选学习卡">
                 {FILTER_BUCKETS.map((bucket) => (
                   <button key={bucket.key} type="button" className={filter === bucket.key ? "is-active" : ""} aria-pressed={filter === bucket.key} title={bucket.hint} onClick={() => setFilter(bucket.key)}>
                     {bucket.label}<span>{bucket.key === "all" ? page?.items.length ?? 0 : counts[bucket.key]}</span>
@@ -581,7 +581,7 @@ export function ObjectiveLibrarySurface() {
                     <button type="button" className="v3-goal-row" onClick={() => openObjective(item.objectiveId)}>
                       <span className={`v3-goal-row__marker v3-goal-row__marker--${objectiveStateTone(item.personalState.state)}`} aria-hidden="true" />
                       <span className="v3-goal-row__body">
-                        <span className="v3-goal-row__title">{item.conceptLabel ?? item.primaryNoteTitle ?? "未命名理解目标"}</span>
+                        <span className="v3-goal-row__title">{item.conceptLabel ?? item.primaryNoteTitle ?? "未命名学习卡"}</span>
                         <span className="v3-goal-row__summary">{item.publicSummary}</span>
                         <span className="v3-objective-tags">
                           <span className="objective-card-type objective-card-type--row" data-empty={item.cardStrategy ? "false" : "true"}><span>卡型</span><strong>{cardStrategyLabel(item.cardStrategy)}</strong></span>
@@ -703,7 +703,7 @@ export function ObjectiveDetailSurface() {
   };
   return (
     <ApprovedSurfaceFrame family="workshop" eyebrow="远征简报" headingId="objective-detail-title" title="挑战简报" detail="先看要证明什么，再决定现在是否出发">
-      {!activeObjectiveId ? <SurfaceDataState kind="empty" message="还没有选择理解目标" detail="从理解目标库点击目标后，会直接进入完整详情。" /> : null}
+      {!activeObjectiveId ? <SurfaceDataState kind="empty" message="还没有选择学习卡" detail="从学习卡列表点开一张卡后，会直接进入完整详情。" /> : null}
       {activeObjectiveId && loading ? <SurfaceDataState kind="loading" message="正在读取目标详情" detail="这里只显示公开内容，不含答案和评分规则。" /> : null}
       {activeObjectiveId && !loading && failure ? <SurfaceDataState kind="error" message="目标详情暂时不可用" detail={failure} onRetry={() => void load()} /> : null}
       {activeObjectiveId && !loading && !failure && objective && content && detailState ? (
@@ -715,7 +715,7 @@ export function ObjectiveDetailSurface() {
                 <span className={`objective-mode-badge objective-mode-badge--${detailMode?.mode ?? "unavailable"}`}>{detailMode?.label}</span>
                 <span className={`v3-objective-state v3-objective-state--${objectiveStateTone(detailState)}`}><CircleDot size={12} aria-hidden="true" />{formatObjectiveState(detailState)}</span>
               </div>
-              <h3>{content.conceptLabel ?? "未命名理解目标"}</h3>
+              <h3>{content.conceptLabel ?? "未命名学习卡"}</h3>
               <p className="v3-objective-summary">{content.publicSummary}</p>
             </header>
 

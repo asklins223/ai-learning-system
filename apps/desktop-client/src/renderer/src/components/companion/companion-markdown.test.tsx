@@ -5,8 +5,8 @@ import { plainCompanionBubbleText, renderCompanionMarkdown } from "./companion-m
 
 /** 打开通道换成记账替身：这个文件只验"点了有没有把地址交出去、交的是哪一条"。 */
 const { opened } = vi.hoisted(() => ({ opened: [] as string[] }));
-vi.mock("./companion-link", () => ({
-  openCompanionExternalLink: (url: string) => { opened.push(url); return Promise.resolve(true); },
+vi.mock("../../app/external-link", () => ({
+  openExternalLink: (url: string) => { opened.push(url); return Promise.resolve(true); },
 }));
 
 function show(text: string) {

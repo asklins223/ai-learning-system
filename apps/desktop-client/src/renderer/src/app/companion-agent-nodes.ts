@@ -74,7 +74,11 @@ export type CompanionAgentNodes = readonly CompanionAgentNode[];
  * 认不出的工具不猜语义，统一说"正在处理…"（猜错比不认识更坏）。
  */
 const TOOL_LABELS: Record<string, string> = {
-  companion_read_context: "正在看你这一页",
+  // 「正在看你这一页」原本挂在 read_context 上，而那个工具读的是落库的学习上下文、
+  // 跟屏幕无关——她一边说"看你这一页"一边什么页面都没看，正是这次误判的界面形状。
+  // 现在这句话只属于真正读屏的那个工具。
+  companion_read_context: "正在看你的学习上下文",
+  companion_read_current_page: "正在看你这一页",
   companion_read_history: "正在翻之前的对话",
   companion_recall_memory: "正在想你说过的事",
   companion_search_notes: "正在翻你的笔记",

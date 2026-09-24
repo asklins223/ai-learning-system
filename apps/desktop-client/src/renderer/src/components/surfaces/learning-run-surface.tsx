@@ -62,6 +62,7 @@ import {
   learningRunResultMatchesRun,
   shouldClearPendingResultForSnapshot,
   shouldConfirmCompanionForOutcome,
+  shouldPlayResultCeremony,
   shouldPollLearningRunResult,
   snapshotRequiresResolvedLearningResult,
 } from "../learning-run-result-policy";
@@ -78,7 +79,7 @@ import { progressSegmentForOutcome } from "./objective-progress-band";
 import { VoiceTeachbackEditor } from "./run-voice-input";
 import { LearningRunCeremony } from "./LearningRunCeremony";
 import { microphoneAvailabilityCopy, probeMicrophone, type MicrophoneAvailability } from "../voice-capability";
-import { companionResultFeedbackAllowed, learningDiscoveryCard, learningRunFeedback } from "./objective-quest-presentation";
+import { companionResultFeedbackAllowed, ceremonyPresentation, learningDiscoveryCard, learningRunFeedback } from "./objective-quest-presentation";
 
 type ResultState =
   | { kind: "idle" }
@@ -142,7 +143,7 @@ export function learningPhaseLabel(phase: string): string {
 const terminalCopy: Record<Extract<ResultState, { kind: "terminal" }>["value"]["reasonCode"], string> = {
   user_ended: "这次旅程已安全结束，没有生成新的学习结果。",
   runtime_cancelled: "这次旅程被取消，没有生成新的学习结果。",
-  target_fingerprint_changed: "学习目标已经更新，本次旅程不能继续写入旧结果。",
+  target_fingerprint_changed: "学习卡已经更新，本次旅程不能继续写入旧结果。",
   schedule_generation_changed: "复习安排已经变化，本次旅程不能继续消费旧安排。",
   permission_revoked: "当前账号已失去这条学习内容的权限。",
 };
@@ -2015,15 +2016,16 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
       const resultKey = `${value.runId}:${value.result.snapshotId}:${value.result.outcome}`;
       const isFreshResult = resultAcknowledgementEligibleRef.current
         && acknowledgedResultKeyRef.current !== resultKey;
-      const playsFullCeremony = isFreshResult && shouldConfirmCompanionForOutcome(value.result.outcome);
+      const playsCeremony = isFreshResult && shouldPlayResultCeremony(value.result.outcome);
+      const confirmsCompanion = shouldConfirmCompanionForOutcome(value.result.outcome);
       const hasPositiveCompanionFeedback = ["demonstrated", "practice_completed", "partial"].includes(value.result.outcome);
       if (isFreshResult) {
         acknowledgedResultKeyRef.current = resultKey;
-        setResultAcknowledgementActive(playsFullCeremony);
+        setResultAcknowledgementActive(playsCeremony);
         if (companionFeedbackAllowed && hasPositiveCompanionFeedback) {
           pendingResultFeedbackRef.current = {
-            moment: playsFullCeremony ? "confirm" : "encourage",
-            line: companionResultLine(value.result, snapshot?.target.publicSummary ?? "这条理解目标", resultKey),
+            moment: confirmsCompanion ? "confirm" : "encourage",
+            line: companionResultLine(value.result, snapshot?.target.publicSummary ?? "这张学习卡", resultKey),
           };
         } else {
           pendingResultFeedbackRef.current = null;
@@ -2565,6 +2567,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
     action.kind !== "request_hint" && !quickActionKeys.has(actionKey(action)));
   const thisTime = thisTimeVerdicts(result ?? undefined);
   const feedback = result ? learningRunFeedback(result) : null;
+  const ceremony = feedback ? ceremonyPresentation(feedback) : null;
   const runModeLabel = snapshot.publishedTargetEligibility === "eligible" && !hints.some((entry) => entry.downgraded)
     ? "正式挑战"
     : snapshot.publishedTargetEligibility === "blocked"
@@ -2576,7 +2579,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
       <div ref={primaryContentRef} className="learning-run-primary-content" aria-hidden={pendingAction || pendingHintAction ? true : undefined}>
       {result || terminal ? (
         <>
-        {result && feedback ? <LearningRunCeremony active={resultAcknowledgementActive} headline={feedback.headline} achievement={feedback.achievement} companionLine={companionFeedbackAllowed ? companionFeedbackLine : null} onStart={playPendingResultFeedback} onFinish={finishResultCeremony} /> : null}
+        {result && feedback && ceremony ? <LearningRunCeremony active={resultAcknowledgementActive} stamp={ceremony.stamp} eyebrow={ceremony.eyebrow} headline={feedback.headline} achievement={feedback.achievement} companionLine={companionFeedbackAllowed ? companionFeedbackLine : null} onStart={playPendingResultFeedback} onFinish={finishResultCeremony} /> : null}
         <section className="learning-run-result-board" inert={resultAcknowledgementActive || undefined} data-outcome={result ? result.outcome : "no_result"} data-tone={feedback?.tone ?? "neutral"} data-acknowledgement={resultAcknowledgementActive ? "active" : "idle"}>
           <header className="learning-run-arrival">
             <div className="learning-run-arrival__topline">
@@ -2750,7 +2753,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
             <button type="button" className="button primary" onClick={() => onExit({ route: exitRoute })}>
               <ArrowLeft size={15} aria-hidden="true" />{resultReturnLabel}
             </button>
-            <button type="button" className="button" onClick={openObjective}>查看理解目标</button>
+            <button type="button" className="button" onClick={openObjective}>查看学习卡</button>
           </div>
         </section>
         </>
@@ -2772,10 +2775,12 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
               </div>
               {/* 旅程页的初始焦点落点。此前它只有纸外那颗「返回书房」胶囊，
                   于是键盘用户一进作答页，焦点停在"离开"上而不是题目上。 */}
+              {/* 主位是主题不是指令：recall 题的 prompt 为 §7.3 泄题防护故意不含内容
+                  （run-planner.ts:210），全仓一字不变，把它放大等于把最大的字给零信息。 */}
               <h2 ref={primaryHeadingRef} tabIndex={-1} data-surface-initial-focus="true">
-                {activeTask && snapshot.phase === "active" ? activeTask.prompt : processingHeadline}
+                {activeTask && snapshot.phase === "active" ? snapshot.target.publicSummary : processingHeadline}
               </h2>
-              {activeTask && snapshot.phase === "active" ? <p>{activeTask.targetSummary}</p> : null}
+              {activeTask && snapshot.phase === "active" ? <p>{activeTask.prompt}</p> : null}
             </header>
             {/* P21（B4）：求助面板从左侧导航栏搬进题面区。此前提示文字落在侧栏里
                 207px 宽的一栏、9px 字号，而"看过提示这轮只计练习分"那句只有 **7.5px**
@@ -3068,7 +3073,7 @@ export function LearningRunSurface({ onExit }: LearningRunSurfaceProps = {}) {
         <SurfaceDataState
           kind="empty"
           message="还没有进行中的学习旅程"
-          detail="从理解目标、复习队列或今日学习里开始一轮，题目会在这一屏接着走。"
+          detail="从学习卡、复习队列或今日学习里开始一轮，题目会在这一屏接着走。"
           action={(
             <button type="button" className="button primary" onClick={() => invoke("home")}>
               回书桌

@@ -15,6 +15,7 @@ import {
 } from "./room-machine";
 import { scenePhaseForIntent, type SceneMotionPhase } from "../scene/scene-motion";
 import type { HudPageId } from "../components/hud/hud-pages";
+import type { PageReadableV1 } from "@ailearn/shared/companion-bridge-contracts";
 import type { SourceStatusTab } from "../components/surfaces/source-index";
 import {
   DEFAULT_WINDOW_LIVE2D_MODEL_ID,
@@ -171,6 +172,16 @@ type RoomStore = {
   /** 当前页面在 desktop-pages-v3 mockup 中的编号，由页面自身发布。 */
   hudPage: HudPageId;
   /**
+   * 当前页面自己登记的「屏上可读视图」——伴星通用读页面的唯一来源（doc 37）。
+   *
+   * 单槽 + 发布者令牌：同一时刻只有一页在被看，而卸载时**只有当初那份发布能撤销
+   * 它**。不用"卸载就清空"是因为换页时 A 的 cleanup 与 B 的 setup 顺序并不保证，
+   * 清空会把刚发布的新视图抹掉——症状恰好是"她偶尔读不到"这种最难查的红。
+   *
+   * 不持久化：这是实时状态，重启后由页面重新发布。
+   */
+  pageReadableView: { readonly token: string; readonly view: PageReadableV1 } | null;
+  /**
    * page 04 的两种入口形态：`first` = 04A 首次进入，`returning` = 04B 老用户
    * 的空间菜单。只在 `hudPage === "space"` 时有意义，其余页面一律为 null。
    */
@@ -288,6 +299,9 @@ type RoomStore = {
     readonly selectedIndex: number;
   } | null) => void;
   setHudPage: (page: HudPageId, spaceEntry?: "first" | "returning") => void;
+  /** 发布/撤销本页的可读视图；token 不匹配时不动槽位（见 `pageReadableView`）。 */
+  publishPageReadableView: (token: string, view: PageReadableV1) => void;
+  retractPageReadableView: (token: string) => void;
   /** 发布/清空顶栏空间胶囊的身份；由门禁在每次读到已验证会话时调用。 */
   setSpaceIdentity: (identity: SpaceIdentity | null) => void;
   setAccountIdentity: (identity: AccountIdentity | null) => void;
@@ -350,6 +364,7 @@ export const useRoomStore = create<RoomStore>()(
       activeReviewTarget: null,
       hudPage: "home",
       hudSpaceEntry: null,
+      pageReadableView: null,
       spaceIdentity: null,
       accountIdentity: null,
       accountAvatar: null,
@@ -414,6 +429,7 @@ export const useRoomStore = create<RoomStore>()(
         activeReviewTarget: null,
         hudPage: "home",
         hudSpaceEntry: null,
+        pageReadableView: null,
         onboardingOpen: false,
         companionMoment: "idle",
         pendingHomeCompletion: null,
@@ -533,6 +549,18 @@ export const useRoomStore = create<RoomStore>()(
         hudPage,
         hudSpaceEntry: hudPage === "space" ? hudSpaceEntry ?? null : null,
       }),
+      // 内容相同就不 set：视图会随进度刷新，而每一次 set 都会让 chat session
+      // 重新组一次 bridge context。真正的去重在主进程（deep-equal 后才 publish），
+      // 这里挡住的是无谓的渲染层重渲染。
+      publishPageReadableView: (token, view) => set((state) => {
+        const current = state.pageReadableView;
+        if (current?.token === token && JSON.stringify(current.view) === JSON.stringify(view)) {
+          return state;
+        }
+        return { pageReadableView: { token, view } };
+      }),
+      retractPageReadableView: (token) => set((state) =>
+        (state.pageReadableView?.token === token ? { pageReadableView: null } : state)),
       setSpaceIdentity: (spaceIdentity) => set({ spaceIdentity }),
       setAccountIdentity: (accountIdentity) => set({ accountIdentity }),
       setAccountAvatar: (accountAvatar) => set({ accountAvatar }),

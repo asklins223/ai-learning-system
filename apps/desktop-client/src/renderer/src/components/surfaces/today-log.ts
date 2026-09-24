@@ -20,7 +20,7 @@ import type {
 const KIND_LABELS: Readonly<Record<ActivityEventV1["kind"], string>> = {
   note: "笔记",
   source: "来源",
-  objective: "理解目标",
+  objective: "学习卡",
   learning_run: "学习旅程",
   card_generation: "卡片生成",
   job: "系统活动",
@@ -32,7 +32,7 @@ const VERB_LABELS: Readonly<Record<ActivityEventV1["verb"], string>> = {
   "note.created": "新建笔记",
   "note.updated": "更新笔记",
   "source.created": "收录来源",
-  "objective.created": "建立理解目标",
+  "objective.created": "建立学习卡",
   "learning_run.started": "开始学习旅程",
   "learning_run.completed": "完成学习旅程",
   "card_generation.started": "发起卡片生成",

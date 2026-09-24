@@ -555,7 +555,7 @@ export async function loadUnderstandingProjection(
 
   const kpRows = objectiveRows.map((o) => ({
     id: o.objectiveId,
-    claim: labelByObjective.get(o.objectiveId) ?? "理解目标",
+    claim: labelByObjective.get(o.objectiveId) ?? "学习卡",
     cardId: cardByObjective.get(o.objectiveId) ?? null,
     sourceFingerprint: o.sourceFingerprint,
     createdAtText: o.createdAtText,

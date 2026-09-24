@@ -1909,6 +1909,7 @@
     {"idx": 272, "version": "7", "when": 1789800000028, "tag": "0273_retire_workspace_memories_on_departure", "breakpoints": true},
     {"idx": 273, "version": "7", "when": 1789800000029, "tag": "0274_allow_note_purge_by_retiring_cards_first", "breakpoints": true},
     {"idx": 274, "version": "7", "when": 1789800000030, "tag": "0275_evidence_quote_copies_v2", "breakpoints": true},
-    {"idx": 275, "version": "7", "when": 1789800000031, "tag": "0276_dissolve_workspace_function", "breakpoints": true}
+    {"idx": 275, "version": "7", "when": 1789800000031, "tag": "0276_dissolve_workspace_function", "breakpoints": true},
+    {"idx": 276, "version": "7", "when": 1789800000032, "tag": "0277_page_readable_view_in_context", "breakpoints": true}
   ]
 }

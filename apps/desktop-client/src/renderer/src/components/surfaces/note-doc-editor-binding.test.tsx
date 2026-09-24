@@ -19,7 +19,7 @@ import {
   updateYFragment,
   yXmlFragmentToProseMirrorRootNode,
 } from "y-prosemirror";
-import { noteDocSchemaSpec } from "@ailearn/shared/note-doc-schema";
+import { noteBlocksToPmNodes, noteDocSchemaSpec } from "@ailearn/shared/note-doc-schema";
 
 /**
  * 批次 C2 的门槛用例：**编辑器的 schema 带不带得住我们的块属性**。
@@ -131,6 +131,37 @@ describe("编辑器的 schema 与 fragment 上的块属性", () => {
     const unknown = serverNames.filter((name) => !extended.nodes[name]);
     // text/doc 这类两边同名才算对上；对不上就是服务端写进去的块在对端不存在。
     expect(unknown).toEqual([]);
+    editor.destroy();
+  });
+
+  it("服务端写进去的段落图片，编辑器读出来是图片节点，不是那串标记字", async () => {
+    /**
+     * 两份 schema 光名字对上不够，**位置**也要对得上。
+     *
+     * 改前实测（2026-09-24）：窄规格把段落写成 `text*`、图片挂在 `block` 组，于是
+     * `noteBlocksToPmNodes` 遇到"上图：![配图](…) ，如下"只能交出一个装着整串标记的
+     * 文本节点——编辑器把它当正文画出来。这条走的是真链路：窄规格写 fragment，
+     * 编辑器那份 schema 读出来，看的是节点类型清单。
+     */
+    const editor = await makeEditor(true);
+    const extended = editor.action((ctx) => ctx.get(schemaCtx));
+    const doc = new Y.Doc();
+    const fragment = doc.getXmlFragment("content");
+    prosemirrorJSONToYXmlFragment(serverSchema, {
+      type: "doc",
+      content: noteBlocksToPmNodes([
+        { type: "paragraph", content: "上图：![配图](/api/uploads/a.png)，如下" },
+        { type: "image", content: "![整块图](/api/uploads/b.png)" },
+      ]) as never,
+    } as never, fragment);
+
+    const kinds: string[] = [];
+    yXmlFragmentToProseMirrorRootNode(fragment, extended).descendants((node) => {
+      kinds.push(node.type.name);
+      return true;
+    });
+    // 夹在字里的那张与整块那张都成了 image 节点；一个都不许是 `![…](…)` 那样的文本。
+    expect(kinds).toEqual(["paragraph", "text", "image", "text", "paragraph", "image"]);
     editor.destroy();
   });
 

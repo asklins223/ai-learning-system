@@ -23,26 +23,11 @@ import {
 } from "../../app/desktop-client";
 import { HudPage } from "../hud/HudPage";
 import { useHudPage } from "../hud/use-hud-page";
+import { usePageReadableView } from "../hud/use-page-readable-view";
+import type { PageReadableV1 } from "@ailearn/shared/companion-bridge-contracts";
 import { matchesReviewTarget } from "../review-focus";
 import { SurfaceDataState, useDayAnchor } from "./surface-data";
-import {
-  DECK_DRAG_SLOP,
-  REVIEW_WINDOW_SIZE,
-  deckDragOutcome,
-  deckDragShift,
-  reviewDeckPosition,
-  reviewDeckRound,
-  reviewOverdueLabel,
-  reviewReasonFacts,
-  reviewReasonSentence,
-  reviewReasonTag,
-  reviewSequenceAfter,
-  reviewStartabilityLabel,
-  reviewFormalValidationBlockedLabel,
-  reviewWindowStart,
-  uniqueReviewItems,
-  type ReviewItem,
-} from "./review-deck";
+import {DECK_DRAG_SLOP, REVIEW_WINDOW_SIZE, deckDragOutcome, deckDragShift, reviewDeckPosition, reviewDeckRound, reviewOverdueLabel, reviewReasonFacts, reviewReasonSentence, reviewReasonTag, reviewSequenceAfter, reviewStartabilityLabel, reviewFormalValidationBlockedLabel, reviewWindowStart, uniqueReviewItems, type ReviewItem} from "./review-deck";
 
 type LoadedReviewQueue = {
   readonly version: 2;
@@ -804,26 +789,26 @@ export function ReviewSurface() {
     const surface = objectives[item.objectiveId];
     if (surface) return surface.content.conceptLabel ?? surface.content.publicSummary;
     return unreadableObjectiveIds.has(item.objectiveId)
-      ? "这张卡的理解目标暂时读不到标签"
+      ? "这张卡暂时读不到标题"
       : "正在读取这张卡的问题…";
   };
   const originOf = (item: ReviewItem): string => {
     const surface = objectives[item.objectiveId];
     if (!surface) {
       return unreadableObjectiveIds.has(item.objectiveId)
-        ? "已排到的到期复习 · 目标标签暂时读不到"
+        ? "已排到的到期复习 · 这张卡暂时读不到标题"
         : "这张卡是排到时间的到期复习";
     }
     if (surface.sources.primaryNote) return `来自笔记《${surface.sources.primaryNote.title}》`;
     if (surface.content.sourceLabel) return `来自来源「${surface.content.sourceLabel}」`;
-    return "来自复习队列里的理解目标";
+    return "来自复习队列里的这张卡";
   };
 
-  /** 同一理解目标在这批到期项里还有几张卡 —— 不是「牵动了几个目标」。 */
+  /** 同一学习卡在这批到期项里还有几张卡 —— 不是「牵动了几个目标」。 */
   const relatedCards = front && queue
     ? queue.items.filter((item) => item.objectiveId === front.objectiveId).length
     : 0;
-  /** 已载入队列覆盖到多少个不同的理解目标。跨目标的说法只由它承担。 */
+  /** 已载入队列覆盖到多少个不同的学习卡。跨目标的说法只由它承担。 */
   const affectedObjectives = queue ? new Set(queue.items.map((item) => item.objectiveId)).size : 0;
   const reason = front
     ? reviewReasonFacts(front, relatedCards, nowMs, Math.max(0, selectedIndex), affectedObjectives)
@@ -869,6 +854,35 @@ export function ReviewSurface() {
       ? `${reviewDeckPosition(selectedIndex, deckTotal)}，${questionOf(front)}`
       : reviewDeckPosition(selectedIndex, deckTotal)
     : boundary?.message ?? "";
+
+  /**
+   * 复习队列登记给伴星读的可读视图（doc 37）。
+   *
+   * 位置句、总数、可开始数、当前这张的状态字全部复用页面已经在算的那几个派生值
+   * （`reviewDeckPosition` / `deckTotal` / `readyCount` / `blockedLabel`），
+   * 空态与错误态走 `boundary`——她说"今天没有到期项"之前，得先真的读到这一句。
+   */
+  const readableView = useMemo<PageReadableV1 | null>(() => {
+    if (!queue && !boundary) return null;
+    const items = queue?.items ?? [];
+    return {
+      pageId: "review_queue",
+      title: "到期复习",
+      statusLine: items.length > 0 ? reviewDeckPosition(selectedIndex, deckTotal) : boundary?.message ?? "",
+      metrics: [
+        { label: "已载入", value: `${items.length} 项` },
+        { label: "服务端确认", value: `${deckTotal} 项` },
+        { label: "可直接开始", value: `${readyCount} 项` },
+      ],
+      items: items.slice(0, 8).map((item, index) => ({
+        ordinal: index + 1,
+        label: (labelOf(item) ?? "这一项还没有可读的标题").slice(0, 60),
+        ...(index === selectedIndex ? { state: (blockedLabel ?? "可开始").slice(0, 24) } : {}),
+      })),
+      ...(boundary ? { notice: `${boundary.message}：${boundary.detail.slice(0, 60)}` } : {}),
+    };
+  }, [blockedLabel, boundary, deckTotal, labelOf, queue, readyCount, selectedIndex]);
+  usePageReadableView(readableView);
 
   return (
     <HudPage page="queue">
@@ -992,7 +1006,7 @@ export function ReviewSurface() {
                             <RotateCcw size={14} aria-hidden="true" />刷新开始条件
                           </button>
                         )}
-                        {/* 有主笔记就开笔记，否则落到理解目标页——同一个「查看来源」
+                        {/* 有主笔记就开笔记，否则落到学习卡页——同一个「查看来源」
                             的两条去路，不是两颗按钮。 */}
                         <button
                           type="button"
@@ -1090,7 +1104,7 @@ export function ReviewSurface() {
                   <p>
                     到期：{dueLine}
                     <br />
-                    同一理解目标：{reason.relatedCards} 张到期卡
+                    同一张学习卡：{reason.relatedCards} 项到期
                   </p>
                 </>
               )}
@@ -1123,7 +1137,7 @@ export function ReviewSurface() {
               <p className="small">
                 已载入 {queue?.items.length ?? 0} / {deckTotal} 项
                 <br />
-                覆盖 {reason.affectedObjectives} 个理解目标
+                覆盖 {reason.affectedObjectives} 张学习卡
               </p>
               {queue?.nextCursor ? (
                 <p className="small">

@@ -64,7 +64,7 @@ export function variantNotAuthorized(): LearningRunServiceError {
   );
 }
 
-export function contextStale(message = "学习目标已变化，请重新开始"): LearningRunServiceError {
+export function contextStale(message = "学习卡已变化，请重新开始"): LearningRunServiceError {
   return new LearningRunServiceError(LearningRunErrorCode.CONTEXT_STALE, message, 409);
 }
 

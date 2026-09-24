@@ -38,6 +38,56 @@ export type NoteDocReadScope = NoteDocScope & { userId: string };
 type NoteDoc = ReturnType<typeof emptyFragmentNoteDoc>;
 
 /**
+ * 把"从 note_blocks 补齐出来的那一份"定成这一篇的文档身份——只在没有快照时发生一次。
+ *
+ * **为什么必须有这一步**（2026-09-23 实测到的丢字现场）：补齐每次都会 `new Y.Doc()`，
+ * 也就是每次一个**新的 clientID**。而"取起点"（`doc-state` → 这里）与"写入"
+ * （`onLoadDocument` → 这里）是两次独立的补齐，两份文档互不相识。客户端按起点敲出来的
+ * 增量在服务端**进不了文档**：Yjs 对缺依赖的增量不报错，只把它挂进 `pendingStructs`，
+ * 文档一个字不变（同一段代码在桌面端那侧的对照实测：0 个 update 事件、内容原样）。
+ * 于是落盘钩子把**没变的**那一份写回去、照样回 200 + `revision + 1`，界面显示
+ * "● 已自动保存"——用户敲的五六行一个字都没进库，返回列表再进来自然"只存下来一点点"。
+ *
+ * 实测复现（新建一篇笔记 → 取起点 → 上送一条真增量）：
+ *   doc-update 200 {"revision":1} → `note_document_states` 里仍是补齐时那块空段落；
+ *   第二次（状态行已存在、两边同源）同样的操作才正常落进 `note_blocks`。
+ * 新建笔记这条路**每一次**都命中，所以它是"必现"的。
+ *
+ * 定下来的动作是 **insert-if-absent**：两个人同时第一次打开同一篇时，谁先写谁就是
+ * 这一篇的身份，后到的那个改用已存在的那一份。反过来（后到者覆盖）等于把前一个人
+ * 手上那份身份当场作废，他之后敲的每一个字都会重新变成"进不去"。
+ */
+async function materializeBackfilledNoteDoc(
+  tx: ApiTransaction,
+  scope: NoteDocScope,
+  doc: NoteDoc,
+): Promise<{ doc: NoteDoc; backfilled: boolean }> {
+  const inserted = await tx
+    .insert(noteDocumentStates)
+    .values({
+      noteId: scope.noteId,
+      workspaceId: scope.workspaceId,
+      state: snapshotOf(doc),
+      revision: 1,
+    })
+    .onConflictDoNothing({ target: noteDocumentStates.noteId })
+    .returning({ noteId: noteDocumentStates.noteId });
+  if (inserted.length > 0) return { doc, backfilled: true };
+
+  // 输给了另一个同时第一次打开这篇的人：以他那一份为准，我这份丢掉（不能两份都留着）。
+  const winner = await tx.query.noteDocumentStates.findFirst({
+    where: and(
+      eq(noteDocumentStates.noteId, scope.noteId),
+      eq(noteDocumentStates.workspaceId, scope.workspaceId),
+    ),
+    columns: { state: true },
+  });
+  if (!winner) return { doc, backfilled: true };
+  doc.destroy();
+  return { doc: docFromSnapshot(Uint8Array.from(winner.state)), backfilled: false };
+}
+
+/**
  * 读正文文档。没有快照时从当前版本的 note_blocks 反向补齐（这就是迁移接缝）。
  *
  * 判据在**这里**而不是只放在路由上：有快照的那条分支原本一个 `notes` 行都不读，
@@ -101,7 +151,9 @@ export async function loadNoteDoc(
       ...(row.imageAssetId ? { imageAssetId: row.imageAssetId } : {}),
     })),
   );
-  return { doc, backfilled: true };
+  // 补齐出来的这一份**当场定下来**：下一次补齐（写入那条路）必须拿到同一个身份，
+  // 否则客户端按这次起点产生的增量永远进不了文档。理由与实测见上面那个函数。
+  return materializeBackfilledNoteDoc(tx, scope, doc);
 }
 
 /**

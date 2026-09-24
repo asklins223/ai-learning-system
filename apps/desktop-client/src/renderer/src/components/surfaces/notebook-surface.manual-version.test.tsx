@@ -11,6 +11,9 @@
  *
  * 这一组钉住解耦后的三条：
  *  1. 按钮常驻（不脏时也在），名字与纸面提示、版本历史里那句是同一个；
+ *  2. 那颗按钮现在叫「保存」（审计 F54：它一直叫「提交并确认」，而正文早就自动保存好了，
+ *     这个名字让人以为"系统在等我来确认存盘"）；
+ *  3. 干净态屏上不出现第二颗带"保存"字样的按钮；
  *  2. 没改动时点它给出可读回执，且**不**白造一个版本（`note.save` 不被调用）；
  *  3. ⌘S 在没改动时同样有回执，不再静默。
  *
@@ -146,35 +149,37 @@ describe("NotebookSurface · 手动定版（审计 F36）", () => {
   it("按钮常驻：没有未提交改动时也在屏上，名字与纸面提示同一个", async () => {
     await renderEditor();
 
-    const button = screen.getByRole("button", { name: "提交并确认" });
+    const button = screen.getByRole("button", { name: "保存" });
     expect(button).toBeTruthy();
     // 提示语里指的那个名字，屏上必须真有。
-    expect(screen.getByText(/点「提交并确认」才存成一个可回去的版本/)).toBeTruthy();
+    expect(screen.getByText(/点「保存」才存成一个可回去的版本/)).toBeTruthy();
+    // 干净态不摆第二颗带"保存"字样的按钮：那时「重试保存」必须不在屏上。
+    expect(screen.queryByRole("button", { name: /重试保存/ })).toBeNull();
   });
 
   it("没改动时点它给回执，不白造一个版本", async () => {
     const { state } = await renderEditor();
 
-    fireEvent.click(screen.getByRole("button", { name: "提交并确认" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(100);
     });
 
-    expect(saveLine()).toContain("这已经是一个版本了");
+    expect(saveLine()).toContain("没有新的改动，还是那一版");
     expect(state.saveCalls).toBe(0);
   });
 
-  it("有改动时点它真的定出一版，回执写明已提交并确认", async () => {
+  it("有改动时点它真的定出一版，回执写明已保存", async () => {
     const { state } = await renderEditor();
 
     await typeTitle("改过的标题");
-    fireEvent.click(screen.getByRole("button", { name: "提交并确认" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(200);
     });
 
     expect(state.saveCalls).toBe(1);
-    expect(saveLine()).toContain("已提交并确认");
+    expect(saveLine()).toContain("已保存");
   });
 
   it("⌘S 在没改动时也给同一句回执，不再静默", async () => {
@@ -188,6 +193,6 @@ describe("NotebookSurface · 手动定版（审计 F36）", () => {
       await vi.advanceTimersByTimeAsync(100);
     });
 
-    expect(saveLine()).toContain("这已经是一个版本了");
+    expect(saveLine()).toContain("没有新的改动，还是那一版");
   });
 });

@@ -36,6 +36,8 @@ export const assistantPageContexts = pgTable(
     graph: jsonb("graph"),
     capabilityHints: jsonb("capability_hints").notNull().default([]),
     sensitivity: text("sensitivity").notNull().default("normal"),
+    /** 页面自登记的屏上可读视图（0277）；无时间戳，"多久之前"由 issuedAt 算。 */
+    readableView: jsonb("readable_view"),
     issuedAt: timestamp("issued_at", { withTimezone: true }).notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),

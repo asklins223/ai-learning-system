@@ -278,3 +278,65 @@ test("P5 hydration 负向：未注册 renew→null；同 pageInstance 覆盖旧 
     await seeded.cleanup();
   }
 });
+
+/**
+ * 页面可读视图的写入侧（doc 37）。
+ *
+ * 读侧（worker 那条查询）在 `workers/ai-worker/src/integration-tests/
+ * companion-agent-postgres.integration.ts` 里钉；这里只钉三件写入侧才会坏的事：
+ * 1. publish 真的把视图落进 `readable_view` 这一列（漏了就是她永远读不到）；
+ * 2. 回来的 snapshot 带着它（broker 的 dedupe 与 renew 的 CAS 都读这个对象）；
+ * 3. **只改视图也要换 revision**——否则 renew 会拿旧 revision 通过 CAS，
+ *    而"内容变了"这件事在服务端完全看不出来。
+ */
+test("publish：页面可读视图落进 readable_view 列，且只改视图也会换 revision", async () => {
+  const seeded = await seed();
+  const view = {
+    pageId: "card_generation_progress",
+    title: "把《IndexTTS 2.5》整理成学习卡",
+    metrics: [{ label: "进度", value: "已写出 3 / 4 张候选" }],
+    items: [
+      { ordinal: 1, label: "提取线索", state: "卡型 · 主动回忆" },
+      { ordinal: 2, label: "重传触发" },
+    ],
+  };
+  try {
+    const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
+    const first = await withWorkspaceTransaction(scope, (tx) =>
+      publishContext(tx, scope, {
+        contextId: randomUUID(),
+        accountSessionId: "acct-1",
+        deviceSessionId: "dev-1",
+        pageInstanceId: `page:${randomUUID()}`,
+        page: { ...makePage(seeded.cardId, seeded.keyPointId), readableView: view },
+        now: new Date(),
+      }),
+    );
+    assert.deepEqual(first.readableView, view, "snapshot 必须带回视图");
+
+    const stored = await sql`
+      SELECT readable_view FROM assistant_page_contexts WHERE id = ${first.contextId}
+    `;
+    assert.deepEqual((stored[0] as { readable_view: unknown }).readable_view, view,
+      "视图必须落进 readable_view 列");
+
+    // 只有计数器动了一格：页面、实体、interactionState 全不动。
+    const moved = await withWorkspaceTransaction(scope, (tx) =>
+      publishContext(tx, scope, {
+        contextId: randomUUID(),
+        accountSessionId: "acct-1",
+        deviceSessionId: "dev-1",
+        pageInstanceId: `page:${randomUUID()}`,
+        page: {
+          ...makePage(seeded.cardId, seeded.keyPointId),
+          readableView: { ...view, metrics: [{ label: "进度", value: "已写出 4 / 4 张候选" }] },
+        },
+        now: new Date(),
+      }),
+    );
+    assert.notEqual(moved.revision, first.revision, "视图变化必须换 revision");
+    assert.deepEqual(moved.readableView?.metrics?.[0]?.value, "已写出 4 / 4 张候选");
+  } finally {
+    await seeded.cleanup();
+  }
+});

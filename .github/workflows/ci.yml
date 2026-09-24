@@ -555,6 +555,9 @@ jobs:
       # 第三、四份（note-trash-card-serving / note-purge-soft-deleted）钉的是 doc 34
       # L16/L17：软删的来源笔记要把它的卡从队列与卡列表一起收掉、恢复又要一起回来；
       # 以及 30 天清除**真的删得掉东西**（生成过卡的那一篇今天删不掉，如实钉住）。
+      # companion-bridge-postgres 是 09-24 才接进来的（doc 37 通用读页面）：这条链路
+      # 此前只在本地手动跑过，写入侧（readable_view 落列、只改视图也要换 revision）
+      # 没有任何 CI 覆盖。
       - name: Verify note document state and collaboration authorization behaviour
         working-directory: apps/api
         env:
@@ -575,6 +578,7 @@ jobs:
             src/integration-tests/evidence-quote-copy-retrieval-postgres.integration.ts \
             src/integration-tests/workspace-dissolve-postgres.integration.ts \
             src/integration-tests/workspace-dissolve-route-postgres.integration.ts \
+            src/integration-tests/companion-bridge-postgres.integration.ts \
             2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/note-collaboration.tap"
 
       # LearningRun 纵切（21 条）此前一直不在点名列里，代价实测到了：F28 改了

@@ -4212,8 +4212,15 @@ export class DesktopGateway {
     // 所以取起点的那一刻（界面打开这篇）就把状态留下，而不是等第一次提交才去取——
     // 那时候可能已经没有网了。
     const session = this.noteDocLocalSession(safeNoteId);
+    // 服务端这一刻的那份状态**每次都并进来**，不是只有第一次。
+    //
+    // 跳过它的后果不是省一次合并，而是这台机器此后一直拿着"第一次打开这一篇时"的那份
+    // 正文：个人空间没有长连接（决定 7b），另一个窗口写进去的字没有任何别的通道能到
+    // 这一屏，于是用户看到的是十分钟前的笔记，而他刚在另一个窗口改过。CRDT 的合并是
+    // 纯加法——本机攒着没交出去的增量一条都不会因此丢掉（那些在 `pending` 里，且同在
+    // 这份文档里），所以"每次都并"只有好处。
+    session.state.seed(parsed.data.update);
     if (!session.seeded) {
-      session.state.seed(parsed.data.update);
       session.seeded = true;
       session.revision = parsed.data.revision;
       session.savedAt = parsed.data.savedAt;
@@ -4315,9 +4322,13 @@ export class DesktopGateway {
       receipt = await this.uploadNoteDocUpdate(safeNoteId, merged, requestId);
     } catch (error) {
       if (!isOfflineFailure(error)) {
-        // 权限/尺寸/非法编码这类错误重发一百次也是同一个结果，不能留在队列里
-        // 让它变成"每次输入都重试一次的死循环"。只退掉这一次刚压进去的那条。
-        if (produced !== null) session.pending.pop();
+        // **失败的那一条留在队列里**，不能退掉。它此刻已经并进本机这份文档了，退掉
+        // 之后的下一次写会走"这次没产生新东西"那条分支、如实回 `unchanged`——而界面
+        // 把 `unchanged` 当"已保存"（清未提交标记、清草稿），于是这次失败变成一次
+        // 静默丢字：文档里有、服务端没有，屏上还写着"已自动保存"。
+        // 留着它，下一次写会把同一批再交一次，失败也照样**喊出来**。
+        // 重发的代价是有界的：只有用户再敲字（或点重试）才会触发下一次尝试，不是定时
+        // 轮询；而"重发一百次也是同一个结果"的那类错误本来就该让用户看见，不是咽下去。
         throw error;
       }
       return { via: "queued", revision: session.revision, savedAt: session.savedAt };
@@ -4354,7 +4365,10 @@ export class DesktopGateway {
       session.savedAt = receipt.savedAt;
     } catch (error) {
       if (!isOfflineFailure(error)) {
-        session.pending = [];
+        // 与 `settleNoteDocUpdate` 同一条规矩：失败的那一批**留在队列里**。清了它，这些
+        // 操作就只剩文档里那一份，而下一次写会走"没产生新东西"那条分支、如实回
+        // `unchanged`——界面把它当"已保存"（清未提交标记、清草稿），这次失败就变成一次
+        // 静默丢字。留着，下一次写或下一次建连还会再交一次，失败也照样喊出来。
         throw error;
       }
       // 还是没通：留着，下一次写或下一次建连再试。
@@ -5213,7 +5227,7 @@ function domainErrorCode(status: number, body: unknown): GatewayErrorCode | null
   // 把它们放到 403 上一起认，就会把一次取图失败说成邀请码问题。
   if (status === 403) return token === CONSENT_REQUIRED_TOKEN ? "ai_consent_required" : null;
   if (status !== 400 && status !== 404 && status !== 409 && status !== 410) return null;
-  return AUTH_DOMAIN_ERROR_CODES[token] ?? null;
+  return NOTE_DOMAIN_ERROR_CODES[token] ?? AUTH_DOMAIN_ERROR_CODES[token] ?? null;
 }
 
 function retryAfterFromHeaders(headers: Headers): string | undefined {

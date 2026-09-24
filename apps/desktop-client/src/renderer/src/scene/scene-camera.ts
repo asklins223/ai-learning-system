@@ -44,8 +44,8 @@ export const SCENE_CAMERA_PRESETS: Readonly<Record<ViewPresetId, SceneCameraPres
   "source-library": { label: "来源库近景", scale: 1.04, xPercent: 0, yPercent: 0 },
   "source-detail": { label: "来源详情近景", scale: 1.08, xPercent: 1, yPercent: -2 },
   "note-library": { label: "笔记库近景", scale: 1.04, xPercent: 0, yPercent: 0 },
-  "objective-library": { label: "理解目标近景", scale: 1.04, xPercent: -1, yPercent: 0 },
-  "objective-detail": { label: "理解目标详情近景", scale: 1.1, xPercent: 0, yPercent: -2 },
+  "objective-library": { label: "学习卡近景", scale: 1.04, xPercent: -1, yPercent: 0 },
+  "objective-detail": { label: "学习卡详情近景", scale: 1.1, xPercent: 0, yPercent: -2 },
   "companion-center": { label: "伴星中心近景", scale: 1.02, xPercent: 0, yPercent: 0 },
   settings: { label: "设置近景", scale: 1.02, xPercent: 0, yPercent: 0 },
   // 「未完成的学习」是一页待办清单（审计 F24），取景跟着研究册那一档，别自己发明偏移。

@@ -15,6 +15,7 @@
  */
 
 import { z } from "zod";
+import type { DesktopRouteV1 } from "./desktop-ipc-contracts.ts";
 import { understandingLensSchema, projectionCheckpointSchema } from "./learning-run-contracts.ts";
 
 // ─── §14.2 Entity、Route 与 Context 合同 ─────────────────────────────────
@@ -33,19 +34,36 @@ export type EntityRefV2 =
   | { kind: "route_plan"; routePlanId: string }
   | { kind: "change_set"; changeSetId: string };
 
+/**
+ * 设置页真实存在的六个分区 id（与设置表面左侧目录同一份，不是另一套说法）。
+ * 伴星说得出哪个分区，就得真的落进那个分区。
+ */
+export const SETTINGS_SECTION_IDS_V2 = [
+  "account",
+  "members",
+  "appearance",
+  "companion",
+  "data",
+  "management",
+] as const;
+export type SettingsSectionIdV2 = (typeof SETTINGS_SECTION_IDS_V2)[number];
+
 export type AllowedMainRouteV2 =
   | { kind: "home" }
   | { kind: "today" }
   | { kind: "source"; sourceId?: string }
   | { kind: "note"; noteId: string }
+  | { kind: "note_library" }
   | { kind: "card"; cardId: string; objectiveId: string }
+  | { kind: "objective_library" }
   | { kind: "review"; scheduleId?: string }
+  | { kind: "search" }
   // 方案 16 §18.1：focus_graph_node（lens）与 restore_graph_viewport
   // （restoreRun）复用 star_map 路由（graph 页按参数聚焦/恢复）。
   | { kind: "star_map"; keyPointId?: string; lens?: "current_target" | "evidence" | "provenance" | "issues"; restoreRun?: string }
   | { kind: "learning_run"; runId: string }
   | { kind: "conversation" }
-  | { kind: "settings"; section?: "companion" | "privacy" | "voice" | "accessibility" | "pet" | "model" };
+  | { kind: "settings"; section?: SettingsSectionIdV2 };
 
 export type UiTargetRefV2 =
   | { kind: "quick_capture" }
@@ -78,6 +96,7 @@ export type AssistantContextSnapshotV2 = {
     | "source"
     | "note"
     | "card"
+    | "objective"
     | "review"
     | "star_map"
     | "learning_run"
@@ -100,6 +119,7 @@ export type AssistantContextSnapshotV2 = {
   };
   capabilityHints: MainCommandKindV2[]; // 仅提示，不是授权
   sensitivity: "normal" | "formal_assessment" | "credential_surface";
+  readableView?: PageReadableV1;
   issuedAt: string;
   expiresAt: string;
 };
@@ -109,7 +129,7 @@ export type MainPageContextV2 = AssistantContextSnapshotV2;
 /** Main renderer 可提交的 context 输入（安全字段由 broker 覆盖，§14.2）。 */
 export type MainPageContextInputV2 = Pick<
   AssistantContextSnapshotV2,
-  "routeRef" | "pageKind" | "entityRefs" | "interactionState" | "graph" | "capabilityHints" | "sensitivity"
+  "routeRef" | "pageKind" | "entityRefs" | "interactionState" | "graph" | "capabilityHints" | "sensitivity" | "readableView"
 >;
 
 // ─── §14.3 UI Event、Domain Event 与 Delivery ────────────────────────────
@@ -308,8 +328,11 @@ export const allowedMainRouteV2Schema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("today") }),
   z.strictObject({ kind: z.literal("source"), sourceId: z.string().uuid().optional() }),
   z.strictObject({ kind: z.literal("note"), noteId: z.string().uuid() }),
+  z.strictObject({ kind: z.literal("note_library") }),
   z.strictObject({ kind: z.literal("card"), cardId: z.string().uuid(), objectiveId: z.string().uuid() }),
+  z.strictObject({ kind: z.literal("objective_library") }),
   z.strictObject({ kind: z.literal("review"), scheduleId: z.string().uuid().optional() }),
+  z.strictObject({ kind: z.literal("search") }),
   z.strictObject({
     kind: z.literal("star_map"),
     keyPointId: z.string().uuid().optional(),
@@ -320,9 +343,65 @@ export const allowedMainRouteV2Schema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("conversation") }),
   z.strictObject({
     kind: z.literal("settings"),
-    section: z.enum(["companion", "privacy", "voice", "accessibility", "pet", "model"]).optional(),
+    section: z.enum(SETTINGS_SECTION_IDS_V2).optional(),
   }),
 ]);
+
+/**
+ * 伴星一句话能跳到的页面：**这一张表就是词表本身**。
+ *
+ * 三条各自成立、合起来才坏的事曾在同一周发生三次：
+ * ① `companion_open_page` 的参数枚举手抄一份，和桌面端能落地的页面各说各话；
+ * ② 「今日」「设置」在服务端是合法 route，客户端映射表里没有分支，
+ *    于是按钮根本不出现（`today`/`settings` 就是这两条），她却照着一句"到了"；
+ * ③ 笔记库、学习卡、查找是真实存在的页面，她的词表里却没有，
+ *    只能被就近塞进"来源库/星图"——用户看到的正是"跳的不是我要的那页"。
+ * 页面名一律取 HUD 那页自己的标题，别名用来接用户的口语（书架/资料库、星图/知识图谱）。
+ */
+export const COMPANION_PAGE_DESTINATIONS_V2 = [
+  { kind: "home", label: "首页", aliases: ["房间"], route: { kind: "room.home" } },
+  { kind: "today", label: "今日学习", aliases: ["今天", "学习"], route: { kind: "room.today" } },
+  { kind: "source", label: "来源库", aliases: ["书架", "资料库"], route: { kind: "source.library" } },
+  { kind: "note_library", label: "笔记库", aliases: ["笔记"], route: { kind: "note.library" } },
+  { kind: "objective_library", label: "学习卡", aliases: ["卡片", "理解目标", "理解地图"], route: { kind: "objective.library" } },
+  { kind: "star_map", label: "理解星图", aliases: ["星图", "知识图谱"], route: { kind: "understanding.graph" } },
+  { kind: "review", label: "复习队列", aliases: ["待复习"], route: { kind: "review.queue" } },
+  { kind: "search", label: "全局搜索", aliases: ["搜索"], route: { kind: "search.global" } },
+  {
+    kind: "conversation",
+    label: "伴星中心",
+    aliases: ["对话"],
+    route: { kind: "companion.center", tab: "dialogue" },
+  },
+  {
+    kind: "settings",
+    label: "设置中心",
+    aliases: ["设置"],
+    route: { kind: "settings.section", section: "account" },
+  },
+] as const satisfies readonly {
+  kind: AllowedMainRouteV2["kind"];
+  label: string;
+  aliases: readonly string[];
+  route: DesktopRouteV1;
+}[];
+
+export type CompanionPageKindV2 = (typeof COMPANION_PAGE_DESTINATIONS_V2)[number]["kind"];
+
+export const companionPageKindValuesV2: readonly CompanionPageKindV2[] = Object.freeze(
+  COMPANION_PAGE_DESTINATIONS_V2.map((page) => page.kind),
+);
+
+export function companionPageRouteV2(kind: CompanionPageKindV2): DesktopRouteV1 {
+  const page = COMPANION_PAGE_DESTINATIONS_V2.find((destination) => destination.kind === kind);
+  if (!page) throw new Error(`伴星页面词表里没有 ${kind}`);
+  // 返回副本：词表是 `as const` 的共享对象，调用方（渲染层）拿到的是可以随便处理的一份。
+  return { ...page.route };
+}
+
+export function companionPageLabelV2(kind: string): string {
+  return COMPANION_PAGE_DESTINATIONS_V2.find((page) => page.kind === kind)?.label ?? kind;
+}
 
 export const uiTargetRefV2Schema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("quick_capture") }),
@@ -332,11 +411,75 @@ export const uiTargetRefV2Schema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("run_current_task"), runId: z.string().uuid(), taskId: z.string().uuid() }),
 ]);
 
+/**
+ * 页面可读视图（通用"读我当前这一页"）。
+ *
+ * 这是**任何**页面都能填的一种形状，不是某页的专用 DTO：标题 + 状态行 + 计数器 +
+ * **带序号的条目列表** + 空态/报错 + 当前筛选。`items[].ordinal` 是整个形状里
+ * 唯一不可省的东西——用户说"第四张""第二个星体"时，只有它在场才能把指法落到
+ * 具体条目上。缺了它，这个工具又会被降级成"每页各写一个查询"。
+ *
+ * 载荷里**没有任何时间戳**："多久之前"一律由服务端从 context 行的 issuedAt 算。
+ * 客户端自报相对时间有两个坏处：每次 publish 都是新 pageInstanceId 且旧行当场
+ * revoke，一个每分钟变的字符串会把推送打成自我撤销的洪水；而且同一个读数会出现
+ * 两个来源（屏幕一个、她嘴里一个）。
+ *
+ * 内容与 `sensitivity` 一样是不可信提示：正文由服务端按 sensitivity 二次裁剪，
+ * 上限在这里钉死（工具 maxOutputChars 是 4000）。
+ */
+export const PAGE_READABLE_TOTAL_CHAR_BUDGET = 1_600;
+
+export const pageReadableMetricV1Schema = z.strictObject({
+  label: z.string().min(1).max(40),
+  value: z.string().min(1).max(40),
+});
+
+export const pageReadableItemV1Schema = z.strictObject({
+  /** 屏幕上显示的那个数（1 起）；不是数据库主键，也不参与归属校验。 */
+  ordinal: z.number().int().min(1).max(99),
+  label: z.string().min(1).max(120),
+  /** 条目自己的状态字（"已过质量门"/"待你决定"），照抄界面文案。 */
+  state: z.string().min(1).max(40).optional(),
+});
+
+export const pageReadableV1Schema = z
+  .strictObject({
+    /** 页面自登记的种类标识，仅用于日志与"她复述我在哪页"。 */
+    pageId: z.string().min(1).max(40),
+    title: z.string().min(1).max(120),
+    statusLine: z.string().min(1).max(160).optional(),
+    metrics: z.array(pageReadableMetricV1Schema).max(6).optional(),
+    items: z.array(pageReadableItemV1Schema).max(12).optional(),
+    notice: z.string().min(1).max(200).optional(),
+    filters: z.array(pageReadableMetricV1Schema).max(6).optional(),
+  })
+  .superRefine((value, ctx) => {
+    const used
+      = value.pageId.length
+        + value.title.length
+        + (value.statusLine?.length ?? 0)
+        + (value.notice?.length ?? 0)
+        + (value.metrics ?? []).reduce((n, m) => n + m.label.length + m.value.length, 0)
+        + (value.items ?? []).reduce((n, i) => n + i.label.length + (i.state?.length ?? 0), 0)
+        + (value.filters ?? []).reduce((n, f) => n + f.label.length + f.value.length, 0);
+    if (used > PAGE_READABLE_TOTAL_CHAR_BUDGET) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["title"],
+        message: `readable view exceeds ${PAGE_READABLE_TOTAL_CHAR_BUDGET} chars`,
+      });
+    }
+  });
+
+export type PageReadableV1 = z.infer<typeof pageReadableV1Schema>;
+export type PageReadableItemV1 = z.infer<typeof pageReadableItemV1Schema>;
+export type PageReadableMetricV1 = z.infer<typeof pageReadableMetricV1Schema>;
+
 /** Main renderer 提交的 context 输入（§14.2：安全字段由 broker 覆盖）。 */
 export const mainPageContextInputV2Schema = z.strictObject({
   routeRef: allowedMainRouteV2Schema,
   pageKind: z.enum([
-    "today", "source", "note", "card", "review", "star_map",
+    "today", "source", "note", "card", "objective", "review", "star_map",
     "learning_run", "conversation", "settings", "other",
   ]),
   entityRefs: z.array(entityRefV2Schema).max(64),
@@ -356,6 +499,8 @@ export const mainPageContextInputV2Schema = z.strictObject({
     ]))
     .max(16),
   sensitivity: z.enum(["normal", "formal_assessment", "credential_surface"]),
+  /** 这一页此刻显示给用户的可读视图；没有有效调用方的页面不发。 */
+  readableView: pageReadableV1Schema.optional(),
 });
 
 export const assistantContextSnapshotV2Schema = mainPageContextInputV2Schema

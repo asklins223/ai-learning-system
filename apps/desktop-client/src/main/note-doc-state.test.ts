@@ -115,6 +115,24 @@ describe("影子文档的增量转手", () => {
     state.dispose();
   });
 
+  it("来历不明的增量必须抛出来，不许报成'没改动'", () => {
+    // 与这份文档**没有共同历史**的一条增量（另一份补齐出来的文档上改的，同样的内容、
+    // 不同的身份）：Yjs 对缺依赖的增量不报错，只把它挂进 `pendingStructs`，文档一个字
+    // 不变、一个 update 事件都不发。于是 `applyLocal` 返回 null，调用方按"本来就有这条"
+    // 处理、报成 `unchanged`——界面显示"已自动保存"，而这份文档里没有它、服务端更不会有。
+    // 2026-09-23 那次"敲了五六行、回列表再进来就没了"就是这个形状，所以这里必须抛。
+    const base = baseBytes();
+    const state = createNoteDocState();
+    state.seed(base);
+    const foreign = localBodyEdit(baseBytes(), 1, 0, "另一份文档上写的");
+    expect(() => state.applyLocal(foreign)).toThrow(/note_doc_update_unmerged/);
+
+    // 正向对照：同一份起点上改出来的增量照常交出一条增量——上面那条不是因为
+    // "applyLocal 坏了"才抛。
+    expect(state.applyLocal(localBodyEdit(base, 1, 0, "同源改的"))).toBeTruthy();
+    state.dispose();
+  });
+
   it("标题走同一份文档：改名不动正文，且它自己就是那条增量", () => {
     const base = baseBytes();
     const state = createNoteDocState();

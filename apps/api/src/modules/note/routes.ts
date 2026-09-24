@@ -205,6 +205,16 @@ export async function noteRoutes(app: FastifyInstance) {
       if (outcome.status === "no_version") {
         return reply.code(409).send({ error: "note_has_no_version", message: "笔记没有当前版本" });
       }
+      // 这条增量引用的历史，服务端那份文档里没有（两边不是同一份文档）。**必须报错**：
+      // 报 200 的话客户端会把它当"已保存"，而库里一个字都没动——2026-09-23 那次
+      // "敲了五六行、回列表再进来就没了"就是这个形状。客户端据此重取起点再写。
+      // 判据在 `applyUploadedDocUpdate` 的 `applyAndReportLanded`。
+      if (outcome.status === "identity_mismatch") {
+        return reply.code(409).send({
+          error: "doc_identity_mismatch",
+          message: "这条增量与当前文档不是同一份历史，请重新取一次编辑起点",
+        });
+      }
       reply.header("Cache-Control", "private, no-store");
       return { revision: outcome.revision, savedAt: outcome.savedAt };
     },

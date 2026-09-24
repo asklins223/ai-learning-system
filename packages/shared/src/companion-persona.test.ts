@@ -7,7 +7,25 @@ import {
   COMPANION_PERSONA_V5,
   COMPANION_PERSONA_V5_PROMPT_ID,
   COMPANION_PERSONA_V5_SHA256,
+  COMPANION_VOICE_STYLE_LINES_V1,
 } from "./companion-persona.ts";
+
+test("日记引用的那两句音色，是角色底座里的原话（一处真相）", () => {
+  // 桌宠日记不抄第二份音色：它引用 `COMPANION_VOICE_STYLE_LINES_V1`。
+  // 谁改了底座那两句而没同步这里，或者反过来在日记里另写一份，这条就红。
+  for (const line of COMPANION_VOICE_STYLE_LINES_V1.split("\n")) {
+    assert.ok(
+      COMPANION_CHARACTER_BASE_V5.includes(line),
+      `这句不再是底座里的原话了：${line.slice(0, 24)}…`,
+    );
+  }
+  // 底座被改时，被日记排除在外的那三处机制必须仍然在底座里——
+  // 不在就说明有人把它们挪进了音色两句，日记会重新抄成题材（方案 36 真跑实录）。
+  assert.ok(COMPANION_CHARACTER_BASE_V5.includes("把球抛回去"));
+  assert.ok(COMPANION_CHARACTER_BASE_V5.includes("不假称自己有身体"));
+  assert.ok(!COMPANION_VOICE_STYLE_LINES_V1.includes("把球抛回去"));
+  assert.ok(!COMPANION_VOICE_STYLE_LINES_V1.includes("不假称自己有身体"));
+});
 
 test("v5 prompt 有冻结的 canonical 字节与哈希", () => {
   const bytes = Buffer.from(COMPANION_PERSONA_V5, "utf8");

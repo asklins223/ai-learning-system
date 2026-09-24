@@ -11,9 +11,21 @@ import {
   isLearningRunSnapshotResponseCurrent,
   shouldConfirmCompanionForOutcome,
   shouldClearPendingResultForSnapshot,
+  shouldPlayResultCeremony,
   shouldPollLearningRunResult,
   snapshotRequiresResolvedLearningResult,
 } from "./learning-run-result-policy";
+
+/** 穷举合同里的全部 outcome，新增一支时两张表都会红。 */
+const ALL_OUTCOMES: LearningRunResultV2["outcome"][] = [
+  "demonstrated",
+  "partial",
+  "needs_repair",
+  "not_assessable",
+  "practice_completed",
+  "skipped",
+  "declared_unable",
+];
 
 describe("LearningRun request fence", () => {
   it("invalidates an in-flight request when the run changes", () => {
@@ -85,17 +97,17 @@ describe("LearningRun result policy", () => {
   });
 
   it("only acknowledges demonstrated evidence with Companion confirm", () => {
-    const outcomes: LearningRunResultV2["outcome"][] = [
-      "demonstrated",
-      "partial",
-      "needs_repair",
-      "not_assessable",
-      "practice_completed",
-      "skipped",
-      "declared_unable",
-    ];
+    expect(ALL_OUTCOMES.filter(shouldConfirmCompanionForOutcome)).toEqual(["demonstrated"]);
+  });
 
-    expect(outcomes.filter(shouldConfirmCompanionForOutcome)).toEqual(["demonstrated"]);
+  /**
+   * 演出比伴星点头宽：练习结算也到场，但伴星口吻不许被顺手顶成 confirm。
+   * 两条判据的差集就是这条边界，所以两张表都要钉住。
+   */
+  it("plays the result ceremony for demonstrated and for practice", () => {
+    expect(ALL_OUTCOMES.filter(shouldPlayResultCeremony)).toEqual(["demonstrated", "practice_completed"]);
+    expect(ALL_OUTCOMES.filter(shouldPlayResultCeremony).filter(shouldConfirmCompanionForOutcome))
+      .toEqual(["demonstrated"]);
   });
 
   it("clears stale pending results when an authoritative snapshot is interactive again", () => {

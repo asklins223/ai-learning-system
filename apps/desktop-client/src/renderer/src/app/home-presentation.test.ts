@@ -505,7 +505,7 @@ describe("homePresentation", () => {
       degradation: { unavailableSections: ["primaryFocus"], retryable: true },
     }), false, null)).toEqual({
       title: "学习记录暂未送达",
-      detail: "主学习目标暂时无法读取",
+      detail: "主学习卡暂时无法读取",
       primaryLabel: "重新读取",
       primaryIntent: null,
       retry: true,

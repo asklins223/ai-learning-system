@@ -57,7 +57,7 @@ function openLabel(objectType: DesktopSearchItem["objectType"]): string {
   switch (objectType) {
     case "note": return "打开完整笔记";
     case "source": return "打开这份来源";
-    case "objective": return "打开理解目标";
+    case "objective": return "打开学习卡";
   }
 }
 
@@ -127,7 +127,7 @@ function previewTitle(preview: SearchPreview): string {
   switch (preview.kind) {
     case "note": return preview.detail.title || "未命名笔记";
     case "source": return preview.detail.source.title;
-    case "objective": return preview.detail.content.conceptLabel ?? "未命名理解目标";
+    case "objective": return preview.detail.content.conceptLabel ?? "未命名学习卡";
     default: return "";
   }
 }
@@ -415,7 +415,7 @@ export function SearchSurface() {
       <section className="search-desk">
         <div className="search-command">
           <b aria-hidden="true">⌕</b>
-          <label className="sr-only" htmlFor="search-desk-query">搜索来源、笔记与理解目标</label>
+          <label className="sr-only" htmlFor="search-desk-query">搜索来源、笔记与学习卡</label>
           <input
             id="search-desk-query"
             ref={inputRef}
@@ -497,7 +497,7 @@ export function SearchSurface() {
               <SurfaceDataState kind="error" message="搜索范围暂时不可用" detail={sessionFailure} onRetry={retry} />
             ) : null}
             {sessionReady && !hasQuery ? (
-              <SurfaceDataState kind="empty" message="输入关键词开始查找" detail="来源、笔记与理解目标共用同一组结果；选中后右侧直接预览。" />
+              <SurfaceDataState kind="empty" message="输入关键词开始查找" detail="来源、笔记与学习卡共用同一组结果；选中后右侧直接预览。" />
             ) : null}
             {sessionReady && hasQuery && listBusy && items.length === 0 ? (
               <SurfaceDataState kind="loading" message="正在搜索" detail="结果只来自当前工作区的全局搜索接口。" />

@@ -556,13 +556,14 @@ export function noteOpeningExcerpt(content: unknown): string | null {
 export const PAGE_KIND_LABELS: Record<string, string> = {
   note: "笔记",
   card: "学习卡",
+  objective: "学习卡",
   source: "资料",
-  review: "复习页",
-  star_map: "知识图谱",
+  review: "复习队列",
+  star_map: "理解星图",
   learning_run: "学习运行",
-  today: "今日页",
-  settings: "设置页",
-  conversation: "对话",
+  today: "今日学习",
+  settings: "设置中心",
+  conversation: "伴星中心",
 };
 
 /**

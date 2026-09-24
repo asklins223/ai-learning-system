@@ -80,23 +80,33 @@ describe("CompanionChatRecordArticle 的跳转块（方案 29 §4.8）", () => {
     expect(goToRoute).toHaveBeenCalledTimes(2);
   });
 
-  it("桌面端没有等价形态的落点：留下她去过哪里的痕迹，但不给假按钮", () => {
-    const goToRoute = vi.fn();
+  it("「去今日」现在给真按钮：这一页曾经在映射表里没有分支，按钮根本不渲染", () => {
+    const goToRoute = vi.fn().mockResolvedValue(undefined);
     render(
       <CompanionChatRecordArticle
-        message={message({
-          blocks: [
-            { type: "text", text: "今天这页给你看看。" },
-            { type: "nav", label: "去今日", route: { kind: "today" } },
-          ],
-        })}
+        message={message({ blocks: [{ type: "nav", label: "去今日", route: { kind: "today" } }] })}
         chat={session(goToRoute)}
       />,
     );
-    expect(screen.queryByRole("button", { name: "去今日" })).toBeNull();
-    expect(screen.getByText("去今日")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "去今日" }));
+    expect(goToRoute).toHaveBeenCalledWith({ kind: "room.today" });
+  });
+
+  it("这一版客户端不认识的落点（服务端比客户端新）：留下她去过哪里的痕迹，但不给假按钮", () => {
+    const goToRoute = vi.fn();
+    render(
+      <CompanionChatRecordArticle
+        message={message({ blocks: [
+          { type: "nav", label: "去活动流", route: { kind: "activity_feed" } as never },
+        ] })}
+        chat={session(goToRoute)}
+      />,
+    );
+    expect(screen.getByText("去活动流")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "去活动流" })).toBeNull();
     expect(goToRoute).not.toHaveBeenCalled();
   });
+
 
   it("同一句话里多个落点按顺序都在", () => {
     render(

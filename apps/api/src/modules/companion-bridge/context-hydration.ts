@@ -58,6 +58,7 @@ export function buildContextSnapshot(input: HydratedContextInput): AssistantCont
     graph: input.input.graph,
     capabilityHints: input.input.capabilityHints,
     sensitivity: input.input.sensitivity,
+    readableView: input.input.readableView,
     issuedAt: input.issuedAt.toISOString(),
     expiresAt: input.expiresAt.toISOString(),
   };

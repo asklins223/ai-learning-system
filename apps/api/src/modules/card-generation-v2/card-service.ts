@@ -848,7 +848,7 @@ async function loadCardClosure(
     ))
     .limit(1);
   if (objectives.length === 0) {
-    throw new CardGenerationV2ServiceError("objective_not_found", 404, "学习目标不存在");
+    throw new CardGenerationV2ServiceError("objective_not_found", 404, "学习卡不存在");
   }
   const objective = objectives[0];
 

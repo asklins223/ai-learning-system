@@ -41,7 +41,7 @@ const DIRECTORY_ITEMS: readonly DirectoryItem[] = [
   { id: "home", label: "首页", intent: "home" },
   { id: "sources", label: "来源", intent: "open-sources" },
   { id: "notes", label: "笔记", intent: "open-notes" },
-  { id: "goals", label: "理解", intent: "open-objectives" },
+  { id: "goals", label: "学习卡", intent: "open-objectives" },
   // 星图 (page 19) sits with the understanding group: it is the topology view
   // of the same sources → notes → objectives chain the three chips above open.
   { id: "graph", label: "星图", intent: "graph" },

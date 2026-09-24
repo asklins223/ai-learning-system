@@ -343,7 +343,7 @@ export function HomeV2Provider({ children }: { readonly children: ReactNode }) {
         break;
       case "current-target":
         detail = home.hasFocus ? "今天的主目标已经定下" : "还没定下今天的主目标";
-        meta = home.hasFocus ? "查看这个目标" : "去理解地图定一个";
+        meta = home.hasFocus ? "查看这个目标" : "去学习卡里定一张";
         break;
       case "companion-center":
         detail = companionHome.projection?.profileSummary.name
@@ -535,7 +535,7 @@ export function HomeV2Provider({ children }: { readonly children: ReactNode }) {
 
 const HOME_V2_DECOR_COPY: Readonly<Record<CompanionDecorIdV1, { readonly title: string; readonly detail: string }>> = Object.freeze({
   "keepsake.first-note": { title: "第一张研究札记", detail: "来自第一篇存好的笔记" },
-  "keepsake.first-goal": { title: "第一枚目标罗盘", detail: "来自第一个正式学习目标" },
+  "keepsake.first-goal": { title: "第一枚目标罗盘", detail: "来自第一张正式学习卡" },
   "keepsake.first-review": { title: "第一本复习历", detail: "来自第一次完成复习" },
   "keepsake.first-memory": { title: "第一幅记忆标本", detail: "来自第一条确认的伴星记忆" },
 });

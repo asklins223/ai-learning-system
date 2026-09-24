@@ -23,6 +23,7 @@ import {
   gatewayErrorMessage,
   unwrapGatewayResult,
 } from "../../app/desktop-client";
+import { imageOnlyFiles } from "../../app/source-intake";
 import { HudPage } from "../hud/HudPage";
 import { useHudPage } from "../hud/use-hud-page";
 import type { HudPageId } from "../hud/hud-pages";
@@ -39,12 +40,9 @@ import {
   isCardGenerationInFlight,
   isLiveGenerationForNote,
 } from "./card-generation-status";
-import {
-  blocksMatchMarkdown,
-  blocksToMarkdown,
-  markdownToBlocks,
-  parseMarkdownTable,
-} from "./note-blocks";
+import { parseMarkdownTable } from "./note-blocks";
+import { isHorizontalRule, noteInlineDisplayText, noteInlineImages, renderNoteInline } from "./note-reading-inline";
+import { sourceImageObjectKeyFromUrl } from "@ailearn/shared/source-image-contracts";
 import { useSourceImage } from "./source-image";
 import { ImageGalleryLightbox, useImageLightbox, ZoomableReadingImage, type GalleryImage } from "./image-viewer";
 import { NoteMarkdownEditor, type NoteMarkdownEditorHandle } from "./note-markdown-editor";
@@ -154,7 +152,7 @@ const FEEDBACK_REASONS: readonly { readonly value: DesktopCardGenerationFeedback
   { value: "too_many", label: "卡片太多" },
   { value: "missing_key_objective", label: "漏掉关键目标" },
   { value: "surface_paraphrase", label: "只是换了个说法" },
-  { value: "wrong_learning_goal", label: "学习目标不符" },
+  { value: "wrong_learning_goal", label: "学习卡不符" },
   { value: "duplicate_existing_card", label: "与已有卡片重复" },
   { value: "not_worth_reviewing", label: "不值得复习" },
 ];
@@ -234,7 +232,9 @@ function conceptMark(
   if (!label) return null;
   for (const block of blocks) {
     if (block.type !== "paragraph") continue;
-    const text = noteBlockText(block.content);
+    // 区间要落在**显示出来的字**上：`content` 里还有 `**`、`![]()` 这些不占格子的标记，
+    // 拿它算偏移，高亮就会整体错位几个字符（渲染与这里共用 `noteInlineDisplayText`）。
+    const text = noteInlineDisplayText(block.content);
     const at = text.indexOf(label);
     if (at < 0) continue;
     return { ordinal: block.ordinal, range: sentenceRange(text, at, label.length) };
@@ -497,21 +497,29 @@ export function NotebookSurface() {
     : allBlocks.slice(0, READING_WINDOW);
   const hiddenBlockCount = allBlocks.length - readingBlocks.length;
 
-  // 这篇笔记的全部图片，按正文顺序排好；顺带记下每个图片块在画廊里的序号，
-  // 让正文里的缩略图点击时知道自己该打开第几张。块列表来自已提交版本，
-  // 一次渲染内不变，memo 只是让这张索引表不随无关状态重算。
+  // 这篇笔记的全部图片，按正文顺序排好；顺带记下**每一块**第一张图在画廊里的序号，
+  // 让正文里的缩略图点击时知道自己该开在哪一张。一块可以有好几张：编辑器里的图是
+  // **行内节点**（`paragraph > image`），一整段里并排两张是常态。
+  // 笔记块里存的是站内地址：画廊切到哪张才取哪张的字节，站外直链则原样交给 `<img>`。
   const noteImages = useMemo(() => {
     const images: GalleryImage[] = [];
-    const ordinalToIndex = new Map<number, number>();
+    const ordinalToStart = new Map<number, number>();
     for (const block of allBlocks) {
-      if (block.type !== "image") continue;
-      const image = parseImageBlock(block.content);
-      if (!image) continue;
-      ordinalToIndex.set(block.ordinal, images.length);
-      // 笔记块里存的是站内地址：画廊切到哪张才取哪张的字节。
-      images.push({ kind: "internal", url: image.url, alt: image.alt || "笔记图片" });
+      const found = block.type === "image"
+        ? (() => {
+          const image = parseImageBlock(block.content);
+          return image ? [{ src: image.url, alt: image.alt }] : [];
+        })()
+        : noteInlineImages(block.content);
+      if (found.length === 0) continue;
+      ordinalToStart.set(block.ordinal, images.length);
+      for (const item of found) {
+        images.push(sourceImageObjectKeyFromUrl(item.src)
+          ? { kind: "internal", url: item.src, alt: item.alt || "笔记图片" }
+          : { kind: "resolved", src: item.src, alt: item.alt || "笔记图片" });
+      }
     }
-    return { images, ordinalToIndex };
+    return { images, ordinalToStart };
   }, [allBlocks]);
   // 画廊的开关状态收在通用钩子里（本页只负责 openAt/close 的接线）。
   const noteGallery = useImageLightbox(noteImages.images.length);
@@ -561,7 +569,7 @@ export function NotebookSurface() {
     if (!api || !current || !current.permissions.canSave || saving) return;
     if (!dirty) {
       // 审计 F36：手动定版的语义是"把此刻定成一个可回去的版本"，不是"把改动交出去"。
-      // 自动保存 1.2 秒就把 dirty 清掉，原来那道 `!dirty` 早退于是让「提交并确认」
+      // 自动保存 1.2 秒就把 dirty 清掉，原来那道 `!dirty` 早退于是让「保存」
       // 与 ⌘S 在正常写作节奏里永远静默无反应——用户分不清是没生效还是没必要。
       // 没有改动时如实回一句"这已经是一个版本了"，自动那条仍然静默（它是 debounce 的）。
       if (reason === "manual") {
@@ -578,7 +586,7 @@ export function NotebookSurface() {
       // 正文与标题都交给文档增量（批次 4.4）。原来一次保存同时提交**整篇正文**和一个
       // 版本指针：两扇窗口都还在编辑时，后提交的那一次把前一次的正文原地改掉，而且
       // 没有版本可回去。现在交的是"我改了哪些块"，合并由 CRDT 负责——内容这条路上
-      // 不再存在"覆盖"这个动作。（谁先「提交并确认」仍然会先推进版本指针，后一次
+      // 不再存在"覆盖"这个动作。（谁先按「保存」仍然会先推进版本指针，后一次
       // 确认拿旧令牌会被 409 挡下来，那是版本历史的顺序问题，与正文覆盖是两回事。）
       // 标题先写进文档的 `meta`，然后正文与它一起作为**一条 yjs 增量**交出去。
       // 原来这里是两个通道（blocks + title），于是"改了标题没改正文"和"正文删空了"
@@ -588,7 +596,7 @@ export function NotebookSurface() {
       // flush 给了 null 就是"本机没有攒下任何增量"：那一次什么都没写，报成提交过就是在骗回执。
       const written = { via: flushed ?? "unchanged" as const, savedAt: new Date().toISOString() };
       if (reason === "manual") {
-        // 「提交并确认」多走一步：把文档此刻定成一个可回去的版本。它不再带正文。
+        // 「保存」多走一步：把文档此刻定成一个可回去的版本。它不再带正文。
         const response = await api.note.save({
           meta: createRequestMeta(epochRef.current),
           commandId: createCommandId("note-save"),
@@ -627,7 +635,7 @@ export function NotebookSurface() {
 
   // Debounced autosave: the save-line reports the server receipt, never a local guess.
   // A failed save is sticky: the effect must not re-arm, or every AUTOSAVE_DELAY_MS
-  // would flip the save-line between "正在提交…" and the failure notice — the
+  // would flip the save-line between "正在保存…" and the failure notice — the
   // flicker. Recovery paths: the "重试保存" button, or a new keystroke (the
   // effect below clears the error so the debounce restarts naturally).
   // Debounced autosave. 依赖里**不能有 `save` 或 `note` 对象**：这一屏每几秒就有一次
@@ -668,6 +676,22 @@ export function NotebookSurface() {
     getContent: () => draftRef.current.content,
     disabled: !editable || !note?.permissions.canSave,
   });
+
+  /**
+   * 纸面上松手的图片归这一篇正文。
+   *
+   * 正文那一块由编辑器自己的插件接住（`note-markdown-editor` 的 NOTE_IMAGE_UPLOAD），
+   * 但纸面比正文大：工具条、页边、最后一行下面那一截都落不到 `.ProseMirror` 上，
+   * 过去那几处会被全局采集器抢走，回一句"暂不解析这张图"。混进非图片文件就不算
+   * "往正文里放图"，仍然交回采集器逐份说清去向。
+   */
+  const paperAcceptsImages = mode === "edit" && editable;
+  const paperImageFiles = (event: React.DragEvent<HTMLElement>): File[] => {
+    if (!paperAcceptsImages) return [];
+    // 正文里那一下编辑器已经接过了，这里只补它够不着的那一圈。
+    if (event.target instanceof HTMLElement && event.target.closest(".ProseMirror")) return [];
+    return imageOnlyFiles(event.dataTransfer);
+  };
 
   /** 改归属：走 IPC 那一条，服务端那一处判作者。 */
   const setShareScope = async (shareScope: NoteShareScopeV1) => {
@@ -838,19 +862,19 @@ export function NotebookSurface() {
   // "已自动保存" while keystrokes were still uncommitted — and the page's own
   // 草稿 tag said the opposite.
   const saveLabel = saving || saveState === "saving"
-    ? "● 正在提交…"
+    ? "● 正在保存…"
     : saveState === "error"
-      ? "● 这次提交没成功，你写的还在本机"
+      ? "● 这次没保存上，你写的还在本机"
       : dirty
-        ? "● 有未提交编辑"
+        ? "● 有改动还没保存"
         : saveState === "committed" && receipt
           ? // 流式那条只能说"已写入、正在同步"：服务端落盘还要等 Hocuspocus 的空闲
             // 刷写。把本机接受说成已保存，就是这次审查里"看起来存下来了"那一类错觉。
             `● ${receipt.isAutosave
               ? receipt.via === "queued"
-                ? "没网，已记在本机，联网后自动交上去"
+                ? "没网，先记在本机，联网后自动保存"
                 : receipt.via === "stream" ? "已写入，正在同步" : "已自动保存"
-              : receipt.via === "no_change" ? "这已经是一个版本了，没有新的改动" : "已提交并确认"} · ${formatClock(receipt.savedAt)}`
+              : receipt.via === "no_change" ? "没有新的改动，还是那一版" : "已保存"} · ${formatClock(receipt.savedAt)}`
           : "● 已经存好，和服务器上的版本一致";
 
   const openSource = () => {
@@ -1088,7 +1112,7 @@ export function NotebookSurface() {
         <fieldset className="generation-options">
           <legend>生成方案</legend>
           <div className="generation-options__row">
-            <span className="generation-options__label">学习目标</span>
+            <span className="generation-options__label">学习卡</span>
             {LEARNING_GOALS.map((item) => (
               <button
                 key={item.value}
@@ -1259,7 +1283,7 @@ export function NotebookSurface() {
       <div className="meta">
         <span>{formatRelative(note.currentVersion.updatedAt)}</span>
         <span>{note.sourceId ? `关联来源 ${source?.source.title ?? "暂时读不到"}` : "未关联来源"}</span>
-        <span>{objective ? `理解目标：${objective.content.conceptLabel ?? "未命名目标"}` : "未关联理解目标"}</span>
+        <span>{objective ? `学习卡：${objective.content.conceptLabel ?? "未命名学习卡"}` : "未关联学习卡"}</span>
       </div>
       <div className="rule" />
       <div className="reading-body">
@@ -1269,14 +1293,13 @@ export function NotebookSurface() {
             block={block}
             mark={mark?.ordinal === block.ordinal ? mark.range : null}
             workspaceEpoch={epochRef.current}
-            imageIndex={noteImages.ordinalToIndex.get(block.ordinal)}
-            imageOpen={noteGallery.openIndex !== null
-              && noteImages.ordinalToIndex.get(block.ordinal) === noteGallery.openIndex}
-            onOpenImage={(open) => {
-              const index = noteImages.ordinalToIndex.get(block.ordinal);
-              if (open && index !== undefined) noteGallery.openAt(index);
-              else noteGallery.close();
-            }}
+            gallery={noteImages.ordinalToStart.has(block.ordinal)
+              ? {
+                start: noteImages.ordinalToStart.get(block.ordinal)!,
+                openAt: (index: number) => noteGallery.openAt(index),
+                close: noteGallery.close,
+              }
+              : undefined}
           />
         )) : <p className="small">这一版正文还没有段落。</p>}
         {hiddenBlockCount > 0 ? (
@@ -1306,7 +1329,7 @@ export function NotebookSurface() {
           server text with no explanation. */}
       {saving || dirty ? (
         <p className="small notebook-note" role="status">
-          {saving ? "正在提交刚才的编辑…" : "有未提交编辑，切回编辑继续写。"}
+          {saving ? "正在保存刚才的编辑…" : "有改动还没保存，切回编辑继续写。"}
         </p>
       ) : null}
       {restoredDraftNote}
@@ -1382,9 +1405,9 @@ export function NotebookSurface() {
           <span className="tag red">{dirty || saveState === "error" ? "草稿" : "已同步"}</span>
       <NotebookPresence peers={noteDocLive.presencePeers} selfName={presenceName} />
       {shareStateControls}
-      {/* 那句"每次改动都会存成一个版本"已经不成立：自动保存并入正文，只有
-          「提交并确认」才存成一个可回去的版本。继续写着就是给读者一个假的心智模型。 */}
-      <span className="small">改动会实时并入这一篇；点「提交并确认」才存成一个可回去的版本</span>
+      {/* 自动保存并入正文，只有按「保存」才留下一个可回去的版本。左上角 HUD 那句
+          "每次改动都会存成版本"讲的正是这件错的事——两处必须跟着同一句走。 */}
+      <span className="small">改动会实时并入这一篇；点「保存」才存成一个可回去的版本</span>
         </div>
         <div className="meta">
           <span>{note.permissions.canSave ? "自动保存开启" : "当前身份不能保存"}</span>
@@ -1517,16 +1540,19 @@ export function NotebookSurface() {
           不再替它摆一对按钮。 */}
       {/* 常驻：这不只是"存一下改过的字"，而是把此刻定成一个可回去的版本。
           挂在 `dirty` 上会让它在自动保存过后消失——那正是 F36 里用户一次都点不到的按钮。
-          名字与纸面提示、版本历史里那句必须同一个（原来屏上的真按钮叫「立即保存」，
-          提示语却在指「提交并确认」）。 */}
+          名字与纸面提示、版本历史里那句必须同一个。
+          没保存上时它就地变成「重试保存」：这一档只留一颗可点的按钮，
+          而不是并排摆两颗、让人猜该点哪个（用户报的就是"都保存好了还让我确认什么"）。 */}
       {note.permissions.canSave ? (
-        <button type="button" className="button" disabled={saving} onClick={() => void save("manual")}>
-          {saving ? "正在提交…" : "提交并确认"}
-        </button>
-      ) : null}
-      {saveState === "error" ? (
-        <button type="button" className="button danger" disabled={saving} onClick={() => void save("manual")}>
-          <RefreshCw size={15} aria-hidden="true" />重试保存
+        <button
+          type="button"
+          className={saveState === "error" ? "button danger" : "button"}
+          disabled={saving}
+          onClick={() => void save("manual")}
+        >
+          {saveState === "error" ? (
+            <><RefreshCw size={15} aria-hidden="true" />重试保存</>
+          ) : saving ? "正在保存…" : "保存"}
         </button>
       ) : null}
       {versionAndOptionsToggles}
@@ -1537,7 +1563,21 @@ export function NotebookSurface() {
   return (
     <>
       <HudPage page={page}>
-        <article className="notebook" aria-busy={loading || undefined} data-mode={mode}>
+        <article
+          className="notebook"
+          aria-busy={loading || undefined}
+          data-mode={mode}
+          data-note-paper-image-drop={paperAcceptsImages ? "" : undefined}
+          onDragOver={(event) => {
+            if (paperImageFiles(event).length > 0) event.preventDefault();
+          }}
+          onDrop={(event) => {
+            const files = paperImageFiles(event);
+            if (files.length === 0) return;
+            event.preventDefault();
+            for (const file of files) imageUploads.queueFile(file);
+          }}
+        >
           {statePaper ? <div className="notebook-scroll">{statePaper}</div> : null}
           {!loading && !failure && note ? (
             <>
@@ -1578,65 +1618,67 @@ function ReadingBlock({
   block,
   mark,
   workspaceEpoch,
-  imageIndex,
-  imageOpen,
-  onOpenImage,
+  gallery,
 }: {
   readonly block: NoteBlockProjectionV1;
   /** Character range of the sentence this block contributes, when it has one. */
   readonly mark: readonly [number, number] | null;
   /** 站内图片的字节请求要带上它，工作区换了就不该再回旧图。 */
   readonly workspaceEpoch?: number;
-  /** 这张图在整篇笔记图片画廊里的序号；不是图片块时为 undefined。 */
-  readonly imageIndex?: number;
-  /** 画廊此刻是否正开在这张图上（受控灯箱）。 */
-  readonly imageOpen?: boolean;
-  readonly onOpenImage?: (open: boolean) => void;
+  /**
+   * 这一块第一张图在整篇画廊里的序号与开关（一块可以有好几张：编辑器里的图是行内
+   * 节点）。没有图的块不传，那时行内图仍可单独放大，只是不进整篇画廊。
+   */
+  readonly gallery?: {
+    readonly start: number;
+    readonly openAt: (index: number) => void;
+    readonly close: () => void;
+  };
 }) {
   if (block.type === "image") {
     // 图片块要先取字节再画图，所以由自己的组件承载状态：hook 不能排在这一串
     // 按块类型分叉的早返回之后。
-    return (
-      <ReadingImage
-        block={block}
-        workspaceEpoch={workspaceEpoch}
-        imageOpen={imageOpen}
-        onOpenImage={onOpenImage}
-      />
-    );
+    return <ReadingImage block={block} workspaceEpoch={workspaceEpoch} gallery={gallery} />;
   }
-  const text = noteBlockText(block.content);
-  if (block.type === "heading") return <h3 className="serif">{text}</h3>;
-  if (block.type === "code") return <pre className="code-block"><code>{text}</code></pre>;
-  if (block.type === "list") return <p className="list-block">{text}</p>;
-  if (block.type === "quote") return <p className="quote">{text}</p>;
+  const inline = {
+    mark,
+    workspaceEpoch,
+    galleryStart: gallery?.start,
+    onOpenGallery: gallery?.openAt,
+  };
+  if (block.type === "heading") return <h3 className="serif">{renderNoteInline(block.content, inline)}</h3>;
+  if (block.type === "code") {
+    // 代码块里的换行与星号都是内容，不是语法：`pre` 自己保空白，不走行内解析。
+    return <pre className="code-block"><code>{noteBlockText(block.content)}</code></pre>;
+  }
+  if (block.type === "list") {
+    // 每一项占一行、带自己的记号：以前整块列表压成一行，第二项开始根本看不出是列表。
+    return <p className="list-block">{renderNoteInline(block.content, { ...inline, lineClass: "list-line" })}</p>;
+  }
+  if (block.type === "quote") return <p className="quote">{renderNoteInline(block.content, inline)}</p>;
   // Tables have no block type; a paragraph of pipe rows renders as one.
-  const table = parseMarkdownTable(text);
+  const table = parseMarkdownTable(noteBlockText(block.content));
   if (table) {
-    const [header, ...rows] = table;
+    // 第二行是**语法**不是内容（`| --- | --- |` 那一条分隔行），跟着画就多出一整行减号。
+    const [header, , ...rows] = table;
+    const cell = (value: string, key: string) => <span key={key}>{renderNoteInline(value, { mark: null })}</span>;
     return (
       <table className="md-table">
         <thead>
-          <tr>{header.map((cell, index) => <th key={index}>{cell}</th>)}</tr>
+          <tr>{header?.map((value, index) => <th key={index}>{cell(value, `h${index}`)}</th>)}</tr>
         </thead>
         <tbody>
           {rows.map((row, rowIndex) => (
-            <tr key={rowIndex}>{row.map((cell, cellIndex) => <td key={cellIndex}>{cell}</td>)}</tr>
+            <tr key={rowIndex}>{row.map((value, cellIndex) => <td key={cellIndex}>{cell(value, `c${rowIndex}-${cellIndex}`)}</td>)}</tr>
           ))}
         </tbody>
       </table>
     );
   }
-  if (!mark) return <p>{text}</p>;
-  const [start, end] = mark;
-  if (start >= end) return <p>{text}</p>;
-  return (
-    <p>
-      {text.slice(0, start)}
-      <span className="mark">{text.slice(start, end)}</span>
-      {text.slice(end)}
-    </p>
-  );
+  // 编辑器把 `---` 画成一条线，投影回来它是一个内容为 `---` 的段落；不认出来就是
+  // 纸面上凭空多出三个减号。
+  if (isHorizontalRule(noteInlineDisplayText(block.content))) return <hr className="reading-rule" />;
+  return <p>{renderNoteInline(block.content, inline)}</p>;
 }
 
 /**
@@ -1650,13 +1692,15 @@ function ReadingBlock({
 function ReadingImage({
   block,
   workspaceEpoch,
-  imageOpen,
-  onOpenImage,
+  gallery,
 }: {
   readonly block: NoteBlockProjectionV1;
   readonly workspaceEpoch?: number;
-  readonly imageOpen?: boolean;
-  readonly onOpenImage?: (open: boolean) => void;
+  readonly gallery?: {
+    readonly start: number;
+    readonly openAt: (index: number) => void;
+    readonly close: () => void;
+  };
 }) {
   const image = parseImageBlock(block.content);
   const { state, retry } = useSourceImage(image?.url ?? "", workspaceEpoch);
@@ -1671,8 +1715,13 @@ function ReadingImage({
         alt={alt}
         retryable={state.status === "ready"}
         onRetry={retry}
-        open={imageOpen}
-        onOpenChange={onOpenImage}
+        // 有整篇画廊时开关归画廊（受控，组件自己不再叠一层灯箱）；没有就单张放大。
+        open={gallery ? false : undefined}
+        onOpenChange={(open) => {
+          if (!gallery) return;
+          if (open) gallery.openAt(gallery.start);
+          else gallery.close();
+        }}
       />
     );
   }

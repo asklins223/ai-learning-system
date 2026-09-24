@@ -1552,10 +1552,19 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
       .then(() => persistNoteDocLocal(noteId))
       .then(() => gateway.watchNoteDocument(noteId, ({ noteId: _framedByGateway, ...event }) => {
       if (streamWorkspaceEpoch !== activeWorkspaceEpoch) return;
-      if (event.type === "status" && event.authorizedScope) {
-        authorizedScope = event.authorizedScope;
+      if (event.type === "status") {
+        // 可写的那句答复只在鉴权那一刻来一次，而**连接会掉**。掉了还留着
+        // `read-write`，写入就继续并进那条已经发不出去的文档：provider 的 `send` 在
+        // socket 不是 open 时**静默丢弃**（`readyState === Open` 才发），界面上照样是
+        // "● 已写入，正在同步"，而这一篇的正文只活在主进程那份内存文档里——离开这篇
+        // （transport 被销毁）就没了。所以连接不在时把这一位清掉，写入退回 HTTP 那条
+        // 同一个增量口（服务端一样收到，且 `via` 如实报 `uploaded`）。
+        const scope = event.status === "authenticated"
+          ? (event.authorizedScope ?? authorizedScope)
+          : null;
+        authorizedScope = scope;
         const entry = noteDocStreams.get(noteId);
-        if (entry) entry.authorizedScope = event.authorizedScope;
+        if (entry) entry.authorizedScope = scope;
       }
       emit("noteDoc", { kind: "note_doc_event", noteId, event }, activeWorkspaceEpoch);
     })).then((handle) => {

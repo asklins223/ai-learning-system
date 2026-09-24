@@ -21,6 +21,8 @@ import type { RoomIntent } from "../../app/room-machine";
 import { createRequestMeta, unwrapGatewayResult } from "../../app/desktop-client";
 import { HudPage } from "../hud/HudPage";
 import { useHudPage } from "../hud/use-hud-page";
+import { usePageReadableView } from "../hud/use-page-readable-view";
+import type { PageReadableV1 } from "@ailearn/shared/companion-bridge-contracts";
 import { SurfaceDataState, useDayAnchor, useSurfaceProjection } from "./surface-data";
 import { buildAllSpacesSummary, type AllSpacesSummary } from "./all-spaces-summary";
 import {
@@ -111,7 +113,7 @@ function enterDelay(index: number): { animationDelay: string } {
 const START_ACTIONS: readonly { readonly label: string; readonly intent: RoomIntent }[] = [
   { label: "写笔记", intent: "open-notebook" },
   { label: "收录来源", intent: "open-sources" },
-  { label: "理解目标", intent: "open-objectives" },
+  { label: "学习卡", intent: "open-objectives" },
 ];
 
 /** 单条日志/异常的跳转按钮：target 为空时不给按钮，不给读者一条死路。 */
@@ -581,6 +583,33 @@ export function StudySurface() {
   const sharedStep = useMemo(() => sharedAnomalyStep(groups), [groups]);
   const logNote = useMemo(() => (data ? todayLogTruncationNote(data) : null), [data]);
   const anomalyNote = useMemo(() => (data ? todayAnomalyTruncationNote(data) : null), [data]);
+
+  /**
+   * 今日页登记给伴星读的可读视图（doc 37）。条目就是屏上「待处理」那几组，
+   * 序号按屏幕顺序；headline/detail/metrics 全部复用 `buildTodayVerdict` 的产物，
+   * 这一层不重新算任何一个数。
+   */
+  const readableView = useMemo<PageReadableV1 | null>(() => {
+    if (!data || !verdict) return null;
+    return {
+      pageId: "today",
+      title: "今日学习",
+      statusLine: `${verdict.headline}${verdict.detail ? ` · ${verdict.detail.slice(0, 80)}` : ""}`,
+      metrics: [
+        ...verdict.metrics.map((metric) => ({ label: metric.label, value: metric.value })),
+        ...(verdict.background > 0 ? [{ label: "后台失败", value: `${verdict.background} 条` }] : []),
+      ],
+      items: groups.slice(0, 8).map((group, index) => ({
+        ordinal: index + 1,
+        label: group.title.slice(0, 60),
+        state: group.count > 1
+          ? `${group.statusLabel.slice(0, 16)} ×${group.count}`
+          : group.statusLabel.slice(0, 24),
+      })),
+      ...(failure ? { notice: `这一页没读到最新内容：${failure.slice(0, 80)}` } : {}),
+    };
+  }, [data, failure, groups, verdict]);
+  usePageReadableView(readableView);
 
   const triageRef = useRef<HTMLElement>(null);
   // 滚动交给容器的 `scroll-behavior`（CSS 里在 reduced-motion 下退回 auto），

@@ -595,3 +595,39 @@ describe("设置页与搜索页的会话级状态", () => {
     expect(payload.state).not.toHaveProperty("workspaceScopeRevision");
   });
 });
+
+describe("页面可读视图槽位（doc 37）", () => {
+  const view = (detail: string) => ({
+    pageId: "card_generation_progress",
+    title: "把《IndexTTS 2.5》整理成学习卡",
+    metrics: [{ label: "进度", value: detail }],
+  });
+
+  it("内容没变时不换对象——否则每一帧渲染都会重新 publish 一次", () => {
+    useRoomStore.getState().publishPageReadableView("t-1", view("已写出 3 / 4 张候选"));
+    const first = useRoomStore.getState().pageReadableView;
+    useRoomStore.getState().publishPageReadableView("t-1", view("已写出 3 / 4 张候选"));
+    expect(useRoomStore.getState().pageReadableView).toBe(first);
+    useRoomStore.getState().publishPageReadableView("t-1", view("已写出 4 / 4 张候选"));
+    expect(useRoomStore.getState().pageReadableView).not.toBe(first);
+    expect(useRoomStore.getState().pageReadableView?.view.metrics?.[0].value)
+      .toBe("已写出 4 / 4 张候选");
+  });
+
+  it("换页时后来者的发布不会被前一个页面的撤销抹掉", () => {
+    useRoomStore.getState().publishPageReadableView("t-old", view("已写出 4 / 4 张候选"));
+    useRoomStore.getState().publishPageReadableView("t-new", view("第 2 张 / 共 9 张"));
+    // 旧页面卸载时的 cleanup 可能晚于新页面发布——令牌不匹配就必须什么都不做。
+    useRoomStore.getState().retractPageReadableView("t-old");
+    expect(useRoomStore.getState().pageReadableView?.token).toBe("t-new");
+    useRoomStore.getState().retractPageReadableView("t-new");
+    expect(useRoomStore.getState().pageReadableView).toBeNull();
+  });
+
+  it("实时状态不持久化：重启后由页面重新登记", () => {
+    useRoomStore.getState().publishPageReadableView("t-1", view("已写出 3 / 4 张候选"));
+    const raw = persistedStorage.entries.get("ailearn.desktop-room.v2");
+    const payload = JSON.parse(raw as string) as { state: Record<string, unknown> };
+    expect(payload.state).not.toHaveProperty("pageReadableView");
+  });
+});

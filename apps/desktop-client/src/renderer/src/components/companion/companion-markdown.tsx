@@ -11,7 +11,7 @@
  * 已下发前缀之后还会变，任何"猜闭合"的做法都会让文字在用户眼前跳变。
  */
 import type { ReactNode } from "react";
-import { openCompanionExternalLink } from "./companion-link";
+import { openExternalLink } from "../../app/external-link";
 
 /**
  * 行内标记。斜体那条刻意要求星号两侧都不是空白，否则 `长 * 宽 * 高`
@@ -42,7 +42,7 @@ function renderInline(text: string, keyBase: string): ReactNode[] {
           type="button"
           className="companion-md__link"
           key={`${keyBase}-${index}`}
-          onClick={() => { void openCompanionExternalLink(groups.url); }}
+          onClick={() => { void openExternalLink(groups.url); }}
         >
           <span>{groups.label}</span>
           <small>{groups.url}</small>

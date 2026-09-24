@@ -24,7 +24,7 @@ import { HocuspocusProvider } from "@hocuspocus/provider";
 import { closeDatabase, withWorkspaceTransaction } from "../db/client.ts";
 import { checkpointNote, createNote } from "../modules/note/service.ts";
 import { documentNameForNote, closeNoteCollaboration, collaborationLoad } from "../modules/note/collaboration.ts";
-import { docFromSnapshot, editFragmentBlockText, projectFragmentBlocks } from "../modules/note/doc-fragment.ts";
+import { docFromSnapshot, editFragmentBlockText, projectFragmentBlocks, writeFragmentBlocks } from "../modules/note/doc-fragment.ts";
 
 /**
  * 夹具连接用超级用户那条（`DATABASE_URL`），被测应用连接仍是 `ailearn_api`。
@@ -72,6 +72,8 @@ let privateNoteId = "";
 const liveProviders: HocuspocusProvider[] = [];
 
 const paraA = `协同段落甲 ${tag}`;const paraB = `协同段落乙 ${tag}`;
+/** 第三条段落：只在"同源增量"的正向对照里用，避免踩到别的用例改过的第 2 块。 */
+const paraC = `协同段落丙 ${tag}`;
 const noteTitle = `协同笔记 ${tag}`;
 /**
  * 所有拒绝对客户端都只有这一个理由：`onAuthenticate` 抛的 message 只进服务端日志
@@ -516,6 +518,296 @@ test("非法或超限的增量：400 与 413 分得清", async () => {
   const tooBig = await uploadUpdate(ownerToken, oversize);
   assert.equal(tooBig.statusCode, 413, `超尺寸应回 413，实际 ${tooBig.statusCode}: ${tooBig.body}`);
   assert.equal(tooBig.json().error, "update_too_large");
+});
+
+/** 建一篇**空**笔记（界面上点「新建笔记」就是这条：`blocks: []`，因此没有文档快照）。 */
+async function createEmptyNote(token: string): Promise<string> {
+  const created = await app.inject({
+    method: "POST",
+    url: "/notes",
+    headers: { authorization: `Bearer ${token}` },
+    payload: { blocks: [] },
+  });
+  assert.equal(created.statusCode, 200, `新建笔记必须成功，实际 ${created.statusCode}: ${created.body}`);
+  const noteIdCreated = created.json().note.id as string;
+  // 前提断言：`blocks: []` 那条路不写文档快照（写了这条用例就不是在测补齐那条路）。
+  const stored = await sql`SELECT note_id FROM note_document_states WHERE note_id = ${noteIdCreated}`;
+  assert.equal(stored.length, 0, "空笔记不该一开始就有文档快照，这条用例的前提变了");
+  return noteIdCreated;
+}
+
+test("修改一篇没有快照的历史笔记：改既有文字、删字、追加、改标题，一样都不许丢", async () => {
+  // 与上一条同一个根因，但走的是**改**而不是"在空笔记里敲第一句"：
+  //  - 库里现在就有这种行（4.1 之前建的、以及导入/来源转笔记之外的路留下的）：
+  //    25 块、72 块的老笔记没有 `note_document_states` 行；
+  //  - 改既有文字在 Yjs 里是 delete+insert（patch 一段已经存在的 `Y.XmlText`），
+  //    与"追加一段"产生的结构形状不同，所以这条单独钉。
+  // 修之前：第一次上送 200 而库里一个字没动；状态行是那次落盘顺手建的，于是**第二次**
+  // 之后的编辑又好了——用户看到的就是"改了没保存，再改一次又好了"。
+  const created = await app.inject({
+    method: "POST",
+    url: "/notes",
+    headers: { authorization: `Bearer ${ownerToken}` },
+    payload: {
+      title: `历史笔记改写 ${tag}`,
+      blocks: [
+        { type: "heading", content: `历史笔记改写 ${tag}` },
+        { type: "paragraph", content: `原来的第一段 ${tag}` },
+        { type: "paragraph", content: `原来的第二段 ${tag}` },
+      ],
+    },
+  });
+  assert.equal(created.statusCode, 200, `建笔记必须成功，实际 ${created.statusCode}: ${created.body}`);
+  const legacyNoteId = created.json().note.id as string;
+  // 删掉快照 = 回到"4.1 之前建的笔记"那个形状（`loadNoteDoc` 只能从 note_blocks 补齐）。
+  await sql`DELETE FROM note_document_states WHERE note_id = ${legacyNoteId}`;
+
+  const docStateOf = async (): Promise<{ update: string; backfilled: boolean }> => {
+    const response = await app.inject({
+      method: "GET",
+      url: `/v2/notes/${legacyNoteId}/doc-state`,
+      headers: { authorization: `Bearer ${ownerToken}` },
+    });
+    assert.equal(response.statusCode, 200, `取起点必须成功，实际 ${response.statusCode}: ${response.body}`);
+    return response.json() as { update: string; backfilled: boolean };
+  };
+  const storedContents = async (): Promise<string[]> => {
+    const rows = await sql`SELECT state FROM note_document_states WHERE note_id = ${legacyNoteId}`;
+    if (!rows.length) return [];
+    const doc = docFromSnapshot(rows[0].state as Uint8Array);
+    const contents = projectFragmentBlocks(doc).map((block) => block.content);
+    doc.destroy();
+    return contents;
+  };
+  const projectedContents = async (): Promise<string[]> =>
+    (await sql`
+      SELECT nb.content FROM note_blocks nb
+      JOIN notes n ON n.current_version_id = nb.version_id
+      WHERE n.id = ${legacyNoteId} ORDER BY nb.ordinal
+    `).map((row) => String(row.content));
+
+  // ① 改既有文字（patch 一段已经存在的行）
+  const first = await docStateOf();
+  assert.equal(first.backfilled, true, "没有快照时必须走补齐那条路，这条用例的前提就是这个");
+  const edited = docFromSnapshot(Buffer.from(first.update, "base64"));
+  const rewritten = `改过的第一段 ${tag}`;
+  const editedBefore = Y.encodeStateVector(edited);
+  editFragmentBlockText(edited, 1, rewritten);
+  const editUpdate = Buffer.from(Y.encodeStateAsUpdate(edited, editedBefore)).toString("base64");
+  edited.destroy();
+  const editSent = await uploadUpdate(ownerToken, editUpdate, legacyNoteId);
+  assert.equal(editSent.statusCode, 200, `改写必须成功，实际 ${editSent.statusCode}: ${editSent.body}`);
+  assert.ok((await storedContents()).includes(rewritten), "改写没进文档快照");
+  assert.ok((await projectedContents()).includes(rewritten), "改写没投影进 note_blocks");
+
+  // ② 在同一篇上继续：删掉一段的字 + 追加一段 + 改标题（meta 那条路）
+  const second = await docStateOf();
+  assert.equal(second.backfilled, false, "第一次写入之后快照必须已经定下来");
+  const more = docFromSnapshot(Buffer.from(second.update, "base64"));
+  const moreBefore = Y.encodeStateVector(more);
+  const fragment = more.getXmlFragment("content");
+  const third = fragment.get(2) as Y.XmlElement;
+  const line = third.get(0) as Y.XmlText;
+  line.delete(0, line.length);
+  const appended = `追加的一段 ${tag}`;
+  const paragraph = new Y.XmlElement("paragraph");
+  paragraph.insert(0, [new Y.XmlText(appended)]);
+  fragment.insert(fragment.length, [paragraph]);
+  more.getMap("meta").set("title", `改过的标题 ${tag}`);
+  more.getMap("meta").set("titleSource", "manual");
+  const moreUpdate = Buffer.from(Y.encodeStateAsUpdate(more, moreBefore)).toString("base64");
+  more.destroy();
+  const moreSent = await uploadUpdate(ownerToken, moreUpdate, legacyNoteId);
+  assert.equal(moreSent.statusCode, 200, `删字+追加+改标题必须成功，实际 ${moreSent.statusCode}: ${moreSent.body}`);
+
+  const after = await storedContents();
+  assert.ok(after.includes(appended), "追加的那一段没进快照");
+  assert.ok(!after.includes(`原来的第二段 ${tag}`), "删掉的字又回来了");
+  assert.ok(after.includes(rewritten), "第二次写入把第一次的改写弄丢了");
+  const title = await sql`SELECT title, title_source FROM notes WHERE id = ${legacyNoteId}`;
+  assert.equal(String(title[0].title), `改过的标题 ${tag}`, "标题没落到 notes.title");
+  assert.equal(String(title[0].title_source), "manual");
+});
+
+test("新建的空笔记：按取到的起点敲字，必须真的落库（2026-09-23 丢字现场）", async () => {
+  // 复现用户报的那条链路：点「新建笔记」（`blocks: []` → **没有** `note_document_states`
+  // 行）→ 打开这篇取起点 → 敲几行 → 自动保存（POST doc-update）。
+  //
+  // 修之前：上送回 **200 + revision+1**，而库里一个字都没动。根因是"补齐"每次
+  // `new Y.Doc()`（每次一个新 clientID）：取起点那次补齐出一份 X，写入时
+  // `onLoadDocument` 又补齐出一份 Y，两份互不相识——客户端按 X 产生的增量在 Y 上缺依赖，
+  // Yjs 把它挂进 `pendingStructs` 且**不报错**，落盘钩子照样把没变的 Y 写回去。界面上
+  // 显示"● 已自动保存"，返回列表再进来自然"只存下来一点点"。空笔记这条路每次都命中，
+  // 所以它是必现的（同一条链路的探针实测：doc-update 200 revision=1，快照里仍是空段落）。
+  const freshNoteId = await createEmptyNote(ownerToken);
+
+  const stateResponse = await app.inject({
+    method: "GET",
+    url: `/v2/notes/${freshNoteId}/doc-state`,
+    headers: { authorization: `Bearer ${ownerToken}` },
+  });
+  assert.equal(stateResponse.statusCode, 200, `取起点必须成功，实际 ${stateResponse.statusCode}: ${stateResponse.body}`);
+  const start = stateResponse.json() as { update: string; backfilled: boolean };
+  assert.equal(start.backfilled, true, "空笔记没有快照，这条用例的前提就是走补齐那条路");
+
+  // 界面那一侧：拿起点建自己的文档，敲一句，差出增量。
+  const local = docFromSnapshot(Buffer.from(start.update, "base64"));
+  const before = Y.encodeStateVector(local);
+  const typed = `用户敲进去的这一句 ${tag}`;
+  writeFragmentBlocks(local, [
+    ...projectFragmentBlocks(local).map(({ ordinal: _ordinal, ...block }) => ({
+      type: block.type,
+      content: block.content,
+    })),
+    { type: "paragraph", content: typed },
+  ]);
+  const update = Buffer.from(Y.encodeStateAsUpdate(local, before)).toString("base64");
+  local.destroy();
+
+  const sent = await uploadUpdate(ownerToken, update, freshNoteId);
+  assert.equal(sent.statusCode, 200, `上送必须成功，实际 ${sent.statusCode}: ${sent.body}`);
+
+  // 关键断言：这一句必须真的在库里。修之前这里红在"上送回了 200，正文却没进"。
+  const rows = await sql`
+    SELECT nb.content FROM note_blocks nb
+    JOIN notes n ON n.current_version_id = nb.version_id
+    WHERE n.id = ${freshNoteId} ORDER BY nb.ordinal
+  `;
+  assert.ok(
+    rows.map((row) => String(row.content)).some((content) => content.includes(typed)),
+    `上送回 200，正文却没进 note_blocks：${JSON.stringify(rows.map((row) => String(row.content)))}`,
+  );
+  const stored = await sql`SELECT state FROM note_document_states WHERE note_id = ${freshNoteId}`;
+  assert.equal(stored.length, 1, "上送之后必须留下这一篇的文档快照");
+  const storedDoc = docFromSnapshot(stored[0].state as Uint8Array);
+  assert.ok(
+    projectFragmentBlocks(storedDoc).some((block) => block.content.includes(typed)),
+    "文档快照里没有这句：增量被挂起了（缺依赖），服务端根本没应用它",
+  );
+  storedDoc.destroy();
+
+  // 第二次敲（快照已存在、两边同源）必须照常合并——正向对照，否则上面那条可能只是"碰巧"。
+  const again = await app.inject({
+    method: "GET",
+    url: `/v2/notes/${freshNoteId}/doc-state`,
+    headers: { authorization: `Bearer ${ownerToken}` },
+  });
+  assert.equal(again.json().backfilled, false, "快照已经定下来了，这一次不该再补齐");
+  const second = docFromSnapshot(Buffer.from((again.json() as { update: string }).update, "base64"));
+  const secondBefore = Y.encodeStateVector(second);
+  const typedAgain = `第二句 ${tag}`;
+  writeFragmentBlocks(second, [
+    ...projectFragmentBlocks(second).map(({ ordinal: _ordinal, ...block }) => ({
+      type: block.type,
+      content: block.content,
+    })),
+    { type: "paragraph", content: typedAgain },
+  ]);
+  const secondUpdate = Buffer.from(Y.encodeStateAsUpdate(second, secondBefore)).toString("base64");
+  second.destroy();
+  const secondSent = await uploadUpdate(ownerToken, secondUpdate, freshNoteId);
+  assert.equal(secondSent.statusCode, 200, `第二次上送必须成功，实际 ${secondSent.statusCode}: ${secondSent.body}`);
+  const afterSecond = await sql`SELECT state FROM note_document_states WHERE note_id = ${freshNoteId}`;
+  const finalDoc = docFromSnapshot(afterSecond[0].state as Uint8Array);
+  const finalContents = projectFragmentBlocks(finalDoc).map((block) => block.content);
+  finalDoc.destroy();
+  assert.ok(finalContents.some((content) => content.includes(typed)), "第二次上送把第一句弄丢了");
+  assert.ok(finalContents.some((content) => content.includes(typedAgain)), "第二次上送没落进快照");
+});
+
+test("来历不明的增量：409 + doc_identity_mismatch，不许再回 200", async () => {
+  // 与库里那份**没有共同历史**的增量（这里拿另一篇笔记的起点造一条）：服务端应用不了它，
+  // 必须明确拒绝。报 200 的话客户端会当成"已保存"并清掉本机草稿，而库里一个字没动——
+  // 那正是上一条丢字的形状。这一格是兜底：身份错位再发生时，宁可报错。
+  const otherNoteId = await createEmptyNote(ownerToken);
+  const otherState = await app.inject({
+    method: "GET",
+    url: `/v2/notes/${otherNoteId}/doc-state`,
+    headers: { authorization: `Bearer ${ownerToken}` },
+  });
+  assert.equal(otherState.statusCode, 200);
+
+  const foreign = docFromSnapshot(Buffer.from((otherState.json() as { update: string }).update, "base64"));
+  const foreignBefore = Y.encodeStateVector(foreign);
+  editFragmentBlockText(foreign, 0, `另一篇笔记上的这一句 ${tag}`);
+  const foreignUpdate = Buffer.from(Y.encodeStateAsUpdate(foreign, foreignBefore)).toString("base64");
+  foreign.destroy();
+
+  const rejected = await uploadUpdate(ownerToken, foreignUpdate);
+  assert.equal(rejected.statusCode, 409, `来历不明的增量必须被拒，实际 ${rejected.statusCode}: ${rejected.body}`);
+  assert.equal(rejected.json().error, "doc_identity_mismatch", "拒绝的理由必须可分辨");
+
+  // 正向对照：同一篇自己的起点造出来的增量照常 200——上面那条不是因为"上送坏了"才 409。
+  const own = await app.inject({
+    method: "GET",
+    url: `/v2/notes/${noteId}/doc-state`,
+    headers: { authorization: `Bearer ${ownerToken}` },
+  });
+  const ownDoc = docFromSnapshot(Buffer.from((own.json() as { update: string }).update, "base64"));
+  const ownBefore = Y.encodeStateVector(ownDoc);
+  const ownEdit = `${paraC}（同源增量）`;
+  editFragmentBlockText(ownDoc, 1, ownEdit);
+  const ownUpdate = Buffer.from(Y.encodeStateAsUpdate(ownDoc, ownBefore)).toString("base64");
+  ownDoc.destroy();
+  const accepted = await uploadUpdate(ownerToken, ownUpdate);
+  assert.equal(accepted.statusCode, 200, `同源增量必须照常接受，实际 ${accepted.statusCode}: ${accepted.body}`);
+  await waitFor(async () => (await projectedRows()).includes(ownEdit), "同源增量落库");
+});
+
+test("协作空间那条路：按 doc-state 起点敲的字，经 WS 那份文档也要真的落库", async () => {
+  // 同一条丢字现场的**协作半边**：桌面端在协作空间里走 WS——渲染进程的文档来自
+  // `doc-state`，而 provider 那份是服务端自己加载出来的。补齐那一步如果各自造一份
+  // 新身份的文档，两边就互不相识：渲染进程的增量并进 transport 后，服务端那份文档
+  // 一个字不变，`applyLocal` 读到"没产生新东西"、界面显示"已自动保存"，而库里没有。
+  const freshNoteId = await createEmptyNote(ownerToken);
+  await sql`UPDATE notes SET share_scope = 'shared' WHERE id = ${freshNoteId}`;
+
+  const stateResponse = await app.inject({
+    method: "GET",
+    url: `/v2/notes/${freshNoteId}/doc-state`,
+    headers: { authorization: `Bearer ${ownerToken}` },
+  });
+  assert.equal(stateResponse.statusCode, 200, `取起点必须成功，实际 ${stateResponse.statusCode}: ${stateResponse.body}`);
+  const rendererDoc = docFromSnapshot(Buffer.from((stateResponse.json() as { update: string }).update, "base64"));
+
+  // 桌面端的 transport：一条空文档 + provider，内容由服务端同步过来。
+  const { doc: transport, provider, synced } = connect(ownerToken, documentNameForNote(freshNoteId));
+  await synced;
+
+  const before = Y.encodeStateVector(rendererDoc);
+  const typed = `协作空间里敲进去的这一句 ${tag}`;
+  editFragmentBlockText(rendererDoc, 0, typed);
+  const diff = Buffer.from(Y.encodeStateAsUpdate(rendererDoc, before));
+  rendererDoc.destroy();
+  assert.ok(diff.length > 0, "没造出增量，这条用例什么都没测");
+
+  // 主进程那一步：把界面的增量并进 transport 文档，由 provider 送出去。
+  transport.transact(() => {
+    Y.applyUpdate(transport, diff, "local");
+  });
+  await waitFor(() => provider.unsyncedChanges === 0, "服务端确认收到 WS 编辑");
+
+  // 落库要等 Hocuspocus 的空闲刷写（debounce 2 秒）。
+  const storedOf = async (): Promise<string[]> => {
+    const rows = await sql`SELECT state FROM note_document_states WHERE note_id = ${freshNoteId}`;
+    if (!rows.length) return [];
+    const doc = docFromSnapshot(rows[0].state as Uint8Array);
+    const contents = projectFragmentBlocks(doc).map((block) => block.content);
+    doc.destroy();
+    return contents;
+  };
+  await waitFor(async () => (await storedOf()).some((content) => content.includes(typed)), "WS 编辑落进快照");
+  const projected = await sql`
+    SELECT nb.content FROM note_blocks nb
+    JOIN notes n ON n.current_version_id = nb.version_id
+    WHERE n.id = ${freshNoteId} ORDER BY nb.ordinal
+  `;
+  assert.ok(
+    projected.map((row) => String(row.content)).some((content) => content.includes(typed)),
+    "WS 那条路的编辑没投影进 note_blocks",
+  );
+  destroyProviders();
+  await waitFor(() => collaborationLoad().documents === 0, "文档卸载");
 });
 
 test("编辑起点必须来自 doc-state：从行重建会复制块", async () => {

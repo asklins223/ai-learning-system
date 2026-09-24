@@ -23,6 +23,9 @@ export function computeContextRevisionV2(input: MainPageContextInput): string {
     graph: input.graph ?? null,
     capabilityHints: [...input.capabilityHints].sort(),
     sensitivity: input.sensitivity,
+    // 可读视图必须进摘要：视图变了就是 context 变了，否则 renew 的 CAS 与
+    // "同一个 publish 重试"的判定都会把内容变化当成重复请求吞掉。
+    readableView: input.readableView ?? null,
   });
   return sha256Hex(canonical);
 }

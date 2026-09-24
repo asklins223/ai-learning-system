@@ -59,7 +59,9 @@ function stubNoteDocApi(options: {
   const drafts = new Map<string, { update: string; savedAt: string }>();
   const docApi = {
     state: vi.fn(async (input: { noteId: string }) => noteDocResult({ update: options.seedFor(input.noteId) })),
-    syncUpdate: vi.fn(async () => ({
+    // 入参写成显式形状：用例要读 `calls[i][0].update`（"这一次交的是哪几条"），
+    // 不写就成了零参元组，读它 typecheck 直接红。
+    syncUpdate: vi.fn(async (_input: { noteId: string; update: string }) => ({
       ok: true as const,
       workspaceEpoch: 1,
       data: { via: options.via ?? "uploaded", revision: 2, savedAt: "2026-09-21T00:11:00.000Z" },
@@ -193,6 +195,56 @@ describe("笔记正文的本机草稿", () => {
     expect(drafts.has(NOTE_ID)).toBe(true);
     // 判据与"待提交"那一位同源：没交出去就还是脏的。
     expect(live?.dirty).toBe(true);
+  });
+
+  it("往返期间敲进来的字不会被那一次保存清掉", async () => {
+    // 一次自动保存要等一次服务端往返（实测 40–170ms，慢的时候更久），而人是不会停的。
+    // 回执回来时把整条队列清空，就等于把这段时间敲的字从"待提交"里划掉：既没交出去、
+    // 也不再算未提交，而同一刻清掉的草稿本来是它们唯一的副本——"敲了五六行、只存下来
+    // 一点点"的另一半就是这个。
+    vi.useFakeTimers();
+    const seed = seedUpdate();
+    const { docApi, drafts } = stubNoteDocApi({ seedFor: () => seed, via: "uploaded" });
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    docApi.syncUpdate.mockImplementation(async () => {
+      await gate;
+      return { ok: true as const, workspaceEpoch: 1, data: { via: "uploaded" as const, revision: 2, savedAt: DRAFT_SAVED_AT } };
+    });
+
+    render(<Probe noteId={NOTE_ID} />);
+    await settle();
+    act(() => { type("往返之前敲的"); });
+    await vi.advanceTimersByTimeAsync(700);
+    expect(drafts.has(NOTE_ID)).toBe(true);
+
+    // 这一次交出去的是"往返之前敲的"，回执还压着。
+    const inFlight = live!.flush();
+    await act(async () => { await Promise.resolve(); });
+    act(() => { type("往返期间敲的"); });
+    release();
+    await act(async () => { await inFlight; });
+
+    // 队列里还剩往返期间那一条：仍然脏，草稿也还在（它是那一条唯一的副本）。
+    expect(live?.dirty).toBe(true);
+    expect(drafts.has(NOTE_ID)).toBe(true);
+    expect(docApi.draftClear).not.toHaveBeenCalled();
+
+    // 下一次保存交的就是它——不是"已经保存过了"。
+    await act(async () => { await live?.flush(); });
+    expect(docApi.syncUpdate).toHaveBeenCalledTimes(2);
+    const first = docApi.syncUpdate.mock.calls[0]?.[0]?.update ?? "";
+    const second = docApi.syncUpdate.mock.calls[1]?.[0]?.update ?? "";
+    expect(second).not.toBe(first);
+    // 两次交的合起来，才是文档此刻的全部内容（第一次那句 + 往返期间那句）。
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, unB64(seed));
+    Y.applyUpdate(doc, unB64(first));
+    Y.applyUpdate(doc, unB64(second));
+    const text = doc.getXmlFragment(FRAGMENT_KEY).toString();
+    doc.destroy();
+    expect(text).toContain("往返之前敲的");
+    expect(text).toContain("往返期间敲的");
   });
 
   it("已经并进文档的那一份草稿不当成新的：不恢复，顺手清掉", async () => {

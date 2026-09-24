@@ -536,7 +536,7 @@ export function unverifiedNumericClaims(replyText: string, contextText: string):
 
 /**
  * 数字的**合法出处**只有"本轮重算出来的"那几块：环境快照、页面上下文、划选原文、
- * 学习目标。记忆块不算出处——实机 2026-09-21 那个编出来的"本周 23 分钟"被抽取器
+ * 学习卡。记忆块不算出处——实机 2026-09-21 那个编出来的"本周 23 分钟"被抽取器
  * 写成了 `learning_context`（见 companion-memory-extractor 的 isVolatileStatisticMemory），
  * 于是她下一轮"有依据"地复述自己的谎，而任何照上下文核对的判据都会判它合格。
  */

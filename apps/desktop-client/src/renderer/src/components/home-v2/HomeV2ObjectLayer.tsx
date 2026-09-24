@@ -9,7 +9,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useHomeProjection } from "../../app/home-projection";
 import { homePresentation } from "../../app/home-presentation";
@@ -17,6 +17,8 @@ import { useRoomStore } from "../../app/room-store";
 import { resolveSceneMotionMode } from "../../scene/scene-motion";
 import { useHomeV2 } from "./HomeV2Experience";
 import { useHudPage } from "../hud/use-hud-page";
+import { usePageReadableView } from "../hud/use-page-readable-view";
+import type { PageReadableV1 } from "@ailearn/shared/companion-bridge-contracts";
 import { HOME_FEATURE_ICONS } from "./home-feature-icons";
 import { homeFeaturesForRegion, type HomeFeatureRegionId } from "./home-feature-registry";
 import type { HomeV2Zone } from "./home-v2";
@@ -33,7 +35,7 @@ const REGION_COPY: Readonly<Record<ObjectZone, Readonly<{
 }>>> = Object.freeze({
   desk: { id: "desk-book", label: "书桌", detail: "今日下一步与今日复习", icon: BookOpenText },
   shelf: { id: "magic-catalog", label: "书架", detail: "研究册、笔记、资料与搜索", icon: Search },
-  window: { id: "window-stars", label: "星窗", detail: "学习目标与理解星图", icon: Orbit },
+  window: { id: "window-stars", label: "星窗", detail: "学习卡与理解星图", icon: Orbit },
   rest: { id: "rest-cushion", label: "休息角", detail: "伴星、日记、人格与记忆", icon: MessageCircle },
 });
 
@@ -194,6 +196,32 @@ export function HomeV2ObjectLayer() {
   useLayoutEffect(() => {
     setPortalHost(document.querySelector<HTMLElement>(".desktop-app"));
   }, []);
+
+  /**
+   * 首页登记给伴星读的可读视图（doc 37）。
+   *
+   * 必须按下面第 200 行那条早退的**同一组条件**收口：这个组件在业务页面上仍然挂载
+   * （只是渲染 null），无条件发布就会让首页和当前页抢同一个槽位——症状是"她在某些
+   * 页面上读到的是首页"。
+   * 三个读数（`reviewLabel` / `activeRunCount` / `queueCount`）直接取
+   * `homePresentation` 的产物，与首页那三张卡同源。
+   */
+  const homeShowing = !surface && !onboardingOpen && viewPreset === "room";
+  const readableView = useMemo<PageReadableV1 | null>(() => {
+    if (!homeShowing) return null;
+    return {
+      pageId: "home",
+      title: home.title,
+      statusLine: home.detail.slice(0, 160),
+      metrics: [
+        { label: "复习", value: home.reviewLabel },
+        ...(home.activeRunCount !== null ? [{ label: "可恢复的学习", value: `${home.activeRunCount} 轮` }] : []),
+        ...(home.queueCount !== null ? [{ label: "队列", value: `${home.queueCount} 项` }] : []),
+      ],
+      ...(failure ? { notice: `首页没有读到最新投影：${failure.slice(0, 80)}` } : {}),
+    };
+  }, [failure, home, homeShowing]);
+  usePageReadableView(readableView);
 
   if (surface || onboardingOpen || viewPreset !== "room") return null;
 

@@ -294,7 +294,7 @@
   }
 }
 
-/* WorkspaceLibrary（10 理解目标 / 11 目标详情）走 `.approved-surface__content`
+/* WorkspaceLibrary（10 学习卡 / 11 学习卡详情）走 `.approved-surface__content`
    壳，同一动态机制、同一注册表座位；注意这套壳的「无伴星」基线与 `.content`
    不同：默认 right:88 / left:88，折叠左座 22px，窄窗 44/64px。壳自带 560ms
    过渡，无需另加。 */
@@ -5642,6 +5642,64 @@
   height: 0;
   color: #967e6b;
   pointer-events: none;
+}
+
+/* ── 阅读页：与上面「书写区」同一套字形 ──
+ *
+ * 阅读页以前只画纯文本，所以上面那批行内元素对它一条都没生效——`**重点**` 露着星号、
+ * 段落里的图不画、`---` 当字打出来。这一段不是新规格：每一条都是把上面编辑器里
+ * 已经定好的值抄给 `.reading-body`，两处共用一份数字，而不是各写一份。
+ */
+.hud-surface .notebook .reading-body strong { font-weight: 700; }
+.hud-surface .notebook .reading-body em { font-style: italic; }
+.hud-surface .notebook .reading-body del { color: var(--hud-soft); }
+
+.hud-surface .notebook .reading-body a {
+  color: var(--hud-clay);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 4px;
+}
+
+.hud-surface .notebook .reading-body code {
+  padding: 1px 5px;
+  border-radius: 6px;
+  background-color: rgba(52, 37, 28, 0.08);
+  font: 0.88em ui-monospace, SFMono-Regular, Menlo, "Courier New", monospace;
+}
+
+/* 代码块整块已经是等宽底色，里面的 code 不再套一层（与编辑器 pre code 同一条豁免）。 */
+.hud-surface .notebook .reading-body .code-block code { padding: 0; background: none; font: inherit; }
+
+/* 段落里的图与块级图同一个形状：编辑器那边 img 也是 display block。 */
+.hud-surface .notebook .reading-body .reading-image {
+  max-height: 420px;
+  margin: 6px auto;
+}
+
+/* 分隔线：编辑器画 hr，阅读页以前把三个减号当字打出来。 */
+.hud-surface .notebook .reading-body .reading-rule {
+  height: 0;
+  margin: 0 0 var(--note-line);
+  border: 0;
+  border-top: 1px solid var(--hud-line-strong);
+}
+
+/* 引用：左侧一道竖线，与编辑器 blockquote 同一条。 */
+.hud-surface .notebook .reading-body .quote {
+  padding-left: 15px;
+  border-left: 3px solid rgba(175, 82, 44, 0.42);
+}
+
+/* 列表：一项一行、各带自己的记号。格线由外层那个 p 铺，所以行本身不再垫高度。
+   记号落在悬挂缩进腾出来的那 10px 里（`.p.list-block` 的 padding-left 15 / text-indent -10）。 */
+.hud-surface .notebook .reading-body .list-line { display: block; }
+
+.hud-surface .notebook .reading-body .list-line::before {
+  content: "•";
+  display: inline-block;
+  width: 10px;
+  margin-right: 5px;
+  color: var(--hud-clay);
 }
 
 @media (max-width: 760px) {

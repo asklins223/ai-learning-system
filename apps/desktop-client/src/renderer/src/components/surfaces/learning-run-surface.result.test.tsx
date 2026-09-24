@@ -8,6 +8,7 @@ import {
   getLearningRunResultResponseV2Schema,
 } from "@ailearn/shared/learning-run-v2-contracts";
 import { LearningRunSurface } from "./learning-run-surface";
+import { LEARNING_RUN_CEREMONY_LITE_DURATION_MS } from "./LearningRunCeremony";
 import { useRoomStore } from "../../app/room-store";
 
 /**
@@ -227,8 +228,45 @@ describe("LearningRunSurface · 新结果过关演出", () => {
     expect(document.querySelector(".learning-run-result-board")).not.toBeNull();
   });
 
-  it("练习那一次拿不到「已说清」判定时，圆章跟着换成留痕那一支", async () => {
-    renderResult(2, allCoveredPractice({
+  /**
+   * 演出不再按 3 秒自己收场（2026-09-24 裁定：点一下任意区域才关）。这一条等的
+   * 就是"过了改前那个 3000ms 它还在"，所以不能缩短——缩了就是在测改前的行为。
+   */
+  it("过了改前那 3 秒演出仍在，点任意一处才收场", async () => {
+    renderResult(2, allCoveredPractice(), vi.fn(), assessingSnapshot());
+    await waitFor(() => expect(document.querySelector(".learning-run-ceremony")).not.toBeNull());
+    await new Promise((resolve) => window.setTimeout(resolve, 3_400));
+    expect(document.querySelector(".learning-run-ceremony"), "演出仍应留在屏上").not.toBeNull();
+    expect(document.querySelector(".learning-run-result-board")?.hasAttribute("inert")).toBe(true);
+    fireEvent.pointerDown(document.body);
+    await waitFor(() => expect(document.querySelector(".learning-run-ceremony")).toBeNull());
+    expect(document.querySelector(".learning-run-result-board")?.hasAttribute("inert")).toBe(false);
+  });
+
+  it("有组件截断 pointerdown 冒泡时，演出仍点得开", async () => {
+    renderResult(2, allCoveredPractice(), vi.fn(), assessingSnapshot());
+    await waitFor(() => expect(document.querySelector(".learning-run-ceremony")).not.toBeNull());
+    // 伴星 feed 菜单就是这么挡的（CompanionFeedMenu.tsx:121）。监听不在捕获相的话，
+    // 这一屏会永远点不动。
+    const swallow = (event: Event) => event.stopPropagation();
+    document.body.addEventListener("pointerdown", swallow);
+    try {
+      fireEvent.pointerDown(document.body);
+      await waitFor(() => expect(document.querySelector(".learning-run-ceremony")).toBeNull());
+    } finally {
+      document.body.removeEventListener("pointerdown", swallow);
+    }
+  });
+
+  it("轻量模式仍按时自己收场，不把人挡在结算屏前", async () => {
+    useRoomStore.setState({ motionMode: "lite" });
+    renderResult(2, allCoveredPractice(), vi.fn(), assessingSnapshot());
+    await waitFor(() => expect(document.querySelector('.learning-run-ceremony[data-motion="lite"]')).not.toBeNull());
+    await new Promise((resolve) => window.setTimeout(resolve, LEARNING_RUN_CEREMONY_LITE_DURATION_MS + 300));
+    expect(document.querySelector(".learning-run-ceremony")).toBeNull();
+  });
+
+  it("练习那一次拿不到「已说清」判定时，圆章跟着换成留痕那一支", async () => {    renderResult(2, allCoveredPractice({
       assessment: {
         source: "assessment_critic",
         status: "completed",
@@ -239,7 +277,7 @@ describe("LearningRunSurface · 新结果过关演出", () => {
       },
     }), vi.fn(), assessingSnapshot());
     await waitFor(() => expect(document.querySelector(".learning-run-ceremony")).not.toBeNull());
-    expect(document.querySelector(".learning-run-ceremony__stamp")?.textContent).toBe("收获");
+    expect(document.querySelector(".learning-run-ceremony__stamp")?.textContent).toBe("留痕");
     expect(document.querySelector(".learning-run-ceremony__eyebrow")?.textContent).toBe("练习旅程 · 练习已留痕");
   });
 
@@ -326,7 +364,7 @@ describe("LearningRunSurface · 结算页结构", () => {
     await waitFor(() => expect(document.querySelector(".learning-run-result-actions")).not.toBeNull());
 
     const buttons = [...document.querySelectorAll<HTMLButtonElement>(".learning-run-result-actions button")];
-    expect(buttons.map((b) => b.textContent)).toEqual(["返回学习空间", "查看理解目标"]);
+    expect(buttons.map((b) => b.textContent)).toEqual(["返回学习空间", "查看学习卡"]);
     expect(buttons[0]?.className).toContain("primary");
   });
 

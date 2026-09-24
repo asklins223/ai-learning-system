@@ -123,3 +123,11 @@ export function learningRunResultMatchesRun(
 export function shouldConfirmCompanionForOutcome(outcome: LearningRunResultV2["outcome"]): boolean {
   return outcome === "demonstrated";
 }
+
+/**
+ * 演出比「伴星点头」宽：练习结算也值得一次到场，但它不算掌握。
+ * 两条判据必须分开——合在一起会让放开演出顺手把伴星口吻从 encourage 顶成 confirm。
+ */
+export function shouldPlayResultCeremony(outcome: LearningRunResultV2["outcome"]): boolean {
+  return outcome === "demonstrated" || outcome === "practice_completed";
+}

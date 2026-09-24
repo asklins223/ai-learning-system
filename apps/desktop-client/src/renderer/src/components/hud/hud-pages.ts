@@ -151,14 +151,14 @@ export const HUD_PAGES: Readonly<Record<HudPageId, HudPageDefinition>> = {
     plate: "writing",
     companion: {
       mode: "ambient", seat: "left", framing: "bust", interaction: "on-demand", proactive: "silent", draggable: false,
-      starter: "正文按不可变版本保存，来源和版本都在页边。",
+      starter: "来源和版本都收在页边。",
     },
   },
   "note-edit": {
     id: "note-edit",
     number: "09",
     title: "笔记编辑",
-    subtitle: "纯文本块专注写作；标题和正文每次改动都会存成版本",
+    subtitle: "Markdown 所见即所得；可回去的版本按「保存」留下",
     plate: "writing",
     // Reading and writing are one page in two modes, so they share a seat: the
     // clips hang over the right edge in both, and flipping the seat moved the
@@ -171,7 +171,7 @@ export const HUD_PAGES: Readonly<Record<HudPageId, HudPageDefinition>> = {
   goals: {
     id: "goals",
     number: "10",
-    title: "理解目标",
+    title: "学习卡",
     subtitle: "目标不是列表，而是一张正在推进的理解路线",
     plate: "workshop",
     companion: {
@@ -181,7 +181,7 @@ export const HUD_PAGES: Readonly<Record<HudPageId, HudPageDefinition>> = {
   "goal-detail": {
     id: "goal-detail",
     number: "11",
-    title: "理解目标详情",
+    title: "学习卡详情",
     subtitle: "围绕一个主张查看证据、出处、版本和验证入口",
     plate: "workshop",
     companion: {
@@ -268,14 +268,14 @@ export const HUD_PAGES: Readonly<Record<HudPageId, HudPageDefinition>> = {
     plate: "library",
     companion: {
       mode: "ambient", seat: "right", framing: "bust", interaction: "on-demand", proactive: "silent", draggable: false,
-      starter: "我把来源、笔记和理解目标放在同一组结果里。",
+      starter: "我把来源、笔记和学习卡放在同一组结果里。",
     },
   },
   graph: {
     id: "graph",
     number: "19",
     title: "理解星图",
-    subtitle: "把来源、笔记、理解目标与证据画成一片可漫游的知识宇宙",
+    subtitle: "把来源、笔记、学习卡与证据画成一片可漫游的知识宇宙",
     plate: "observatory",
     companion: {
       mode: "ambient", seat: "left", framing: "bust", interaction: "on-demand", proactive: "silent", draggable: false,

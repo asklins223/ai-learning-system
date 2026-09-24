@@ -542,6 +542,7 @@ export const desktopRouteKindValues = [
   "auth.login",
   "auth.register",
   "room.home",
+  "room.today",
   "objective.library",
   "objective.detail",
   "source.library",
@@ -570,6 +571,7 @@ export type DesktopNamespaceM2 = (typeof desktopNamespaceM2Values)[number];
 export const desktopRouteKindM2Values = [
   ...desktopRouteKindM1Values,
   "room.home",
+  "room.today",
   "objective.library",
   "objective.detail",
   "source.library",
@@ -605,6 +607,7 @@ const gateRouteSchema = z.discriminatedUnion("kind", [
 
 const workspaceRouteSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("room.home") }),
+  z.strictObject({ kind: z.literal("room.today") }),
   z.strictObject({ kind: z.literal("objective.library") }),
   z.strictObject({ kind: z.literal("objective.detail"), objectiveId: uuidSchema }),
   z.strictObject({ kind: z.literal("source.library") }),
@@ -756,6 +759,16 @@ export const gatewayErrorCodeValues = [
   "stale_workspace",
   "result_unknown",
   "safe_internal_error",
+  /**
+   * 笔记那条增量与本机这份文档不是同一份历史：`/doc-update` 会回 409 +
+   * `error: "doc_identity_mismatch"`，网关按 token 翻成这个码。
+   *
+   * 为什么不并进 `conflict`：那句话说的是"学习状态变了，先同步"，而这里的处置是
+   * "这篇笔记的编辑起点过期了，重开一次再写"，两件事的下一步动作不一样。
+   * 这一格存在的意义是**不许再静默**——2026-09-23 那次"敲了五六行、回列表再进来
+   * 就没了"，服务端当时回的是一句 200。
+   */
+  "note_doc_stale",
   // Auth-form outcomes. The API answers these with distinct `error` tokens in
   // its response body; the desktop gateway maps them through so the sign-in and
   // sign-up forms can say what actually went wrong instead of collapsing every

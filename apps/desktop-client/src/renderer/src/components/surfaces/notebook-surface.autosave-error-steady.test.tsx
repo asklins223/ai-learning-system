@@ -11,7 +11,7 @@ import { useRoomStore } from "../../app/room-store";
  * Regression test for the save-line flicker: after a failed save the page used
  * to re-arm the autosave debounce (dirty stayed true, saving was false), so
  * every AUTOSAVE_DELAY_MS it retried and flipped the save-line between
- * "正在提交…" and "这次提交没成功，本机草稿仍在" — a steady flicker. The error
+ * "正在保存…" and "这次没保存上，本机草稿仍在" — a steady flicker. The error
  * state is now sticky: exactly one attempt, a stable failure notice, and
  * autosave resumes only on a new keystroke or the retry button.
  *
@@ -146,17 +146,25 @@ describe("NotebookSurface · 保存失败后的稳定态", () => {
       await vi.advanceTimersByTimeAsync(1_500);
     });
     expect(state.saveAttempts).toBe(1);
-    expect(saveLine()).toContain("这次提交没成功");
+    expect(saveLine()).toContain("这次没保存上");
+
+    // 失败那一档，动作行只留一颗可点的按钮：主按钮自己变成「重试保存」。原来这里
+    // 并排挂着「提交并确认」与「重试保存」两颗，都调同一个 `save("manual")`，
+    // 看不出该点哪个——而"提交"那个名字还额外暗示正文没存住。
+    const actionLabels = [...document.querySelectorAll(".notebook-actions--editor button")]
+      .map((button) => button.textContent ?? "");
+    expect(actionLabels).toContain("重试保存");
+    expect(actionLabels.filter((label) => label.includes("保存"))).toEqual(["重试保存"]);
 
     // The pre-fix page re-armed the debounce and retried on every tick — the
     // flicker. The error must be sticky: many ticks, still exactly one attempt,
-    // and the save-line never flips back to "正在提交…".
+    // and the save-line never flips back to "正在保存…".
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10_000);
     });
     expect(state.saveAttempts).toBe(1);
-    expect(saveLine()).toContain("这次提交没成功");
-    expect(saveLine()).not.toContain("正在提交");
+    expect(saveLine()).toContain("这次没保存上");
+    expect(saveLine()).not.toContain("正在保存");
   });
 
   it("失败后再次输入会清除错误态并恢复自动保存", async () => {
@@ -171,7 +179,7 @@ describe("NotebookSurface · 保存失败后的稳定态", () => {
     // A new keystroke clears the sticky error, so the debounce re-arms and a
     // second attempt fires after the delay.
     await typeTitle("测试笔记TT");
-    expect(saveLine()).not.toContain("这次提交没成功");
+    expect(saveLine()).not.toContain("这次没保存上");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_500);
     });

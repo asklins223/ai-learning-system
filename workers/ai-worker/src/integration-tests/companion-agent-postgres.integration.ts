@@ -563,3 +563,86 @@ test("Agent epoch fence：run 冻结的 epoch 与当前不一致 → 拒绝执�
     await f.cleanup();
   }
 });
+
+/**
+ * 通用读页面（doc 37）：`companion_read_current_page` 背后那条查询的真实往返。
+ *
+ * 这里唯一值得钉的是**跨空间/跨账号守卫**：`assistant_page_contexts` 的 RLS 守卫
+ * 对 `ailearn_worker` 是按用户名放行的（`CURRENT_USER = 'ailearn_worker' OR ...`），
+ * 也就是说行级隔离在这条路径上根本不存在，SQL 里那两个 id 条件是唯一的闸。
+ * 本地绿不等于它有闸（dev 的 api 角色还是 BYPASSRLS），所以断言写成
+ * "换一个 user 就必须什么都读不到"——去掉任一条件都会让它红。
+ */
+type ContextSeed = "live" | "revoked" | "expired";
+
+/** 按三种生命周期各造一条 context 行；时间全部在 JS 侧算，不拼裸 SQL。 */
+async function seedPageContext(
+  ws: string,
+  uid: string,
+  title: string,
+  state: ContextSeed,
+): Promise<string> {
+  const id = randomUUID();
+  const now = Date.now();
+  const issuedAt = new Date(state === "expired" ? now - 60_000 : now);
+  const expiresAt = new Date(state === "expired" ? now - 5_000 : now + 30_000);
+  const revokedAt = state === "revoked" ? new Date(now) : null;
+  const routeRef = { kind: "note", noteId: randomUUID() };
+  const readableView = {
+    pageId: "card_generation_progress",
+    title,
+    metrics: [{ label: "进度", value: "已写出 3 / 4 张候选" }],
+    items: [{ ordinal: 1, label: "提取线索" }],
+  };
+  await sql.begin(async (tx) => {
+    await tx`SELECT set_config('app.workspace_id', ${ws}, true)`;
+    await tx`SELECT set_config('app.user_id', ${uid}, true)`;
+    // entity_refs / capability_hints 走列默认值：jsonb 列直接传 JS 空数组会被
+    // postgres.js 当成 Postgres 数组，那是另一类静默失败。
+    await tx`
+      INSERT INTO assistant_page_contexts
+        (id, workspace_id, user_id, page_instance_id, revision, route_ref, page_kind,
+         sensitivity, interaction_state, readable_view, issued_at, expires_at, revoked_at)
+      VALUES (${id}, ${ws}, ${uid}, ${`pi-${id}`}, ${`rev-${id}`}, ${tx.json(routeRef)}, ${"note"},
+              ${"normal"}, ${"processing"}, ${tx.json(readableView)},
+              ${issuedAt}, ${expiresAt}, ${revokedAt})
+    `;
+  });
+  return id;
+}
+
+test("读页面：worker 绕过 RLS，但 workspace/user 两个条件仍然把别人的屏挡住", async () => {
+  const mine = await seedBase();
+  const theirs = await seedBase();
+  await seedPageContext(mine.workspaceId, mine.userId, "上一屏（已撤销）", "revoked");
+  await seedPageContext(mine.workspaceId, mine.userId, "早就关掉的窗口", "expired");
+  await seedPageContext(mine.workspaceId, mine.userId, "把《我的笔记》整理成学习卡", "live");
+  await seedPageContext(theirs.workspaceId, theirs.userId, "把《别人的笔记》整理成学习卡", "live");
+
+  const { withWorkerWorkspaceTransaction } = await import("../db.ts");
+  const { readLatestPageContextRow, currentPageToolResult } = await import(
+    "../handlers/companion-agent-runtime.ts"
+  );
+  const read = (ws: string, uid: string) => withWorkerWorkspaceTransaction(
+    { workspaceId: ws, userId: uid },
+    (tx) => readLatestPageContextRow(tx, { workspaceId: ws, userId: uid }),
+  );
+
+  const own = await read(mine.workspaceId, mine.userId);
+  assert.ok(own, "自己这一页必须读得到");
+  assert.equal((own.readable_view as { title: string }).title, "把《我的笔记》整理成学习卡",
+    "已撤销与已过期的那两条不能被当成当前这一屏");
+  const result = currentPageToolResult(own);
+  assert.equal(result.value.available, true);
+  assert.equal((result.value.metrics as Array<{ value: string }>)[0].value, "已写出 3 / 4 张候选");
+
+  // 同 workspace 换 user：必须什么都读不到（漏掉 user_id 条件时这里会拿到上面那条）。
+  assert.equal(await read(mine.workspaceId, theirs.userId), null,
+    "user 条件一漏，别人这一屏就成了她的读数");
+
+  // 全新作用域：available=false，而不是拿旧数据或别人的数据顶上。
+  const lonely = await seedBase();
+  const none = await read(lonely.workspaceId, lonely.userId);
+  assert.equal(none, null);
+  assert.equal(currentPageToolResult(none).value.available, false);
+});

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   noteBlocksToPmNodes,
+  noteDocSchemaSpec,
   parseInlineMarkdown,
   pmNodesToNoteBlocks,
   type NoteDocBlockSpec,
@@ -166,8 +167,134 @@ test("图片行认不出 Markdown 时把整串当地址，不当说明", () => {
   assert.deepEqual(roundTrip(blocks), blocks);
 });
 
+test("服务端写段落里的图片：写出去是节点，不是那串标记字", () => {
+  // 改前实测：`noteBlocksToPmNodes` 把 `![配图](…)` 整串塞进一个 text 节点，
+  // 编辑器于是把标记当正文显示（导入、来源转笔记、恢复历史版本三条路都踩）。
+  const nodes = noteBlocksToPmNodes([{ type: "paragraph", content: "上图：![配图](/api/uploads/a.png)，如下" }]);
+  const content = (nodes[0] as { content?: { type: string; text?: string }[] }).content ?? [];
+  assert.deepEqual(content.map((node) => node.type), ["text", "image", "text"]);
+  assert.deepEqual(roundTrip([{ type: "paragraph", content: "上图：![配图](/api/uploads/a.png)，如下" }]), [
+    { type: "paragraph", content: "上图：![配图](/api/uploads/a.png)，如下" },
+  ]);
+});
+
+test("块级图片写的是 paragraph > image，投回来仍然是 image 那一档", () => {
+  // 编辑器里图片只有行内一个位置，所以文档里不存在"顶层图片节点"这种形状；
+  // 但 `note_blocks.type` 上挂着数据库约束（`image_asset_id` 只允许出现在 type='image' 的行），
+  // 服务端另有十处按这个类型分叉，所以"整段就一张图"必须认回 `image`。
+  const blocks = [{ type: "image", content: "![整块图](/api/uploads/b.png)", imageAssetId: "asset-9" }];
+  const nodes = noteBlocksToPmNodes(blocks);
+  assert.equal((nodes[0] as { type: string }).type, "paragraph");
+  assert.deepEqual((nodes[0] as { content?: { type: string }[] }).content?.map((node) => node.type), ["image"]);
+  assert.deepEqual(roundTrip(blocks), blocks);
+  // 夹在字里的那张不算块级图片，它归段落。
+  const mixed = pmNodesToNoteBlocks([{
+    type: "paragraph",
+    content: [{ type: "image", attrs: { src: "/a.png", alt: "图" } }, { type: "text", text: "旁边还有字" }],
+  } as never] as never);
+  assert.equal(mixed[0]!.type, "paragraph");
+  assert.equal(mixed[0]!.content, "![图](/a.png)旁边还有字");
+});
+
+/**
+ * 窄规格与编辑器 schema 的**位置**也要一致（名字对上了放不进去一样是丢内容）。
+ * 这一条只钉得住"规格自己编译得过"，另一半（编辑器读出来是 image 节点还是文本）在
+ * `apps/desktop-client/.../note-doc-editor-binding.test.tsx` —— 那里才有真编辑器的 schema。
+ */
+test("窄规格里 hardbreak 与 image 都带 inline: true，段落才收得下 inline*", () => {
+  // prosemirror-model 判行内只看 `!(spec.inline || name=="text")`，组名不参与。
+  // 少写这一个标记，`new Schema(noteDocSchemaSpec)` 当场报 Mixing inline and block content。
+  const spec = noteDocSchemaSpec as unknown as {
+    nodes: Record<string, { inline?: boolean; group?: string; content?: string }>;
+  };
+  for (const name of ["hardbreak", "image"]) {
+    assert.equal(spec.nodes[name]!.inline, true, `${name} 没标 inline，段落的 inline* 会拒收它`);
+  }
+  assert.equal(spec.nodes.paragraph!.content, "inline*");
+  assert.equal(spec.nodes.heading!.content, "inline*");
+});
+
 test("未闭合的标记按原文留着，与阅读页同一口径", () => {
   assert.deepEqual(parseInlineMarkdown("**未闭合的加粗"), [{ kind: "text", text: "**未闭合的加粗" }]);
   const blocks = [{ type: "paragraph", content: "**未闭合的加粗" }];
   assert.deepEqual(roundTrip(blocks), blocks);
+});
+
+/**
+ * 下面这几条钉的是 2026-09-24 阅读页对拍量出来的那几类"编辑器里有、投影回来没有"。
+ * 共同点不是显示样式不好看，是**内容凭空少了一块**：这条投影同时喂着服务端的
+ * `note_blocks`，所以丢的那半在搜索与卡片证据里也一样不存在。
+ */
+test("段落里的行内图片投影成 Markdown，不再整块变空", () => {
+  // Milkdown 的 image 是 `inline: true, group: "inline"`，所以编辑器写出的就是
+  // `paragraph > image`。它没有文本也没有子节点，投影漏掉它时症状是"这一块的正文变成空串"。
+  const nodes = [{
+    type: "paragraph",
+    content: [
+      { type: "text", text: "上图：" },
+      { type: "image", attrs: { src: "/api/uploads/a.png", alt: "示意图" } },
+      { type: "text", text: "，如下" },
+    ],
+  }];
+  const [block] = pmNodesToNoteBlocks(nodes as never);
+  assert.equal(block!.content, "上图：![示意图](/api/uploads/a.png)，如下");
+  // 写侧此刻还放不进去（规格里 image 是块级），所以往返必须**稳定在原样**，
+  // 不能一次比一次少字。
+  assert.deepEqual(roundTrip([{ type: "paragraph", content: block!.content }]), [
+    { type: "paragraph", content: block!.content },
+  ]);
+});
+
+test("图片语法不被拆成「一个感叹号 + 一个链接」", () => {
+  assert.deepEqual(parseInlineMarkdown("![示意图](/a.png)"), [
+    { kind: "image", alt: "示意图", src: "/a.png" },
+  ]);
+});
+
+test("删除线两侧对称：序列化写 ~~，解析也认得 ~~", () => {
+  // `applyMarks` 一直在写 `~~x~~`，而解析器没有这一支——写进服务端的删除线在对端编辑器
+  // 里是字面的波浪号。这条把"只写不读"那种半边实现钉住。
+  const [block] = pmNodesToNoteBlocks([{
+    type: "paragraph",
+    content: [{ type: "text", text: "作废", marks: [{ type: "strike_through" }] }],
+  } as never] as never);
+  assert.equal(block!.content, "~~作废~~");
+  assert.deepEqual(parseInlineMarkdown("~~作废~~"), [{ kind: "strike", text: "作废" }]);
+  const nodes = noteBlocksToPmNodes([{ type: "paragraph", content: "~~作废~~" }]);
+  const texts = (nodes[0] as { content?: { text?: string; marks?: { type: string }[] }[] }).content ?? [];
+  assert.deepEqual(
+    texts.filter((node) => node.marks?.length).map((node) => `${node.text}|${node.marks?.[0]?.type}`),
+    ["作废|strike_through"],
+  );
+});
+
+test("表格单元里的换行与竖线不会把整张表打回散文", () => {
+  // `parseMarkdownTable` 按行认表：每行都要以 `|` 开头结尾。单元里带进一个换行，
+  // 那一行就不像表格线了，读侧于是把整张表当普通段落画（竖线全露出来）。
+  const cell = (content: { type: string; text?: string }[]) => ({
+    type: "table_cell",
+    content: [{ type: "paragraph", content }],
+  });
+  const [block] = pmNodesToNoteBlocks([{
+    type: "table",
+    content: [
+      { type: "table_header_row", content: [
+        { type: "table_header", content: [{ type: "paragraph", content: [{ type: "text", text: "列甲" }] }] },
+        { type: "table_header", content: [{ type: "paragraph", content: [{ type: "text", text: "列乙" }] }] },
+      ] },
+      { type: "table_row", content: [
+        cell([{ type: "text", text: "格里" }, { type: "hardbreak" }, { type: "text", text: "换行" }]),
+        cell([{ type: "text", text: "a|b" }]),
+      ] },
+    ],
+  } as never] as never);
+  const lines = block!.content.split("\n");
+  // 表头 + 分隔行 + 这一行数据：单元里那个换行**不该**再多撑出一行。
+  assert.equal(lines.length, 3, `表格被单元里的换行撑成了 ${lines.length} 行`);
+  for (const line of lines) {
+    assert.ok(line.startsWith("|") && line.endsWith("|"), `这一行不再像表格：${line}`);
+  }
+  // 两列还是两列：单元里的 `|` 转义过，不会被当成列分隔符。第三行才是数据行。
+  const dataRow = lines[lines.length - 1]!;
+  assert.equal(dataRow.slice(1, -1).split(/(?<!\\)\|/).length, 2, dataRow);
 });

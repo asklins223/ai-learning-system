@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -38,6 +38,8 @@ import {
 } from "./surfaces/card-generation-status";
 import { HudPage } from "./hud/HudPage";
 import { useHudPage } from "./hud/use-hud-page";
+import { usePageReadableView } from "./hud/use-page-readable-view";
+import type { PageReadableV1 } from "@ailearn/shared/companion-bridge-contracts";
 import { formatRelative } from "./surfaces/surface-data";
 import { cardStrategyPresentation } from "./surfaces/card-strategy-presentation";
 
@@ -708,6 +710,66 @@ export function CardGenerationSurface() {
   const activeCandidateRevision = activeCandidate?.revision ?? null;
   const runKey = run?.runId ?? null;
 
+  /**
+   * 这一屏登记给伴星读的可读视图（doc 37）。
+   *
+   * `landedCandidates` 就是屏上「已经写好的卡，后面的还在写」那一条列表，序号按屏幕
+   * 顺序给——用户说的"第四张"只有在这里落地成条目，她才可能回答"第四张还没写出来"，
+   * 而不是去查一个跟这次生成无关的任务队列。
+   *
+   * 数字全部取自页面已经在渲染的那几个 view（`progressView.detail` /
+   * `practiceQuotaView` / `candidateDecisionLabel`），这里一个都不重新计算：同一屏
+   * 出现两个来源，迟早会对不上。
+   * 条目标题压到 60 字、最多 8 条，是为了整份视图留在合同总预算内——超了会被
+   * `usePageReadableView` 挡下并 console 报出来，不是静默丢。
+   */
+  const readableView = useMemo<PageReadableV1 | null>(() => {
+    if (!run || loading) return null;
+    const shortLabel = (text: string) => text.slice(0, 60);
+    if (page === "candidate") {
+      return {
+        pageId: "card_generation_review",
+        title: `审核这次生成的学习卡${noteTitle ? `（《${shortLabel(noteTitle)}》）` : ""}`,
+        statusLine: activeCandidate ? candidateDecisionLabel(activeCandidate) : cardGenerationStatusLabel(run.status),
+        metrics: [
+          { label: "候选", value: `${activeCandidateIndex + 1} / ${candidates.length}` },
+          { label: "还没决定", value: `${actionableUndecidedCount} 张` },
+          ...(practiceQuotaView ? [{ label: "练习件", value: shortLabel(practiceQuotaView) }] : []),
+        ],
+        items: candidates.slice(0, 8).map((candidate, index) => ({
+          ordinal: index + 1,
+          label: shortLabel(candidate.objective.publicSummary),
+          state: shortLabel(candidateDecisionLabel(candidate)).slice(0, 24),
+        })),
+        ...(failure ? { notice: `候选卡暂时不可用：${shortLabel(failure)}` } : {}),
+      };
+    }
+    return {
+      pageId: "card_generation_progress",
+      title: noteTitle ? `把《${shortLabel(noteTitle)}》整理成学习卡` : "把一篇笔记整理成可练习的问题",
+      statusLine: `${cardGenerationStatusLabel(run.status)} · ${progressView?.eyebrow ?? "这一步还说不出来"}`,
+      metrics: [
+        ...(progressView?.detail ? [{ label: "进度", value: shortLabel(progressView.detail) }] : []),
+        ...(progressView ? [{ label: "整体进度", value: `${progressPercent}%` }] : []),
+        { label: "已落地的候选", value: `${landedCandidates.length} 张` },
+      ],
+      items: landedCandidates.slice(0, 8).map((candidate, index) => ({
+        ordinal: index + 1,
+        label: shortLabel(candidate.objective.publicSummary),
+        state: shortLabel(`卡型 · ${cardStrategyPresentation[candidate.strategy].label}`).slice(0, 24),
+      })),
+      ...(failure
+        ? { notice: `无法确认这次生成：${shortLabel(failure)}` }
+        : progressView
+          ? {}
+          : { notice: "这次生成停下来了，后台没有给出可以恢复的下一步。" }),
+    };
+  }, [
+    activeCandidate, activeCandidateIndex, actionableUndecidedCount, candidates, failure,
+    landedCandidates, loading, noteTitle, page, practiceQuotaView, progressPercent, progressView, run,
+  ]);
+  usePageReadableView(readableView);
+
   // The preflight the activation path already runs, read for the card on screen:
   // revealing the answer is what creates the exposure, so the row follows both
   // the candidate and the reveal.
@@ -1030,7 +1092,7 @@ export function CardGenerationSurface() {
                     </p>
                   ) : null}
                   <div className="answer-slip">
-                    <small>理解目标摘要</small>
+                    <small>学习卡摘要</small>
                     <strong>{activeCandidate.objective.publicSummary}</strong>
                   </div>
                       </div>
@@ -1207,7 +1269,7 @@ export function CardGenerationSurface() {
                   className="button green"
                   onClick={() => { resetObjectiveLibraryView(); invoke("open-objectives"); }}
                 >
-                  查看理解目标
+                  查看学习卡
                 </button>
               ) : null}
               {/* 「返回笔记」在同一屏只出现一次：恢复契约已经签发过返回动作，或者左侧

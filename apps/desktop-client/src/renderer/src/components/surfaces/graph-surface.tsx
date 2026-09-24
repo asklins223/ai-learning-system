@@ -29,6 +29,8 @@ import { createRequestMeta, unwrapGatewayResult } from "../../app/desktop-client
 import { useRoomStore } from "../../app/room-store";
 import { HudPage } from "../hud/HudPage";
 import { useHudPage } from "../hud/use-hud-page";
+import { usePageReadableView } from "../hud/use-page-readable-view";
+import type { PageReadableV1 } from "@ailearn/shared/companion-bridge-contracts";
 import { useSurfaceProjection } from "./surface-data";
 import {
   edgeEndpointKey,
@@ -491,6 +493,39 @@ export function GraphSurface() {
     `${counts.edges} 真实光路`,
   ].join(" · "), [counts, rawGraph.nodes.length, visibleGraph.nodes.length]);
 
+  /**
+   * 星图登记给伴星读的可读视图（doc 37）。
+   *
+   * `telemetry` 就是屏底那一行读数，条目取自**筛选后可见**的那几颗（不是全量
+   * `rawGraph`）——用户说"第三颗星体"指的是屏幕上数得出来的那一个。
+   * 当前筛选一并给出，否则她读到 12 颗而屏上只有 5 颗时会归错因。
+   */
+  const readableView = useMemo<PageReadableV1 | null>(() => {
+    if (!data) return null;
+    return {
+      pageId: "star_map",
+      title: "知识星图",
+      statusLine: telemetry,
+      metrics: [
+        { label: "可见星体", value: `${visibleGraph.nodes.length} / ${rawGraph.nodes.length}` },
+        ...(selectedNode ? [{ label: "正在看", value: selectedNode.label.slice(0, 40) }] : []),
+      ],
+      items: visibleGraph.nodes.slice(0, 8).map((node, index) => ({
+        ordinal: index + 1,
+        label: node.label.slice(0, 60),
+        state: `${NODE_TYPE_LABEL[node.type] ?? node.type} · ${nodeStateLabel(node)}`.slice(0, 24),
+      })),
+      filters: [
+        { label: "状态筛选", value: stateFilter },
+        { label: "搜索词", value: deferredQuery.slice(0, 40) || "未填" },
+      ],
+      ...(visibleGraph.nodes.length === 0
+        ? { notice: "按当前的筛选与搜索词，图上没有剩下任何星体。" }
+        : {}),
+    };
+  }, [data, deferredQuery, rawGraph.nodes.length, selectedNode, stateFilter, telemetry, visibleGraph.nodes]);
+  usePageReadableView(readableView);
+
   return (
     <HudPage page="graph" wide>
       <div className="universe-page" data-detail-open={Boolean(selectedNode)} data-searching={query !== deferredQuery}>
@@ -574,7 +609,7 @@ export function GraphSurface() {
             ) : null}
           </div>
 
-          <nav className="universe-filter-dock" aria-label="按理解目标状态筛选星图" title="计数仅表示各状态的理解目标数量；相关来源、笔记与证据会一并保留">
+          <nav className="universe-filter-dock" aria-label="按学习卡状态筛选星图" title="计数仅表示各状态的学习卡数量；相关来源、笔记与证据会一并保留">
             {FILTERS.map((item) => (
               <button key={item.value} type="button" className={`universe-filter${stateFilter === item.value ? " is-active" : ""}`} onClick={() => setStateFilter(item.value)} disabled={item.value !== "all" && filterCounts[item.value] === 0} aria-pressed={stateFilter === item.value}>
                 <span>{item.label}</span><small>{filterCounts[item.value]}</small>
@@ -638,7 +673,7 @@ export function GraphSurface() {
           <div className="universe-status-overlay">
             <section className="universe-status-card" aria-busy={loading || undefined} role={failure ? "alert" : "status"}>
               <span className="universe-status-orbit" aria-hidden="true">{failure ? <CircleHelp size={20} /> : rawGraph.nodes.length > 0 ? <Search size={20} /> : <Network size={20} />}</span>
-              {loading ? <><strong>正在点亮你的知识宇宙</strong><p>计算星系位置、关系光路与证据信号…</p></> : failure ? <><strong>理解星图暂时不可用</strong><p>{failure}</p><button type="button" onClick={() => void reload()}>重新读取</button></> : rawGraph.nodes.length === 0 ? <><strong>这片宇宙还没有星体</strong><p>先从来源写下笔记并形成理解目标，真实路径会在这里出现。</p><button type="button" onClick={() => invoke("open-sources")}><BookOpenText size={14} />查看来源库</button></> : <><strong>这个星域里没有匹配项</strong><p>清除搜索或切回“全部”即可恢复。</p><button type="button" onClick={() => { setQuery(""); setStateFilter("all"); setFitRequest((value) => value + 1); }}>显示全部星体</button></>}
+              {loading ? <><strong>正在点亮你的知识宇宙</strong><p>计算星系位置、关系光路与证据信号…</p></> : failure ? <><strong>理解星图暂时不可用</strong><p>{failure}</p><button type="button" onClick={() => void reload()}>重新读取</button></> : rawGraph.nodes.length === 0 ? <><strong>这片宇宙还没有星体</strong><p>先从来源写下笔记并形成学习卡，真实路径会在这里出现。</p><button type="button" onClick={() => invoke("open-sources")}><BookOpenText size={14} />查看来源库</button></> : <><strong>这个星域里没有匹配项</strong><p>清除搜索或切回“全部”即可恢复。</p><button type="button" onClick={() => { setQuery(""); setStateFilter("all"); setFitRequest((value) => value + 1); }}>显示全部星体</button></>}
             </section>
           </div>
         ) : null}

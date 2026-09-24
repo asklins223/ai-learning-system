@@ -15,8 +15,7 @@ import {
   dispatchSourceCaptured,
   formatCaptureSize,
   hasOpenModal,
-  isEditableTarget,
-  isSourceCaptureTarget,
+  isOwnedDropTarget,
   markLinkSeen,
   readSeenLinks,
   titleFromFileName,
@@ -407,7 +406,7 @@ export function GlobalDropOverlay() {
       Boolean(transfer && (transfer.types.includes("Files") || transfer.types.includes("text/uri-list")));
 
     const onDragEnter = (event: DragEvent) => {
-      if (onboardingRef.current || isEditableTarget(event.target) || isSourceCaptureTarget(event.target) || hasOpenModal()) {
+      if (onboardingRef.current || isOwnedDropTarget(event.target, event.dataTransfer) || hasOpenModal()) {
         dragDepthRef.current = 0;
         if (phaseRef.current?.kind === "armed") setPhase(null);
         return;
@@ -422,7 +421,7 @@ export function GlobalDropOverlay() {
     };
     const onDragOver = (event: DragEvent) => {
       // 放行这次拖放：preventDefault 之后 drop 事件才会进来。
-      if (phaseRef.current && !isEditableTarget(event.target) && !isSourceCaptureTarget(event.target)) {
+      if (phaseRef.current && !isOwnedDropTarget(event.target, event.dataTransfer)) {
         event.preventDefault();
         if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
       }
@@ -433,9 +432,13 @@ export function GlobalDropOverlay() {
       if (dragDepthRef.current === 0 && phaseRef.current.kind === "armed") setPhase(null);
     };
     const onDrop = (event: DragEvent) => {
-      // 采集栏、编辑器各有自己的投放格：它们 preventDefault 过的，这层不碰。
-      if (onboardingRef.current || event.defaultPrevented || isEditableTarget(event.target) || isSourceCaptureTarget(event.target)) {
+      // 采集栏、编辑器、笔记纸面各有自己的投放格：这层不跟它们抢。
+      const owned = event.defaultPrevented || isOwnedDropTarget(event.target, event.dataTransfer);
+      if (onboardingRef.current || owned) {
         dragDepthRef.current = 0;
+        // 松手这一下归别人了，"松开，收进来源库"那句就该收回去——浮层本身不吃
+        // 事件（pointer-events:none），不主动收就会一直挂在屏幕上说一件没发生的事。
+        if (phaseRef.current?.kind === "armed") setPhase(null);
         return;
       }
       if (!phaseRef.current || !event.dataTransfer || !hasFiles(event.dataTransfer)) return;
@@ -489,7 +492,7 @@ export function GlobalDropOverlay() {
   const succeeded = report?.outcomes.some((outcome) => outcome.ok) ?? false;
 
   return (
-    <div className="source-intake-drop" aria-hidden={report ? undefined : true}>
+    <div className="source-intake-drop" data-phase={phase.kind} aria-hidden={report ? undefined : true}>
       <div
         className="source-intake-drop__card"
         role={report ? "alertdialog" : undefined}

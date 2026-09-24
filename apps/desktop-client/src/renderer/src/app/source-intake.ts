@@ -61,6 +61,32 @@ export function isSourceCaptureTarget(target: EventTarget | null): boolean {
   return target instanceof HTMLElement && Boolean(target.closest(".capture-strip, .capture-form"));
 }
 
+/** 编辑中的笔记纸面挂这个属性，声明"纯图片的拖放归这一篇正文"。 */
+export const NOTE_PAPER_IMAGE_DROP_ATTR = "data-note-paper-image-drop";
+
+/**
+ * 整份都是图片才返回文件，混进任何一个别的文件就返回空。
+ *
+ * 这条判据同时决定两件事：纸面要不要接住这一下，以及全局浮层要不要让路——
+ * 两边各写一遍迟早会说出不一致的那句话。
+ */
+export function imageOnlyFiles(transfer: DataTransfer | null): File[] {
+  if (!transfer || transfer.files.length === 0) return [];
+  const files = Array.from(transfer.files);
+  return files.every((file) => file.type.startsWith("image/")) ? files : [];
+}
+
+/**
+ * 这个落点有没有主人：编辑器和表单收文字，笔记纸面收整份图片。
+ *
+ * 浮层在 dragenter 时问过同一个问题，才敢说"松开就收进来源库"。
+ */
+export function isOwnedDropTarget(target: EventTarget | null, transfer: DataTransfer | null): boolean {
+  if (isEditableTarget(target) || isSourceCaptureTarget(target)) return true;
+  if (!(target instanceof HTMLElement)) return false;
+  return Boolean(target.closest(`[${NOTE_PAPER_IMAGE_DROP_ATTR}]`) && imageOnlyFiles(transfer).length > 0);
+}
+
 /** 当前是否有模态对话框开着：有就别弹新窗，排队等下一轮。 */
 export function hasOpenModal(): boolean {
   return Boolean(document.querySelector(

@@ -286,7 +286,7 @@ describe("读取计数的说法", () => {
     const text = await counter();
     expect(text).toContain("共 2 条");
     expect(text).not.toContain("已载入");
-    expect(document.querySelector(".v3-goal-search input")?.getAttribute("placeholder")).toBe("搜索全部理解目标");
+    expect(document.querySelector(".v3-goal-search input")?.getAttribute("placeholder")).toBe("搜索全部学习卡");
   });
 
   it("确实还有下一页时才报「已载入 X / Y」，placeholder 也收回已载入范围", async () => {
@@ -296,6 +296,6 @@ describe("读取计数的说法", () => {
     const text = await counter();
     expect(text).toContain("已载入 1 / 40 条");
     expect(text).not.toContain("共 40 条");
-    expect(document.querySelector(".v3-goal-search input")?.getAttribute("placeholder")).toBe("搜索已载入目标");
+    expect(document.querySelector(".v3-goal-search input")?.getAttribute("placeholder")).toBe("搜索已载入的卡");
   });
 });

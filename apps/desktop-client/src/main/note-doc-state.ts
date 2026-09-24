@@ -95,6 +95,45 @@ function applyTitleToDoc(doc: Y.Doc, title: string, titleSource: string): Uint8A
 /** 本机改动的 origin 标签：provider 与这里用同一个值判"该不该上行"。 */
 const LOCAL_ORIGIN = "local";
 
+/**
+ * 文档里有没有"进不来"的结构（Yjs 的 `pendingStructs`）。
+ *
+ * 为什么不用"编一遍看多大"：`encodeStateAsUpdate` 连**删除集**一起写，于是
+ * "字节数超过常数"量到的是"这份文档删过东西"，不是"有挂起的结构"（实测：一篇正常
+ * 编辑过的笔记编出来 10 字节，被误判成有挂起）。`doc.store.pendingStructs` 是 Yjs
+ * 类型声明里就有的字段，问它才是问对了地方。
+ */
+function hasPendingStructs(doc: Y.Doc): boolean {
+  return doc.store.pendingStructs !== null || doc.store.pendingDs !== null;
+}
+
+/**
+ * 把这条增量并进文档之后，它真的进去了吗？
+ *
+ * `Y.applyUpdate` 对"缺依赖"的增量**不报错**：它把那些结构挂进 `pendingStructs`，
+ * 文档一个字不变，也就一个 update 事件都不发。于是 `applyLocal` 返回 null，调用方按
+ * "本来就有这条"处理，报成 `unchanged`——界面上就是"已自动保存"，而这份文档里没有它，
+ * 服务端更不会有。
+ *
+ * 判据不是"内容有没有变"（幂等重发也不会变），而是"**本来干净、应用完却挂上了进不来的
+ * 结构**"：那说明这条增量与这份文档不是同一份历史。文档本来就挂着东西时这一格判不了
+ * （那些结构既不在状态向量里、也不是新来的）——那时一律放行，因为误报会把用户正常的
+ * 保存拒掉，比漏报更坏；而这类残留本身是修之前攒下的。
+ *
+ * 什么时候会缺共同历史：本机这份文档与服务端那份不是同一份文档。补齐出来的文档每次
+ * 都是新身份，2026-09-23 的丢字现场就是这么来的；服务端那一半已经在 `document-state.ts`
+ * 的 `materializeBackfilledNoteDoc` 收口，这里是上行之前的兜底——宁可报错，也不能再把
+ * "没写进去"报成"已保存"。服务端 `collaboration.ts` 里那份同名判据管的是另一半。
+ */
+function applyAndReportLanded(doc: Y.Doc, update: string, apply: (update: string, origin: unknown) => Uint8Array[]): Uint8Array[] {
+  const cleanBefore = !hasPendingStructs(doc);
+  const produced = apply(update, LOCAL_ORIGIN);
+  if (produced.length === 0 && cleanBefore && hasPendingStructs(doc)) {
+    throw new Error("note_doc_update_unmerged");
+  }
+  return produced;
+}
+
 export function createNoteDocState(): NoteDocState {
   const doc = new Y.Doc();
   /** provider 实例：它的 origin 就是"这条不是我写的"的判据。 */
@@ -140,7 +179,11 @@ export function createNoteDocState(): NoteDocState {
     applyLocal: (update) => {
       // LOCAL_ORIGIN 这个标签要让 provider 认得出"这是我该送出去的"：它按 origin 决定
       // 是否上行，缺了它就变成"改了但没发"。
-      const produced = apply(update, LOCAL_ORIGIN);
+      //
+      // 什么都没产生有两种：**本来就有**（幂等重发，可以如实回"没改动"）与
+      // **根本进不去**（缺依赖，被挂起）。后者必须喊出来——报成"没改动"就是界面上的
+      // "已自动保存"而这份文档里没有它。判据见 `applyAndReportLanded`。
+      const produced = applyAndReportLanded(doc, update, apply);
       if (produced.length === 0) return null;
       return b64(Y.mergeUpdates(produced));
     },

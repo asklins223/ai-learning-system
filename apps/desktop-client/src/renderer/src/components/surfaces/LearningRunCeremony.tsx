@@ -3,8 +3,9 @@ import { createPortal } from "react-dom";
 import { Sparkles } from "lucide-react";
 import { useRoomStore } from "../../app/room-store";
 
-export const LEARNING_RUN_CEREMONY_DURATION_MS = 3_000;
 export const LEARNING_RUN_CEREMONY_LITE_DURATION_MS = 700;
+/** 彩纸只在这段窗口里继续生成；演出不再自动收场，所以生成必须先停。 */
+const CONFETTI_SPAWN_MS = 3_000;
 
 type ConfettiParticle = {
   x: number;
@@ -43,6 +44,7 @@ function CelebrationConfetti() {
     let frame = 0;
     let lastTime = performance.now();
     let drizzleAt = lastTime + 420;
+    const spawnUntil = lastTime + CONFETTI_SPAWN_MS;
     let stopped = false;
     const timers: number[] = [];
 
@@ -89,7 +91,8 @@ function CelebrationConfetti() {
       const step = Math.min(time - lastTime, 50) / 16.667;
       lastTime = time;
       ctx.clearRect(0, 0, width, height);
-      if (time > drizzleAt) {
+      const spawning = time < spawnUntil;
+      if (spawning && time > drizzleAt) {
         add(random(0, width), -15, Math.PI / 2 + random(-0.3, 0.3), random(0.5, 1.7), true);
         drizzleAt = time + random(55, 105);
       }
@@ -120,6 +123,8 @@ function CelebrationConfetti() {
         }
         ctx.restore();
       }
+      // 演出不再按时收场，所以纸落完就自己停，不能留一个空转的 rAF。
+      if (!spawning && particles.length === 0) return;
       frame = window.requestAnimationFrame(loop);
     };
 
@@ -143,6 +148,8 @@ function CelebrationConfetti() {
 
 export function LearningRunCeremony({
   active,
+  stamp,
+  eyebrow,
   headline,
   achievement,
   companionLine,
@@ -150,6 +157,8 @@ export function LearningRunCeremony({
   onFinish,
 }: {
   readonly active: boolean;
+  readonly stamp: string;
+  readonly eyebrow: string;
   readonly headline: string;
   readonly achievement: string;
   readonly companionLine: string | null;
@@ -188,15 +197,18 @@ export function LearningRunCeremony({
       setVisible(false);
       onFinish();
     };
-    const timer = window.setTimeout(finish, motionMode === "lite"
-      ? LEARNING_RUN_CEREMONY_LITE_DURATION_MS
-      : LEARNING_RUN_CEREMONY_DURATION_MS);
-    window.addEventListener("pointerdown", finish, { once: true });
-    window.addEventListener("keydown", finish, { once: true });
+    // 轻量模式仍按时自己收场；完整演出留到用户点任意一处再关（2026-09-24 裁定）。
+    const timer = motionMode === "lite"
+      ? window.setTimeout(finish, LEARNING_RUN_CEREMONY_LITE_DURATION_MS)
+      : 0;
+    // capture 而不是冒泡：伴星 feed 菜单有两处 stopPropagation，冒泡监听会被吃掉，
+    // 那时这一屏就再也点不开了。
+    window.addEventListener("pointerdown", finish, { once: true, capture: true });
+    window.addEventListener("keydown", finish, { once: true, capture: true });
     return () => {
-      window.clearTimeout(timer);
-      window.removeEventListener("pointerdown", finish);
-      window.removeEventListener("keydown", finish);
+      if (timer) window.clearTimeout(timer);
+      window.removeEventListener("pointerdown", finish, { capture: true });
+      window.removeEventListener("keydown", finish, { capture: true });
     };
   }, [active, motionMode, onFinish, onStart, reducedMotion]);
 
@@ -209,8 +221,8 @@ export function LearningRunCeremony({
       <div className="learning-run-ceremony__orbit learning-run-ceremony__orbit--one" aria-hidden="true" />
       <div className="learning-run-ceremony__orbit learning-run-ceremony__orbit--two" aria-hidden="true" />
       <div className="learning-run-ceremony__content">
-        <div className="learning-run-ceremony__stamp" aria-hidden="true"><Sparkles size={28} /><strong>通关</strong></div>
-        <span className="learning-run-ceremony__eyebrow">正式挑战 · 掌握完成</span>
+        <div className="learning-run-ceremony__stamp" aria-hidden="true"><Sparkles size={28} /><strong>{stamp}</strong></div>
+        <span className="learning-run-ceremony__eyebrow">{eyebrow}</span>
         <h2>{headline}</h2>
         <p>{achievement}</p>
         {companionLine ? <div className="learning-run-ceremony__companion"><span>伴星</span>{companionLine}</div> : null}
