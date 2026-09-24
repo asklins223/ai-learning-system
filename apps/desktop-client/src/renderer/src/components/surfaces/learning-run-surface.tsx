@@ -2543,7 +2543,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
           {feedback ? (
             <section className="learning-run-arrival-evidence" aria-label="本次学习反馈">
               <div><span>{feedback.tone === "neutral" ? "本次记录" : result?.outcome === "practice_completed" && !thisTime.coveredCount ? "本次判定" : "做对了什么"}</span><p>{feedback.achievement}</p></div>
-              <div><span>还差什么</span><p>{feedback.gap}</p></div>
+              {feedback.gap ? <div><span>还差什么</span><p>{feedback.gap}</p></div> : null}
               <div><span>下一步</span><p>{nextChallengeLabel}</p></div>
             </section>
           ) : null}
@@ -2597,12 +2597,17 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
                   <b>本次掌握</b>
                   <p>{provenLedgerText(result)}</p>
                 </div>
-                <div>
-                  <b>还差什么</b>
-                  {feedback?.improvements.length ? (
-                    <ul>{feedback.improvements.map((reason) => <li key={reason}>{reason}</li>)}</ul>
-                  ) : <p>{feedback?.gap ?? "按下一步建议继续即可。"}</p>}
-                </div>
+                {/* 审计 F30：没有具体缺口时这一块整块不渲染——原来会印一句
+                    "按下一步建议继续即可。"，而这句在旁白里又把读者推回本页的
+                    "下一步"，等于什么都没说；同一句话还会被印两遍。 */}
+                {feedback?.improvements.length || feedback?.gap ? (
+                  <div>
+                    <b>还差什么</b>
+                    {feedback.improvements.length
+                      ? <ul>{feedback.improvements.map((reason) => <li key={reason}>{reason}</li>)}</ul>
+                      : <p>{feedback.gap}</p>}
+                  </div>
+                ) : null}
                 <div>
                   <b>学习状态变化</b>
                   <p>{scheduleImpactText(result.scheduleImpact)}</p>
@@ -2796,7 +2801,13 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
             ) : (
               <div role="status">
                 <strong className="title">{activeTask ? activeTask.prompt : phaseLabels[snapshot.phase]}</strong>
-                <p className="small">正在准备下一步。</p>
+                {/* 审计 F11：暂停之后旁边还写着"正在准备下一步"，读者会以为后台还在推进。
+                    暂停是**用户自己做的**，这一句要说的是"要等你继续"，不是"还在算"。 */}
+                <p className="small">
+                  {snapshot.phase === "paused"
+                    ? "已暂停计时；点继续之后才会读取下一步。"
+                    : "正在准备下一步。"}
+                </p>
                 {failure ? <p className="small" role="alert">{failure.message}</p> : null}
               </div>
             )}

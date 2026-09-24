@@ -356,6 +356,17 @@ describe("LearningRunSurface · 动作区", () => {
    * （继续补充证据 / 结束但不改变复习）落在折叠的「更多选择」里。
    * 用户的原话是"我就一直在这里等着？"。
    */
+  /**
+   * 审计 F11：点「暂停」之后页面写着「已暂停」，旁边却还是「正在准备下一步。」——
+   * 读者会以为后台还在推进；而暂停是**用户自己做的**，这一句要说的是"要等你继续"。
+   */
+  it("暂停之后说的是「等你继续」，不是「正在准备下一步」", async () => {
+    renderRun(snapshot({ phase: "paused" }));
+
+    await waitFor(() => expect(document.body.textContent).toContain("已暂停计时"));
+    expect(document.body.textContent).not.toContain("正在准备下一步");
+  });
+
   it("checkpoint 不装成后台在准备：下一步按钮在明面上，且说清为什么停住", async () => {
     const checkpoint = snapshot({
       phase: "checkpoint",
