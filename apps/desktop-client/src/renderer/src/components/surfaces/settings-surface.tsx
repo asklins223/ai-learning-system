@@ -1795,6 +1795,15 @@ export function SettingsSurface() {
                   {signingOut ? "正在退出…" : "退出登录"}
                 </button>
               </SettingRow>
+              {/* 审计 F42：整个账户区此前**没有注销账号的入口**，最接近的只有"退出登录"，
+                  而那是两件事。产品当前不提供自助注销，那就在页面上说明白怎么才能删，
+                  而不是让人在设置里翻三圈找不到、或者以为退出登录就等于注销。 */}
+              <SettingRow
+                title="删除账号"
+                detail="当前版本不提供自助删除。要彻底删掉账号与其中的学习数据，请用注册邮箱写信给支持邮箱说明；删除后无法恢复，我们会在核实身份后处理。"
+              >
+                <span className="tag">当前不提供</span>
+              </SettingRow>
             </div>
           </details>
         </section>
@@ -2547,12 +2556,16 @@ export function SettingsSurface() {
           </section>
 
           <section className="settings-group">
-            <h3 className="settings-group__title">生命周期</h3>
+            {/* 审计 F41：导出与导入并排放在「生命周期」里，读起来像"备份/恢复"一对，
+                而**服务端只有导出这一半**（没有任何端点能把这份 JSON 导回来）。
+                所以①分组改成"导出与归档"，把导入 Markdown 留在"这页还能做什么"那一组；
+                ②导出的说明里明写"导不回来"，不再让"备份"这个词暗示可以恢复。 */}
+            <h3 className="settings-group__title">导出与归档</h3>
             <div className="settings-rows">
               <SettingRow
-                title="导出工作区"
+                title="导出工作区（只读存档）"
                 detail={currentRole === "owner"
-                  ? "把当前空间的来源、笔记、理解目标与版本写成一个 JSON 文件；保存位置由你在系统对话框里选择。"
+                  ? "把当前空间的来源、笔记、理解目标与版本写成一个 JSON 文件，用来留档或自己分析；保存位置由你在系统对话框里选择。**这份文件目前导不回来**——要恢复内容，请在原空间里操作。"
                   : "整库导出只对空间所有者开放，你在这个空间是成员。"}
               >
                 <button
@@ -2567,7 +2580,7 @@ export function SettingsSurface() {
               <SettingRow
                 title="导入 Markdown 笔记"
                 detail={currentRole === "owner"
-                  ? "一次最多 100 个 .md 文件，文件名作标题；相同批次重试不会产生重复笔记。导进来的文件属于这个空间——协作空间里所有成员和他们的伴星都会读到。"
+                  ? "从本机的 .md 文件建笔记（**不是**上面那份 JSON 存档的导入口）：一次最多 100 个文件，文件名作标题；相同批次重试不会产生重复笔记。导进来的文件属于这个空间——协作空间里所有成员和他们的伴星都会读到。"
                   : "批量导入只对空间所有者开放，你在这个空间是成员。"}
               >
                 <label
