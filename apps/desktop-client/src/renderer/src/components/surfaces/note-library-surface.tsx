@@ -106,6 +106,8 @@ export function NoteLibrarySurface() {
   const [renaming, setRenaming] = useState<{ noteId: string; title: string } | null>(null);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  /** 恢复成功的回执（审计 F48）：与"已撤销邀请"同规格的一句话。 */
+  const [trashReceipt, setTrashReceipt] = useState<string | null>(null);
   const [rowFailure, setRowFailure] = useState<string | null>(null);
   const [trash, setTrash] = useState<NotePage | null>(null);
   const [trashLoading, setTrashLoading] = useState(false);
@@ -432,6 +434,10 @@ export function NoteLibrarySurface() {
       setTrash((current) => (current
         ? { ...current, items: current.items.filter((item) => item.id !== note.id) }
         : null));
+      // 审计 F48：恢复本身是对的，但屏上一条回执都没有——用户只能靠"它不见了"推断，
+      // 而"不见了"和"又被删了一次"长得一样。同一应用里"撤销邀请"会写"已撤销"、
+      // "稍后提醒"会写推迟到哪天，这一条也要有同规格的一句。
+      setTrashReceipt(`已把《${note.title}》恢复到笔记列表。`);
       await reload();
       await loadTrash();
     } catch (error) {
@@ -656,7 +662,7 @@ export function NoteLibrarySurface() {
             </section>
           </div>
         ) : (
-          <section className="source-index note-index" aria-label="全部笔记">
+          <section className="source-index note-index" aria-label={trash ? `回收站 · ${trash.items.length} 篇` : "全部笔记"}>
             {/* Search and the time tabs filter the live list; the trash is a
                 different list, so they are not drawn while it is open. They used
                 to stay enabled and do nothing — and a submitted search walked the
@@ -700,6 +706,10 @@ export function NoteLibrarySurface() {
 
             {trash ? (
               <div className="source-list">
+                {trashReceipt ? (
+                  // 审计 F48：恢复成功的回执就贴在这一屏上（与"已撤销邀请"同规格）。
+                  <p className="small index-foot" role="status">{trashReceipt}</p>
+                ) : null}
                 {trashLoading ? <SurfaceDataState kind="loading" message="正在读取回收站" detail="回收站里的笔记仍然属于当前工作区。" /> : null}
                 {!trashLoading && trashFailure ? <SurfaceDataState kind="error" message="回收站暂时不可用" detail={trashFailure} onRetry={() => void loadTrash()} /> : null}
                 {!trashLoading && !trashFailure && trash.items.length === 0 ? (

@@ -288,6 +288,33 @@ describe("NoteLibrarySurface · 边界与多数据", () => {
     expect(screen.getByRole("button", { name: /加载更多/ })).toBeTruthy();
   });
 
+  /**
+   * 审计 F48：恢复本身是对的（库侧 alive 15→16 已实测），但屏上一条回执都没有——
+   * 用户只能靠"它不见了"推断，而"不见了"和"又被删了一次"长得一样。同一应用里
+   * "撤销邀请"会写"已撤销"、"稍后提醒"会写推迟到哪天，这一条也要有同样规格的一句。
+   * 顺带：回收站视图的区域名不再挂在"全部笔记"上（读起来像"全部笔记都被删了"）。
+   */
+  it("恢复一条笔记：有明确回执，且区域名说的是回收站", async () => {
+    stubGateway({
+      live: [NOTE("n1", "笔记一")],
+      trashed: [NOTE("t1", "被删的笔记")],
+      trashedTotal: 1,
+    });
+    render(<NoteLibrarySurface />);
+
+    await waitFor(() => expect(screen.getByText("笔记一")).toBeTruthy());
+    await openTrash();
+    await waitFor(() => expect(screen.getByText("被删的笔记")).toBeTruthy());
+
+    // 回收站视图的区域名跟着视图走。
+    const trashed = document.querySelector('[aria-label^="回收站 · "]');
+    expect(trashed?.getAttribute("aria-label")).toBe("回收站 · 1 篇");
+    expect(document.querySelector('[aria-label="全部笔记"]')).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /恢复/ }));
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("已把《被删的笔记》恢复到笔记列表。"));
+  });
+
   it("重命名不会把读者打回第一页", async () => {
     const { state } = stubGateway({
       live: [NOTE("n1", "笔记一")],
