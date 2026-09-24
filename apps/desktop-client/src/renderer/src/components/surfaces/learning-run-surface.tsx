@@ -245,7 +245,9 @@ function companionResultLine(result: LearningRunResultV2, targetSummary: string,
 
 const scheduleReasonLabels: Record<string, string> = {
   not_authorized: "当前证据等级不足以改变复习安排",
-  facet_only: "本次只产生了 facet 级证据",
+  // 兜底那句（拿不到逐条判定时才用）：以前写"本次只产生了 facet 级证据"——
+  // `facet` 是内部词，用户读不出"差了多少、差哪几处"（审计 F50）。
+  facet_only: "这次只补齐了一部分要点",
   record_only: "本次只写入记录",
   practice_only: "本次属于练习，不改变复习",
   diagnostic_only: "本次属于诊断，不改变复习",
@@ -329,12 +331,29 @@ function facetText(facets: readonly string[], empty: string): string {
   return facets.map((facet) => facetLabels[facet] ?? facet).join("、");
 }
 
-function scheduleImpactText(impact: ScheduleImpact): string {
+function scheduleImpactText(
+  impact: ScheduleImpact,
+  rubricResults: ReadonlyArray<{ facet: string; verdict: string }> = [],
+): string {
   // 到期时间是**未来**，不能用 formatRelative：它算的是 (now - value)，未来时间
   // 得到负 minutes，`minutes < 1` 直接命中「刚刚」——于是明天和下个月都显示
   // 「下次到期 刚刚。」（31 号文档 P4）。复用列表行那套「今天/明天/N 天后」。
   if (impact.kind === "created") return `已创建复习安排，下次到期 ${formatObjectiveDay(impact.dueAt)}。`;
   if (impact.kind === "rescheduled") return `已重新安排复习，下次到期 ${formatObjectiveDay(impact.dueAt)}。`;
+  /**
+   * 审计 F50：「排程没动」至少有三种原因，界面上以前压成同一句话。`facet_only`
+   * 这一种的数据其实全在手里（逐条判定已经返回），所以直接说清"证明了几处、
+   * 还差哪几处、差的那些补上才会推进"——而不是留一句"只产生了 facet 级证据"。
+   */
+  if (impact.reasonCode === "facet_only" && rubricResults.length > 0) {
+    const covered = rubricResults.filter((item) => item.verdict === "covered");
+    const gaps = [...new Set(rubricResults
+      .filter((item) => item.verdict !== "covered")
+      .map((item) => facetLabels[item.facet] ?? item.facet))];
+    if (gaps.length > 0) {
+      return `本次没有改变复习安排：${rubricResults.length} 个要点里证明了 ${covered.length} 个，还差 ${gaps.join("、")}；这几处补齐了才会推进排程。`;
+    }
+  }
   return `本次没有改变复习安排：${scheduleReasonLabels[impact.reasonCode] ?? impact.reasonCode}。`;
 }
 
@@ -2628,7 +2647,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
                 ) : null}
                 <div>
                   <b>学习状态变化</b>
-                  <p>{scheduleImpactText(result.scheduleImpact)}</p>
+                  <p>{scheduleImpactText(result.scheduleImpact, result.assessment?.rubricResults ?? [])}</p>
                 </div>
               </div>
             ) : (

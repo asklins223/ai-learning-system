@@ -439,4 +439,72 @@ describe("LearningRunSurface · 结算页结构", () => {
       .find((d) => d.textContent?.startsWith("学习状态变化"));
     expect(schedule?.textContent).toContain("下次到期 明天。");
   });
+
+  /**
+   * 审计 F50：「排程没动」至少有三种原因，此前压成同一句话，其中 `facet_only`
+   * 那句还写着"本次只产生了 facet 级证据"——内部词，且不说差多少、差哪几处，
+   * 而逐条判定其实早就返回了。下面两条把三种原因钉成三句互不相同、且可执行的话。
+   */
+  const scheduleRow = () => [...document.querySelectorAll(".learning-run-result-evidence > div")]
+    .find((d) => d.textContent?.startsWith("学习状态变化"));
+
+  it("facet_only 说清证明了几处、还差哪几处，不念内部词", async () => {
+    renderResult(1, resultWithRubric(1, {
+      outcome: "partial",
+      demonstratedFacets: ["recall"],
+      gapFacets: [],
+      scheduleImpact: { kind: "none", reasonCode: "facet_only" },
+      assessment: {
+        source: "assessment_critic",
+        status: "completed",
+        trustClass: "mastery_eligible",
+        rubricResults: [
+          { rubricItemId: "r1", facet: "recall", verdict: "covered", userFacingReason: "回忆说清了。" },
+          { rubricItemId: "r2", facet: "explain", verdict: "missing", userFacingReason: "没有解释机制。" },
+          { rubricItemId: "r3", facet: "boundary", verdict: "partial", userFacingReason: "边界不完整。" },
+          { rubricItemId: "r4", facet: "explain", verdict: "missing", userFacingReason: "再说一遍机制。" },
+        ],
+      },
+    }));
+    await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
+
+    const text = scheduleRow()?.textContent ?? "";
+    expect(text).toContain("4 个要点里证明了 1 个");
+    // 差的要点按人话点名，同一个面缺两条也只点一次。
+    expect(text).toContain("解释");
+    expect(text).toContain("边界");
+    expect(text.match(/解释/g)?.length).toBe(1);
+    expect(text).toContain("这几处补齐了才会推进排程");
+    expect(text).not.toContain("facet");
+  });
+
+  it("practice_only 与 facet_only 是两句话，不共用一句「无法评估」", async () => {
+    renderResult(1, allCoveredPractice());
+    await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
+
+    const practice = scheduleRow()?.textContent ?? "";
+    expect(practice).toContain("本次属于练习，不改变复习");
+    expect(practice).not.toContain("无法评估");
+    expect(practice).not.toContain("还差");
+  });
+
+  it("拿不到逐条判定时，facet_only 的兜底那句也不念内部词", async () => {
+    renderResult(1, resultWithRubric(1, {
+      outcome: "partial",
+      demonstratedFacets: ["recall"],
+      gapFacets: [],
+      scheduleImpact: { kind: "none", reasonCode: "facet_only" },
+      assessment: {
+        source: "assessment_critic",
+        status: "completed",
+        trustClass: "mastery_eligible",
+        rubricResults: [],
+      },
+    }));
+    await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
+
+    const text = scheduleRow()?.textContent ?? "";
+    expect(text).toContain("本次没有改变复习安排");
+    expect(text).not.toMatch(/facet|not_assessable|practice_only/);
+  });
 });
