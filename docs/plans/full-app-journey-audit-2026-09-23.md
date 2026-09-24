@@ -722,6 +722,8 @@ Python 脚本整文件覆写，锚点算错把 `docs/plans/full-app-journey-audi
 别把 ledger 的重要段落长时间留在未提交状态。我这一侧的 §8 行（F14/F19/F22/F26/F29/F48/F50/F51
 与 F39 ③）都已重新落好。
 
+**集测接入 CI 的盘子（2026-09-24 中午量）**：`apps/api/src/integration-tests` 共 **67** 份 `.integration.ts`，`.github/workflows/ci.yml` 的点名列里只有 **24** 份——43 份从不自动跑。F51 那批就是栽在这里：`learning-runs-postgres` 不在名单里，F28 改了签发条件之后两条期望静默失效了一整天。今天顺手抽了 4 份跑（受限 API + worker 双角色）：`learning-runs-structured-postgres` 3/4 通过、1 条自带 SKIP 理由（V1 planner 已退役，repair 无生成入口）；`assistant-memory-postgres` 3/3；`learning-run-origin-contract` 未跑完即被打断；**`learning-runs-demonstrated-postgres` 只有 1 条用例，且缺 `ASSESSMENT_CRITIC_URL/KEY` 时整条静默 skip**——这种接进 CI 也是零信号，先要解决"要么写真 critic 替身、要么显式 require 环境"再谈登记。结论：登记要一份一份判（跑不跑得动、会不会静默 skip、要哪些 env），不是把 43 个文件名贴进去就算补上。
+
 **并行会话在途（2026-09-24 08:18–08:26，如实记）**：另一条会话此刻在同一棵树上做
 「纸面上的图片拖放」——`notebook-surface.tsx` 08:18 被改、`notebook-surface.paper-image-drop.test.tsx`
 08:24 新建且**当前是红的**（`expect(uploads).toHaveLength(1)` 拿到 0），
