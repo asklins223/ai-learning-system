@@ -724,6 +724,16 @@ Python 脚本整文件覆写，锚点算错把 `docs/plans/full-app-journey-audi
 
 **集测接入 CI 的盘子（2026-09-24 中午量）**：`apps/api/src/integration-tests` 共 **67** 份 `.integration.ts`，`.github/workflows/ci.yml` 的点名列里只有 **24** 份——43 份从不自动跑。F51 那批就是栽在这里：`learning-runs-postgres` 不在名单里，F28 改了签发条件之后两条期望静默失效了一整天。今天顺手抽了 4 份跑（受限 API + worker 双角色）：`learning-runs-structured-postgres` 3/4 通过、1 条自带 SKIP 理由（V1 planner 已退役，repair 无生成入口）；`assistant-memory-postgres` 3/3；`learning-run-origin-contract` 未跑完即被打断；**`learning-runs-demonstrated-postgres` 只有 1 条用例，且缺 `ASSESSMENT_CRITIC_URL/KEY` 时整条静默 skip**——这种接进 CI 也是零信号，先要解决"要么写真 critic 替身、要么显式 require 环境"再谈登记。结论：登记要一份一份判（跑不跑得动、会不会静默 skip、要哪些 env），不是把 43 个文件名贴进去就算补上。
 
+**交接快照（2026-09-24 13:0x，另一条会话停下时树里的状态，实测不是推断）**：它留了 41+ 个文件的未提交改动
+（`run-service` / `run-processing-tick` / `run-errors` / `activity/service` / `card-generation-v2` / note 三件 /
+桌面主进程与合同 / `ci.yml` / 迁移 0277 等）。这一批**自洽**：桌面 `tsc` 两 project 干净、全量 **195 文件 1640 用例绿**；
+api `tsc` 干净、单测 **1590 通过 0 失败**；worker `tsc` 干净（早先那条 `COMPANION_CHARACTER_BASE_V5` 的红已被它自己修掉）、
+单测 **815/815**；它新增的迁移 `0277_page_readable_view_in_context` 既登记进 `_journal.json` 也有对应 SQL 文件。
+本线程（F51/F26/F50/F29/F39③/F10/F03/F04 使能层）全部已在 23 个提交里，工作树里没有我的未提交残留。
+**下一步的落点已被它占过的**：F04 的界面那一行（`ReviewSurface.tsx` 里它写了"同一学习卡在这批到期项里还有几张卡"）、
+F42 收口（`settings-surface.tsx`）、F03 的"一屏只一个主操作"（`WorkspaceLibrarySurface.tsx`）——
+从这些接着做之前先把它那批提交掉，别在混着两拨未提交改动的树上继续叠。
+
 **并行会话在途（2026-09-24 08:18–08:26，如实记）**：另一条会话此刻在同一棵树上做
 「纸面上的图片拖放」——`notebook-surface.tsx` 08:18 被改、`notebook-surface.paper-image-drop.test.tsx`
 08:24 新建且**当前是红的**（`expect(uploads).toHaveLength(1)` 拿到 0），
