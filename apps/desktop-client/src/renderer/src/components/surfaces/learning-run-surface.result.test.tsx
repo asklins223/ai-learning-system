@@ -23,6 +23,7 @@ const RUN_ID = "00000000-0000-4000-8000-000000000001";
 const SNAPSHOT_ID = "00000000-0000-4000-8000-000000000002";
 const CARD_ID = "00000000-0000-4000-8000-000000000003";
 const OBJECTIVE_ID = "00000000-0000-4000-8000-000000000004";
+const TASK_ID = "00000000-0000-4000-8000-00000000000a";
 
 const origin = { kind: "card", cardId: CARD_ID, objectiveId: OBJECTIVE_ID } as const;
 const returnTarget = { kind: "card", cardId: CARD_ID, objectiveId: OBJECTIVE_ID } as const;
@@ -95,7 +96,7 @@ const resultWithRubric = (
 });
 
 /** 一次「全说清但只算练习」的结算——31 号文档 P1 的原始形态。 */
-const allCoveredPractice = () => resultWithRubric(4, {
+const allCoveredPractice = (overrides: Record<string, unknown> = {}) => resultWithRubric(4, {
   outcome: "practice_completed",
   demonstratedFacets: [],
   gapFacets: [],
@@ -111,6 +112,7 @@ const allCoveredPractice = () => resultWithRubric(4, {
       userFacingReason: `${step} 那一步说清了。`,
     })),
   },
+  ...overrides,
 });
 
 function stubGateway(resultPayload: unknown, rubricLength = 12, snapshotPayload = completedSnapshot()) {
@@ -202,15 +204,50 @@ describe("LearningRunSurface · 新结果过关演出", () => {
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("heading", { name: "这一关，你真的说明白了" })));
   });
 
-  it("历史 demonstrated 与新完成的 practice_completed 都不播放正式过关", async () => {
+  it("历史 demonstrated 不播放演出：只有当场等到评估结果的那一次才算新完成", async () => {
     renderResult(2, resultWithRubric(2));
     await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
     expect(document.querySelector(".learning-run-ceremony")).toBeNull();
-    cleanup();
+  });
 
+  /**
+   * 练习结算从 2026-09-24 起也到场。此前那枚圆章写死「通关」、眉标写死
+   * 「正式挑战 · 掌握完成」，放开闸门就会把一次练习印成掌握完成——所以这一条
+   * 钉的是「播了，且说的是练习那两个字」。
+   */
+  it("新完成的 practice_completed 播放一次，圆章与眉标说的是练习", async () => {
     renderResult(2, allCoveredPractice(), vi.fn(), assessingSnapshot());
-    await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
-    expect(document.querySelector(".learning-run-ceremony")).toBeNull();
+    await waitFor(() => expect(document.querySelector(".learning-run-ceremony")).not.toBeNull());
+    expect(document.querySelector(".learning-run-ceremony__confetti")).not.toBeNull();
+    expect(document.querySelector(".learning-run-ceremony__stamp")?.textContent).toBe("收获");
+    expect(document.querySelector(".learning-run-ceremony__eyebrow")?.textContent).toBe("练习旅程 · 练习有收获");
+    expect(document.querySelector(".learning-run-ceremony")?.textContent).toContain("这次练习，已经看见你会了什么");
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(document.querySelector(".learning-run-ceremony")).toBeNull());
+    expect(document.querySelector(".learning-run-result-board")).not.toBeNull();
+  });
+
+  it("练习那一次拿不到「已说清」判定时，圆章跟着换成留痕那一支", async () => {
+    renderResult(2, allCoveredPractice({
+      assessment: {
+        source: "assessment_critic",
+        status: "completed",
+        trustClass: "practice_only",
+        rubricResults: [{
+          rubricItemId: "rubric-1", facet: "recall", verdict: "missing", userFacingReason: "没有说到取舍。",
+        }],
+      },
+    }), vi.fn(), assessingSnapshot());
+    await waitFor(() => expect(document.querySelector(".learning-run-ceremony")).not.toBeNull());
+    expect(document.querySelector(".learning-run-ceremony__stamp")?.textContent).toBe("收获");
+    expect(document.querySelector(".learning-run-ceremony__eyebrow")?.textContent).toBe("练习旅程 · 练习已留痕");
+  });
+
+  it("正式过关的圆章与眉标仍是从前那两行字", async () => {
+    renderResult(2, resultWithRubric(2), vi.fn(), assessingSnapshot());
+    await waitFor(() => expect(document.querySelector(".learning-run-ceremony")).not.toBeNull());
+    expect(document.querySelector(".learning-run-ceremony__stamp")?.textContent).toBe("通关");
+    expect(document.querySelector(".learning-run-ceremony__eyebrow")?.textContent).toBe("正式挑战 · 掌握完成");
   });
 
   it("关闭动效或偏好减少动效时直接显示结果，不等待演出", async () => {
@@ -515,6 +552,47 @@ describe("LearningRunSurface · 结算页结构", () => {
     const body = document.querySelector(".learning-run-result-reveal__body")?.textContent ?? "";
     expect(body).toContain("这次想考的是");
     expect(body).not.toContain("你提交的回答");
+  });
+
+  /**
+   * 审计 F29 的另一半：正文由服务端随结果载荷带回来（`result.submitted`）。
+   * 这里刻意**不经过提交流程**——直接渲染一个已结算的 run，等价于"刷新之后 /
+   * 从历史重进"。那条路径以前永远看不到自己交过什么。
+   */
+  it("刷新之后仍能看到本轮交过的原文，按钮也不再撒谎（审计 F29）", async () => {
+    renderResult(1, resultWithRubric(1, {
+      submitted: [
+        { taskId: TASK_ID, sequence: 1, kind: "text", text: "因为检索本身就在改记忆，重读没有这个作用。" },
+      ],
+    }));
+    await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
+
+    const button = screen.getByRole("button", { name: "看这次的答案与解释" });
+    fireEvent.click(button);
+    await waitFor(() => expect(document.querySelector(".learning-run-result-reveal__body")).not.toBeNull());
+
+    const body = document.querySelector(".learning-run-result-comparison");
+    expect(body?.textContent).toContain("因为检索本身就在改记忆，重读没有这个作用。");
+    expect(body?.textContent).toContain("你提交的回答");
+    expect(body?.textContent).toContain("这次想考的是");
+  });
+
+  it("补充过证据就把两次都列出来，各标第几次，不拿最后一次冒充唯一一次", async () => {
+    renderResult(1, resultWithRubric(1, {
+      submitted: [
+        { taskId: TASK_ID, sequence: 1, kind: "text", text: "第一次：只说了会忘。" },
+        { taskId: TASK_ID, sequence: 2, kind: "voice", text: "第二次：补了检索练习的机制。" },
+      ],
+    }));
+    await waitFor(() => expect(document.querySelector(".learning-run-result-board")).not.toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "看这次的答案与解释" }));
+    await waitFor(() => expect(document.querySelector(".learning-run-result-reveal__body")).not.toBeNull());
+
+    const body = document.querySelector(".learning-run-result-comparison")?.textContent ?? "";
+    expect(body).toContain("第 1 次交的回答");
+    expect(body).toContain("第 2 次交的回答");
+    expect(body).toContain("第一次：只说了会忘。");
+    expect(body).toContain("第二次：补了检索练习的机制。");
   });
 
   it("拿不到逐条判定时，facet_only 的兜底那句也不念内部词", async () => {

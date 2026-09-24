@@ -482,6 +482,125 @@ test("E08：请求提示后提交 text → Critic 未配置 fail closed → not_
   }
 });
 
+/**
+ * 审计 F29：结果载荷必须带上**本轮交上来的原文**。
+ *
+ * 病是这么来的：结果页那颗按钮写"看这次的答案与解释"，展开后只有参考要点——因为
+ * 正文只活在客户端一个内存态里（提交回执那一刻写进去），刷新、从历史重进就没了，
+ * 而 `/learning-runs/:id/*` 那一批端点里没有任何一条读 `learning_artifacts`。
+ * 这条用例钉的是服务端这一侧：已锁定的原文要随结果出来，未锁的（草稿）不算"交过"。
+ *
+ * 结算结果由夹具直接写进 `learning_runs.result`：本机没配 critic，走不到真判定，
+ * 但被测的是"读已锁 artifact"这一段，与谁写下那份 result 无关。
+ */
+test("F29：结果载荷带上本轮已锁的原文，被取代的那一份不算", async () => {
+  const seeded = await seed();
+  try {
+    const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
+    const run = await withWorkspaceTransaction(scope, async (tx) =>
+      createLearningRunForTest(tx, {
+        ...scope,
+        request: {
+          originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
+          goal: "stabilize",
+          idempotencyKey: "f29-create",
+        },
+      }),
+    );
+    const variant = run.activeTask!.activeVariant;
+    await withWorkspaceTransaction(scope, async (tx) =>
+      submitArtifact(tx, {
+        ...scope,
+        runId: run.runId,
+        taskId: run.activeTaskId!,
+        request: {
+          version: 1,
+          variantId: variant.variantId,
+          variantRevision: variant.revision,
+          runRevision: run.revision,
+          taskRevision: run.activeTask!.revision,
+          inputSchemaHash: variant.inputSchemaHash,
+          payload: { kind: "text", text: "因为检索本身就在改记忆，重读没有这个作用。" },
+          idempotencyKey: "f29-submit",
+        },
+      }),
+    );
+
+    const resultJson = JSON.stringify({
+      outcome: "partial",
+      demonstratedFacets: ["recall"],
+      gapFacets: ["explain"],
+      scheduleImpact: { kind: "none", reasonCode: "facet_only" },
+      returnTarget: { kind: "card", cardId: seeded.cardId, keyPointId: seeded.keyPointId, objectiveId: seeded.keyPointId },
+    });
+    await scoped(scope, (tx) => tx`
+      UPDATE learning_runs SET phase = 'completed', result = ${resultJson}::jsonb
+      WHERE id = ${run.runId}
+    `);
+
+    const payload = await withWorkspaceTransaction(scope, async (tx) =>
+      getResultPayloadV2(tx, { ...scope, runId: run.runId }),
+    );
+    if (payload.status !== "learning_result") {
+      assert.fail(`应当读到学习结果，实际 status=${payload.status}`);
+    }
+    assert.deepEqual(payload.result.submitted, [{
+      taskId: run.activeTaskId!,
+      sequence: 1,
+      kind: "text",
+      text: "因为检索本身就在改记忆，重读没有这个作用。",
+    }], "已锁定的原文要随结果载荷出来（F29 的全部意义就在这）");
+
+    // 补充证据的真实形状：一个任务**只允许一条 locked**（部分唯一索引
+    // `learning_artifacts_task_locked_unique_idx`），所以第二次作答是"把前一条标成
+    // superseded + 锁一条新的"。这一步同时守三件事：superseded 不再被报出、
+    // 语音取的是确认过的逐字稿、报的是当下这条而不是最早那条。
+    await scoped(scope, (tx) => tx`
+      UPDATE learning_artifacts SET status = 'superseded', updated_at = now()
+      WHERE run_id = ${run.runId} AND status = 'locked'
+    `);
+    await scoped(scope, (tx) => tx`
+      INSERT INTO learning_artifacts (
+        id, run_id, task_id, variant_id, workspace_id, user_id, revision, payload,
+        payload_hash, public_payload_hash, input_schema_hash, private_solution_hash,
+        safety_report_hash, disclosure_profile_hash, assistance_snapshot_hash,
+        status, locked_at, supersedes_artifact_id)
+      SELECT gen_random_uuid(), run_id, task_id, variant_id, workspace_id, user_id,
+             revision + 1,
+             ${tx.json({ kind: "voice", confirmedTranscript: "口述：检索练习比重读更有效。" })},
+             payload_hash, public_payload_hash, input_schema_hash, private_solution_hash,
+             safety_report_hash, disclosure_profile_hash, assistance_snapshot_hash,
+             'locked', now(), id
+      FROM learning_artifacts WHERE run_id = ${run.runId} ORDER BY revision DESC LIMIT 1
+    `);
+    const afterSupplement = await withWorkspaceTransaction(scope, async (tx) =>
+      getResultPayloadV2(tx, { ...scope, runId: run.runId }),
+    );
+    assert.equal(afterSupplement.status === "learning_result" ? afterSupplement.result.submitted?.length : -1, 1,
+      "一个任务只报当下这一条");
+    assert.deepEqual(afterSupplement.status === "learning_result" ? afterSupplement.result.submitted?.[0] : null, {
+      taskId: run.activeTaskId!,
+      sequence: 1,
+      kind: "voice",
+      text: "口述：检索练习比重读更有效。",
+    }, "语音答案带的是确认过的逐字稿");
+
+    // 反向对照：被**取代**的那一份不算这一轮交过的答案（artifact 只有
+    // locked / superseded 两种终态，补充证据会把前一次标成 superseded）。
+    // 不写这一句，用例其实只在测"有 artifact 行就带出来"，与锁没锁无关。
+    await scoped(scope, (tx) => tx`
+      UPDATE learning_artifacts SET status = 'superseded' WHERE run_id = ${run.runId} AND status = 'locked'
+    `);
+    const afterUnlock = await withWorkspaceTransaction(scope, async (tx) =>
+      getResultPayloadV2(tx, { ...scope, runId: run.runId }),
+    );
+    assert.equal(afterUnlock.status === "learning_result"
+      ? afterUnlock.result.submitted : undefined, undefined, "superseded 的那一份不该当成这一轮交过的答案");
+  } finally {
+    await seeded.cleanup();
+  }
+});
+
 test("E09：assessing 阶段 end(abandon) → epoch 前移 → 迟到评估无副作用", async () => {
   const seeded = await seed();
   try {

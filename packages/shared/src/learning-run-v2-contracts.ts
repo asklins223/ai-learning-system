@@ -280,6 +280,22 @@ export const learningRunTargetRevealV2Schema = z.strictObject({
 });
 export type LearningRunTargetRevealV2 = z.infer<typeof learningRunTargetRevealV2Schema>;
 
+/**
+ * 本轮交上来的原文（审计 F29）。结算页要说"你这次答的是什么"、补充题要说"上次那句
+ * 需要纠正的是哪句"——此前这两处都只在一个内存态里（`lockedAnswer`），刷新、从历史
+ * 重进、或结算后再进来就没了，界面因此承诺了一件手里没有的事。
+ *
+ * 只送**有文字的那两种**（text / voice 的确认逐字稿）。结构化作答（顺序、连线、
+ * 选择）不在这条里：把那三种也摊成一句人话是另一件事，不借这个字段偷偷塞原文。
+ */
+export const learningRunSubmittedAnswerV2Schema = z.strictObject({
+  taskId: z.string().min(1),
+  sequence: z.number().int().min(1),
+  kind: z.enum(["text", "voice"]),
+  text: z.string().min(1).max(20_000),
+});
+export type LearningRunSubmittedAnswerV2 = z.infer<typeof learningRunSubmittedAnswerV2Schema>;
+
 const learningRunResultCoreV2Schema = z.strictObject({
   outcome: learningRunOutcomeSchema,
   demonstratedFacets: z.array(taskIntentSchema),
@@ -288,6 +304,8 @@ const learningRunResultCoreV2Schema = z.strictObject({
   returnTargetV2: learningRunReturnTargetV2Schema,
   projection: learningRunProjectionSchema.optional(),
   assessment: learningRunResultAssessmentV2Schema.optional(),
+  /** 见 `learningRunSubmittedAnswerV2Schema`：按任务顺序，老 run 可以完全没有。 */
+  submitted: z.array(learningRunSubmittedAnswerV2Schema).max(6).optional(),
 });
 
 export const learningRunResultV2Schema = z.strictObject({

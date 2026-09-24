@@ -18,7 +18,7 @@
  * - 答案正文不进事件 payload / outbox payload。
  */
 
-import { and, desc, eq, gt, gte, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, sql } from "drizzle-orm";
 import { interactionQualifications } from "@ailearn/shared/db-schema/learning-runs";
 import type { ApiTransaction } from "../../db/client.ts";
 import {
@@ -58,6 +58,7 @@ import type {
   LearningRunOriginV2,
   LearningRunPublicSnapshotV2,
   LearningRunPublicV1,
+  LearningRunSubmittedAnswerV2,
   LearningRunResultAssessmentV2,
   LearningRunTargetPublicV2,
   LearningRunTargetRevealV2,
@@ -73,6 +74,7 @@ import {
   getLearningRunResultResponseV2Schema,
   learningRunOriginV2Schema,
   learningRunPublicSnapshotV2Schema,
+  artifactPayloadSchema,
   learningRunResultAssessmentV2Schema,
   learningRunResultSchema,
   learningRunResultV2Schema,
@@ -1293,6 +1295,7 @@ function projectLearningRunResultV2(
   context: V2RunContext,
   rawResult: unknown,
   assessment?: LearningRunResultAssessmentV2,
+  submitted: LearningRunSubmittedAnswerV2[] = [],
 ): LearningRunResultV2 {
   const parsed = learningRunResultSchema.safeParse(rawResult);
   if (!parsed.success) throw unsupportedV2Contract("V2 result 的 nested result 不是 canonical 结果");
@@ -1308,6 +1311,7 @@ function projectLearningRunResultV2(
     returnTargetV2: context.returnTargetV2,
     ...(parsed.data.projection ? { projection: parsed.data.projection } : {}),
     ...(assessment ? { assessment } : {}),
+    ...(submitted.length > 0 ? { submitted } : {}),
   });
 }
 
@@ -1316,6 +1320,43 @@ function projectLearningRunResultV2(
  * 逐 rubric 判定与给用户看的一句说明。老 run / 尚未评估的 run 没有这份数据，
  * 字段保持可选，不阻断结果读取。
  */
+/**
+ * 本轮交上来的原文（审计 F29）。只取**已锁**的 artifact——未锁的是草稿，不算"交过"；
+ * 同一个任务被补充证据覆盖过两次时取最后一次（用户要看到的是那一轮真正结算的内容）。
+ * 结构化作答（顺序/连线/选择）没有单句原文，跳过而不是替它编一句。
+ */
+async function loadResultSubmissionsV2(
+  tx: ApiTransaction,
+  runId: string,
+): Promise<LearningRunSubmittedAnswerV2[]> {
+  const rows = await tx
+    .select({
+      taskId: learningArtifacts.taskId,
+      sequence: learningTasks.sequence,
+      payload: learningArtifacts.payload,
+    })
+    .from(learningArtifacts)
+    .innerJoin(learningTasks, eq(learningTasks.id, learningArtifacts.taskId))
+    .where(and(
+      eq(learningArtifacts.runId, runId),
+      eq(learningArtifacts.status, "locked"),
+    ))
+    .orderBy(asc(learningTasks.sequence), asc(learningArtifacts.revision));
+  // "同一 sequence 只有一条"实际由部分唯一索引 `learning_artifacts_task_locked_unique_idx`
+  // 保证（一个任务只能有一条 locked），这里的 Map 只是防止有人日后放宽那条索引时静默多报。
+  const latest = new Map<number, { taskId: string; kind: "text" | "voice"; text: string }>();
+  for (const row of rows) {
+    const parsed = artifactPayloadSchema.safeParse(row.payload);
+    if (!parsed.success) continue;
+    if (parsed.data.kind === "text") {
+      latest.set(row.sequence, { taskId: row.taskId, kind: "text", text: parsed.data.text });
+    } else if (parsed.data.kind === "voice") {
+      latest.set(row.sequence, { taskId: row.taskId, kind: "voice", text: parsed.data.confirmedTranscript });
+    }
+  }
+  return [...latest.entries()].map(([sequence, value]) => ({ sequence, ...value }));
+}
+
 async function loadResultAssessmentV2(
   tx: ApiTransaction,
   runId: string,
@@ -1445,11 +1486,12 @@ export async function getResultPayloadV2(
   };
   if (context.run.result) {
     const assessment = await loadResultAssessmentV2(tx, context.run.id);
+    const submitted = await loadResultSubmissionsV2(tx, context.run.id);
     return getLearningRunResultResponseV2Schema.parse({
       ...base,
       status: "learning_result",
       httpStatus: 200,
-      result: projectLearningRunResultV2(context, context.run.result, assessment),
+      result: projectLearningRunResultV2(context, context.run.result, assessment, submitted),
     });
   }
   if (context.run.phase === "ended" || context.run.phase === "cancelled" || context.run.phase === "stale") {

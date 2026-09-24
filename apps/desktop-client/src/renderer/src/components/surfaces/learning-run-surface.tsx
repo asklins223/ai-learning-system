@@ -2395,6 +2395,23 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
 
   const activeTask = snapshot.activeTask;
   const result = resultState.kind === "result" ? resultState.value.result : null;
+  /**
+   * 结算页"你交过的原文"从哪来（审计 F29）。
+   *
+   * 以前只有 `lockedAnswer` 一个内存态：提交那一刻写进去，刷新、从历史重进、结算后
+   * 再进来就没了——于是那颗"看这次的答案与解释"的按钮在大多数时候承诺一件手里
+   * 没有的事。服务端现在随结果载荷带回 `submitted`（本轮**已锁**的原文），所以
+   * 优先读它；同一次会话里刚交完还没刷新时，本地那份也照样能用。
+   */
+  // 只认服务端那一份：`answerPreview` 对 text/voice 算出来的就是同一句原文，
+  // 留两条来源只会让"刚交完"和"刷新之后"两屏长得不一样——而那正是 F29 的病。
+  // 结构化作答（顺序/连线/选择）不在这条里：把它摊成一句人话是另一件事。
+  const answerSources: Array<{ key: string; label: string; text: string }> = (result?.submitted ?? [])
+    .map((answer, index, all) => ({
+      key: `${answer.taskId}:${answer.sequence}`,
+      label: all.length > 1 ? `第 ${index + 1} 次交的回答` : "你提交的回答",
+      text: answer.text,
+    }));
   const terminal = resultState.kind === "terminal" ? resultState.value : null;
   const resultSeed = result ? `${runId}:${result.snapshotId}:${result.outcome}` : null;
   const rawDiscoveryCard = result && resultSeed ? learningDiscoveryCard(result, resultSeed) : null;
@@ -2681,18 +2698,20 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
                    * 正文送出来之前，按钮只能说它真的给的东西。
                    */
                   <button type="button" className="button" onClick={loadTargetReveal}>
-                    {lockedAnswer ? "看这次的答案与解释" : "看参考答案与解释"}
+                    {answerSources.length > 0 ? "看这次的答案与解释" : "看参考答案与解释"}
                   </button>
                 ) : null}
                 {targetReveal.kind === "loading" ? <p className="small">正在读取答案…</p> : null}
                 {targetReveal.kind === "ready" ? (
                   <div className="learning-run-result-reveal__body">
-                    {lockedAnswer ? (
+                    {answerSources.length > 0 ? (
                       <section className="learning-run-result-comparison" aria-label="提交回答与参考要点对照">
-                        <div>
-                          <span>你提交的回答</span>
-                          <p>{lockedAnswer}</p>
-                        </div>
+                        {answerSources.map((answer) => (
+                          <div key={answer.key}>
+                            <span>{answer.label}</span>
+                            <p>{answer.text}</p>
+                          </div>
+                        ))}
                         <div>
                           <span>这次想考的是</span>
                           <p className="learning-run-result-reveal__answer">{targetReveal.reveal.answerText}</p>
