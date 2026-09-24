@@ -160,6 +160,10 @@ function installApi(options: {
     auth: {
       getState: vi.fn(async () => ok(session(role, { collaborative: options.collaborativeSpace }))),
       joinWorkspace: vi.fn(async () => ok(session(role, { collaborative: options.collaborativeSpace }))),
+      leaveWorkspace: vi.fn(async (input: unknown) => {
+        calls.push({ method: "auth.leaveWorkspace", input });
+        return ok({ version: 1 as const, left: true as const });
+      }),
       getProfile: vi.fn(async () => ok({ version: 1 as const, displayName: "读者", avatarUrl: null })),
       logout: vi.fn(async (input: unknown): Promise<GatewayResultV1<{ loggedOut: true; serverRevoked: boolean }>> => {
         calls.push({ method: "logout", input });
@@ -239,6 +243,11 @@ function installApi(options: {
         calls.push({ method: "switch", input });
         if (options.switchRejects) throw new Error("switch refused");
         return ok(session(role));
+      }),
+      rename: vi.fn(async (input: unknown) => {
+        calls.push({ method: "workspace.rename", input });
+        const request = input as { workspaceId: string; name: string };
+        return ok({ workspaceId: request.workspaceId, name: request.name });
       }),
       // 服务端返回的是**逐表计数**（迁移 0276），界面只转述它，不自己估数。
       transferOwnership: vi.fn(async (input: unknown) => {
@@ -619,6 +628,55 @@ describe("owner invite and member management (旧版设置页回补)", () => {
   });
 });
 
+describe("空间管理：改名与退出（审计 F39 / F40）", () => {
+  it("协作空间的 owner 能从这里改名（审计 F39）", async () => {
+    // 当前空间就是这个协作空间，且我是它的 owner。
+    const { api, calls } = installApi({ collaborativeSpace: true, ownerCollaborative: true });
+    render(<SettingsSurface />);
+    await screen.findByText("理解空间", { selector: ".space-identity h3" });
+
+    openSection("账户与空间");
+
+    // 卡片自己说清这是哪个空间的改名（不再是"协作空间不能从这里改名"）。
+    expect(await screen.findByText("协作空间改名")).toBeTruthy();
+    const input = document.getElementById("settings-personal-name") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "新的协作空间名" } });
+    fireEvent.click(screen.getByRole("button", { name: "改名" }));
+
+    await waitFor(() => expect(api.workspace.rename).toHaveBeenCalledTimes(1));
+    const input2 = (api.workspace.rename as ReturnType<typeof vi.fn>).mock.calls[0][0] as { workspaceId: string; name: string };
+    expect(input2.name).toBe("新的协作空间名");
+    // 改的是**当前这个协作空间**，不是我的个人空间。
+    expect(input2.workspaceId).toBeTruthy();
+    expect(calls.some((call) => call.method === "workspace.rename")).toBe(true);
+  });
+
+  it("退出要二次确认，并说清怎么回来（审计 F40）", async () => {
+    const { api } = installApi({ collaborativeSpace: true });
+    render(<SettingsSurface />);
+    await screen.findByText("理解空间", { selector: ".space-identity h3" });
+
+    openSection("账户与空间");
+    const leave = await screen.findByRole("button", { name: /^退出 / });
+
+    // 第一下只是展开确认，不发调用。
+    fireEvent.click(leave);
+    expect(api.auth.leaveWorkspace).not.toHaveBeenCalled();
+    const panel = await screen.findByRole("group", { name: /的确认$/ });
+    expect(panel.textContent).toContain("需要空间所有者重新发一个邀请码");
+
+    // 取消可用。
+    fireEvent.click(within(panel).getByRole("button", { name: "取消" }));
+    expect(screen.queryByRole("group", { name: /的确认$/ })).toBeNull();
+
+    // 确认之后才真的退。
+    fireEvent.click(screen.getByRole("button", { name: /^退出 / }));
+    const panel2 = await screen.findByRole("group", { name: /的确认$/ });
+    fireEvent.click(within(panel2).getByRole("button", { name: /^确认退出/ }));
+    await waitFor(() => expect(api.auth.leaveWorkspace).toHaveBeenCalledTimes(1));
+  });
+});
+
 describe("个人空间的成员与邀请（审计 F17 / F31）", () => {
   it("个人空间不摆「生成邀请」：说清边界，并指向真正能做的地方", async () => {
     installApi(); // 默认夹具就是个人空间
@@ -644,7 +702,7 @@ describe("个人空间的成员与邀请（审计 F17 / F31）", () => {
         safeMessageKey: "error.personal_workspace_not_shareable" as const,
         retry: "never" as const,
       },
-    }));
+    })) as unknown as typeof api.invites.create;
     render(<SettingsSurface />);
     await screen.findByText("理解空间", { selector: ".space-identity h3" });
 

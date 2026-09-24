@@ -437,6 +437,11 @@ export function SettingsSurface() {
   // 解散是不可逆动作：确认文本按空间名校验，且计数只在成功后由服务端那份带来。
   const [transferCandidate, setTransferCandidate] = useState<string | null>(null);
   const [dissolvePending, setDissolvePending] = useState<string | null>(null);
+  /**
+   * 退出确认（审计 F40）：退出与解散都会让人"看不到一批材料"，此前一个一键即走、
+   * 一个要打空间名。同等级后果给同等级防护——行内展开确认，写清代价与回来的路。
+   */
+  const [leavePending, setLeavePending] = useState<string | null>(null);
   const [dissolveConfirmText, setDissolveConfirmText] = useState("");
   const [profileFailure, setProfileFailure] = useState<string | null>(null);
   const [avatarSrc, setAvatarSrc] = useState<string | null>(null);
@@ -1046,7 +1051,8 @@ export function SettingsSurface() {
         meta: createRequestMeta(epochRef.current),
         workspaceId: workspace.workspaceId,
       }));
-      setNotice(`已退出「${workspace.name}」。`);
+      // 审计 F40：退出是单向的（这一行会从名册里消失），所以回执必须说清怎么回来。
+      setNotice(`已退出「${workspace.name}」。要再进来，需要空间所有者重新发一个邀请码。`);
       // 空间边界变化：沿用切换空间的失效路径，但把读者送回这一页。
       publishGateInvalidation("stale_workspace");
       invoke("open-settings");
@@ -1063,14 +1069,14 @@ export function SettingsSurface() {
   /** 重命名自己的个人工作区。 */
   const renamePersonalWorkspace = async () => {
     const name = renameValue.trim();
-    if (!personalWorkspace || !name || profileBusy) return;
+    if (!renamableWorkspace || !name || profileBusy) return;
     setProfileBusy("rename");
     setNotice(null);
     setFailureNotice(null);
     try {
       const response = await window.ailearn.workspace.rename({
         meta: createRequestMeta(epochRef.current),
-        workspaceId: personalWorkspace.workspaceId,
+        workspaceId: renamableWorkspace.workspaceId,
         name,
       });
       const result = unwrapGatewayResult(response);
@@ -1312,6 +1318,15 @@ export function SettingsSurface() {
     [workspaces],
   );
 
+  /**
+   * 能改名的那个空间（审计 F39）：自己的个人空间，或者**当前这个协作空间**（我是它的
+   * owner）。协作空间此前一律拒掉，界面上唯一的替代出口是不可逆的解散——名字随手起错
+   * 了没有轻的出路是操作逻辑问题，而改名本身没有任何破坏性。
+   */
+  const renamableWorkspace = isOwner && currentWorkspace && !currentWorkspace.isPersonal
+    ? currentWorkspace
+    : personalWorkspace;
+
   // ── 旧版设置页回补：档案、Owner 名册、作答偏好随会话读取 ───────────
   const sessionUserId = session?.user?.userId ?? null;
   const sessionWorkspaceId = session?.workspace?.workspaceId ?? null;
@@ -1491,16 +1506,48 @@ export function SettingsSurface() {
                         : current ? <span className="tag green">当前</span> : <ArrowRight size={14} aria-hidden="true" />}
                     </button>
                     {canLeave ? (
-                      <button
-                        type="button"
-                        className="button danger settings-ledger__leave"
-                        aria-label={`退出 ${workspace.name}`}
-                        disabled={profileBusy !== null || switching !== null}
-                        onClick={() => void leaveWorkspace(workspace)}
-                      >
-                        <LogOut size={12} aria-hidden="true" />
-                        {profileBusy === `leave-${workspace.workspaceId}` ? "退出中…" : "退出"}
-                      </button>
+                      leavePending === workspace.workspaceId ? (
+                        <div
+                          className="settings-ledger__dissolve-panel"
+                          role="group"
+                          aria-label={`退出 ${workspace.name} 的确认`}
+                        >
+                          <p className="settings-group__note">
+                            退出后这个空间的笔记、卡片与排程都看不到了；要再进来，需要空间所有者重新发一个邀请码。
+                          </p>
+                          <div className="settings-ledger__dissolve-actions">
+                            <button
+                              type="button"
+                              className="button danger"
+                              aria-label={`确认退出 ${workspace.name}`}
+                              disabled={profileBusy !== null || switching !== null}
+                              onClick={() => void leaveWorkspace(workspace)}
+                            >
+                              <LogOut size={12} aria-hidden="true" />
+                              {profileBusy === `leave-${workspace.workspaceId}` ? "退出中…" : "确认退出"}
+                            </button>
+                            <button
+                              type="button"
+                              className="button"
+                              disabled={profileBusy !== null}
+                              onClick={() => setLeavePending(null)}
+                            >
+                              取消
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className="button danger settings-ledger__leave"
+                          aria-label={`退出 ${workspace.name}`}
+                          disabled={profileBusy !== null || switching !== null}
+                          onClick={() => setLeavePending(workspace.workspaceId)}
+                        >
+                          <LogOut size={12} aria-hidden="true" />
+                          退出
+                        </button>
+                      )
                     ) : null}
                     {canDissolve ? (
                       dissolvePending === workspace.workspaceId ? (
@@ -1558,16 +1605,20 @@ export function SettingsSurface() {
                 );
               })}
             </div>
-            {personalWorkspace ? (
+            {renamableWorkspace ? (
               <div className="settings-block">
                 <div className="settings-block__head">
                   <div>
-                    <b>个人空间改名</b>
-                    <p>只对「{personalWorkspace.name}」生效，协作空间不能从这里改名。</p>
+                    <b>{renamableWorkspace.isPersonal ? "个人空间改名" : "协作空间改名"}</b>
+                    <p>
+                      {renamableWorkspace.isPersonal
+                        ? `只对「${renamableWorkspace.name}」生效。`
+                        : `改的是「${renamableWorkspace.name}」；协作空间里只有所有者能改名，成员要改动请找所有者。`}
+                    </p>
                   </div>
                 </div>
                 <div className="settings-field">
-                  <label className="settings-field__label" htmlFor="settings-personal-name">个人空间名称</label>
+                  <label className="settings-field__label" htmlFor="settings-personal-name">空间名称</label>
                   <div className="hud-field">
                     <input
                       id="settings-personal-name"

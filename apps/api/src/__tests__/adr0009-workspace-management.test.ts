@@ -506,50 +506,62 @@ describe("PROFILE-01: renameWorkspace validation logic", () => {
   // Simulate the validation from renameWorkspace
   const MAX_WORKSPACE_NAME_LENGTH = 50;
 
+  /**
+   * 审计 F39 之后判据是两问：**是不是自己的个人空间**，或者**是不是这个协作空间的
+   * owner**（`workspaces.owner_id` 或 membership.role=owner）。名字本身的规则不变。
+   */
   function validateWorkspaceName(
     name: string,
-    isPersonal: boolean,
+    access: { readonly personal: boolean; readonly collaborativeOwner?: boolean },
   ): { ok: true; name: string } | { ok: false; error: string } {
     const trimmedName = name.trim();
     if (!trimmedName) return { ok: false, error: "empty_name" };
     if (trimmedName.length > MAX_WORKSPACE_NAME_LENGTH) {
       return { ok: false, error: "empty_name" }; // code reuse: length error maps to empty_name
     }
-    if (!isPersonal) return { ok: false, error: "not_personal_workspace" };
+    if (!access.personal && !access.collaborativeOwner) {
+      return { ok: false, error: "not_personal_workspace" };
+    }
     return { ok: true, name: trimmedName };
   }
 
   test("empty name → empty_name error", () => {
-    const result = validateWorkspaceName("", true);
+    const result = validateWorkspaceName("", { personal: true });
     assert.equal(result.ok, false);
     if (!result.ok) assert.equal(result.error, "empty_name");
   });
 
   test("whitespace-only name → empty_name error", () => {
-    const result = validateWorkspaceName("   ", true);
+    const result = validateWorkspaceName("   ", { personal: true });
     assert.equal(result.ok, false);
     if (!result.ok) assert.equal(result.error, "empty_name");
   });
 
   test("name exceeding 50 chars → error", () => {
-    const result = validateWorkspaceName("a".repeat(51), true);
+    const result = validateWorkspaceName("a".repeat(51), { personal: true });
     assert.equal(result.ok, false);
   });
 
   test("name at exactly 50 chars → ok", () => {
-    const result = validateWorkspaceName("a".repeat(50), true);
+    const result = validateWorkspaceName("a".repeat(50), { personal: true });
     assert.equal(result.ok, true);
     if (result.ok) assert.equal(result.name.length, 50);
   });
 
-  test("collaborative workspace → not_personal_workspace error", () => {
-    const result = validateWorkspaceName("新名称", false);
+  test("协作空间的 owner 可以改名（审计 F39 放开的这一格）", () => {
+    const result = validateWorkspaceName("新名称", { personal: false, collaborativeOwner: true });
+    assert.equal(result.ok, true);
+    if (result.ok) assert.equal(result.name, "新名称");
+  });
+
+  test("协作空间的普通成员不能改名", () => {
+    const result = validateWorkspaceName("新名称", { personal: false, collaborativeOwner: false });
     assert.equal(result.ok, false);
     if (!result.ok) assert.equal(result.error, "not_personal_workspace");
   });
 
   test("valid personal workspace name → ok with trimmed name", () => {
-    const result = validateWorkspaceName("  学习空间  ", true);
+    const result = validateWorkspaceName("  学习空间  ", { personal: true });
     assert.equal(result.ok, true);
     if (result.ok) assert.equal(result.name, "学习空间");
   });

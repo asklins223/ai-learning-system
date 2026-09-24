@@ -1141,6 +1141,7 @@ export async function updateUserProfile(
 export type RenameWorkspaceError =
   | "not_found"
   | "not_member"
+  | "not_owner"
   | "not_personal_workspace"
   | "empty_name";
 
@@ -1160,9 +1161,29 @@ export async function renameWorkspace(
   const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
   if (!user) return { ok: false, error: "not_found" };
 
-  // 仅允许重命名个人工作区
+  // 个人空间：仍然只允许重命名自己那一个（原有规则）。
+  //
+  // 协作空间（审计 F39）：**它的 owner 也能改名**。此前这条把协作空间一律拒掉，
+  // 而界面上唯一的替代出口是不可逆的解散——"名字随手起错了"没有轻的出路是操作
+  // 逻辑问题，改名本身没有任何破坏性。判据与 `transferWorkspaceOwnership` 同一句：
+  // `workspaces.owner_id` 或 membership.role=owner（co-owner 也是 owner）。
   if (user.personalWorkspaceId !== workspaceId) {
-    return { ok: false, error: "not_personal_workspace" };
+    const [workspace, membership] = await Promise.all([
+      db.query.workspaces.findFirst({ where: eq(workspaces.id, workspaceId), columns: { ownerId: true, workspaceType: true } }),
+      db.query.workspaceMembers.findFirst({
+        where: and(
+          eq(workspaceMembers.workspaceId, workspaceId),
+          eq(workspaceMembers.userId, userId),
+          isNull(workspaceMembers.leftAt),
+        ),
+        columns: { role: true },
+      }),
+    ]);
+    if (!workspace) return { ok: false, error: "not_found" };
+    if (!membership && workspace.ownerId !== userId) return { ok: false, error: "not_member" };
+    const actorIsOwner = workspace.ownerId === userId || membership?.role === "owner";
+    if (!actorIsOwner) return { ok: false, error: "not_owner" };
+    if (workspace.workspaceType !== "collaborative") return { ok: false, error: "not_personal_workspace" };
   }
 
   // 读写都在同一个 workspace 事务里：`workspaces` 的租户守卫按
