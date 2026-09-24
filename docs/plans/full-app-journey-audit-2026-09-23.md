@@ -603,6 +603,12 @@
 | **F32** | ✅ 已修（三条） | ① worker 判死收尾把来源置 `failed` + 原因（`parse-source.ts` 的 `markSourceParseFailed` + `index.ts` 的 `DEAD_FINALIZERS`）；② 「解析中」计数含排队等待；③ 「全部」悬停说明不含归档 | worker 受限角色集测 3/3（变异检验红）；`source-index.test.ts` 15/15（变异检验红） |
 | **F26** | ✅ 已修（"空白"那一条） | `TaskSurface.tsx`：过渡完成加墙钟兜底（`armTransitionDeadline`，时长 + 400ms，两侧幂等并互清） | `task-surface-transition-deadline.test.tsx` 2 条（把 `gsap.timeline` 桩成永不回调＝rAF 停掉，只推墙钟：进场自己走到 `entered`、换面不会永停 `leaving`）；**变异检验**：摘掉兜底两条都红。**未做**：任务区"带 run ID 的加载/失败边界"、恢复弹层"1/共 10 项 + 完整清单"（与 F24 同族） |
 | **F33** | ✅ 已修 | `normalizeSourceUrl` + `findDuplicateSource` + `createSource` 的 `force`/`duplicateOf`；通道与界面提示（默认「打开已有来源」/次级「仍然再采一次」） | 服务端 4 条 + 界面 2 条，两处变异检验；结构盘点 services 9→10 |
+| **F24** | ✅ 已修 | 首页「N 项可恢复」按数量分流（1 条直达该 run / ≥2 开清单 / 读不到不猜）；新增「未完成的学习」一页（`ResumableSurface` + 路由 + 取景 + 纸面样式）；dashboard 合同新增 `activeRuns`（与 `counts.activeRuns` 同判据同上限，名字取目标 conceptLabel） | 实机：点首页那张卡落到清单，**10 项列全 10 行**（此前只有 1 行）；`resumable-surface.test.tsx` 5 条 + `home-presentation.test.ts` 新增 soleActiveRun 用例；两份结构盘点按同序补条目 |
+| **F05** | ✅ 已修 | 卷宗「主笔记」改为 `openPrimaryNote(note)`：先按按钮上写的那一篇 `setActiveNoteRef` 再导航 | `WorkspaceLibrarySurface.primary-note.test.tsx` 3 条（点谁开谁 / 先前访问过别的笔记也不串 / 没有主笔记不给按钮）；**变异检验**：退回 `invoke("open-notebook")` 两条变红 |
+| **F35** | ✅ 已修 | 阅读屏标签跟着真实来源（`readingUnversionedContent`＝实时文档有内容 →「未定版的当前内容 · 已存版本 vN」；否则「不可变版本：vN」）；列表卡段数与"有没有正文"同一判定（`noteParagraphCount`，空段落不算） | `notebook-surface.version-label.test.tsx` 2 条 + `note-library-card-copy.test.tsx` 2 条；变异检验：钉死 `readingUnversionedContent=false` → 阅读屏那条变红。**未做**：标题两面一致性（列表读服务端 title、阅读屏读文档 meta） |
+| **F37** | ✅ 已修（一半） | 列表行带 `hasBody`（服务端在算封面图同一次往返里算出来），空稿在列表里写「还没有写正文」 | api 用例扩成"封面 + 正文"两件事（v1 有正文 true / v2 只有空白 false）；api 1587、desktop 189 文件全绿。**未做**：点开新建又离开不增加笔记数（要本地起稿 + 首次落库，属新功能） |
+| **F17** | ✅ 已修 | 成员与邀请按 `isOwner && !spaceIsPersonal` 判；个人空间给边界说明并指向空间胶囊的「新建协作空间」 | `settings-surface.test.tsx` 新增"个人空间没有邀请按钮且说明可执行"；邀请/名册/转让那一族用例换到协作空间夹具 |
+| **F31** | ✅ 已修 | `personal_workspace_not_shareable` 进码表（合同 + 网关按 token 认 + 渲染层人话），邀请失败改写在触发它的那张卡里 | 网关域码表补一行（变异检验：摘掉映射即红）；界面新增"同类拒绝的文案与位置"用例（`alert` 必须落在「生成邀请」那一组内） |
 | **F34** | ✅ 已修 | `deriveSourceTitle` 按句读收尾 | 5 条用例（含真实调用点），变异检验：退回 `slice(0,60)` → 报出审计现场那串以「而」结尾的标题 |
 
 **F28 的差异说明（要产品点头的一条）**：方案 ① 写的是"不满足证据完备性的目标不进复习队列"，
@@ -620,14 +626,11 @@
 `search-global-ipc.test.ts`（5 条原样穿过；缺 `total` 的坏页必须报错而不是回空）。
 
 **本线程未动的清单（下一手的顺序）**：
-1. **F24**（首页"10 项可恢复"点进今日日志）＋ F26 余下两条（任务区加载/失败边界、
-   恢复弹层"先显示 1/共 10 项"）——同一族，一起做。
-2. **F20 / F35 / F37**（笔记本族的其余三条：恢复失败态、版本标签真实性、新建空稿）。
-   ⚠️ `notebook-surface.tsx` 与 `note-doc-*` 那批文件此刻有**并行会话在改**，动之前先看
-   `git status` 与文件 mtime。
-3. **F05**（目标简报的"主笔记"打开另一篇）。
-5. **F17 / F31 / F39 / F40 / F41 / F42 / F45**（空间与邀请一族）——多数要改
-   `desktop-gateway.ts`（**并行会话正在改**）与 `settings-surface.tsx`。
+1. **F26 余下两条**（任务区"带 run ID 的加载/失败边界"、恢复弹层"先显示 1/共 10 项"）。
+2. **F39 / F40 / F41 / F42 / F45**（空间管理一族：协作空间改名、退出的确认与回退、
+   导出的可回导性或文案与分组、动作收口与注销声明、确定性失败不说"稍后重试"）。
+3. **F20**（生成恢复失败要被当成"读不到"而不是"没有任务"——F02 修好后这条没有可触发的
+   失败面，留给下一次真出故障时验）。
 6. **F44**（记忆按空间扇出）——数据模型改动，验收要先造出 global 记忆。
 7. **F03 / F04 / F06 / F14 / F23 / F29 / F30 / F50 / F51**——产品链路收敛那一批，
    集中在复习/作答/今日三个面。
