@@ -16,6 +16,11 @@
  * 角色：请使用受限的 ailearn_api（与 CI/生产一致，NOBYPASSRLS）。本文件的裸
  * SQL 校验统一经 scoped() 带 workspace/user 上下文，因此在受限角色下同样成立；
  * 用超级用户跑会绕过 RLS，让"恰好 1 行"类断言失去隔离意义。
+ *
+ * 上面那句"统一经 scoped()"在 2026-09-24 之前是不成立的：16 处裸 `sql` 校验没有
+ * 带上下文，受限角色下全被 RLS 挡成 0 行（9 条用例红）。加新校验时请继续走
+ * scoped()——本文件现已接入 CI（`.github/workflows/ci.yml` 的 fresh-migrations
+ * job，用的就是受限角色），漏一次会在 CI 上直接变红，而不是等到某人手跑。
  */
 
 import { after, test } from "node:test";
@@ -291,11 +296,11 @@ test("P2 纵切：card 创建 → declared_unable 提交 → tick 评估+Commit 
     assert.equal(afterRun.result.scheduleImpact.policyReason, "declared_unable");
 
     // 5) schedule：恰好一个 pending successor（短间隔）。
-    const schedRows = await sql`
+    const schedRows = await scoped(scope, (tx) => tx`
       SELECT id, generation, interval_days, reason_code FROM review_schedules
       WHERE workspace_id = ${seeded.workspaceId} AND user_id = ${seeded.userId}
         AND subject_id = ${seeded.keyPointId} AND status = 'pending'
-    `;
+    `);
     assert.equal(schedRows.length, 1);
     assert.equal(schedRows[0].generation, 1);
     assert.equal(schedRows[0].interval_days, 1);
@@ -383,10 +388,10 @@ test("P2 fail closed：text 提交 + Critic 未配置 → not_assessable checkpo
       SELECT count(*)::int AS n FROM canonical_learning_event_outbox WHERE run_id = ${run.runId}
     `);
     assert.equal(envelopeCount[0].n, 0);
-    const schedCount = await sql`
+    const schedCount = await scoped(scope, (tx) => tx`
       SELECT count(*)::int AS n FROM review_schedules
       WHERE workspace_id = ${seeded.workspaceId} AND subject_id = ${seeded.keyPointId}
-    `;
+    `);
     assert.equal(schedCount[0].n, 0);
   } finally {
     await seeded.cleanup();
@@ -468,9 +473,9 @@ test("E08：请求提示后提交 text → Critic 未配置 fail closed → not_
       SELECT count(*)::int AS n FROM canonical_learning_event_outbox WHERE run_id = ${run.runId}
     `);
     assert.equal(envelopeCount[0].n, 0, "E08 提示暴露 0 canonical");
-    const schedCount = await sql`
+    const schedCount = await scoped(scope, (tx) => tx`
       SELECT count(*)::int AS n FROM review_schedules WHERE workspace_id = ${seeded.workspaceId}
-    `;
+    `);
     assert.equal(schedCount[0].n, 0, "E08 提示暴露 0 schedule");
   } finally {
     await seeded.cleanup();
@@ -825,10 +830,10 @@ test("E04：review origin → consume_pending 授权 → declared_unable 提交 
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
     // 预置 pending schedule（到期）供 review origin 消费。
     const scheduleId = randomUUID();
-    await sql`
+    await scoped(scope, (tx) => tx`
       INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days, generation, policy_version, reason_code, created_at, updated_at)
       VALUES (${scheduleId}, ${seeded.workspaceId}, ${seeded.userId}, 'card', ${seeded.keyPointId}, 'pending', now() - interval '1 day', 1, 7, 'discrete-v2', 'initial_validation', now(), now())
-    `;
+    `);
 
     // 1) review origin 创建（consume_pending 授权 + generation 校验）。
     const run = await withWorkspaceTransaction(scope, async (tx) =>
@@ -872,16 +877,16 @@ test("E04：review origin → consume_pending 授权 → declared_unable 提交 
     }
 
     // 3) 旧 schedule 被消费（非 pending）+ 恰好一个 successor。
-    const oldSched = await sql`
+    const oldSched = await scoped(scope, (tx) => tx`
       SELECT status FROM review_schedules WHERE id = ${scheduleId}
-    `;
+    `);
     assert.notEqual(oldSched[0].status, "pending", "旧 schedule 必须被消费");
-    const successors = await sql`
+    const successors = await scoped(scope, (tx) => tx`
       SELECT id FROM review_schedules
       WHERE workspace_id = ${seeded.workspaceId}
         AND id <> ${scheduleId}
         AND subject_id = ${seeded.keyPointId}
-    `;
+    `);
     assert.equal(successors.length, 1, "恰好一个 successor");
 
     // 4) 恰好一个 canonical envelope。
@@ -901,10 +906,10 @@ test("REVIEW-QUEUE-PROJECTION-01：真实 V2 queue identity 与 direct startabil
   try {
     const auth = { authorization: `Bearer ${seeded.token}` };
     const dueScheduleId = randomUUID();
-    await sql`
+    await scoped(scope, (tx) => tx`
       INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days, generation, policy_version, reason_code, created_at, updated_at)
       VALUES (${dueScheduleId}, ${seeded.workspaceId}, ${seeded.userId}, 'card', ${seeded.keyPointId}, 'pending', now() - interval '1 minute', 1, 12, 'discrete-v2', 'initial_validation', now(), now())
-    `;
+    `);
 
     const queueResponse = await app.inject({ method: "GET", url: "/reviews/v2/queue?limit=10", headers: auth });
     assert.equal(queueResponse.statusCode, 200, queueResponse.body);
@@ -971,10 +976,10 @@ test("REVIEW-QUEUE-PROJECTION-01：真实 V2 queue identity 与 direct startabil
     assert.equal(staleGenerationStart.json().error, "schedule_generation_changed");
 
     const futureScheduleId = randomUUID();
-    await sql`
+    await scoped(scope, (tx) => tx`
       INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days, generation, policy_version, reason_code, created_at, updated_at)
       VALUES (${futureScheduleId}, ${seeded.workspaceId}, ${seeded.userId}, 'card', ${seeded.keyPointId}, 'pending', now() + interval '1 hour', 1, 13, 'discrete-v2', 'initial_validation', now(), now())
-    `;
+    `);
     const futureStart = await app.inject({
       method: "POST",
       url: "/learning-runs",
@@ -991,10 +996,10 @@ test("REVIEW-QUEUE-PROJECTION-01：真实 V2 queue identity 与 direct startabil
     assert.equal(futureStart.json().blockedReason, "not_due");
 
     const cooldownScheduleId = randomUUID();
-    await sql`
+    await scoped(scope, (tx) => tx`
       INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days, generation, policy_version, reason_code, created_at, updated_at)
       VALUES (${cooldownScheduleId}, ${seeded.workspaceId}, ${seeded.userId}, 'card', ${seeded.keyPointId}, 'pending', now() - interval '1 minute', 1, 14, 'discrete-v2', 'initial_validation', now(), now())
-    `;
+    `);
     // validation_assistance_exposures 是**启用 RLS 的用户私有表**（策略要求
     // user_id = app.user_id），裸 INSERT 必须在带会话上下文的事务中执行，否则
     // WITH CHECK 求值为 NULL 直接 42501。这里模拟"该用户此前已被提示过"以命中
@@ -1035,10 +1040,10 @@ test("GS-01B：V2 review origin → public snapshot/result/return 全链绑定�
   try {
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
     const scheduleId = randomUUID();
-    await sql`
+    await scoped(scope, (tx) => tx`
       INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days, generation, policy_version, reason_code, created_at, updated_at)
       VALUES (${scheduleId}, ${seeded.workspaceId}, ${seeded.userId}, 'card', ${seeded.keyPointId}, 'pending', now() - interval '1 day', 1, 9, 'discrete-v2', 'initial_validation', now(), now())
-    `;
+    `);
 
     const request = {
       version: 2 as const,
@@ -1138,10 +1143,10 @@ test("RUN-V2-START-IDEMPOTENCY-01：同 key 并发 V2 start 只产生一个 run"
   try {
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
     const scheduleId = randomUUID();
-    await sql`
+    await scoped(scope, (tx) => tx`
       INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days, generation, policy_version, reason_code, created_at, updated_at)
       VALUES (${scheduleId}, ${seeded.workspaceId}, ${seeded.userId}, 'card', ${seeded.keyPointId}, 'pending', now() - interval '1 day', 1, 15, 'discrete-v2', 'initial_validation', now(), now())
-    `;
+    `);
     const request = {
       version: 2 as const,
       originV2: {
@@ -1182,10 +1187,10 @@ test("RUN-V2-WIRE-01：HTTP V2 draft/submit receipt → response-loss replay →
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
     const auth = { authorization: `Bearer ${seeded.token}` };
     const scheduleId = randomUUID();
-    await sql`
+    await scoped(scope, (tx) => tx`
       INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days, generation, policy_version, reason_code, created_at, updated_at)
       VALUES (${scheduleId}, ${seeded.workspaceId}, ${seeded.userId}, 'card', ${seeded.keyPointId}, 'pending', now() - interval '1 day', 1, 10, 'discrete-v2', 'initial_validation', now(), now())
-    `;
+    `);
 
     const startBody = {
       version: 2 as const,
@@ -1417,10 +1422,10 @@ test("RUN-V2-ACTION-IDEMPOTENCY-01：V2 action availability 与 response-loss ex
   try {
     const auth = { authorization: `Bearer ${seeded.token}` };
     const scheduleId = randomUUID();
-    await sql`
+    await scoped(scope, (tx) => tx`
       INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days, generation, policy_version, reason_code, created_at, updated_at)
       VALUES (${scheduleId}, ${seeded.workspaceId}, ${seeded.userId}, 'card', ${seeded.keyPointId}, 'pending', now() - interval '1 day', 1, 11, 'discrete-v2', 'initial_validation', now(), now())
-    `;
+    `);
 
     const startResponse = await app.inject({
       method: "POST",
@@ -1753,7 +1758,7 @@ test("RUN-V2-ACTION-IDEMPOTENCY-01：V2 action availability 与 response-loss ex
     // A terminal review run must not keep emitting a deleted schedule as if
     // it were navigable. The API may provide only the still-active card as a
     // server-proven fallback; the resolver must not invent another route.
-    await sql`DELETE FROM review_schedules WHERE id = ${scheduleId}`;
+    await scoped(scope, (tx) => tx`DELETE FROM review_schedules WHERE id = ${scheduleId}`);
     const deletedTargetReturnResponse = await app.inject({
       method: "GET",
       url: `/learning-runs/${before.runId}/return-contract/v2`,
@@ -1805,10 +1810,10 @@ test("RUN-V2-ACTION-AVAILABILITY-01：direct API 覆盖 full phase/checkpoint/re
   try {
     const auth = { authorization: `Bearer ${seeded.token}` };
     const scheduleId = randomUUID();
-    await sql`
+    await scoped(scope, (tx) => tx`
       INSERT INTO review_schedules (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at, interval_days, generation, policy_version, reason_code, created_at, updated_at)
       VALUES (${scheduleId}, ${seeded.workspaceId}, ${seeded.userId}, 'card', ${seeded.keyPointId}, 'pending', now() - interval '1 day', 1, 12, 'discrete-v2', 'initial_validation', now(), now())
-    `;
+    `);
     const startResponse = await app.inject({
       method: "POST",
       url: "/learning-runs",
@@ -2216,10 +2221,10 @@ test("COMMIT-GUARD-01：结算绑定 command.assessmentId；门禁拒绝落到 c
     const envelope = envelopeRows[0].envelope as { assessments: Array<{ assessmentId: string }> };
     assert.equal(envelope.assessments[0].assessmentId, assessment1, "envelope 必须引用命令的 assessment");
     // facet_evidence 0 schedule（§13.6）。
-    const schedCount = await sql`
+    const schedCount = await scoped(scope, (tx) => tx`
       SELECT count(*)::int AS n FROM review_schedules
       WHERE workspace_id = ${seeded.workspaceId} AND subject_id = ${seeded.keyPointId}
-    `;
+    `);
     assert.equal(schedCount[0].n, 0);
   } finally {
     await seeded.cleanup();

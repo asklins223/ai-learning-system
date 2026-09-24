@@ -577,6 +577,25 @@ jobs:
             src/integration-tests/workspace-dissolve-route-postgres.integration.ts \
             2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/note-collaboration.tap"
 
+      # LearningRun 纵切（21 条）此前一直不在点名列里，代价实测到了：F28 改了
+      # `supplementOffer` 的签发条件之后，本文件两条期望（E08、P4 单槽正控制）就地
+      # 失效却没人变红——只有本地手动跑过一次才发现。同一批还把文件里 16 处裸 `sql`
+      # 校验改成带 workspace/user 上下文的 `scoped()`：文件开头写着"请用受限角色"，
+      # 但那些裸读在 `ailearn_api` 下会被 RLS 挡成 0 行（9 条红）。现在两种角色都实测
+      # 全绿，就按它自己的说明接进 CI（超级用户会绕过 RLS，这条才是产品口径）。
+      - name: Verify learning run vertical slice against postgres
+        working-directory: apps/api
+        env:
+          NODE_ENV: test
+          DATABASE_URL_MIGRATOR: ${{ env.DATABASE_URL_MIGRATOR }}
+          DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
+          DATABASE_URL_WORKER: ${{ env.DATABASE_URL_WORKER }}
+        run: |
+          set -o pipefail
+          node --import tsx --test --test-concurrency=1 \
+            src/integration-tests/learning-runs-postgres.integration.ts \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/learning-runs.tap"
+
       # 空间隔离 schema 棘轮：把当前"带 workspace_id 但缺外键 / 缺 RLS"的表如实登记为
       # 基线，要求实际集合与基线完全相等——新增违规变红，修好一条也必须同步删基线，
       # 所以清单只能缩短。一次性补齐 89 个外键不现实，用棘轮换"不再恶化"。
