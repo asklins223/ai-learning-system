@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   PROGRESS_SEGMENTS,
   progressBandLabel,
+  progressSegmentLabel,
   progressSegmentForOutcome,
   progressSegmentForState,
 } from "./objective-progress-band";
@@ -53,6 +54,25 @@ describe("状态到位置的查表", () => {
     expect(progressSegmentForOutcome("declared_unable")).toBeNull();
     expect(progressSegmentForOutcome("demonstrated")).toBe(2);
     expect(progressSegmentForOutcome("practice_completed")).toBe(1);
+  });
+});
+
+describe('第 2 段有两种情形（审计 F03）', () => {
+  it('没交出去过任何东西时写「作答中」，交过才写「练过了」', () => {
+    expect(progressSegmentLabel(1, false)).toBe('作答中');
+    expect(progressSegmentLabel(1, true)).toBe('练过了');
+    // 只有第 2 段有这一分裂：第 1 段本来就是"还没答过"，第 3 段必然交过。
+    expect(progressSegmentLabel(0, false)).toBe('还没答过');
+    expect(progressSegmentLabel(2, false)).toBe('说清了');
+    expect(progressBandLabel(1, false)).toBe('走到第 2 段，共 3 段：作答中');
+  });
+
+  it('带子上当前那一格跟着换词，其余两格不动', () => {
+    const { container } = render(<ObjectiveProgressBand segment={1} submitted={false} />);
+    const labels = [...container.querySelectorAll('.objective-progress__label')].map((el) => el.textContent);
+    expect(labels).toEqual(['还没答过', '作答中', '说清了']);
+    expect(container.querySelector('.objective-progress')?.getAttribute('aria-label'))
+      .toContain('作答中');
   });
 });
 

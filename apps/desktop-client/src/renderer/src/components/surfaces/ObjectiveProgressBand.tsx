@@ -1,4 +1,4 @@
-import { PROGRESS_SEGMENTS, progressBandLabel } from "./objective-progress-band";
+import { PROGRESS_SEGMENTS, progressBandLabel, progressSegmentLabel } from "./objective-progress-band";
 
 /**
  * 贯穿列表 / 详情 / 结算的**同一个**进度对象（31 号文档 §9.1，批次 B10）。
@@ -12,15 +12,26 @@ import { PROGRESS_SEGMENTS, progressBandLabel } from "./objective-progress-band"
  * 但**一格都不点亮**，末尾补一个 `—`。DESIGN.md:178 要的就是这个——没有读数
  * 时显示 `—`，而不是拿 0 冒充"还没答过"。
  */
-export function ObjectiveProgressBand({ segment, className }: { segment: number | null; className?: string }) {
+export function ObjectiveProgressBand({
+  segment,
+  className,
+  submitted = true,
+}: {
+  readonly segment: number | null;
+  readonly className?: string;
+  /** 这一条目标上到底交出去过东西没有（F03）。默认 true = 维持原措辞。 */
+  readonly submitted?: boolean;
+}) {
   return (
     <div
       className={`objective-progress${className ? ` ${className}` : ""}`}
       role="img"
-      aria-label={progressBandLabel(segment)}
+      aria-label={progressBandLabel(segment, submitted)}
       data-segment={segment ?? "none"}
     >
-      {PROGRESS_SEGMENTS.map((label, index) => (
+      {PROGRESS_SEGMENTS.map((label, index) => {
+        const shown = index === segment ? progressSegmentLabel(segment, submitted) : label;
+        return (
         <span
           key={label}
           className="objective-progress__seg"
@@ -28,9 +39,9 @@ export function ObjectiveProgressBand({ segment, className }: { segment: number 
           data-current={segment === index ? "true" : "false"}
         >
           <span className="objective-progress__bar" aria-hidden="true" />
-          <span className="objective-progress__label">{label}</span>
+          <span className="objective-progress__label">{shown}</span>
         </span>
-      ))}
+      );})}
       {segment === null ? <span className="objective-progress__none">—</span> : null}
     </div>
   );

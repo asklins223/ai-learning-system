@@ -30,7 +30,9 @@ describe("三屏共用同一个进度组件", () => {
   it("列表焦点卡与详情页读 personalState，结算页读本次 outcome", () => {
     const library = read("WorkspaceLibrarySurface.tsx");
     expect(
-      library.match(/<ObjectiveProgressBand segment=\{progressSegmentForState\(([^)]+)\)\} \/>/g),
+      // 允许 `segment=` 之后还挂别的 prop（F03 加了 `submitted`），但读数那一句
+      // 必须原样是查表调用。
+      library.match(/<ObjectiveProgressBand\s+segment=\{progressSegmentForState\(([^)]+)\)\}/g),
       "列表与详情不再是同一个读数来源",
     ).toHaveLength(2);
     expect(read("learning-run-surface.tsx"))
@@ -41,10 +43,21 @@ describe("三屏共用同一个进度组件", () => {
     // 组件的 prop 只有 `segment: number | null`，所以"绕过查表自己推"唯一的形态
     // 就是传字面量或三元式。这条断言把每个调用点钉在查表函数上。
     const calls = SURFACES.flatMap((file) =>
-      [...read(file).matchAll(/<ObjectiveProgressBand segment=\{([^}]+)\}/g)].map((match) => ({ file, expr: match[1].trim() })));
+      [...read(file).matchAll(/<ObjectiveProgressBand\s+segment=\{([^}]+)\}/g)].map((match) => ({ file, expr: match[1].trim() })));
     expect(calls.length, "一个调用点都没找到，这条守卫就是空的").toBeGreaterThanOrEqual(3);
     for (const call of calls) {
       expect(call.expr, `${call.file} 的调用点没走查表`).toMatch(/^progressSegmentFor(State|Outcome)\(/);
+    }
+    // 第二条腿：除 `segment` 之外还能挂哪些 prop，逐个列死。位置只能来自查表，
+    // 但"带子上的措辞"也是同一屏的事实来源——放开成任意 prop 就等于允许第二个
+    // 客户端自己推导出来的读数。
+    for (const file of SURFACES) {
+      for (const match of read(file).matchAll(/<ObjectiveProgressBand([^>]*?)\/>/g)) {
+        const props = [...match[1].matchAll(/\b([a-zA-Z]+)=/g)].map((p) => p[1]);
+        for (const prop of props) {
+          expect(["segment", "submitted", "className"], `${file} 挂了没登记的 prop：${prop}`).toContain(prop);
+        }
+      }
     }
   });
 });

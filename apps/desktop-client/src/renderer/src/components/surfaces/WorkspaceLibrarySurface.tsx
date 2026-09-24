@@ -478,7 +478,10 @@ export function ObjectiveLibrarySurface() {
               <span className="objective-expedition__next"><Flag size={16} aria-hidden="true" />{serverFocus ? "下一关" : "推荐下一关"}</span>
               <h3 id="goal-focus-title">{activeGoal.conceptLabel ?? activeGoal.primaryNoteTitle ?? "未命名理解目标"}</h3>
               <blockquote>{activeGoal.publicSummary}</blockquote>
-              <ObjectiveProgressBand segment={progressSegmentForState(activeGoal.personalState.state)} />
+              <ObjectiveProgressBand
+                segment={progressSegmentForState(activeGoal.personalState.state)}
+                submitted={activeGoal.progress.practiceTrailCount > 0}
+              />
               <p className="objective-expedition__mode-copy">{activeMode?.description}</p>
             </div>
             <div className="objective-expedition__focus-actions">
@@ -728,7 +731,10 @@ export function ObjectiveDetailSurface() {
             <section className="objective-brief__departure" aria-labelledby="learning-ledger-title">
               <div className="objective-brief__progress">
                 <div className="objective-brief__progress-heading"><h4 id="learning-ledger-title">你已走到这里</h4><span>{objective.personal.practiceTrailCount} 次练习</span></div>
-                <ObjectiveProgressBand segment={progressSegmentForState(detailState)} />
+                <ObjectiveProgressBand
+                  segment={progressSegmentForState(detailState)}
+                  submitted={objective.personal.practiceTrailCount > 0}
+                />
                 <ul>
                   <li><CheckCircle2 size={16} aria-hidden="true" /><span>正式验证</span><strong>{objective.personal.initialValidation ? objective.personal.initialValidation.status === "ready" && objective.personal.lastCanonicalAt ? "可以再次挑战" : ({ ready: "现在可以挑战", deferred: "等待开放", idle: "还没开始", completed: "已经答过" } as const)[objective.personal.initialValidation.status] : "还没安排"}</strong></li>
                   <li><Clock3 size={16} aria-hidden="true" /><span>当前旅程</span><strong>{objective.personal.activeRun ? formatRunPhase(objective.personal.activeRun.phase) : "尚未开始"}</strong></li>

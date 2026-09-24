@@ -58,8 +58,24 @@ export function progressSegmentForOutcome(outcome: string | null | undefined): n
  * 读屏用的一句总结。界面上三段是并排的图形，没有顺序朗读就会变成"还没答过练过了
  * 说清了"三个词而已，听不出走到哪。
  */
-export function progressBandLabel(segment: number | null): string {
+/**
+ * 第 2 段有两种情形，此前塌成一个词（审计 F03）：
+ * - 这一轮刚开始、手上还没交出任何东西 ⇒ 该说**作答中**；
+ * - 真的练过一次、只是没说清 ⇒ 才配说**练过了**。
+ *
+ * 病是这么量的：目标卷宗同一屏右边写着「0 次练习」，带子上写着「练过了」——
+ * 两个数出自同一次读取，却互相不认识。`learning` 这个服务端状态本身不区分这两件事
+ * （它只说"这一轮开始了还没结束"），所以这里要第二件事：**交没过**。
+ * 这一份事实来自服务端的 `practiceTrailCount`，不是客户端推断掌握度。
+ */
+export function progressSegmentLabel(segment: number | null, submitted: boolean): string {
+  if (segment === null) return "";
+  if (segment === 1 && !submitted) return "作答中";
+  return PROGRESS_SEGMENTS[segment];
+}
+
+export function progressBandLabel(segment: number | null, submitted = true): string {
   return segment === null
     ? "这条目标上还没有可报的位置"
-    : `走到第 ${segment + 1} 段，共 3 段：${PROGRESS_SEGMENTS[segment]}`;
+    : `走到第 ${segment + 1} 段，共 3 段：${progressSegmentLabel(segment, submitted)}`;
 }

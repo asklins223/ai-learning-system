@@ -34,7 +34,10 @@ function origin(evidenceSnapshotIds: string[], sourceSnapshotId: string | null =
   };
 }
 
-function detail(origins: Array<ReturnType<typeof origin>>) {
+function detail(
+  origins: Array<ReturnType<typeof origin>>,
+  personal?: { state?: string; practiceTrailCount?: number },
+) {
   return learningObjectiveSurfaceV3Schema.parse({
     version: 3,
     objectiveId: OBJECTIVE_ID,
@@ -53,9 +56,9 @@ function detail(origins: Array<ReturnType<typeof origin>>) {
     sources: { origins, primaryNote: null, missingOrigin: false },
     personal: {
       initialValidation: null, activeRun: null, review: null,
-      practiceTrailCount: 0, lastCanonicalAt: null,
+      practiceTrailCount: personal?.practiceTrailCount ?? 0, lastCanonicalAt: null,
     },
-    personalState: { state: "unvalidated", activeRunId: null },
+    personalState: { state: personal?.state ?? "unvalidated", activeRunId: null },
     lifecycle: { status: "active", successorObjectiveId: null },
     primaryAction: {
       kind: "create_run", objectiveId: OBJECTIVE_ID, label: "开始首次验证",
@@ -101,6 +104,15 @@ const ledgerText = async () => {
   return (aside as Element).textContent ?? "";
 };
 
+const briefText = async () => {
+  const el = await waitFor(() => {
+    const found = document.querySelector(".objective-brief");
+    expect(found).not.toBeNull();
+    return found;
+  });
+  return (el as Element).textContent ?? "";
+};
+
 const SNAPSHOT_IDS = ["00000000-0000-4000-8000-00000000000f", "00000000-0000-4000-8000-000000000010"];
 
 describe("证据栏在没有原文引用时", () => {
@@ -137,6 +149,33 @@ describe("证据栏在没有原文引用时", () => {
     expect(rows[1]).toContain("有当时那份来源，但没留下引用到的原文");
     expect(rows[1]).not.toContain("留了当时引用的原文");
     expect(rows[2]).toContain("没有留当时引用的原文");
+  });
+
+  /**
+   * 审计 F03 的那一屏：同一块地方右边写「0 次练习」，带子上写「练过了」。
+   * `learning` 这个服务端状态只说"这一轮开始了还没结束"，不区分**交没过**东西，
+   * 所以带子必须自己把第二种情形分开：没交过就说"作答中"。
+   */
+  it("刚开一轮、一次都没交出去时，同屏不写「练过了」", async () => {
+    useRoomStore.setState({ invoke: vi.fn(), activeObjectiveId: OBJECTIVE_ID });
+    installApi(detail([origin([])], { state: "learning", practiceTrailCount: 0 }));
+    render(<ObjectiveDetailSurface />);
+
+    const text = await briefText();
+    expect(text).toContain("0 次练习");
+    expect(text).toContain("作答中");
+    expect(text).not.toContain("练过了");
+  });
+
+  it("真交过一次之后，带子才说「练过了」，并且与次数并列不冲突", async () => {
+    useRoomStore.setState({ invoke: vi.fn(), activeObjectiveId: OBJECTIVE_ID });
+    installApi(detail([origin([])], { state: "learning", practiceTrailCount: 2 }));
+    render(<ObjectiveDetailSurface />);
+
+    const text = await briefText();
+    expect(text).toContain("2 次练习");
+    expect(text).toContain("练过了");
+    expect(text).not.toContain("作答中");
   });
 
   it("状态词只承诺它真做过的事：核对的是来源关系，不是「原文证实了这句话」", async () => {
