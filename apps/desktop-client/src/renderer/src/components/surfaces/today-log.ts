@@ -188,6 +188,20 @@ export function readableAnomalyDetail(anomaly: Pick<ActivityAnomalyV1, "kind" | 
   return detail;
 }
 
+/**
+ * 这条异常有没有**用户可执行**的出路（审计 F14）。
+ *
+ * 有可跳转对象（去那篇笔记 / 那个目标）或有一条恢复路径（去设置签同意）才叫"待处理"。
+ * 服务端对**没有目标**的后台 job 失败也会给 anomaly（`activity/service.ts`），
+ * 那种条目既没有可打开的实体、也没有可点的动作——把它们算进"待处理 12"并配一句
+ * "处理完就能继续推进"，等于给用户派了一件他做不了的事。
+ */
+export function isActionableAnomaly(
+  anomaly: Pick<ActivityAnomalyV1, "kind" | "detail" | "target">,
+): boolean {
+  return Boolean(anomaly.target) || anomalyRecovery(anomaly) !== null;
+}
+
 export function buildTodayAnomalyGroups(
   anomalies: readonly ActivityAnomalyV1[],
 ): readonly TodayAnomalyGroup[] {
@@ -284,8 +298,13 @@ export type TodayMetric = {
 export type TodayVerdict = {
   readonly headline: string;
   readonly detail: string;
-  /** 待处理的事务条数（原始条数，不是归并后的类数）。 */
+  /** 待处理的事务条数（原始条数，不是归并后的类数）——**只数用户能处理的那些**。 */
   readonly pending: number;
+  /**
+   * 后台任务自己的失败条数（审计 F14）：没有可打开的对象、也没有可点的动作。
+   * 它们照样要说出来（不能藏），但不当成用户的待办、也不给"处理"承诺。
+   */
+  readonly background: number;
   /** 空的一天不给数字：0 和 0 说不了任何事。 */
   readonly metrics: readonly TodayMetric[];
 };
@@ -328,7 +347,9 @@ export function buildTodayVerdict(
   const total = activity.events.length;
   const learningEvents = activity.events.filter((event) => event.kind !== "job");
   const systemTotal = total - learningEvents.length;
-  const pending = activity.anomalies.length;
+  // 审计 F14：待处理只数可执行的；后台失败单独计数（下面在 headline/detail 里如实说出来）。
+  const pending = activity.anomalies.filter(isActionableAnomaly).length;
+  const background = activity.anomalies.length - pending;
   const leadingEvents = learningEvents.length > 0 ? learningEvents : activity.events;
   const leadingCount = leadingEvents.length;
   // 单类来源到 100 才会触发服务端截断。后台任务触顶不应把“学习记录 1”
@@ -354,14 +375,19 @@ export function buildTodayVerdict(
 
   const span = todaySpan(activity);
 
-  if (total === 0 && pending === 0) {
+  if (total === 0 && pending === 0 && background === 0) {
     return {
       headline: "今天还没有留下记录",
       detail: "写过笔记、收录过来源、复习过卡片，都会按时间出现在这里。",
       pending,
+      background,
       metrics: [],
     };
   }
+  /** 后台失败那一句：它不需要用户做什么，但不能不说。 */
+  const backgroundLine = background > 0
+    ? `另有 ${background} 条后台任务失败已记录；它们没有可以打开的对象，会在必要时自动重试，不需要你处理。`
+    : null;
 
   const metrics: TodayMetric[] = [];
   if (total > 0) {
@@ -376,17 +402,31 @@ export function buildTodayVerdict(
   if (span) metrics.push({ key: "span", label: "时段", value: span, alarm: false });
 
   if (pending === 0) {
-    return { headline: "今天的操作都推进得顺利", detail: countsLine || "今天没有卡住的事务。", pending, metrics };
+    // 审计 F14：全是后台失败时不再说"处理完就能继续推进"——那件事用户处理不了。
+    return {
+      headline: "今天的操作都推进得顺利",
+      detail: [countsLine, backgroundLine].filter(Boolean).join(" ") || "今天没有卡住的事务。",
+      pending,
+      background,
+      metrics,
+    };
   }
   if (total === 0) {
     return {
       headline: "今天的操作还没起步",
       detail: "先把卡住的事情处理掉，新的记录会按时间排在这里。",
       pending,
+      background,
       metrics,
     };
   }
-  return { headline: "有几件事卡在半路，处理完就能继续推进", detail: countsLine, pending, metrics };
+  return {
+    headline: "有几件事卡在半路，处理完就能继续推进",
+    detail: [countsLine, backgroundLine].filter(Boolean).join(" "),
+    pending,
+    background,
+    metrics,
+  };
 }
 
 /** 记录栏底部的诚实声明：触顶就说这不是完整账本，与旧账本栏同一原则。 */

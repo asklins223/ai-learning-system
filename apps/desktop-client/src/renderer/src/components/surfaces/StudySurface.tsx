@@ -187,6 +187,7 @@ function DayVerdict({
  */
 function AnomalyTriage({
   groups,
+  backgroundGroups,
   total,
   sharedStep,
   note,
@@ -195,6 +196,8 @@ function AnomalyTriage({
   anchorRef,
 }: {
   readonly groups: readonly TodayAnomalyGroup[];
+  /** 后台任务自己的失败（无对象、无动作）：说出来，但不当成用户的待办（审计 F14）。 */
+  readonly backgroundGroups: readonly TodayAnomalyGroup[];
   readonly total: number;
   readonly sharedStep: string | null;
   readonly note: string | null;
@@ -211,10 +214,19 @@ function AnomalyTriage({
     <section className="day-triage" aria-labelledby="today-triage-title" ref={anchorRef} tabIndex={-1}>
       <h2 className="day-section-head" id="today-triage-title">
         <b>待处理</b>
-        <span>{groups.length} 项{groups.length < total ? ` · 共 ${total} 条记录` : ""}</span>
+        <span>
+          {groups.length > 0
+            ? `${groups.length} 项${groups.length < total ? ` · 共 ${total} 条记录` : ""}`
+            : "0 项 · 没有需要你处理的事"}
+        </span>
       </h2>
 
       {sharedStep ? <p className="day-triage__step">{sharedStep}</p> : null}
+      {groups.length === 0 && backgroundGroups.length > 0 ? (
+        <p className="day-triage__step">
+          剩下的都是后台任务自己的失败，没有可以打开的对象，也不需要你处理——它们在本节末尾列出。
+        </p>
+      ) : null}
 
       <ul className="day-triage__list">
         {visible.map((group, index) => {
@@ -276,6 +288,41 @@ function AnomalyTriage({
         >
           {expanded ? "收起" : `还有 ${overflow} 个处理项`}
         </button>
+      ) : null}
+
+      {/* 审计 F14：后台任务自己的失败列在这里——它们在页面上有位置、有解释，
+          但没有"处理"按钮、也不进"待处理 N"的数。 */}
+      {backgroundGroups.length > 0 ? (
+        <div className="day-triage__background">
+          <h3 className="day-section-head">
+            <b>系统异常</b>
+            <span>{backgroundGroups.length} 类 · 不需要你处理</span>
+          </h3>
+          <p className="small">
+            这些是后台任务（解析、生成、同步）自己的失败，没有可以打开的对象；系统会在必要时自动重试。
+            如果同一件事一直失败，可以在「设置 → 数据与维护」里反馈。
+          </p>
+          <ul className="day-triage__list">
+            {backgroundGroups.map((group) => (
+              <li className="day-anomaly" key={group.id} data-phase={group.phase}>
+                <span className="day-anomaly__icon" aria-hidden="true">
+                  <TriangleAlert size={13} strokeWidth={2.2} />
+                </span>
+                <div className="day-anomaly__main">
+                  <b className="day-anomaly__title">{group.title}</b>
+                  <span className="day-anomaly__meta">
+                    {group.count > 1 ? (
+                      <span className="day-anomaly__count" title={`同类系统记录 ${group.count} 条`}>
+                        同类记录 ×{group.count}
+                      </span>
+                    ) : null}
+                    <span className="day-anomaly__step">{anomalyStep(group)}</span>
+                  </span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
       ) : null}
 
       {note ? <p className="day-log__note">{note}</p> : null}
@@ -518,6 +565,14 @@ export function StudySurface() {
     () => (data ? sortAnomalyGroups(buildTodayAnomalyGroups(data.anomalies)) : []),
     [data],
   );
+  /**
+   * 分诊只收用户能处理的那些（审计 F14）：有可打开对象或有恢复路径。其余是后台任务
+   * 自己的失败，另起一块列出——说出来，但不当成用户的待办。
+   */
+  const { actionableGroups, backgroundGroups } = useMemo(() => ({
+    actionableGroups: groups.filter((group) => Boolean(group.target || group.recovery)),
+    backgroundGroups: groups.filter((group) => !group.target && !group.recovery),
+  }), [groups]);
   const verdict = useMemo(() => (data ? buildTodayVerdict(data) : null), [data]);
   const allSpacesSummary: AllSpacesSummary | null = useMemo(
     () => (allSpaces.data ? buildAllSpacesSummary(allSpaces.data) : null),
@@ -630,7 +685,8 @@ export function StudySurface() {
             <div className="day-log" tabIndex={0} role="group" aria-label="今日操作日志与待处理事务">
               {groups.length > 0 ? (
                 <AnomalyTriage
-                  groups={groups}
+                  groups={actionableGroups}
+                  backgroundGroups={backgroundGroups}
                   total={data?.anomalies.length ?? groups.length}
                   sharedStep={sharedStep}
                   note={anomalyNote}

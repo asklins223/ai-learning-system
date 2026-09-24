@@ -326,13 +326,24 @@ describe("today log surface", () => {
     expect(screen.queryByText(/后台任务 · 后台任务/)).toBeNull();
   });
 
-  it("renders no jump button when the server could not resolve a target", async () => {
+  /**
+   * 审计 F14：服务端解析不出目标的后台失败（没有对象、也没有恢复路径）不再当"待处理"——
+   * 它们进"系统异常"那一块，有位置、有解释，但没有"处理"按钮，也不进"待处理 N"的数。
+   */
+  it("后台失败没有可去的地方：不给按钮，也不冒充用户的待办", async () => {
     installApi(ok(activity({ anomalies: [anomaly({ kind: "job", status: "failed", target: null })] })));
     render(<StudySurface />);
     await waitFor(() => expect(screen.getByText(/^失败/)).toBeTruthy());
     // 不给死路，也不装作有地方可去。
     expect(screen.queryByRole("button", { name: /去处理/ })).toBeNull();
-    expect(screen.getByText(/没有可直接打开的位置/)).toBeTruthy();
+    // 这一块自己说清"不需要你处理"，并在页面上有明确位置。
+    expect(screen.getAllByText(/不需要你处理/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/后台任务/).length).toBeGreaterThan(0);
+    // 「待处理」这个数不再是 1（它是 0）。
+    const triage = document.querySelector(".day-triage");
+    expect(triage?.textContent).toContain("0 项");
+    // 判断条也不再给那颗"查看 N 个处理项"的主按钮——那件事用户处理不了。
+    expect(screen.queryByRole("button", { name: /个处理项/ })).toBeNull();
   });
 
   it("renders a machine-readable timestamp on every log row", async () => {
