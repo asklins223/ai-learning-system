@@ -1,5 +1,7 @@
 # 学习卡练习与复习多模态改版方案：从「敲字队列」到「伴星驱动的多样作答」
 
+> **目标流程覆盖说明（2026-09-24）：**本文记录旧学习卡练习与复习接线方案。今后从笔记第一次学、复习整篇笔记和自愿加入长期复习，以[方案 38](./38-source-note-learning-journey-prd-2026-09-24.md)为准；卡片练习作为可选支线，多模态作答和可信评估中仍适用的约束继续有效。
+
 > 状态：**Approved（Owner 已于 2026-08-12 确认 §7 四项决策，本方案据此定稿）**
 > 文档版本：1.0（2026-08-12 审查修订：按文档复核落盘——①未提交改动数按复核时 `git status` 实测由 348 更新为 349，并注明为会话快照、实施开工前以当时状态为准（审计基线 / §1.1）；②§0 精确化交付状态为 `deliveryStatus.code = "rebuild_required"`（manifest 中为对象 `{code, label, detail}`，原 0.9 记 `deliveryStatus: rebuild_required` 为简化表述）；③§3.1 补注「练习页/复习页默认优先级不对称」为 Owner 决策 1/2 的刻意结果，并要求 `resolveAnswerMode` 单测锁定该语义；④§4 阶段 A 退出验收补「默认偏好 → 练习页 silent 优先、text 兜底」分支用例；⑤复核确认 ValidationVoiceEntry / VoiceInputPanel 全仓库无页面接线（仅组件互引 + 测试文件引用），「已存在未接线」复用判断成立）
 > 文档版本 0.9 注：0.9（2026-08-12 核对修订：确认三态 Router 本体实现于 **worker 侧** `workers/ai-worker/src/handlers/`（companion-dialogue-router / companion-dialogue / companion-action），0.8 仅将其列于 api 模块——§1.1 / §3.4 / 附录 A 已补齐实现位置与核对范围；§0 的「36 项非 verified」标注出处 `11-1-dod-verification.md`）

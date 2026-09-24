@@ -4945,3 +4945,169 @@ rAF 被节流、段间空档、刚起播还没喂到），就让第二个时钟�
 **还没在真窗口量的那一半**：一次真实回合里"气泡离开的那一刻轨道一起没了"。用户当前实况
 `data-motion-mode="full"`、系统未开减动效，所以那条 CSS 会生效；要坐实需要发一轮真对话
 （一次模型调用），没有擅自跑。
+
+## 15. 2026-09-24：「跳的不是我要的那页」——页面词表收成一处
+
+用户 09-24 上午连着六轮让他跳页面，每一轮都不对（原话见 `companion_messages`，
+逐条读数在 `companion_agent_tool_calls.arguments` 与那条 assistant 消息的 nav 块里）：
+
+| 用户说 | 她调的 | 实际落点 |
+| --- | --- | --- |
+| 去学习页面 | `page: today` | 客户端映射表**没有这一条** → 那颗按钮根本不渲染 |
+| 去笔记页面 | `page: source` | 来源库（旧描述原文写着「书架」「资料库」「来源」都对应 source） |
+| 不是，是去笔记库 | `page: source` | 又一次来源库 |
+| 去学习卡页面 | `page: review` | 复习队列（这一条算落对了） |
+| 去理解目标页面 | `page: star_map` | 理解星图（「理解目标」是另一页，她的词表里没有这一页的名字） |
+| 去今日动态页面 | `page: today` | 同第一条 |
+
+三处各自成立、合起来才让**每一跳**都坏：
+
+1. **两条清单各说各话**：`companion_open_page` 的 `page` 枚举手抄了七个值，
+   而 `allowedMainRouteV2Schema` 是另一份。笔记库、理解目标、全局搜索三页在客户端
+   是**真页面**（`room-machine.ts` 的 `open-notes` / `open-objectives` / `search`），
+   但既不在路由白名单也不在她的枚举里——她说不出那一页，只能挑一个名字相近的。
+2. **白名单里有、映射表里没有**：`today` 与 `settings` 服务端发得出来
+   （`companion-agent-runtime.ts` 的 `routeLabel`/`safeSummary` 还照实写"已定位到今日页面"），
+   `desktopRouteFromAgentRoute()` 却 `default: return null` → `NavBlockLine` 退化成一行没有
+   按钮的字，`autoExecute` 那条 `.catch(() => undefined)` 把失败也吞了。
+   **她在 `full` 档被明告"你调用后页面就会切换"，于是这一跳必然是一句真话形状的假话。**
+3. **测试是手抄的，所以那条"新增 kind 却没写落点会红"永远是绿的**：
+   `companion-chat-session.test.ts` 里那份 `MAPPED_ROUTES` 是九条手抄清单，
+   恰好不包含漏掉的 `today`/`settings`。守卫读不到合同，就只是装饰。
+
+### 15.1 修法：一张表 + 派生式对账
+
+`packages/shared/src/companion-bridge-contracts.ts` 新增 `COMPANION_PAGE_DESTINATIONS_V2`
+（`kind` / 中文页名 / 用户口语别名 / 桌面落点 `DesktopRouteV1`）。它是唯一的页面清单：
+
+- 她的 `page` 枚举与工具描述都从它生成（`companion-agent-registry.ts`），
+  描述里明写「用户点名的页面不在这一列里时不要硬挑一个相近的，问他在哪儿看到的」；
+- worker 的 `routeLabel`/`safeSummary` 用它那份页名（`PAGE_LABELS` 那份手抄已删：
+  旧值里 `source` 叫"书架"、`star_map` 叫"知识图谱"，都不是界面上的页名）；
+- 客户端 `desktopRouteFromAgentRoute()` 的页面分支直接查它，`applyRouteToRoom()` 补
+  `room.today`/`note.library`/`objective.library`/`search.global`/`settings.section` 五个落点
+  （`room.today` 是新增的桌面 route kind；其余四种桌面端早就有，只是没人接）；
+- 对账判据从 `allowedMainRouteV2Schema.options` **现读**：白名单里 13 个 kind，
+  每一个都必须映射得出落点且真的发出 `invoke`。摘掉 `case "today"` → 红 3 条，
+  摘掉 `search.global` 那一格 → 红 1 条且正是 `search`。
+
+顺带两处同源错位（同一条根因的另一半，不做就等于留下第二套词表）：
+
+- `settings` 的 `section` 枚举原本是 `privacy/voice/accessibility/pet/model` 五个
+  **界面上不存在的名字**，设置页真实的六个分区是 `account/members/appearance/companion/data/management`。
+  渲染层那段"六个压成三个"的映射（`bridgePageContext`）一并删掉，直接带真实 id。
+- 用户站在**笔记库/理解目标/查找**这三页时，`routeRef` 走的是默认分支 →
+  她被告知"用户在首页"。三页各补一条分支（`pageKind` 加 `objective`，与 schema 那份枚举同源）。
+  `PAGE_KIND_LABELS` 里 `star_map` 也从"知识图谱"改成界面上的"理解星图"。
+
+### 15.2 量到哪一层
+
+- 四包 typecheck 0 错；shared **392/392**、api **1590 过 0 红**、worker **815/815**、
+  desktop **195 文件全绿**（其中 `CompanionChatRecord` 两条 nav 用例改判：
+  `today` 现在**必须**给真按钮，"没有等价落点"那条换成一个这一版客户端不认识的 kind）。
+- 真跑一轮（`scripts/companion-turn-e2e-verify.py --only AD`，新增的 AD 场景就是用户那句
+  「去笔记库」）：`tools=1 steps=2 succeeded`，`arguments={"page":"note_library"}`，
+  nav 块 `{"kind":"note_library"}`、label「去笔记库」、safeSummary「已定位到笔记库页面」。
+- 真窗口（自建第二实例，`out/` 重建后 `electron . --user-data-dir=/tmp/jumpcheck`）：
+  整页重载回 `preset=room` → 点消息里那颗「去今日」→ `preset=study`、屏上标题「今日学习」；
+  「去笔记库」→ `preset=note-library`、标题「笔记库」。**这两跳就是原来那颗按钮压根不出现、
+  和跳到另一页的那两条。** 量完关掉自己开的窗口，`9321` 与 `:4000` 全程未动。
+
+### 15.3 桌面端重启之后（同日 11:47–11:58，用户令"重启桌面端验证跳转"）
+
+原来那台实例（`--user-data-dir=/tmp/clob-a`、CDP 9321）已经不在跑了，所以按同一 profile
+重新拉起，跑 `out/`（11:47 那份，含本次改动）。量法：每一跳都整页重载 + 读起点，
+再点消息里那颗按钮，读 `[data-view-preset]` 与屏上标题 —— 起点若是目标页则记 SKIP，
+否则"页面本来就在这一屏"会被当成跳对了。
+
+八跳全对（`preset` 与屏上页名一并记）：`去今日`→study「今日学习」、`去笔记库`→note-library「笔记库」、
+`去书架`→source-library「来源库」、`去复习`→review「复习队列」、`去知识图谱`→graph「理解星图」、
+`去全局搜索`→search「全局搜索」、`去理解目标`→objective-library、`去设置中心`→settings「设置中心」。
+其中后三条是**新页名**：真跑两轮（新增场景 AD2/AD3）交回 `{"page":"objective_library"}` 与
+`{"page":"search"}`，而 11:52 另一条「打开设置」交回 `{"page":"settings"}` ——
+`settings` 这一跳从服务端合法、客户端 null，到真的落到设置页。
+（第一次跑这三条我按口语写了 `去查找`/`去设置`，按钮字面其实是「去+词表页名」，
+探针没匹配到就报 FAIL —— 那是探针的标签错，不是产品没跳。）
+
+一处顺带量到的命名分歧，**不属于本批、留给文案口径**：`objective_library` 这一页
+HUD 页签叫「理解目标」（`hud-pages.ts` 第 10 页），落到屏幕上那面 `WorkspaceLibrarySurface.tsx:460`
+的标题却是「理解地图」。她那句"到理解目标页了"和屏上那三个字不是同一个词。
+
+### 15.4 这一条**没**做完的部分
+
+- **正在作答时那一跳仍会被改掉**（doc 35 的 F38b）：`room-store.invoke()` 顶部有
+  `navigationGuard`，学习运行在飞时它把任何 intent 吞掉并硬落 `review.queue`/`room.home`
+  （`TaskSurface.tsx:91-99`），`applyRouteToRoom()` 却照样回 `true`。
+  修它要动"退出运行→等一帧→再换页"那套顺序（正式测评的释放门挂在这条链上），
+  不是换一张词表的大小，所以留在这里明写：这是同一个用户可见症状的**第二个真因**。
+- **学习卡生成中(12) / 候选卡审核(13) 两页仍然跳不进去**：桌面 route kind `note.cardGeneration`
+  要有 `cardGenerationRunId`，路由白名单里没有对应形状。用户 09-24 那六轮里没有直接要这一页。
+- 跑着的桌面实例拿的是**启动那一刻**的 `out/`，所以这些改动要**重启桌面端**才看得见
+  （主进程也要重启：`desktopRouteKindM2Values` 那道路由闸在 `out/main` 里）。
+
+### 15.5 用户裁定：这一页就叫「学习卡」（同日 12:05）
+
+我报了一句"她嘴里叫理解目标、屏上是理解地图"，用户回：**「理解目标、理解地图都不行，就叫学习卡吧」**。
+这一句同时改掉了 09-24 上午那条读数的解释——他 10:30 说的「去学习卡页面」当时落到复习队列，
+不是"跳错一页"那么轻，是**这一页本来就没有他叫的那个名字**。
+
+改的是"这一页叫什么"（八处，全部由同一份词表/HUD 标题出发）：
+
+| 落点 | 改动 |
+| --- | --- |
+| `companion-bridge-contracts.ts` 词表 | `objective_library` 的 label → 学习卡；别名接住旧说法与口语：卡片 / 理解目标 / 理解地图 |
+| 同一张表的 `review` | 别名里的**学习卡 / 卡片挪走**（否则"去学习卡页面"又回到复习队列），改成为「待复习」 |
+| `hud-pages.ts` 第 10 / 11 页 | 理解目标 → 学习卡；理解目标详情 → 学习卡详情 |
+| `DirectoryRail.tsx` | 目录栏那颗 理解 → 学习卡 |
+| `WorkspaceLibrarySurface.tsx:460` | 屏上大标题 理解地图 → 学习卡 |
+| `StudySurface.tsx:116`、`CardGenerationSurface.tsx`「查看理解目标」、`search-surface.tsx`「打开理解目标」 | 三个**指向这一页的入口**同步改口 |
+| worker `PAGE_KIND_LABELS.objective` | 环境块里告诉她"用户正在看"的那三个字 → 学习卡 |
+
+**故意没改的边界**（这些是"提到那个对象的散文"，不是这一页的名字；要一起改口径需要一次文案决定，
+且多处属于并行会话在改的文件）：`today-log.ts` 的「建立理解目标」、`ReviewSurface` / `review-deck.ts`
+里「同一理解目标还有 N 张到期卡」、`settings-surface.tsx:2570` 那个数据分区名、
+`graph-sky.ts` / `understanding-universe.tsx` 的图例「理解目标」、`objective-state-copy.ts` 那份状态文案、
+以及 `HomeV2Experience.tsx:346` 的「去理解地图定一个」和这一页自己的眉标「理解远征」。
+
+验证：shared 392/392、worker 815/815、desktop 195 文件（中途一条红是并行会话给进度带加
+`masteryScore` prop 撞他们自己的登记门禁，一分钟后他们自己收掉，与本批无关）、
+桌面与 worker typecheck 0 错。真跑三轮：「去学习卡页面」→ `{"page":"objective_library"}`（改前是 `review`）、
+「去理解目标那一页」→ 同一页（走别名）、「去笔记库」仍是 `note_library`。
+`out/` 重建（12:18）后重启实例：点她那颗「去学习卡」→ `preset=objective-library`、屏上标题「学习卡」，
+标题那行量到 209×27、无溢出、命中测试落在自己身上。**目录栏那颗没在真窗口量到字**——
+当前窗口是折叠态（只有图标），改的是源码里的 label。
+
+### 15.6 「所有文案都统一成学习卡」（同日 12:40，用户第二句裁定）
+
+我上一版把改动收在"这一页叫什么"，用户回：**「全改了吧，所有文案都统一成学习卡」**。
+所以这一轮把**提到这个对象的散文**一起换掉，但按句子改、不按词替换——
+因为这一层现在也叫"卡"，`同一理解目标还有 N 张到期卡` 直译过去会变成"同一张学习卡还有 N 张到期卡"，
+读不通。12 句先重写措辞（复习队列那三条最典型：`同一张学习卡：N 项到期`、`覆盖 N 张学习卡`、
+`同一张学习卡还有 N 项到期`；`这张卡的理解目标暂时读不到标签` → `这张卡暂时读不到标题`），
+再跑全局：`理解目标 / 理解地图 → 学习卡` 共 **41 处**（16 个文件，含 api 的 `activity/service`
+今日记录标题、`projection-read-service` 图例兜底），`学习目标 → 学习卡` 的用户可见处 **15 处**
+（首页热区「当前学习卡」「主学习卡暂时无法读取」、卡生成页选项与原因项、
+run 侧 `contextStale` 与 `objective_not_found` 那五条错误字、星窗说明、收藏「来自第一张正式学习卡」），
+外加眉标 `理解远征 → 学习证据`、星图筛选组的 `aria-label` 与 `title` 各一条。
+
+**量法上栽了一次，值得记**：第一次逐屏扫"还有没有旧词"只读 `textContent`，报了 5 屏全 0，
+而星图那颗筛选组的 `title="计数仅表示各状态的理解目标数量…"` 还挂着——**属性里的字也是屏上的字**
+（读屏软件与悬停都读得到）。补扫 `aria-label / placeholder / title / alt` 之后才抓到它。
+最终在真窗口（重建 + 重启后的那一版）逐屏量：学习卡页 4、理解星图 6、今日学习 5、复习队列 3、
+设置中心 5、笔记库 3、首页 8 处「学习卡」，**旧词 0 处**；首页与星图在最后一次重建后又各读一遍，仍是 0。
+
+**故意留下的四类，各自有理由**：
+1. **给模型的提示词**里 `学习目标` 共 12 处（`run-critic` 2、`card-generation-v2/prompts` 3、
+   `v2-recall-judge` 6、`proactive-hook` 1）——不是屏上的话，改它们要连带重跑卡生成与判分基线，不是一次改名该付的账。
+2. **已应用迁移文件**头部注释 2 处——改一个字节就换 `sha256`，migrator 会把那个文件**重跑一遍**。
+3. 词表里 `aliases: ["卡片","理解目标","理解地图"]` 是**故意留着接旧说法的**，用户还会那么说。
+4. 一处 `objective-library-view-state.ts` 的复盘注释（叙述 09-20 那天用户从哪一屏点过来），是历史叙述不是文案。
+
+**另一套取名没动，因为那是设计口径不是旧词**：详情页大标题「挑战简报」与它的眉标「远征简报」、
+首页那句"今天的主目标已经定下 / 去学习卡里定一张"、收藏名「第一枚目标罗盘」。
+这些同样在指这一个对象，要不要一并换是再一次决定——先摆在这里。
+
+测试账（改名之后全部重跑）：desktop **195 文件全绿**、shared **392**、worker **815**、api **1590** 均 0 红，
+桌面 + api typecheck 0 错。改文案撞红的测试有 7 条，全按新口径改了断言而不是放宽
+（`home-presentation`、`ReviewSurface`、`WorkspaceLibrarySurface.focus` ×2、`learning-run-surface.result`、
+`review-deck`、`graph-surface` ×2）。
