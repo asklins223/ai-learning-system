@@ -66,6 +66,28 @@ export function reviewDeckPosition(index: number, total: number): string {
   return `第 ${index + 1} 张 / 共 ${total} 张`;
 }
 
+/**
+ * 同一张卡被排了多条时，卡面必须自己说出来（审计 F04）。
+ *
+ * 判据是服务端下发的 `cardId`。此前队列项只有 `objectiveId`，于是"一个目标下的
+ * 不同卡"与"同一张卡的多条排程"在界面上完全同形——实机就被读成了"三张卡分不清"
+ * （量下来其实是同一张卡的六条夹具排程）。有了这一句，至少不会把一件事当成三件事。
+ * 一次结算只消费一条，其余确实还在队列里，所以不能说"重复的可以忽略"。
+ *
+ * 返回 null = 这张没有同卡在前的问题（第一条，或这张卡唯一）。
+ */
+export function sameCardEarlierCount(items: readonly ReviewItem[], index: number): number {
+  const current = items[index];
+  if (!current) return 0;
+  return items.slice(0, index).filter((item) => item.cardId === current.cardId).length;
+}
+
+export function sameCardAsEarlierLabel(items: readonly ReviewItem[], index: number): string | null {
+  const earlier = sameCardEarlierCount(items, index);
+  if (earlier === 0) return null;
+  return `这${earlier === 1 ? "条与前面那条是同一张卡" : `条前面还有 ${earlier} 条同一张卡`}的排程，需要各自结算一次`;
+}
+
 /** The mockup invented "预计 2 分钟"; the schedule's own round is real. */
 export function reviewDeckRound(scheduleGeneration: number): string {
   return `排期第 ${scheduleGeneration} 轮`;
@@ -99,11 +121,11 @@ export type ReviewReasonFacts = {
   readonly formalValidationBlocked: string | null;
   readonly overdue: string;
   /**
-   * 已载入队列里属于同一个理解目标的到期卡数（含当前这张）。它回答的是
+   * 已载入队列里属于同一个学习卡的到期卡数（含当前这张）。它回答的是
    * 「同一个目标还有几张卡」——不是「牵动了几个目标」。
    */
   readonly relatedCards: number;
-  /** 已载入队列覆盖到的不同理解目标数。跨目标的说法只能由它承担。 */
+  /** 已载入队列覆盖到的不同学习卡数。跨目标的说法只能由它承担。 */
   readonly affectedObjectives: number;
   readonly scheduleGeneration: number;
   /** Zero-based seat of the selected card in the loaded queue (head = 0). */
@@ -145,7 +167,7 @@ export function reviewReasonSentence(facts: ReviewReasonFacts): string {
     return `${facts.overdue}，${facts.formalValidationBlocked}。做这张只能当练习，不会改变复习安排。`;
   }
   const parts = [facts.overdue];
-  if (facts.relatedCards > 1) parts.push(`同一理解目标还有 ${facts.relatedCards - 1} 张到期卡`);
+  if (facts.relatedCards > 1) parts.push(`同一张学习卡还有 ${facts.relatedCards - 1} 项到期`);
   if (facts.scheduleGeneration > 1) parts.push(`已经排到第 ${facts.scheduleGeneration} 轮`);
   // Only the actual head card may claim 队首; a card the reader stepped to
   // names its own seat instead of borrowing the head's claim.

@@ -27,6 +27,7 @@ function item(reviewId: string, objectiveId: string, overrides: Partial<ReviewIt
     reviewId,
     scheduleId: `${reviewId}-schedule`,
     objectiveId,
+    cardId: `44444444-4444-4444-8444-${objectiveId.replace(/[^a-z0-9]/g, "").padEnd(12, "0").slice(0, 12)}`,
     scheduleGeneration: 1,
     dueAt: new Date(Date.now() - 3_600_000).toISOString(),
     startability: { kind: "ready" },
@@ -547,7 +548,7 @@ describe("ReviewSurface · card state", () => {
     const deck = await screen.findByRole("group", { name: "复习队列卡叠" });
     // 邻居卡也写着同一句话（它们同样读不到标签），所以只断言正面那张。
     await waitFor(() => expect(deck.querySelector(".deck-card.front h2")?.textContent)
-      .toBe("这张卡的理解目标暂时读不到标签"));
+      .toBe("这张卡暂时读不到标题"));
     expect(within(deck as HTMLElement).queryByText("正在读取这张卡的问题…")).toBeNull();
   });
 });

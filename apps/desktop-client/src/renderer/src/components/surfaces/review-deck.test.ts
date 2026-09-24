@@ -16,8 +16,10 @@ import {
   reviewSequenceAfter,
   reviewStartabilityLabel,
   reviewWindowStart,
-  uniqueReviewItems,
+  sameCardAsEarlierLabel,
+  sameCardEarlierCount,
   type ReviewItem,
+  uniqueReviewItems,
 } from "./review-deck";
 
 const NOW = new Date("2026-09-16T12:00:00.000Z").valueOf();
@@ -28,6 +30,7 @@ function item(overrides: Partial<ReviewItem> = {}): ReviewItem {
     reviewId: "11111111-1111-4111-8111-111111111111",
     scheduleId: "22222222-2222-4222-8222-222222222222",
     objectiveId: "33333333-3333-4333-8333-333333333333",
+    cardId: "44444444-4444-4444-8444-444444444444",
     scheduleGeneration: 1,
     dueAt: "2026-09-16T12:00:00.000Z",
     startability: { kind: "ready" },
@@ -35,6 +38,36 @@ function item(overrides: Partial<ReviewItem> = {}): ReviewItem {
     ...overrides,
   };
 }
+
+describe("同一张卡的多条排程（审计 F04）", () => {
+  const CARD_A = "44444444-4444-4444-8444-444444444444";
+  const CARD_B = "55555555-5555-4555-8555-555555555555";
+  const deckOf = (cards: string[]) => cards.map((cardId, index) => item({
+    reviewId: `${index + 11111111}-1111-4111-8111-111111111111`,
+    cardId,
+  }));
+
+  it("第一条不喊；第二条起说清这是同一张卡、要各自结算一次", () => {
+    const deck = deckOf([CARD_A, CARD_A, CARD_B]);
+    expect(sameCardAsEarlierLabel(deck, 0)).toBeNull();
+    expect(sameCardAsEarlierLabel(deck, 1)).toContain("同一张卡");
+    expect(sameCardAsEarlierLabel(deck, 1)).toContain("各自结算一次");
+    expect(sameCardAsEarlierLabel(deck, 2)).toBeNull();
+  });
+
+  it("判的是整副牌而不是窗口：窗口只剩一条时也不许把它当独立一件事", () => {
+    const deck = deckOf([CARD_A, CARD_A]);
+    expect(sameCardEarlierCount(deck, 1)).toBe(1);
+    // 只数窗口内前面几条 = 这条会漏报——正是 F04 的病根形状。
+    expect(sameCardEarlierCount(deck.slice(1), 0)).toBe(0);
+  });
+
+  it("三条同卡时报出还剩几条，不含糊成「又一张」", () => {
+    const deck = deckOf([CARD_A, CARD_A, CARD_A]);
+    expect(sameCardAsEarlierLabel(deck, 2)).toContain("前面还有 2 条");
+    expect(sameCardAsEarlierLabel(deck, 1)).toContain("与前面那条");
+  });
+});
 
 describe("reviewWindowStart", () => {
   it.each([
@@ -140,7 +173,7 @@ describe("reviewReasonFacts", () => {
       scheduleGeneration: 3,
       queuePosition: 0,
     });
-    expect(reviewReasonSentence(facts)).toBe("已超过 3 天 · 同一理解目标还有 1 张到期卡 · 已经排到第 3 轮，所以它排在队首。");
+    expect(reviewReasonSentence(facts)).toBe("已超过 3 天 · 同一张学习卡还有 1 项到期 · 已经排到第 3 轮，所以它排在队首。");
     expect(reviewReasonTag(facts)).toEqual({ label: "排在最前", tone: "red" });
   });
 

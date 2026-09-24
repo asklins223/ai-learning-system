@@ -42,6 +42,12 @@ export const reviewQueueItemV2Schema = z.strictObject({
   reviewId: z.string().uuid(),
   scheduleId: z.string().uuid(),
   objectiveId: z.string().uuid(),
+  /**
+   * 审计 F04：这张排程**属于哪一张卡**。此前 DTO 只带 `objectiveId`，于是"一个目标
+   * 多张卡"与"同一张卡被排了多条"在界面上长得一样——实机就被读成了"三张卡分不清"
+   * （量下来其实是同一张卡的 6 条夹具排程）。有了它，卡面至少能说清"这两条是同一张卡"。
+   */
+  cardId: z.string().uuid(),
   scheduleGeneration: z.number().int().min(1),
   dueAt: isoTimestampV2Schema,
   startability: reviewQueueStartabilityV2Schema,

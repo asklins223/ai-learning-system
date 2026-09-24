@@ -123,6 +123,7 @@ export function projectReviewQueueV2(
       reviewId: item.reviewId,
       scheduleId: item.reviewId,
       objectiveId: item.objectiveId,
+      cardId: item.cardId,
       scheduleGeneration: item.generation,
       dueAt: item.nextReviewAt,
       startability,

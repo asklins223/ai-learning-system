@@ -50,6 +50,7 @@ describe("review return focus", () => {
       scheduleId,
       scheduleGeneration: 3,
       objectiveId,
+      cardId: "44444444-4444-4444-8444-444444444444",
       dueAt: "2026-08-23T00:00:00.000Z",
       startability: { kind: "ready" as const },
       formalValidationBlocked: null,
