@@ -34,6 +34,7 @@ import {
   reviewQueueV2Schema,
   submitTaskArtifactReceiptV2Schema,
 } from "@ailearn/shared";
+import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
 import { createLearningRunForTest, seedV2Fixture } from "./helpers/v2-card-fixture.ts";
 
 const CONN = process.env.DATABASE_URL_API ?? "postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn";
@@ -99,24 +100,85 @@ interface Seeded {
   cardId: string;
   /** V2 objectiveId（V1 keyPointId alias；createRunV2 V1 薄壳映射二者一致）。 */
   keyPointId: string;
+  objectiveRevisionId: string;
+  noteId: string;
+  noteVersionId: string;
   token: string;
   cleanup: () => Promise<void>;
 }
 
-async function seed(): Promise<Seeded> {
+async function seed(opts: { frozenEvidence?: boolean } = {}): Promise<Seeded> {
   const fixture = await seedV2Fixture(sql, {
     objectiveStatement: "遗忘曲线表明复习间隔决定长期记忆",
     publicSummary: "遗忘曲线",
     front: { cue: "遗忘曲线", prompt: "什么是遗忘曲线？" },
   });
+  if (opts.frozenEvidence) await seedFrozenEvidence(fixture);
   return {
     workspaceId: fixture.workspaceId,
     userId: fixture.userId,
     cardId: fixture.cardId,
     keyPointId: fixture.objectiveId,
+    objectiveRevisionId: fixture.objectiveRevisionId,
+    noteId: fixture.noteId,
+    noteVersionId: fixture.noteVersionId,
     token: fixture.token,
     cleanup: fixture.cleanup,
   };
+}
+
+/**
+ * 给 fixture 的目标补一份完整的**冻结证据**（rubric 定向）。
+ *
+ * 为什么需要它：文本题走 critic 通道时，结算闸先验"这个评分点有没有冻结原文
+ * 证据"（`run-processing-tick.ts` → `task rubric has no frozen evidence`）。
+ * `seedV2Fixture` 默认不落 evidence binding，于是任何文本提交都在这道闸上被判
+ * `not_assessable`/`no_frozen_evidence`——F28 之后那种原因不再签发补充按钮，
+ * 于是"额度没用过 ⇒ 签发 supplement:1"这条正控制永远立不起来（2026-09-24 实
+ * 测：它退化成和 E08 同一条断言）。补全证据后，这条提交会走到真正的下游失败
+ * （本机没配 critic ⇒ `critic_unavailable`），那才是单槽规则该被检验的场景。
+ *
+ * 三个前置表缺一不可：`evidence_snapshots_v2`（冻结闭包读 hash）、
+ * `evidence_eligibility_states_v2`（必须是 `usable`，否则冻结直接 fail）、
+ * `evidence_snapshots_v2.block_id` 指向的 `note_blocks` 行（critic 输入要拿原文
+ * 与 `block_content_hash` 对账，`hashCanonicalV2("block", …)` 必须相等）。
+ */
+async function seedFrozenEvidence(fixture: {
+  workspaceId: string;
+  userId: string;
+  noteId: string;
+  noteVersionId: string;
+  objectiveRevisionId: string;
+}): Promise<void> {
+  const blockContent = "复利效应是本金产生利息后加入本金继续生息的现象";
+  const blockId = randomUUID();
+  const evidenceSnapshotId = randomUUID();
+  await sql.begin(async (tx) => {
+    await tx`SELECT set_config('app.workspace_id', ${fixture.workspaceId}, true)`;
+    await tx`SELECT set_config('app.user_id', ${fixture.userId}, true)`;
+    await tx`INSERT INTO note_blocks (id, version_id, workspace_id, ordinal, type, content)
+      VALUES (${blockId}, ${fixture.noteVersionId}, ${fixture.workspaceId}, 0, 'paragraph', ${blockContent})`;
+    await tx`INSERT INTO evidence_snapshots_v2
+      (id, workspace_id, evidence_snapshot_id, evidence_snapshot_hash, source_snapshot_id,
+       note_id, block_id, start_offset, end_offset, protected_quote_ref, quote_hash,
+       block_content_hash, source_content_hash, modality)
+      VALUES (gen_random_uuid(), ${fixture.workspaceId}, ${evidenceSnapshotId}, ${"b".repeat(64)},
+              ${randomUUID()}, ${fixture.noteId}, ${blockId}, 0, ${blockContent.length},
+              ${`evidence://snapshot/${evidenceSnapshotId}`},
+              ${hashCanonicalV2("evidence-quote", { quote: blockContent })},
+              ${hashCanonicalV2("block", { content: blockContent })}, ${"f".repeat(64)}, 'text')`;
+    await tx`INSERT INTO evidence_eligibility_states_v2
+      (id, workspace_id, eligibility_id, evidence_snapshot_id, status, eligibility_epoch, eligibility_vector_hash)
+      VALUES (gen_random_uuid(), ${fixture.workspaceId}, ${randomUUID()}, ${evidenceSnapshotId},
+              'usable', 1, ${"a".repeat(64)})`;
+    await tx`INSERT INTO learning_objective_evidence_bindings_v2
+      (id, workspace_id, binding_id, objective_revision_id, target_unit_kind, target_unit_id,
+       evidence_snapshot_id, relation, support_strength, semantic_support_report_id,
+       semantic_support_report_hash, binding_hash)
+      VALUES (gen_random_uuid(), ${fixture.workspaceId}, ${randomUUID()}, ${fixture.objectiveRevisionId},
+              'rubric', 'fixture-rubric-u1', ${evidenceSnapshotId}, 'entails', 'direct',
+              ${randomUUID()}, ${"c".repeat(64)}, ${"d".repeat(64)})`;
+  });
 }
 
 async function buildLearningRunApp(): Promise<FastifyInstance> {
@@ -393,9 +455,13 @@ test("E08：请求提示后提交 text → Critic 未配置 fail closed → not_
     // 与现行合同不符——确定性 practice 路径仅存在于 structured 提交。
     // 不变量保持不变：0 canonical / 0 schedule / 不产生掌握证据。
     assert.equal(afterRun.phase, "checkpoint");
+    // 审计 F28 之后的新契约：结算闸因为**系统侧缺冻结证据**而 fail closed 时，
+    // 不再签发补充证据的入口（`supplementOffer` 见到 `no_frozen_evidence` 就回空），
+    // 并把原因码带上——界面据此说"缺的是原文证据，不是你答得不够好"。
     assert.deepEqual(afterRun.checkpoint, {
       kind: "not_assessable",
-      allowedFollowupIds: ["supplement:1"],
+      allowedFollowupIds: [],
+      reasonCode: "no_frozen_evidence",
     });
     assert.equal(afterRun.result, null, "not_assessable 不产生 result");
     const envelopeCount = await scoped(scope, (tx) => tx`
@@ -637,7 +703,7 @@ test("P4 followup：partial checkpoint → activate_followup 激活补充任务 
 });
 
 test("P4 followup 单槽：补充任务自己再落 checkpoint 时不再签发 supplement:1", async () => {
-  const seeded = await seed();
+  const seeded = await seed({ frozenEvidence: true });
   try {
     const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
     const { buildLearningRunAllowedActionsV2 } = await import(
@@ -652,6 +718,18 @@ test("P4 followup 单槽：补充任务自己再落 checkpoint 时不再签发 s
           idempotencyKey: "it-slot-create",
         },
       }),
+    );
+    // 夹具自检：冻下来的目标必须真的带上 rubric 定向证据，否则下面的正控制
+    // 会和 E08 撞在同一条"系统侧缺证据"上（见 seedFrozenEvidence 的注释）。
+    const frozenEvidence = await scoped(scope, (tx) =>
+      tx`SELECT target->'evidence' AS evidence FROM learning_target_snapshots_v2
+         WHERE workspace_id = ${seeded.workspaceId} AND run_id = ${run.runId}`,
+    );
+    assert.deepEqual(
+      (frozenEvidence[0]?.evidence as Array<{ targetUnit: { kind: string; rubricUnitId: string } }>)
+        ?.map((e) => e.targetUnit),
+      [{ kind: "rubric", rubricUnitId: "fixture-rubric-u1" }],
+      "冻结快照必须含一条 rubric 定向证据",
     );
     const submitText = (
       taskId: string,
@@ -695,6 +773,17 @@ test("P4 followup 单槽：补充任务自己再落 checkpoint 时不再签发 s
     assert.ok(
       buildLearningRunAllowedActionsV2(cp1).some((a) => a.kind === "activate_followup"),
       "首次 checkpoint 必须签发补充按钮",
+    );
+    // 正控制的成因也要认对：签发它不是因为"系统侧缺证据"（那正是 F28 要拦的
+    // 情况），而是本机没配 critic。理由码认错，这条测试就成了假绿。
+    const failClosed = await scoped(scope, (tx) =>
+      tx`SELECT payload FROM learning_run_events
+         WHERE run_id = ${run.runId} AND event_type = 'learning_assessment.not_assessable'
+         ORDER BY sequence DESC LIMIT 1`,
+    );
+    assert.equal(
+      (failClosed[0]?.payload as { reasonCode?: string } | undefined)?.reasonCode,
+      "critic_unavailable",
     );
 
     const activated = await withWorkspaceTransaction(scope, async (tx) =>
@@ -1600,6 +1689,47 @@ test("RUN-V2-ACTION-IDEMPOTENCY-01：V2 action availability 与 response-loss ex
     const endReceipt = learningRunActionResponseV2Schema.parse(endResponse.json());
     assert.equal(endReceipt.snapshot.phase, "ended");
     assert.deepEqual(endReceipt.snapshot.allowedActions, []);
+
+    /**
+     * 审计 F51：一条已经进终态的 run 不许再被写计时。
+     *
+     * 现场是：一个没人点过的窗口自己建了一条正式挑战、自己把它记成"用户结束"，
+     * 屏上计时还继续走。计时的入口只有这一条（`POST …/activity-lease/v2`），
+     * 所以这里钉住相位闸——终态上续租必须被拒，`active_seconds_used` 与 `revision`
+     * 都不许再动。（`recordActivityLease` 里那句 `run.phase !== "active"` 就是它；
+     * 这条用例存在的原因是这个形状的窗口在真机上真的出现过，不是假想。）
+     */
+    const terminalLeaseResponse = await app.inject({
+      method: "POST",
+      url: `/learning-runs/${before.runId}/activity-lease/v2`,
+      headers: auth,
+      payload: {
+        version: 2,
+        snapshotId: endReceipt.snapshot.snapshotId,
+        runRevision: endReceipt.snapshot.runRevision,
+        runtimeEpoch: endReceipt.snapshot.runtimeEpoch,
+        deviceSessionId: leaseBody.deviceSessionId,
+        startedAt: new Date(Date.now() - 3_000).toISOString(),
+        endedAt: new Date().toISOString(),
+      },
+    });
+    assert.ok(
+      terminalLeaseResponse.statusCode >= 400 && terminalLeaseResponse.statusCode < 500,
+      `终态 run 的续租必须被拒，实际 ${terminalLeaseResponse.statusCode}：${terminalLeaseResponse.body}`,
+    );
+    const afterTerminalLease = await app.inject({
+      method: "GET",
+      url: `/learning-runs/${before.runId}/v2`,
+      headers: auth,
+    });
+    assert.equal(afterTerminalLease.statusCode, 200, afterTerminalLease.body);
+    const terminalSnapshot = learningRunPublicSnapshotV2Schema.parse(afterTerminalLease.json());
+    assert.equal(
+      terminalSnapshot.activeSecondsUsed,
+      endReceipt.snapshot.activeSecondsUsed,
+      "终态之后不许再计秒",
+    );
+    assert.equal(terminalSnapshot.runRevision, endReceipt.snapshot.runRevision, "终态之后 revision 不许再动");
 
     const terminalResultResponse = await app.inject({
       method: "GET",
