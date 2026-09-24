@@ -3,7 +3,7 @@ import { z } from "zod";
 import { eq } from "drizzle-orm";
 import { db } from "../../db/client.ts";
 import { users, workspaces } from "@ailearn/shared/db-schema/identity";
-import { loginWithPassword, registerWithoutInvite, switchWorkspace, createCollaborativeWorkspace, listUserWorkspaces, joinWorkspaceByInviteToken, leaveWorkspace, JoinWorkspaceError, getAIPrivacySettings, updateAIConsent, updateAIDataPolicy, listAIAuditLog, revokeSession, resetRecoveredUserPassword, SESSION_TTL_MS, updateUserProfile, renameWorkspace, changePassword, revokeAllSessionsForUser, transferWorkspaceOwnership, dissolveWorkspace } from "./service.ts";
+import { loginWithPassword, registerWithoutInvite, switchWorkspace, createCollaborativeWorkspace, listUserWorkspaces, joinWorkspaceByInviteToken, leaveWorkspace, JoinWorkspaceError, getAIPrivacySettings, updateAIConsent, updateAIDataPolicy, listAIAuditLog, revokeSession, resetRecoveredUserPassword, SESSION_TTL_MS, updateUserProfile, renameWorkspace, changePassword, revokeAllSessionsForUser, transferWorkspaceOwnership, dissolveWorkspace, previewWorkspaceDissolve } from "./service.ts";
 import { parseBody } from "../../lib/validate.ts";
 import { requireSession, requireOwner, isWorkspaceOwner, getRequestCredential } from "./middleware.ts";
 import { clampLimit, clampOffset, parseQuery } from "../../lib/pagination.ts";
@@ -714,6 +714,29 @@ export async function authRoutes(app: FastifyInstance, options: AuthRoutesOption
       }
       reply.header("cache-control", "private, no-store");
       return { dissolved: true, counts: result.counts };
+    },
+  );
+
+  // 解散之前的先睹计数（审计 F39 ③）：确认文案说得出"会带走 N 篇笔记、M 张卡"，
+  // 用户点的才不是盲盒。判据与 DELETE 同源——能不能真删仍由 SQL 函数判。
+  app.get(
+    "/workspaces/:id/dissolve-preview",
+    { preHandler: [requireSession] },
+    async (req, reply) => {
+      const params = req.params as { id: string };
+      const result = await previewWorkspaceDissolve(params.id, req.session.userId);
+      if (!result.ok) {
+        const status: Record<string, number> = {
+          workspace_not_found: 404,
+          cannot_dissolve_personal_workspace: 409,
+          actor_is_not_active_owner: 403,
+        };
+        return reply
+          .code(status[result.error] ?? 500)
+          .send({ error: result.error, message: DISSOLVE_MESSAGES[result.error] });
+      }
+      reply.header("cache-control", "private, no-store");
+      return { counts: result.counts };
     },
   );
 

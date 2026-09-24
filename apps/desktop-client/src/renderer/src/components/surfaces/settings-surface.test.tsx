@@ -121,6 +121,8 @@ function auditItem(overrides: Partial<DesktopAiAuditItemV1> = {}): DesktopAiAudi
 
 function installApi(options: {
   readonly role?: "owner" | "member";
+  /** 让解散预览失败——界面必须说"数不出来"，不能拿 0 冒充"这里什么都没有"。 */
+  dissolvePreviewRejects?: boolean;
   /** true = 那个协作空间的当前用户是 owner（解散入口只该在这种行上出现）。 */
   readonly ownerCollaborative?: boolean;
   readonly ai?: WorkspaceAiSettingsV1;
@@ -254,6 +256,16 @@ function installApi(options: {
         calls.push({ method: "transferOwnership", input });
         if (options.transferRejects) throw new Error("transfer refused");
         return ok({ version: 1 as const, workspaceId: OTHER_WORKSPACE, newOwnerUserId: OTHER_WORKSPACE });
+      }),
+      // 解散**之前**的先睹计数（审计 F39 ③）：确认那句话说得出数，才不是盲盒。
+      dissolvePreview: vi.fn(async (input: unknown) => {
+        calls.push({ method: "dissolvePreview", input });
+        if (options.dissolvePreviewRejects) throw new Error("preview refused");
+        return ok({
+          version: 1 as const,
+          workspaceId: OTHER_WORKSPACE,
+          counts: { notes: 3, sources: 2, cards: 11, schedules: 4 },
+        });
       }),
       dissolve: vi.fn(async (input: unknown) => {
         calls.push({ method: "dissolve", input });
@@ -1152,6 +1164,24 @@ it("解散入口只出现在「我是 owner 的协作空间」那一行：member
 it("解散入口出现在 owner 的协作空间那一行", async () => {
   await openSpaceLedger({ ownerCollaborative: true });
   expect(await screen.findByRole("button", { name: "解散 协作空间" })).toBeTruthy();
+});
+
+it("展开确认就问服务端要真实数量，并把四个数写进那一句话（审计 F39 ③）", async () => {
+  const { api } = await openSpaceLedger({ ownerCollaborative: true });
+  fireEvent.click(await screen.findByRole("button", { name: "解散 协作空间" }));
+
+  const note = await screen.findByText(/这个空间里有 3 篇笔记（含回收站里的）、2 份来源、11 张卡、4 条排程/);
+  expect(note.textContent).toContain("取不回来");
+  expect(note.textContent).toContain("输入空间名「协作空间」以确认");
+  expect(api.workspace.dissolvePreview).toHaveBeenCalledTimes(1);
+});
+
+it("数量读不到时说明「数不出来」，不拿 0 冒充「什么都没有」", async () => {
+  await openSpaceLedger({ ownerCollaborative: true, dissolvePreviewRejects: true });
+  fireEvent.click(await screen.findByRole("button", { name: "解散 协作空间" }));
+
+  const note = await screen.findByText(/这一项目前数不出来/);
+  expect(note.textContent).not.toMatch(/0 篇|0 张|0 条/);
 });
 
 it("确认必须输入空间名；没输对就不发调用", async () => {

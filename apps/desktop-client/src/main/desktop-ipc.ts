@@ -97,6 +97,7 @@ import {
   type NoteDocDraftClearResultV1,
   type NoteDocWriteResultV1,
   renameWorkspaceResultV1Schema,
+  dissolvePreviewResultV1Schema,
   dissolveWorkspaceResultV1Schema,
   transferWorkspaceOwnershipResultV1Schema,
   createWorkspaceResultV1Schema,
@@ -717,6 +718,7 @@ const inviteCreateInputSchema = z.strictObject({
 const inviteRevokeInputSchema = z.strictObject({ ...m1InputBase, inviteId: uuidSchema });
 const memberRemoveInputSchema = z.strictObject({ ...m1InputBase, userId: uuidSchema });
 const workspaceDissolveInputSchema = z.strictObject({ ...m1InputBase, workspaceId: uuidSchema });
+const workspaceDissolvePreviewInputSchema = workspaceDissolveInputSchema;
 const workspaceTransferOwnershipInputSchema = z.strictObject({ ...m1InputBase, workspaceId: uuidSchema, toUserId: uuidSchema });
 // Markdown 导入：内容是 UTF-8 文本（渲染层 File.text()），单篇 500KB、最多 100 篇。
 const markdownImportInputSchema = z.strictObject({
@@ -741,6 +743,7 @@ const voicePreferencePatchInputSchema = z.strictObject({
 });
 const revokeOutputSchema = z.strictObject({ revoked: z.literal(true) });
 const memberRemoveOutputSchema = z.strictObject({ removed: z.literal(true) });
+const workspaceDissolvePreviewOutputSchema = dissolvePreviewResultV1Schema;
 const workspaceDissolveOutputSchema = dissolveWorkspaceResultV1Schema;
 const workspaceTransferOwnershipOutputSchema = transferWorkspaceOwnershipResultV1Schema;
 
@@ -2115,6 +2118,14 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
     assertEpoch(input.meta, activeWorkspaceEpoch);
     return gateway.dissolveWorkspace(input.workspaceId, input.meta.requestId);
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, workspaceDissolveOutputSchema);
+
+  // 解散前的先睹计数（审计 F39 ③）：只读，所以确认展开时就取一次；取不到不拦解散，
+  // 但界面必须说"这一项目前数不出来"，不能拿 0 冒充"这里什么都没有"。
+  installHandler(DESKTOP_IPC_CHANNELS.workspaceDissolvePreview, workspaceDissolvePreviewInputSchema, options, async (_event, _window, input) => {
+    requireM2Route(contract, "settings.section");
+    assertEpoch(input.meta, activeWorkspaceEpoch);
+    return gateway.previewWorkspaceDissolve(input.workspaceId, input.meta.requestId);
+  }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, workspaceDissolvePreviewOutputSchema);
 
   // 转让所有权：同一对门（M2 路由 + epoch）。服务端 requireOwner 是最终裁判。
   installHandler(DESKTOP_IPC_CHANNELS.workspaceTransferOwnership, workspaceTransferOwnershipInputSchema, options, async (_event, _window, input) => {

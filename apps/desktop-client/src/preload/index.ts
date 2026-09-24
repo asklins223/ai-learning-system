@@ -103,6 +103,7 @@ const desktopApi: AILearnDesktopApiM2 = {
     export: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceExport, input),
     rename: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceRename, input),
     dissolve: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceDissolve, input),
+    dissolvePreview: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceDissolvePreview, input),
     transferOwnership: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceTransferOwnership, input),
     create: (input) => invoke(DESKTOP_IPC_CHANNELS.workspaceCreate, input)
   },

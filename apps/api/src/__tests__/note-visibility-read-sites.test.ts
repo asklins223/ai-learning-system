@@ -65,6 +65,10 @@ const SYSTEM_LEVEL_READS: Record<string, number> = {
   "modules/export/service.ts": 1,
   // 写入过程中"这篇还在不在"的复查：把它按人筛会把一次并发删除变成对可见性不足的假报错。
   "modules/upload/upload-service.ts": 1,
+  // 解散先睹计数（审计 F39 ③）：刻意取**超集**——回收站里的笔记也会随空间一起消失，
+  // 按人筛会少报，而少报一个"会毁掉多少"的数字比多报更糟。这里只回四个整数，
+  // 不回任何一篇的标题或正文。（同一处读点在卡片棘轮里另计一次。）
+  "modules/identity/service.ts": 1,
 };
 
 /**
@@ -168,6 +172,8 @@ function sourceFiles(dir: string): string[] {
 const CARD_READ_PATTERNS = [/\bfrom\(learningCardsV2\)/g, /\bFROM\s+learning_cards_v2\b/gi];
 const CARD_GUARD_TOKENS = ["visibleCardsCondition", "visibleNotesCondition", "eq(notes.createdBy"];
 const CARD_SYSTEM_LEVEL_READS: Record<string, number> = {
+  // 解散先睹计数：同上，只数不取内容（判据与理由见笔记棘轮里同一条豁免）。
+  "modules/identity/service.ts": 1,
   // 跳转目标可用性：只回答"这张卡还在不在"，取的是 `cardId` 一列。
   "modules/learning-runs/run-service.ts": 1,
   // 回填 `learning_objective_origins_v2`：取的是 `noteVersionId`，不回给任何人正文。

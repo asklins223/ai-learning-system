@@ -97,6 +97,10 @@ after(async () => {
     }
     await tx`DELETE FROM assistant_memory_items WHERE id IN (${globalMemory}, ${workspaceMemory}, ${fanoutInDissolved}, ${fanoutInPersonal})`;
     await tx`DELETE FROM notes WHERE id = ${noteId}`;
+    // 解散预览用例在**三个空间**都种过相撞的行；被解散那一份由真函数收掉，
+    // 个人空间那一份没人动——不清就撞 `sources_created_by_users_id_fk`。
+    await tx`DELETE FROM review_schedules WHERE workspace_id IN (${ws}, ${ownerPersonal}, ${memberPersonal})`;
+    await tx`DELETE FROM sources WHERE workspace_id IN (${ws}, ${ownerPersonal}, ${memberPersonal})`;
     await tx`DELETE FROM workspace_audit_log WHERE target_id = ${ws} OR workspace_id IN (${ws}, ${ownerPersonal}, ${memberPersonal})`;
     await tx`DELETE FROM workspace_members WHERE workspace_id IN (${ws}, ${ownerPersonal}, ${memberPersonal})`;
     await tx`UPDATE users SET personal_workspace_id = NULL WHERE id IN (${owner}, ${member})`;
@@ -125,6 +129,44 @@ test("个人空间与非 owner 一律被挡下", async () => {
     /actor_is_not_active_owner/,
     "member 也能解散别人的空间",
   );
+});
+
+/**
+ * 解散**之前**的先睹计数（审计 F39 ③）。
+ *
+ * 确认文案写着"会连同其中的笔记、卡片与排程一起消失"，但界面上一个数都没有。
+ * 夹具刻意在**另一个空间**（发起者的个人空间）也放了同样的行：预览的 SQL 一旦
+ * 漏掉 `workspace_id` 过滤，数出来就会把两个空间加在一起——没有这批相撞的行，
+ * "过滤写了"和"过滤生效"是两件事。
+ */
+test("解散预览：数得出这个空间里有多少东西，且只数这个空间的", async () => {
+  const { previewWorkspaceDissolve } = await import("../modules/identity/service.ts");
+
+  await admin.begin(async (tx) => {
+    for (const [workspaceId, userId] of [[ws, owner], [ownerPersonal, owner]] as const) {
+      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
+      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
+      await tx`INSERT INTO sources (id, workspace_id, type, title, origin, status, metadata, created_by)
+        VALUES (${randomUUID()}, ${workspaceId}, 'text', ${"相撞的夹具来源"}, 'pasted', 'ready',
+                ${tx.json({})}, ${userId})`;
+      await tx`INSERT INTO review_schedules
+        (id, workspace_id, user_id, subject_type, subject_id, status, next_review_at,
+         interval_days, generation, policy_version, reason_code, created_at, updated_at)
+        VALUES (${randomUUID()}, ${workspaceId}, ${userId}, 'card', ${randomUUID()},
+                'pending', now() + interval '1 day', 1, 1, 'discrete-v2', 'initial_validation', now(), now())`;
+    }
+  });
+
+  const allowed = await previewWorkspaceDissolve(ws, owner);
+  assert.ok(allowed.ok, `owner 读预览应当成功，实际 ${JSON.stringify(allowed)}`);
+  assert.deepEqual(allowed.counts, { notes: 1, sources: 1, cards: 0, schedules: 1 },
+    "计数应当只算被解散那一个空间（个人空间里那一套相撞的行不算进来）");
+
+  const denied = await previewWorkspaceDissolve(ws, member);
+  assert.deepEqual(denied, { ok: false, error: "actor_is_not_active_owner" },
+    "member 不该看到这份计数——他没有解散的权力");
+  const personal = await previewWorkspaceDissolve(ownerPersonal, owner);
+  assert.equal(personal.ok, false, "个人空间没有解散这回事，预览也不该给数");
 });
 
 test("解散：逐表清干净、属于人的记忆活着、审计留得下", async () => {

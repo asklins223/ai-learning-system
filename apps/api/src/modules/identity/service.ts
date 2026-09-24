@@ -1456,6 +1456,64 @@ export async function revokeAllSessionsForUser(userId: string): Promise<void> {
  * 会随迁移增长而悄悄漏表的清单（漏一张就是一批没人认领的孤儿行）。
  * TS 这一层只做三件事：拿会话身份、把函数抛的错误名翻成人能懂的错误码、把逐表计数带回去。
  */
+/**
+ * 解散**之前**的先睹计数（审计 F39 ③）。
+ *
+ * 解散的确认文案自己写着"这个空间会连同其中的笔记、卡片与排程一起消失"，但界面上
+ * 一个数都没有——用户要点开一颗盲盒。真删了多少行由迁移 0276 那个函数逐表带回来，
+ * 那一刻已经太晚，所以这里在确认之前先读一次。
+ *
+ * 两道门卫的分工要写清楚：**能不能删仍然只由 SQL 函数判**（`actor_is_not_active_owner`
+ * 等三条），这份预览只是"给已经在界面上看得到解散按钮的人一个数"。因此这里的判据
+ * 取与改名/转让同一句（`owner_id` 或 membership.role=owner，且必须是协作空间）；
+ * 它不会比真动作更宽松——放宽一点也不会删掉任何东西，收紧则会撒"没有"的谎。
+ */
+export async function previewWorkspaceDissolve(
+  workspaceId: string,
+  actorUserId: string,
+): Promise<
+  | { ok: true; counts: { notes: number; sources: number; cards: number; schedules: number } }
+  | { ok: false; error: "workspace_not_found" | "actor_is_not_active_owner" | "cannot_dissolve_personal_workspace" }
+> {
+  const [workspace, membership] = await Promise.all([
+    db.query.workspaces.findFirst({
+      where: eq(workspaces.id, workspaceId),
+      columns: { ownerId: true, workspaceType: true },
+    }),
+    db.query.workspaceMembers.findFirst({
+      where: and(
+        eq(workspaceMembers.workspaceId, workspaceId),
+        eq(workspaceMembers.userId, actorUserId),
+        isNull(workspaceMembers.leftAt),
+      ),
+      columns: { role: true },
+    }),
+  ]);
+  if (!workspace) return { ok: false, error: "workspace_not_found" };
+  if (workspace.workspaceType !== "collaborative") {
+    return { ok: false, error: "cannot_dissolve_personal_workspace" };
+  }
+  if (workspace.ownerId !== actorUserId && membership?.role !== "owner") {
+    return { ok: false, error: "actor_is_not_active_owner" };
+  }
+
+  // 四张表一起数：`notes`/`sources` 连外键都靠 workspace_id 判，RLS 下必须带上下文，
+  // 否则受限角色读到 0 行——那会让确认文案说"这里什么都没有"。
+  const [row] = await withWorkspaceTransaction({ workspaceId, userId: actorUserId }, async (tx) =>
+    tx.execute(sql`
+      SELECT
+        (SELECT count(*) FROM notes WHERE workspace_id = ${workspaceId}::uuid)::int AS notes,
+        (SELECT count(*) FROM sources WHERE workspace_id = ${workspaceId}::uuid)::int AS sources,
+        (SELECT count(*) FROM learning_cards_v2 WHERE workspace_id = ${workspaceId}::uuid)::int AS cards,
+        (SELECT count(*) FROM review_schedules WHERE workspace_id = ${workspaceId}::uuid)::int AS schedules
+    `),
+  );
+  const counts = (Array.isArray(row) ? row[0] : row) as {
+    notes: number; sources: number; cards: number; schedules: number;
+  };
+  return { ok: true, counts };
+}
+
 export async function dissolveWorkspace(
   workspaceId: string,
   actorUserId: string,

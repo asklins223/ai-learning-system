@@ -220,6 +220,7 @@ export const DESKTOP_IPC_CHANNELS = {
   memberList: "ailearn.v1.member.list",
   memberRemove: "ailearn.v1.member.remove",
   workspaceDissolve: "ailearn.v1.workspace.dissolve",
+  workspaceDissolvePreview: "ailearn.v1.workspace.dissolvePreview",
   workspaceTransferOwnership: "ailearn.v1.workspace.transferOwnership",
   // 数据维护工具：Markdown 批量导入、搜索索引漂移检测与重建。
   settingsMarkdownImport: "ailearn.v1.settings.markdownImport",
@@ -1214,6 +1215,23 @@ export const dissolveWorkspaceResultV1Schema = z.strictObject({
 export type DissolveWorkspaceResultV1 = z.infer<typeof dissolveWorkspaceResultV1Schema>;
 
 /**
+ * 解散**之前**的先睹计数（审计 F39 ③）：确认文案说得出"会带走 N 篇笔记、M 张卡、
+ * K 条排程"，用户点的才不是盲盒。只读，判据与 DELETE 同源；真删了多少行仍以
+ * `dissolveWorkspaceResultV1Schema.counts`（服务端逐表带回）为准。
+ */
+export const dissolvePreviewResultV1Schema = z.strictObject({
+  version: z.literal(1),
+  workspaceId: z.string().uuid(),
+  counts: z.strictObject({
+    notes: z.number().int().min(0),
+    sources: z.number().int().min(0),
+    cards: z.number().int().min(0),
+    schedules: z.number().int().min(0),
+  }),
+});
+export type DissolvePreviewResultV1 = z.infer<typeof dissolvePreviewResultV1Schema>;
+
+/**
  * `POST /workspaces/:id/transfer-ownership` 的结果（服务端的 `ok:true` 形状已经在网关摊平）。
  *
  * 转让是 owner 唯一的"体面出口"：没有它，`leaveWorkspace` 对 owner 永远是
@@ -1864,6 +1882,8 @@ export interface AILearnDesktopApiM1 {
     rename(input: { meta: RequestMetaV1; workspaceId: Uuid; name: string }): Promise<GatewayResultV1<RenameWorkspaceResultV1>>;
     /** 解散协作空间（不可逆）。返回逐表计数，界面用它说明"删了什么"。 */
     dissolve(input: { meta: RequestMetaV1; workspaceId: Uuid }): Promise<GatewayResultV1<DissolveWorkspaceResultV1>>;
+    /** 解散前的先睹计数（只读，仅 owner 可取）；给确认文案用。 */
+    dissolvePreview(input: { meta: RequestMetaV1; workspaceId: Uuid }): Promise<GatewayResultV1<DissolvePreviewResultV1>>;
     /** 转让所有权（仅 owner）。转让后原 owner 降为 member，于是可以退出这个空间。 */
     transferOwnership(input: { meta: RequestMetaV1; workspaceId: Uuid; toUserId: Uuid }): Promise<GatewayResultV1<TransferWorkspaceOwnershipResultV1>>;
     /** 新建协作空间：唯一能把别人正当地加进来的空间类型。 */

@@ -26,8 +26,10 @@ import {
   markdownImportResultV1Schema,
   memberListResultV1Schema,
   renameWorkspaceResultV1Schema,
+  dissolvePreviewResultV1Schema,
   dissolveWorkspaceResultV1Schema,
   transferWorkspaceOwnershipResultV1Schema,
+  type DissolvePreviewResultV1,
   type DissolveWorkspaceResultV1,
   type TransferWorkspaceOwnershipResultV1,
   createWorkspaceResultV1Schema,
@@ -1264,6 +1266,27 @@ export class DesktopGateway {
    * 解散掉的是**当前会话所在的空间**时会留下一个已失效的 session，
    * 所以和 rename 一样清掉本地缓存，让下一次调用重新拿上下文。
    */
+  /**
+   * GET /workspaces/:id/dissolve-preview：解散**之前**的先睹计数（审计 F39 ③）。
+   *
+   * 与 dissolve 同一对门（登录 + 把服务端错误码翻成人能懂的码），但它不改任何状态，
+   * 所以不清 session 与投影缓存：用户展开确认又取消，不该把自己踢出这个空间。
+   */
+  async previewWorkspaceDissolve(workspaceId: string, requestId?: string): Promise<DissolvePreviewResultV1> {
+    await this.ensureConnected(requestId);
+    const result = await this.request(`/workspaces/${workspaceId}/dissolve-preview`, {
+      method: "GET",
+    }, true, true, requestId);
+    const payload = (result.body ?? {}) as Record<string, unknown>;
+    const parsed = dissolvePreviewResultV1Schema.safeParse({
+      version: 1,
+      workspaceId,
+      counts: payload.counts ?? {},
+    });
+    if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
+    return parsed.data;
+  }
+
   async dissolveWorkspace(workspaceId: string, requestId?: string): Promise<DissolveWorkspaceResultV1> {
     await this.ensureConnected(requestId);
     const result = await this.request(`/workspaces/${workspaceId}`, {

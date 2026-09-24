@@ -386,6 +386,26 @@ export function summaryOfDissolveCounts(counts: Record<string, number>): string 
   return `${parts.join("，")}。`;
 }
 
+type DissolvePreviewCounts = { notes: number; sources: number; cards: number; schedules: number };
+type DissolvePreviewState =
+  | null
+  | { workspaceId: string; phase: "loading" }
+  | { workspaceId: string; phase: "unavailable" }
+  | { workspaceId: string; phase: "ready"; counts: DissolvePreviewCounts };
+
+/** 确认那一句话：数得出就报数，数不出来说数不出来，绝不拿 0 冒充"什么都没有"。 */
+function dissolveSentence(preview: DissolvePreviewState, workspaceId: string, name: string): string {
+  const ask = `输入空间名「${name}」以确认。`;
+  if (!preview || preview.workspaceId !== workspaceId) return `正在数这个空间里有多少东西…　${ask}`;
+  if (preview.phase === "loading") return `正在数这个空间里有多少东西…　${ask}`;
+  if (preview.phase === "unavailable") {
+    return `这个空间会连同其中的笔记、来源、卡片与排程一起消失（这一项目前数不出来）。${ask}`;
+  }
+  const { notes, sources, cards, schedules } = preview.counts;
+  return `这个空间里有 ${notes} 篇笔记（含回收站里的）、${sources} 份来源、${cards} 张卡、${schedules} 条排程。`
+    + `解散后它们一起消失，取不回来。${ask}`;
+}
+
 export function SettingsSurface() {
   const theme = useRoomStore((state) => state.theme);
   const setTheme = useRoomStore((state) => state.setTheme);
@@ -443,6 +463,11 @@ export function SettingsSurface() {
    */
   const [leavePending, setLeavePending] = useState<string | null>(null);
   const [dissolveConfirmText, setDissolveConfirmText] = useState("");
+  /**
+   * 解散前的先睹计数（审计 F39 ③）。三种状态要分开：还没取到、取到了、取不到——
+   * 把"取不到"画成 0 会撒一句"这里什么都没有"，而那句话正在给一个不可逆动作壮胆。
+   */
+  const [dissolvePreview, setDissolvePreview] = useState<DissolvePreviewState>(null);
   const [profileFailure, setProfileFailure] = useState<string | null>(null);
   const [avatarSrc, setAvatarSrc] = useState<string | null>(null);
   const [passwordForm, setPasswordForm] = useState({ current: "", next: "", confirm: "" });
@@ -1015,6 +1040,19 @@ export function SettingsSurface() {
    * ② 成功后照服务端带回的逐表计数说话，自己不加"大约多少"这种数字；
    * ③ 失败绝不写成"已删除"——它走既有的 failureNotice 那条路。
    */
+  const loadDissolvePreview = async (workspaceId: string) => {
+    setDissolvePreview({ workspaceId, phase: "loading" });
+    try {
+      const result = unwrapGatewayResult(await window.ailearn.workspace.dissolvePreview({
+        meta: createRequestMeta(epochRef.current),
+        workspaceId,
+      }));
+      setDissolvePreview({ workspaceId, phase: "ready", counts: result.counts });
+    } catch {
+      setDissolvePreview({ workspaceId, phase: "unavailable" });
+    }
+  };
+
   const dissolveWorkspace = async (workspace: WorkspaceSummaryV1) => {
     if (profileBusy || dissolveConfirmText !== workspace.name) return;
     setProfileBusy(`dissolve-${workspace.workspaceId}`);
@@ -1556,7 +1594,9 @@ export function SettingsSurface() {
                           role="group"
                           aria-label={`解散 ${workspace.name} 的确认`}
                         >
-                          <p className="settings-group__note" id={dissolveNoteId}>{`这个空间会连同其中的笔记、卡片与排程一起消失。输入空间名「${workspace.name}」以确认。`}</p>
+                          <p className="settings-group__note" id={dissolveNoteId}>
+                            {dissolveSentence(dissolvePreview, workspace.workspaceId, workspace.name)}
+                          </p>
                           <div className="hud-field">
                             <input
                               aria-labelledby={dissolveNoteId}
@@ -1595,6 +1635,7 @@ export function SettingsSurface() {
                           onClick={() => {
                             setDissolvePending(workspace.workspaceId);
                             setDissolveConfirmText("");
+                            void loadDissolvePreview(workspace.workspaceId);
                           }}
                         >
                           解散空间
