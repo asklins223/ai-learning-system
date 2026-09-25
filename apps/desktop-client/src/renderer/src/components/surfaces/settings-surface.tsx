@@ -59,6 +59,7 @@ import {
   MAX_COMPANION_SCALE,
   MIN_COMPANION_SCALE,
   useRoomStore,
+  type Live2dStatus,
 } from "../../app/room-store";
 import { createRequestMeta, gatewayErrorMessage, unwrapGatewayResult } from "../../app/desktop-client";
 import { signOutCurrentAccount } from "../../app/account-signout";
@@ -72,8 +73,11 @@ import {
 } from "../DirectoryRail";
 import { useHomeV2 } from "../home-v2/HomeV2Experience";
 import { HudPage } from "../hud/HudPage";
+import type { PageReadableV1 } from "@ailearn/shared/companion-bridge-contracts";
 import { HudPicker, HudSegmented, HudSlider, HudSwitch } from "../hud/HudControls";
 import { useHudPage } from "../hud/use-hud-page";
+import { usePageReadableView } from "../hud/use-page-readable-view";
+import { HUD_PAGES } from "../hud/hud-pages";
 import { SurfaceDataState, readAuthenticatedSession } from "./surface-data";
 
 /**
@@ -154,6 +158,20 @@ function nativeReason(value: NativeCapabilityValue | undefined): string {
  * a three-way grant or a native availability, never a boolean, so the chip says
  * which of those it is instead of collapsing them into allowed / denied.
  */
+/** 那一枚芯片写的状态词（`null`＝屏上是一个破折号，还没有读数）。 */
+function capabilityChipLabel(
+  kind: "action" | "native" | "feature",
+  value: ActionCapabilityValue | NativeCapabilityValue | undefined,
+): string | null {
+  if (!value) return null;
+  // 本机能力为 unavailable 时，含义是「客户端没有这条链路」，而不是「权限被拒」。
+  return kind === "native"
+    ? (value === "available" ? "已接入" : "未接入")
+    : kind === "feature"
+      ? (value === "enabled" ? "已开启" : value === "conditional" ? "按条件" : value === "disabled" ? "已关闭" : "暂不可用")
+      : (value === "allowed" ? "已允许" : value === "conditional" ? "按条件" : "未允许");
+}
+
 function CapabilityChip({ value, kind = "action", reason }: {
   readonly value: ActionCapabilityValue | NativeCapabilityValue | undefined;
   readonly kind?: "action" | "native" | "feature";
@@ -162,13 +180,7 @@ function CapabilityChip({ value, kind = "action", reason }: {
 }) {
   if (!value) return <span className="tag" title={reason} aria-label={`状态未知：${reason ?? "尚未读取"}`}>—</span>;
   const on = value === "allowed" || value === "available" || value === "enabled";
-  const label = kind === "native"
-    // 本机能力为 unavailable 时，含义是「客户端没有这条链路」，而不是「权限被拒」。
-    ? (value === "available" ? "已接入" : "未接入")
-    : kind === "feature"
-      ? (value === "enabled" ? "已开启" : value === "conditional" ? "按条件" : value === "disabled" ? "已关闭" : "暂不可用")
-      : (value === "allowed" ? "已允许" : value === "conditional" ? "按条件" : "未允许");
-  return <span className={on ? "tag green" : "tag"} title={reason} aria-label={`${label}：${reason ?? ""}`}>{label}</span>;
+  return <span className={on ? "tag green" : "tag"} title={reason} aria-label={`${capabilityChipLabel(kind, value)}：${reason ?? ""}`}>{capabilityChipLabel(kind, value)}</span>;
 }
 
 function roleLabel(role: WorkspaceSummaryV1["role"] | undefined): string {
@@ -179,6 +191,60 @@ function roleLabel(role: WorkspaceSummaryV1["role"] | undefined): string {
 function spaceTypeLabel(type: WorkspaceSummaryV1["workspaceType"] | undefined): string {
   if (!type) return "—";
   return type === "personal" ? "个人空间" : "协作空间";
+}
+
+/** 空间名册那一行下面那行小字：角色 · 空间类型。屏上写一次，登记也读同一份。 */
+function spaceRoleTypeLine(role: WorkspaceSummaryV1["role"], type: WorkspaceSummaryV1["workspaceType"]): string {
+  return `${role === "owner" ? "Owner" : "Member"} · ${spaceTypeLabel(type)}`;
+}
+
+/** 「这个空间的边界」里数据边界那一格的读数。 */
+function dataBoundaryLine(capabilityFailure: string | null, read: ActionCapabilityValue | undefined): string {
+  if (capabilityFailure) return "状态未读取";
+  return read === "allowed" ? "伴星可读取" : "当前不外发";
+}
+
+/** 开关没有字面：登记用本仓库已经在用的这两个词，用例断言的是 DOM 的 `aria-checked`。 */
+function switchStateLine(checked: boolean): string {
+  return checked ? "已开启" : "未开启";
+}
+
+/** 邀请与名册里那一行的角色词：屏上出现三次（邀请行、成员行、回执），同一份。 */
+function inviteRoleLabel(role: "member" | "owner"): string {
+  return role === "owner" ? "所有者" : "成员";
+}
+
+/** 两块主题板各自写着的名字。 */
+function themeLabel(theme: "day" | "night"): string {
+  return theme === "day" ? "日间场景" : "夜间场景";
+}
+
+/** 滑杆右边那个读数。 */
+function percentLine(value: number): string {
+  return `${Math.round(value * 100)}%`;
+}
+
+/** 模型在本机的加载状态那一枚 tag 写的字。 */
+function live2dStatusLabel(status: Live2dStatus): string {
+  return status === "ready" ? "已加载" : status === "loading" ? "加载中" : "不可用";
+}
+
+/** 播放器那一行 `<b>` 的字：没有读数时屏上写的就是「还没有试听过」。 */
+function voicePlayerLine(player: { readonly name: string } | null): string {
+  return player ? `正在试听：${player.name}` : "还没有试听过";
+}
+
+/** 还没读回来的计数，屏上是一个破折号——登记也照屏上写，不拿 0 顶。 */
+function countOrDash(value: number | undefined): string {
+  return value === undefined ? "—" : String(value);
+}
+
+/** 分段控件此刻选中那一档在屏上写的那个词（取不到就是没露出，宁可不登记）。 */
+function segmentedValue<T extends string>(
+  options: ReadonlyArray<readonly [T, string]>,
+  value: T | undefined,
+): string | null {
+  return options.find(([optionValue]) => optionValue === value)?.[1] ?? null;
 }
 
 /** 导出回执里的体积，按人读得懂的单位显示。 */
@@ -205,6 +271,11 @@ const INVITE_EXPIRY_OPTIONS: ReadonlyArray<readonly [string, string]> = [
   ["none", "无限制"],
 ];
 
+const INVITE_ROLE_OPTIONS: ReadonlyArray<readonly ["member" | "owner", string]> = [
+  ["member", "成员"],
+  ["owner", "所有者"],
+];
+
 /**
  * 数据外发策略的四个开关：字段、标题、说明。以前它们是四段复制粘贴的 JSX，
  * 只有一处写错就会让开关写进另一个字段，而那种错误在类型上是看不出来的。
@@ -214,6 +285,22 @@ const DATA_POLICY_FIELDS: ReadonlyArray<readonly [keyof AiDataPolicyV1, string, 
   ["sendImageContent", "允许发送图片内容", "只影响图片类素材；关闭后图片留在本机。"],
   ["piiDetection", "外发前做个人信息检测", "在内容离开本机前先标记可能的个人信息。"],
   ["auditLogging", "记录 AI 审计日志", "每次外发都留下可追溯的记录，供你回看。"],
+];
+
+/**
+ * 「伴星授权」那四行：能力键、行标题、说明、图标。这四行是伴星最常被问到的一组
+ * （"你能看到我的笔记吗"），所以屏上写一次、登记读同一份，不许有两套标题。
+ */
+const COMPANION_GRANTS: ReadonlyArray<{
+  readonly key: "companion.read" | "companion.sendMessage" | "companion.decideProposal" | "settings.update";
+  readonly title: string;
+  readonly detail: string;
+  readonly mark: React.ReactNode;
+}> = [
+  { key: "companion.read", title: "伴星读取工作区内容", detail: "决定伴星能看到哪些来源、笔记与目标。", mark: <BookOpen size={15} /> },
+  { key: "companion.sendMessage", title: "向伴星发送消息", detail: "消息内容可能离开这台电脑，交给服务器处理。", mark: <MessageCircle size={15} /> },
+  { key: "companion.decideProposal", title: "确认伴星的提议", detail: "提议写入笔记或目标前始终需要你确认。", mark: <ClipboardCheck size={15} /> },
+  { key: "settings.update", title: "代你改空间设置", detail: "空间级的设置只有所有者能改；上面那份同意与策略始终归你自己。", mark: <KeyRound size={15} /> },
 ];
 
 /**
@@ -250,6 +337,22 @@ const TTS_ENGINE_OPTIONS: ReadonlyArray<readonly [TtsEngineV1, string]> = [
 /** 切引擎时一起落定的音色：edge 只有一条，千问取目录第一条。 */
 const ttsDefaultVoiceFor = (engine: TtsEngineV1): string =>
   engine === "qwen" ? QWEN_TTS_VOICE_OPTIONS[0].voice : EDGE_TTS_VOICE_OPTIONS[0].voice;
+
+/**
+ * 某一档引擎对应的那份音色名单；**没读到引擎偏好时屏上根本没有名单**。
+ * 两套引擎的音色名不通用，混在一张列表里会让人以为「龙安灵希」和「晓晓」是可以互换了再听的同一批。
+ */
+function voicesForEngine(engine: TtsEngineV1 | undefined): typeof QWEN_TTS_VOICE_OPTIONS {
+  return engine === "qwen" ? QWEN_TTS_VOICE_OPTIONS : engine === "edge" ? EDGE_TTS_VOICE_OPTIONS : [];
+}
+
+/** 那一行右边写着「在用」的那枚 tag。 */
+const VOICE_IN_USE_TAG = "在用";
+
+/** 跟着账号走的读数：还没读回来时屏上是哪一个词（读到过却拿不到＝未读到）。 */
+function pendingReadLine(read: boolean): string {
+  return read ? "未读到" : "读取中…";
+}
 
 const ANSWER_MODE_OPTIONS: ReadonlyArray<readonly [CompanionAnswerModePreferenceV1["preference"], string]> = [  ["any", "跟随安排"],
   ["voice", "语音"],
@@ -323,11 +426,36 @@ function SettingRow({
   );
 }
 
+/**
+ * 一个分区自己报给伴星读的那份事实（39d W2-7）。字段含义在这一页里**全页统一**，
+ * 每个分区不许另起一套：
+ *  - `statusLine`＝这一屏此刻写着的那句状态（内联状态优先；没有状态就是页脚那句说明）；
+ *  - `items`＝此刻列在屏上的那些行，`label` 是行标题原话、`state` 是**那一行自己**的
+ *    状态字（一枚 tag 或角色词）；折叠块（`<details>`）与页签外的行不算露出；
+ *  - `metrics`＝屏上单独的计数／读数格；
+ *  - `filters`＝这一屏的选中项（分段控件选中的那档、开关此刻的通断）；
+ *  - `notice`＝内联状态那句解释（为什么读不到、为什么是空的）。
+ */
+type SettingsReadable = {
+  readonly statusLine?: string;
+  readonly notice?: string;
+  readonly metrics?: readonly { readonly label: string; readonly value: string }[];
+  readonly filters?: readonly { readonly label: string; readonly value: string }[];
+  readonly items?: readonly { readonly label: string; readonly state?: string }[];
+};
+
 type SettingsPanel = {
   readonly title: string;
   readonly body: React.ReactNode;
   readonly footerNote?: string;
+  readonly readable: SettingsReadable;
 };
+
+/** 外壳级（不分分区）的三句话：JSX 与登记引用同一份。 */
+const SETTINGS_LOADING = { message: "正在读取设置", detail: "这一页只显示服务器确认过的账户、空间与能力。" } as const;
+const SETTINGS_UNAVAILABLE = "设置暂时不可用";
+/** 每个分区都在目录里有一格；她要先知道读者站在哪一格。 */
+const SECTION_FILTER_LABEL = "当前分区";
 
 function SettingsInlineState({
   title,
@@ -1507,9 +1635,7 @@ export function SettingsSurface() {
               <b>数据边界</b>
               <span className="write-line">
                 <Compass className="write-line__icon" size={12} aria-hidden="true" />
-                {capabilityFailure
-                  ? "状态未读取"
-                  : companion?.["companion.read"] === "allowed" ? "伴星可读取" : "当前不外发"}
+                {dataBoundaryLine(capabilityFailure, companion?.["companion.read"])}
               </span>
             </div>
           </section>
@@ -1537,7 +1663,7 @@ export function SettingsSurface() {
                       <span className="settings-ledger__seal" aria-hidden="true">{workspace.name.slice(0, 1)}</span>
                       <span>
                         <b>{workspace.name}</b>
-                        <small>{`${workspace.role === "owner" ? "Owner" : "Member"} · ${spaceTypeLabel(workspace.workspaceType)}`}</small>
+                        <small>{spaceRoleTypeLine(workspace.role, workspace.workspaceType)}</small>
                       </span>
                       {busy
                         ? <span className="tag">切换中…</span>
@@ -1851,6 +1977,22 @@ export function SettingsSurface() {
       </div>
     ),
     footerNote: "空间数据彼此隔离；显示名与头像跨空间通用。",
+    readable: {
+      ...(workspaceListFailure
+        ? { statusLine: "空间列表暂时不可用", notice: workspaceListFailure }
+        : workspaces.length === 0
+          ? { statusLine: "没有可切换的空间", notice: "当前会话未返回其他学习空间。" }
+          : {}),
+      metrics: [{ label: "数据边界", value: dataBoundaryLine(capabilityFailure, companion?.["companion.read"]) }],
+      filters: [
+        { label: "当前空间", value: currentWorkspace?.name ?? "未选择学习空间" },
+        { label: "你的身份", value: roleLabel(currentRole) },
+      ],
+      items: workspaces.slice(0, 12).map((workspace) => ({
+        label: workspace.name,
+        state: spaceRoleTypeLine(workspace.role, workspace.workspaceType),
+      })),
+    },
   });
 
 
@@ -1920,7 +2062,7 @@ export function SettingsSurface() {
                   <HudSegmented
                     label="邀请角色"
                     value={inviteRole}
-                    options={[["member", "成员"], ["owner", "所有者"]] as const}
+                    options={INVITE_ROLE_OPTIONS}
                     compact
                     onChange={(next) => setInviteRole(next)}
                   />
@@ -1947,7 +2089,7 @@ export function SettingsSurface() {
                 <div className="settings-invite-receipt" role="status">
                   <span>
                     <b>邀请码（只显示这一次）</b>
-                    <small>{`${createdInvite.tokenHint} · ${createdInvite.role === "owner" ? "所有者" : "成员"}${createdInvite.expiresAt ? ` · ${dayLabel(createdInvite.expiresAt)} 前有效` : " · 长期有效"}`}</small>
+                    <small>{`${createdInvite.tokenHint} · ${inviteRoleLabel(createdInvite.role)}${createdInvite.expiresAt ? ` · ${dayLabel(createdInvite.expiresAt)} 前有效` : " · 长期有效"}`}</small>
                   </span>
                   <code>{createdInvite.token}</code>
                   <button type="button" className="button primary" onClick={() => void copyInviteToken(createdInvite.token)}>
@@ -1972,7 +2114,7 @@ export function SettingsSurface() {
                 ) : invites?.items.map((invite) => (
                   <SettingRow
                     key={invite.id}
-                    title={`${invite.tokenHint} · ${invite.role === "owner" ? "所有者" : "成员"}`}
+                    title={`${invite.tokenHint} · ${inviteRoleLabel(invite.role)}`}
                     detail={`创建 ${dayLabel(invite.createdAt)} · ${invite.expiresAt ? `过期 ${dayLabel(invite.expiresAt)}` : "长期有效"}${invite.consumedByEmail ? ` · 使用人 ${invite.consumedByEmail}` : ""}`}
                   >
                     <span className={invite.status === "active" ? "tag green" : "tag"}>{inviteStatusLabel(invite.status)}</span>
@@ -2007,7 +2149,7 @@ export function SettingsSurface() {
                   <SettingRow
                     key={member.userId}
                     title={member.email}
-                    detail={`${member.role === "owner" ? "所有者" : "成员"} · ${dayLabel(member.joinedAt)} 加入`}
+                    detail={`${inviteRoleLabel(member.role)} · ${dayLabel(member.joinedAt)} 加入`}
                   >
                     {member.role !== "owner" ? (removeCandidate === member.userId ? (
                       <>
@@ -2058,6 +2200,44 @@ export function SettingsSurface() {
       : isOwner
         ? "邀请与成员管理只对当前空间生效；AI 同意与数据政策在你的账号上，在「AI 数据同意」里改。"
         : "加入协作空间需要空间所有者发出的邀请码；AI 同意与数据政策始终由你本人签署，不看这里的角色。",
+    /**
+     * 这一屏的清单有两种"没露出"：Owner／Member 看到的是完全不同的两组行（成员侧只有
+     * 一句边界说明），而两份列表各自还在自己的读取分支里（读不到／还没读完／空的）。
+     * 四条分支都照屏上那一刻那一行的标题登记，**读到的那一格换成"正在读取…"时，
+     * 登记里也不许留着上一批邀请**。
+     */
+    readable: isOwner && spaceIsPersonal
+      ? { items: [{ label: "个人空间不邀请别人", state: "个人空间" }] }
+      : isOwner
+        ? {
+            filters: [
+              { label: "邀请角色", value: segmentedValue(INVITE_ROLE_OPTIONS, inviteRole) ?? "" },
+              { label: "邀请有效期", value: segmentedValue(INVITE_EXPIRY_OPTIONS, inviteExpiry) ?? "" },
+            ],
+            items: [
+              ...(invitesFailure
+                ? [{ label: "邀请记录暂时不可用" }]
+                : !invitesRead
+                  ? [{ label: "正在读取邀请记录" }]
+                  : (invites?.items.length ?? 0) === 0
+                    ? [{ label: "暂无邀请记录" }]
+                    : (invites?.items ?? []).map((invite) => ({
+                      label: `${invite.tokenHint} · ${inviteRoleLabel(invite.role)}`,
+                      state: inviteStatusLabel(invite.status),
+                    }))),
+              ...(membersFailure
+                ? [{ label: "成员名册暂时不可用" }]
+                : !membersRead
+                  ? [{ label: "正在读取成员" }]
+                  : (members?.items.length ?? 0) === 0
+                    ? [{ label: "暂无成员" }]
+                    : (members?.items ?? []).map((member) => ({
+                      label: member.email,
+                      state: inviteRoleLabel(member.role),
+                    }))),
+            ].slice(0, 12),
+          }
+        : { items: [{ label: "只有空间所有者能发邀请、看名册、移成员", state: "只读" }] },
   });
 
 
@@ -2086,7 +2266,7 @@ export function SettingsSurface() {
                   />
                   <span className="settings-theme__label">
                     {value === "day" ? <Sun size={14} aria-hidden="true" /> : <Moon size={14} aria-hidden="true" />}
-                    {value === "day" ? "日间场景" : "夜间场景"}
+                    {themeLabel(value)}
                   </span>
                   {active ? (
                     <span className="settings-theme__check" aria-hidden="true"><Check size={13} strokeWidth={3} /></span>
@@ -2108,7 +2288,7 @@ export function SettingsSurface() {
                 <HudSegmented label="动效等级" value={motionMode} options={MOTION_OPTIONS} onChange={setMotionMode} compact />
               </SettingRow>
               <SettingRow title="系统减少动效" detail="由操作系统决定，优先级高于上面的等级。">
-                <span className={reducedMotion ? "tag green" : "tag"}>{reducedMotion ? "已开启" : "未开启"}</span>
+                <span className={reducedMotion ? "tag green" : "tag"}>{switchStateLine(reducedMotion)}</span>
               </SettingRow>
             </div>
           </section>
@@ -2146,6 +2326,18 @@ export function SettingsSurface() {
       </>
     ),
     footerNote: "主题、动效、目录行为与入场引导都只影响这台设备，不写入工作区。",
+    /**
+     * 这一屏没有服务端读数：五项全是这台设备此刻的偏好，所以登记的是**每一行选中的那一档**，
+     * 而不是"这里可以选什么"。「重播」那行只有一个按钮、没有取值，不登记（她答不出任何事实）。
+     */
+    readable: {
+      filters: [{ label: "环境主题", value: themeLabel(theme) }],
+      items: [
+        { label: "动效等级", state: segmentedValue(MOTION_OPTIONS, motionMode) ?? undefined },
+        { label: "系统减少动效", state: switchStateLine(reducedMotion) },
+        { label: "目录行为", state: segmentedValue(DIRECTORY_OPTIONS, directoryMode) ?? undefined },
+      ],
+    },
   });
 
   /**
@@ -2160,7 +2352,7 @@ export function SettingsSurface() {
       selected={inUse}
     >
       <span className="settings-voice__actions">
-        {inUse ? <span className="tag green">在用</span> : null}
+        {inUse ? <span className="tag green">{VOICE_IN_USE_TAG}</span> : null}
         {inUse ? null : (
           <button
             type="button"
@@ -2204,7 +2396,7 @@ export function SettingsSurface() {
               max={MAX_COMPANION_SCALE}
               step={0.05}
               onChange={setCompanionScale}
-              format={(value) => `${Math.round(value * 100)}%`}
+              format={percentLine}
               hint={`${Math.round(MIN_COMPANION_SCALE * 100)}% – ${Math.round(MAX_COMPANION_SCALE * 100)}%`}
             />
           </div>
@@ -2250,7 +2442,7 @@ export function SettingsSurface() {
                   onChange={(next) => void changeAnswerMode(next)}
                 />
               ) : (
-                <span className="tag">{answerModeRead ? "未读到" : "读取中…"}</span>
+                <span className="tag">{pendingReadLine(answerModeRead)}</span>
               )}
             </SettingRow>
           </div>
@@ -2275,14 +2467,14 @@ export function SettingsSurface() {
                   onChange={(next) => void changeVoice(next, ttsDefaultVoiceFor(next))}
                 />
               ) : (
-                <span className="tag">{voicePreferenceRead ? "未读到" : "读取中…"}</span>
+                <span className="tag">{pendingReadLine(voicePreferenceRead)}</span>
               )}
             </SettingRow>
 
             {/* 只画当前引擎下的那一份名单：两套引擎的音色名不通用，混在一张列表里
                 会让人以为"龙安灵希"和"晓晓"是可以互换了再听的同一批。 */}
             {voicePreference
-              ? (voicePreference.engine === "qwen" ? QWEN_TTS_VOICE_OPTIONS : EDGE_TTS_VOICE_OPTIONS).map(
+              ? voicesForEngine(voicePreference.engine).map(
                   (option) => voiceRow(option, voicePreference.voice === option.voice),
                 )
               : null}
@@ -2302,7 +2494,7 @@ export function SettingsSurface() {
               {voicePlayer?.playing ? <Pause size={14} aria-hidden="true" /> : <Play size={14} aria-hidden="true" />}
             </button>
             <span className="settings-voice__reading">
-              <b>{voicePlayer ? `正在试听：${voicePlayer.name}` : "还没有试听过"}</b>
+              <b>{voicePlayerLine(voicePlayer)}</b>
               <small>{voicePlayer ? TTS_PREVIEW_TEXT : "点某一行的「试听」，她会用同一句话念给你听：" + TTS_PREVIEW_TEXT}</small>
             </span>
             <span className="settings-voice__track" aria-hidden="true">
@@ -2334,7 +2526,7 @@ export function SettingsSurface() {
                     ? "模型正在加载，完成后这里会变为已加载。"
                     : "模型、许可或 WebGL 不可用；伴星形象会隐藏并就地给出说明。"}
               >
-                {live2dStatus === "ready" ? "已加载" : live2dStatus === "loading" ? "加载中" : "不可用"}
+                {live2dStatusLabel(live2dStatus)}
               </span>
             </SettingRow>
             <SettingRow mark={<MessageCircle size={15} />} title="实时对话" detail="完整对话是否写入由系统开关决定。">
@@ -2362,6 +2554,49 @@ export function SettingsSurface() {
       </>
     ),
     footerNote: "伴星的能力全部来自服务器返回的开关状态；形态选择只保存在这台设备上。",
+    /**
+     * 这一屏的状态字有优先级：**挡住整块的错误 > 正在发生的试听 > 页脚那句说明**。
+     * 清单里那一行「默认作答方式」在没读回来之前屏上写的就是「读取中…」，登记照它写，
+     * 不写成一个看起来像读到了的值。音色那几行只登记**当前引擎**那份名单（换引擎时
+     * 屏上整批换掉，两批名字混报是她最容易跟着说错的东西）。
+     */
+    readable: {
+      ...(capabilityFailure || voicePreviewError || voicePlayer
+        ? {
+            statusLine: capabilityFailure
+              ? "伴星能力状态暂时不可用"
+              : voicePreviewError
+                ? "这一段没试听成"
+                : voicePlayerLine(voicePlayer),
+            notice: capabilityFailure ?? voicePreviewError ?? undefined,
+          }
+        : {}),
+      metrics: [{ label: "伴星大小", value: percentLine(companionScale) }],
+      filters: [{ label: "伴星与环境音", value: switchStateLine(!masterMuted) }],
+      items: [
+        {
+          label: "默认作答方式",
+          state: answerMode
+            ? segmentedValue(ANSWER_MODE_OPTIONS, answerMode.preference) ?? undefined
+            : pendingReadLine(answerModeRead),
+        },
+        {
+          label: "用哪套声音合成",
+          state: voicePreference
+            ? segmentedValue(TTS_ENGINE_OPTIONS, voicePreference.engine) ?? undefined
+            : pendingReadLine(voicePreferenceRead),
+        },
+        ...voicesForEngine(voicePreference?.engine).map((option) => ({
+          label: option.name,
+          ...(voicePreference?.voice === option.voice ? { state: VOICE_IN_USE_TAG } : {}),
+        })),
+        { label: "模型状态", state: live2dStatusLabel(live2dStatus) },
+        { label: "实时对话", state: capabilityChipLabel("action", companion?.["companion.sendMessage"]) ?? undefined },
+        { label: "对话能力", state: capabilityChipLabel("feature", features?.companion_dialogue_v1.state) ?? undefined },
+        { label: "本机语音识别", state: capabilityChipLabel("native", capabilities?.nativeCapabilities.asr) ?? undefined },
+        { label: "语音对话", state: capabilityChipLabel("feature", features?.companion_voice_dialogue_v1.state) ?? undefined },
+      ].slice(0, 12),
+    },
   });
 
   /** Consent drawn as the path the data takes, then the policy your own account signs. */
@@ -2369,18 +2604,26 @@ export function SettingsSurface() {
     const policy = aiSettings?.dataPolicy ?? null;
     const signed = Boolean(aiSettings?.consentVersion);
     const busy = aiSaving !== null;
+    const consentStateLine = signed ? "已签署" : aiSettings?.requiresConsent ? "需要签署" : "未签署";
+    /** 「外发记录」那一格此刻的翻页读数（只有真读到过、且列表非空才成立）。 */
+    const auditPagingLine = auditPage && auditPage.items.length > 0
+      ? `第 ${auditOffset + 1}–${auditOffset + auditPage.items.length} 条 · 共 ${auditPage.total} 条`
+      : null;
     if (aiSettingsFailure) {
+      const unreadableDetail = `${aiSettingsFailure} 这一页不用默认值猜一个状态给你看，重试即可。`;
       return {
         title: "AI 数据同意",
         body: (
           <SettingsInlineState
             title="没能读到你的 AI 数据设置"
-            detail={`${aiSettingsFailure} 这一页不用默认值猜一个状态给你看，重试即可。`}
+            detail={unreadableDetail}
             tone="error"
             onRetry={() => void load()}
           />
         ),
         footerNote: "政策状态读取成功后，才会开放签署与修改入口。",
+        /** 整张卡被这张报错纸换掉了：一行策略、一行授权都不许登记。 */
+        readable: { statusLine: "没能读到你的 AI 数据设置", notice: unreadableDetail },
       };
     }
     return {
@@ -2436,8 +2679,8 @@ export function SettingsSurface() {
                       : "现在只用本机模型跑，不需要签署。"}
               >
                 {signed
-                  ? <span className="tag green">已签署</span>
-                  : <span className="tag">{aiSettings?.requiresConsent ? "需要签署" : "未签署"}</span>}
+                  ? <span className="tag green">{consentStateLine}</span>
+                  : <span className="tag">{consentStateLine}</span>}
               </SettingRow>
               {!signed ? (
                 <SettingRow
@@ -2501,7 +2744,7 @@ export function SettingsSurface() {
                     </SettingRow>
                   ))}
                   <SettingRow
-                    title={`第 ${auditOffset + 1}–${auditOffset + auditPage.items.length} 条 · 共 ${auditPage.total} 条`}
+                    title={auditPagingLine}
                     detail="更早的记录按时间往前列。"
                   >
                     {auditOffset + auditPage.items.length < auditPage.total ? (
@@ -2524,18 +2767,11 @@ export function SettingsSurface() {
             <h3 className="settings-group__title">伴星授权</h3>
             <p className="settings-group__note">由上面的同意与数据策略推导，这一组不能单独修改。</p>
             <div className="settings-rows settings-rows--split">
-              <SettingRow mark={<BookOpen size={15} />} title="伴星读取工作区内容" detail="决定伴星能看到哪些来源、笔记与目标。">
-                <CapabilityChip value={companion?.["companion.read"]} reason={actionReason(companion?.["companion.read"])} />
-              </SettingRow>
-              <SettingRow mark={<MessageCircle size={15} />} title="向伴星发送消息" detail="消息内容可能离开这台电脑，交给服务器处理。">
-                <CapabilityChip value={companion?.["companion.sendMessage"]} reason={actionReason(companion?.["companion.sendMessage"])} />
-              </SettingRow>
-              <SettingRow mark={<ClipboardCheck size={15} />} title="确认伴星的提议" detail="提议写入笔记或目标前始终需要你确认。">
-                <CapabilityChip value={companion?.["companion.decideProposal"]} reason={actionReason(companion?.["companion.decideProposal"])} />
-              </SettingRow>
-              <SettingRow mark={<KeyRound size={15} />} title="代你改空间设置" detail="空间级的设置只有所有者能改；上面那份同意与策略始终归你自己。">
-                <CapabilityChip value={companion?.["settings.update"]} reason={actionReason(companion?.["settings.update"])} />
-              </SettingRow>
+              {COMPANION_GRANTS.map((grant) => (
+                <SettingRow key={grant.key} mark={grant.mark} title={grant.title} detail={grant.detail}>
+                  <CapabilityChip value={companion?.[grant.key]} reason={actionReason(companion?.[grant.key])} />
+                </SettingRow>
+              ))}
             </div>
           </section>
 
@@ -2546,6 +2782,34 @@ export function SettingsSurface() {
         </>
       ),
       footerNote: "改动会立刻存到服务器，这一页的能力状态同时刷新。",
+      /**
+       * 「数据路径」那幅示意图**不登记**：三个格子的字面是图形语言（节点名＋一枚芯片），
+       * 拼成一句话就是造句子；同一批事实由「伴星授权」那四行逐行说，四行都在屏上。
+       * 外发清单也不逐条登记——一屏列得下二十条，载荷只有十二格，登记的是屏上那行翻页读数。
+       */
+      readable: {
+        ...(capabilityFailure ? { statusLine: "授权能力状态暂时不可用", notice: capabilityFailure } : {}),
+        items: [
+          { label: "AI 使用同意", state: consentStateLine },
+          ...(!signed ? [{ label: "签署同意" }] : []),
+          ...DATA_POLICY_FIELDS.map(([field, title]) => ({
+            label: title,
+            state: switchStateLine(policy?.[field] ?? false),
+          })),
+          { label: "外发记录" },
+          ...(auditFailure
+            ? [{ label: "外发记录暂时读不到" }]
+            : auditPagingLine
+              ? [{ label: auditPagingLine }]
+              : isOwner && auditPage && auditPage.items.length === 0
+                ? [{ label: "还没有外发记录" }]
+                : []),
+          ...COMPANION_GRANTS.map((grant) => ({
+            label: grant.title,
+            state: capabilityChipLabel("action", companion?.[grant.key]) ?? undefined,
+          })),
+        ].slice(0, 12),
+      },
     };
   };
 
@@ -2558,15 +2822,15 @@ export function SettingsSurface() {
           <h3 className="settings-group__title">空间内容</h3>
           <div className="settings-stats">
             <div className="settings-stat" data-loading={inventoryLoading ? "true" : undefined}>
-              <b>{inventory ? inventory.sources : "—"}</b>
+              <b>{countOrDash(inventory?.sources)}</b>
               <span>来源</span>
             </div>
             <div className="settings-stat" data-loading={inventoryLoading ? "true" : undefined}>
-              <b>{inventory ? inventory.notes : "—"}</b>
+              <b>{countOrDash(inventory?.notes)}</b>
               <span>笔记</span>
             </div>
             <div className="settings-stat" data-loading={inventoryLoading ? "true" : undefined}>
-              <b>{inventory ? inventory.objectives : "—"}</b>
+              <b>{countOrDash(inventory?.objectives)}</b>
               <span>学习卡</span>
             </div>
           </div>
@@ -2722,6 +2986,30 @@ export function SettingsSurface() {
       </>
     ),
     footerNote: "内容数量来自各库列表接口；本机状态来自主进程注册的真实通道。",
+    /**
+     * 状态字取**屏上从上到下第一张报错纸**（内容数量那一块在上方，先挡住它说的事）。
+     * 「高级维护」整块收在 `<details>` 里，默认没露出 ⇒ 漂移与重建的读数一条都不登记；
+     * 三颗导出／导入按钮那几行没有取值，也不登记。
+     */
+    readable: {
+      ...(inventoryFailure
+        ? { statusLine: "空间内容数量暂时不可用", notice: inventoryFailure }
+        : capabilityFailure
+          ? { statusLine: "本机能力状态暂时不可用", notice: capabilityFailure }
+          : {}),
+      metrics: [
+        { label: "来源", value: countOrDash(inventory?.sources) },
+        { label: "笔记", value: countOrDash(inventory?.notes) },
+        { label: "学习卡", value: countOrDash(inventory?.objectives) },
+      ],
+      items: [
+        { label: "当前工作区", state: currentWorkspace?.name ?? "未选择" },
+        { label: "可见空间", state: `${workspaces.length} 个` },
+        { label: "剪贴板链接识别", state: capabilityChipLabel("native", capabilities?.nativeCapabilities.clipboard) ?? undefined },
+        { label: "系统通知", state: capabilityChipLabel("native", capabilities?.nativeCapabilities.notifications) ?? undefined },
+        { label: "自动更新", state: capabilityChipLabel("native", capabilities?.nativeCapabilities.updates) ?? undefined },
+      ],
+    },
   });
 
   const PANELS: Record<SettingsSectionId, () => SettingsPanel> = {
@@ -2741,6 +3029,47 @@ export function SettingsSurface() {
   }, [section]);
 
   const panel = PANELS[section]();
+
+  /**
+   * 这一屏登记给伴星读的是什么（39d W2-7 落下的最后一页）。
+   *
+   * 六个分区各自只报自己那份事实（见 `SettingsReadable`），公用的三样在这里拼一次：
+   * 页身份、页名、当前在哪一格目录上。**整页还在读取、或整页读不到的时候，分区那一份
+   * 一个字都不发**——那一刻屏上是外壳那两张纸，分区里的数字属于上一轮。
+   * 状态字取不到分区自己的那句时，用的是页脚那句说明：它本来就写在屏上。
+   */
+  const sectionLabel = SECTIONS.find(([id]) => id === section)?.[1] ?? section;
+  const settingsReadableView: PageReadableV1 = loading || failure
+    ? {
+        pageId: "settings",
+        title: HUD_PAGES.settings.title,
+        statusLine: loading ? SETTINGS_LOADING.message : SETTINGS_UNAVAILABLE,
+        ...(failure ? { notice: failure.slice(0, 200) } : {}),
+        filters: [{ label: SECTION_FILTER_LABEL, value: sectionLabel }],
+      }
+    : {
+        pageId: "settings",
+        title: HUD_PAGES.settings.title,
+        statusLine: (panel.readable.statusLine ?? panel.footerNote ?? panel.title).slice(0, 160),
+        ...(panel.readable.notice ? { notice: panel.readable.notice.slice(0, 200) } : {}),
+        ...(panel.readable.metrics?.length
+          ? { metrics: panel.readable.metrics.slice(0, 6).map((entry) => ({ label: entry.label.slice(0, 40), value: entry.value.slice(0, 40) })) }
+          : {}),
+        filters: [
+          { label: SECTION_FILTER_LABEL, value: sectionLabel },
+          ...(panel.readable.filters ?? []).map((entry) => ({ label: entry.label.slice(0, 40), value: entry.value.slice(0, 40) })),
+        ].slice(0, 6),
+        ...(panel.readable.items?.length
+          ? {
+              items: panel.readable.items.slice(0, 12).map((row, index) => ({
+                ordinal: index + 1,
+                label: row.label.slice(0, 120),
+                ...(row.state ? { state: row.state.slice(0, 40) } : {}),
+              })),
+            }
+          : {}),
+      };
+  usePageReadableView(settingsReadableView);
 
   // The fade says “there is more below”, not merely “this body can scroll”. It
   // therefore follows scroll position and disappears at the end of the paper.
@@ -2781,11 +3110,11 @@ export function SettingsSurface() {
 
         {loading ? (
           <article className="settings-card settings-card--state">
-            <SurfaceDataState kind="loading" message="正在读取设置" detail="这一页只显示服务器确认过的账户、空间与能力。" />
+            <SurfaceDataState kind="loading" message={SETTINGS_LOADING.message} detail={SETTINGS_LOADING.detail} />
           </article>
         ) : failure ? (
           <article className="settings-card settings-card--state">
-            <SurfaceDataState kind="error" message="设置暂时不可用" detail={failure} onRetry={() => void load()} />
+            <SurfaceDataState kind="error" message={SETTINGS_UNAVAILABLE} detail={failure} onRetry={() => void load()} />
           </article>
         ) : (
           <article className="settings-card preference" aria-labelledby="settings-panel-title">

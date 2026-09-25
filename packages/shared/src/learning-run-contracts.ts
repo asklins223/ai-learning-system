@@ -17,6 +17,29 @@
 
 import { z } from "zod";
 
+/**
+ * 「帮助会怎么改变这一题的资格」这条策略的**唯一一处**写法（39d W2-4 #14）。
+ *
+ * 之前它是散在各处复述的一句话：桥里 `已揭示提示（本题降级为练习）`、桌面端
+ * `这一题的参考答案你看过，所以这次只算练习…`。合同里那个 `exposureLowersTrust`
+ * 是写死的字面量，所以"后果"只有**一个真相**，就不该有第二份措辞。
+ */
+export const LEARNING_RUN_ASSISTANCE_POLICY_V1 = {
+  hintLevelsMax: 3,
+  exposureLowersTrust: true,
+} as const;
+
+/**
+ * 由策略生成那句后果；策略不改（今天不可能，它是 `true` 字面量）这句话就不会变。
+ * 返回 null 表示"这一题看了也不影响资格"——那时候**不该说这句**，而不是换个说法说。
+ */
+export function learningRunAssistanceConsequenceV1(): string | null {
+  return LEARNING_RUN_ASSISTANCE_POLICY_V1.exposureLowersTrust
+    ? "看过提示或参考答案之后，这一题只算练习，不算正式验证的结果"
+    : null;
+}
+
+
 // ─── §7.3 通用 Interaction 类型 ──────────────────────────────────────────
 
 export const RelationEdgeKind = {
@@ -762,7 +785,7 @@ export type CreateLearningRunRequestV1 = {
 export type LearningRunActionV1 =
   | { kind: "pause" }
   | { kind: "resume" }
-  | { kind: "switch_variant"; alternativeId: string }
+  | { kind: "switch_variant"; alternativeId: string; reason: string }
   | { kind: "request_hint"; level: 1 | 2 | 3 }
   | { kind: "skip_run" }
   | { kind: "activate_followup"; followupId: string }
@@ -1113,7 +1136,7 @@ export const learningTaskPublicSchema = baseVersionSchema
     availableAlternatives: z.array(taskAlternativeDescriptorSchema),
     assistancePolicy: z
       .object({
-        hintLevels: z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3)]),
+        hintLevels: z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(LEARNING_RUN_ASSISTANCE_POLICY_V1.hintLevelsMax)]),
         exposureLowersTrust: z.literal(true),
       })
       .strict(),
@@ -1602,7 +1625,7 @@ export const createLearningRunRequestSchema = baseVersionSchema
 export const learningRunActionSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("pause") }),
   z.strictObject({ kind: z.literal("resume") }),
-  z.strictObject({ kind: z.literal("switch_variant"), alternativeId: z.string().min(1) }),
+  z.strictObject({ kind: z.literal("switch_variant"), alternativeId: z.string().min(1), reason: z.string().min(1).max(200) }),
   z.strictObject({
     kind: z.literal("request_hint"),
     level: z.union([z.literal(1), z.literal(2), z.literal(3)]),

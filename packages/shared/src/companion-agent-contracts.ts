@@ -149,9 +149,32 @@ export type CompanionAgentBudgetSnapshotV1 = z.infer<
   typeof companionAgentBudgetSnapshotV1Schema
 >;
 
+/**
+ * 这几条命令的**执行处在提案确认那条路**（`decideCompanionProposal` 按 payload 的 `kind`
+ * 分支），worker 侧没有直执行器。
+ *
+ * 为什么这件事要写在权限判据里：full 档的语义是"这类动作不必每次问她"，
+ * 于是 `canUseCompanionAgentTool` 会把 `requiresConfirmation` 判成 false，worker 就直接
+ * 去找执行器——找不到，那一轮以一句「这一步我这边还做不了」报错。**结果是权限越高越差**：
+ * guided 档这六条出提案卡（能用），full 档反而失败。这条清单就是用来堵那个反差的：
+ * 命令由提案路径执行的工具，**任何一档都走提案**，worker 不去直执行它们。
+ *
+ * 这**不等于** full 档已经"免确认"——提案卡仍然要点一下。真正的服务端自动确认还欠着
+ * （它是 39d #16 剩下的那半步，要 API 侧在自己进程里确认同一份提案，不能拿"我权限高"
+ * 去绕开唯一的那个执行处）。
+ */
+export const COMPANION_PROPOSAL_EXECUTED_TOOLS: ReadonlySet<string> = new Set([
+  "companion_start_learning",
+  "companion_resume_learning",
+  "companion_pause_learning",
+  "companion_switch_task_variant",
+  "companion_request_hint",
+  "companion_defer_review",
+]);
+
 export function canUseCompanionAgentTool(
   permission: CompanionAgentPermissionLevel,
-  definition: Pick<CompanionAgentToolDefinitionV1, "riskClass" | "requiresConfirmation">,
+  definition: Pick<CompanionAgentToolDefinitionV1, "riskClass" | "requiresConfirmation" | "name">,
 ): { allowed: boolean; requiresConfirmation: boolean; reason?: string } {
   if (definition.riskClass === "read") {
     return { allowed: true, requiresConfirmation: false };
@@ -160,6 +183,11 @@ export function canUseCompanionAgentTool(
     return { allowed: false, requiresConfirmation: false, reason: "agent permission is read_only" };
   }
   if (definition.riskClass === "irreversible") {
+    return { allowed: true, requiresConfirmation: true };
+  }
+  // 命令本体只在提案那条路执行的工具：直执行会撞「没有执行器」，所以 full 档也出提案。
+  // 放在 guided 分支**之前**——否则 guided 只是恰好也返回 true，看不出这条规则在管什么。
+  if (COMPANION_PROPOSAL_EXECUTED_TOOLS.has(definition.name)) {
     return { allowed: true, requiresConfirmation: true };
   }
   if (permission === "guided") {

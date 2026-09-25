@@ -126,6 +126,11 @@ export const companionTurnRuns = pgTable(
     providerId: text("provider_id"),
     modelId: text("model_id"),
     promptVersion: text("prompt_version"),
+    /**
+     * 这一发产出于哪一版泄露闸（39d #28；NULL＝那一版还没记，属"未归因"而不是"空版本"）。
+     * 值由 `companionLeakGateVersionV1()` 派生，不手写。
+     */
+    leakGateVersion: text("leak_gate_version"),
     promptHash: char("prompt_hash", { length: 64 }),
     pageContext: jsonb("page_context"),
     contextGrantId: uuid("context_grant_id"),
@@ -343,6 +348,8 @@ export const companionActionProposals = pgTable(
     // 迁移 0096 新增：confirm 请求体 sha256（幂等去重）。
     requestBodySha256: char("request_body_sha256", { length: 64 }),
     origin: text("origin").$type<"menu" | "agent_tool">(),
+    // 39d W2-4 #16：full 档自动确认的标记（迁移 0278，默认 false＝照旧等人点）。
+    autoConfirm: boolean("auto_confirm").notNull().default(false),
     agentRunId: uuid("agent_run_id"),
     agentToolCallId: text("agent_tool_call_id"),
     agentToolVersion: text("agent_tool_version"),

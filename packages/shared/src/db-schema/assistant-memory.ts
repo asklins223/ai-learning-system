@@ -79,7 +79,6 @@ export const assistantMemoryItems = pgTable(
     pinned: boolean("pinned").notNull().default(false),
     archivedAt: timestamp("archived_at", { withTimezone: true }),
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
-    expiresAt: timestamp("expires_at", { withTimezone: true }),
     conflictGroup: uuid("conflict_group"),
     embeddingProfileVersion: text("embedding_profile_version"),
     sourceType: text("source_type").notNull().default("model_inferred"),

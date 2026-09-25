@@ -4,6 +4,7 @@ import type {
   DesktopSourceDuplicateV1,
   DesktopSourceListItem,
 } from "@ailearn/shared/desktop-surface-contracts";
+import type { PageReadableV1 } from "@ailearn/shared/companion-bridge-contracts";
 import { useRoomStore } from "../../app/room-store";
 import { SpaceSharingNotice } from "../space-sharing-notice";
 import { createRequestMeta, gatewayErrorMessage, unwrapGatewayResult } from "../../app/desktop-client";
@@ -17,6 +18,8 @@ import {
 } from "../../app/source-intake";
 import { HudPage } from "../hud/HudPage";
 import { useHudPage } from "../hud/use-hud-page";
+import { usePageReadableView } from "../hud/use-page-readable-view";
+import { HUD_PAGES } from "../hud/hud-pages";
 import {
   SurfaceDataState,
   formatRelative,
@@ -271,6 +274,77 @@ export function SourceLibrarySurface() {
   const receipt = captured ? captureReceipt(captured.title, capturedRow?.status ?? null) : null;
   const truncatedForTab = status === "archived" ? archivedTruncated : truncated;
 
+  /**
+   * 屏上那几句状态字各算一次，界面与登记给伴星的可读视图共用同一份表达式
+   * （分成两处写就是两份文案，早晚会分叉）。
+   */
+  const pendingHead = pending > 0 ? `${pending} 份待处理` : "没有待处理的材料";
+  const totalLine = `共 ${total} 份来源`;
+  const missingOriginLine = missingOrigin > 0 ? `另有 ${missingOrigin} 份网页来源缺少地址` : null;
+  const stalledLine = "还有材料在解析，页面已停止自动刷新。";
+  const truncatedFootLine
+    = `索引只覆盖了前 ${pool.length} 份，共有 ${status === "archived" ? data?.archivedTotal ?? 0 : total} 份；页签计数只统计已读取的部分。`;
+  const tabLabel = (value: (typeof SOURCE_STATUS_TABS)[number]) =>
+    (value === "all" ? `全部 ${total}` : `${formatSourceStatus(value)} ${tabCount(counts, value, total)}`);
+  const activeTabLabel = tabLabel(status);
+  /**
+   * 伴星读到的那一行"该说什么"：读不到 ＞ 停止刷新 ＞ 空索引 ＞ 刚采集的回执 ＞
+   * 只读了一部分。每一句都是屏上原话，她自己不重新推断。
+   */
+  const noticeLine
+    = failure
+      ? `来源库暂时不可用：${failure.slice(0, 60)}`
+      : stalled
+        ? stalledLine
+        : visible.length === 0
+          ? `${emptyIndex.message}：${emptyIndex.detail.slice(0, 60)}`
+          : receipt
+            ? receipt.slice(0, 200)
+            : truncatedForTab
+              ? truncatedFootLine.slice(0, 200)
+              : null;
+
+  /**
+   * 这一屏登记给伴星读的可读视图（39d W2-7）。
+   *
+   * 标题＝`HudPage` 渲染的那个 `<h1>`（直接取注册表，不另抄一份字面量）；状态行＝采集栏
+   * 的 `<b>` 那一句；页签与搜索词进 `filters`（她要知道"这一屏是筛过的"，不然会把
+   * "搜索结果 3 份"说成"库里有 3 份"）；条目＝索引里真正渲染的那批 `source-sheet`，
+   * 序号按屏幕顺序；`state` 取那一行的状态标签字面。数字全部复用页面已经在算的派生值。
+   *
+   * **只在屏上写着的时候才登记**：`pending > 0` 那一支屏上是"明细"而不是"共 N 份来源"，
+   * 两个数各占各的档，别让她读到一句屏幕上没有的话。
+   */
+  const readableView = useMemo<PageReadableV1 | null>(() => {
+    if (!data && !failure) return null;
+    return {
+      pageId: "sources",
+      title: HUD_PAGES.sources.title,
+      statusLine: pendingHead,
+      metrics: [
+        ...(pending > 0
+          ? [{ label: "待处理明细", value: pendingDetail.slice(0, 40) }]
+          : [{ label: "共", value: totalLine }]),
+        ...(missingOriginLine ? [{ label: "缺地址", value: missingOriginLine.slice(0, 40) }] : []),
+      ],
+      filters: [
+        { label: "页签", value: activeTabLabel.slice(0, 40) },
+        ...(query.trim() ? [{ label: "搜索", value: query.trim().slice(0, 40) }] : []),
+      ],
+      ...(visible.length > 0
+        ? {
+            items: visible.slice(0, 12).map((source, index) => ({
+              ordinal: index + 1,
+              label: source.title.slice(0, 120),
+              state: formatSourceStatus(source.status).slice(0, 40),
+            })),
+          }
+        : {}),
+      ...(noticeLine ? { notice: noticeLine } : {}),
+    };
+  }, [activeTabLabel, data, failure, missingOriginLine, noticeLine, pending, pendingDetail, query, totalLine, visible]);
+  usePageReadableView(readableView);
+
   return (
     <HudPage page="sources">
       <div className="source-desk">
@@ -289,9 +363,9 @@ export function SourceLibrarySurface() {
           receipt={receipt}
           summary={
             <p role="status">
-              <b>{pending > 0 ? `${pending} 份待处理` : "没有待处理的材料"}</b>
+              <b>{pendingHead}</b>
               <br />
-              {pending > 0 ? pendingDetail : `共 ${total} 份来源`}
+              {pending > 0 ? pendingDetail : totalLine}
               {missingOrigin > 0 ? (
                 <>
                   <br />
@@ -341,7 +415,7 @@ export function SourceLibrarySurface() {
                     ? `还没解析完的：正在解析 ${counts.processing} 份 + 排队等待 ${counts.draft} 份`
                     : undefined}
               >
-                {value === "all" ? `全部 ${total}` : `${formatSourceStatus(value)} ${tabCount(counts, value, total)}`}
+                {tabLabel(value)}
               </button>
             ))}
           </div>
@@ -359,7 +433,7 @@ export function SourceLibrarySurface() {
             ) : null}
             {!loading && !failure && stalled ? (
               <p className="surface-notice" role="status">
-                还有材料在解析，页面已停止自动刷新。
+                {stalledLine}
                 <button type="button" className="text-action" onClick={retryRead}>重新读取</button>
               </p>
             ) : null}
@@ -414,7 +488,7 @@ export function SourceLibrarySurface() {
             )) : null}
             {!loading && !failure && truncatedForTab ? (
               <p className="index-foot">
-                索引只覆盖了前 {pool.length} 份，共有 {status === "archived" ? data?.archivedTotal ?? 0 : total} 份；页签计数只统计已读取的部分。
+                {truncatedFootLine}
                 <button type="button" className="text-action" onClick={loadMore}>加载更多</button>
               </p>
             ) : null}

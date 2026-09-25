@@ -48,6 +48,11 @@ process.env.DATABASE_URL_API ??= CONN;
 const sql = postgres(CONN, { max: 2 });
 
 // Critic 未配置：确保 fail closed 分支可复现。
+// 删之前先存一份原值——文件末尾那条"真模型一批"要把它们拿回来（与
+// proactive-generator.test.ts 里 savedUrl 同一手法）。不存的话那条永远只能
+// 在 40 ms 内拿到 "provider not configured"，也就是**看起来跑了、其实一分钱没花**。
+const SAVED_ASSESSMENT_CRITIC_URL = process.env.ASSESSMENT_CRITIC_URL;
+const SAVED_ASSESSMENT_CRITIC_KEY = process.env.ASSESSMENT_CRITIC_KEY;
 delete process.env.ASSESSMENT_CRITIC_URL;
 delete process.env.ASSESSMENT_CRITIC_KEY;
 process.env.LEARNING_RUN_ENABLED ??= "true";
@@ -2605,3 +2610,105 @@ test("PREPARE-DISCLOSURE-RACE：同目标并发 PREPARE 都成功（disclosure �
     await seeded.cleanup();
   }
 });
+
+// ─── 每波末尾那一次真跑（W0 纪律：确定性路径全绿之后，才花这一笔钱）──────
+//
+// 默认**不跑**：`REAL_MODEL_BATCH=1` 才跑。CI 永远不设这个变量——把付费调用
+// 接进 CI 会让每次 push 都花钱，也会让 CI 变成"偶尔红在计费失败上"的地方。
+// 本地怎么跑（.env 里 ASSESSMENT_CRITIC_URL ＋ DASHSCOPE_API_KEY 已在）：
+//   set -a; . ../../.env; set +a
+//   # 根 .env 的四条 DATABASE_URL* 主机段是**容器内的 `postgres`**，宿主机上连不通
+//   # 且**不报错、只是静默挂住**；而它们四条都是超户 ailearn（BYPASSRLS），
+//   # 拿它当"受限角色"会让依赖 RLS 的断言反过来红。所以从宿主机跑必须改两条：
+//   lf() { echo "${1/@postgres:/@localhost:}"; }
+//   export DATABASE_URL="$(lf "$DATABASE_URL")" DATABASE_URL_MIGRATOR="$(lf "$DATABASE_URL")" \
+//     DATABASE_URL_WORKER="$(lf "$DATABASE_URL")" \
+//     DATABASE_URL_API="postgres://ailearn_api:ailearn_dev@localhost:5432/ailearn"
+//   REAL_MODEL_BATCH=1 node --import tsx --test --test-concurrency=1 \
+//     --test-name-pattern="真模型一批" src/integration-tests/learning-runs-postgres.integration.ts
+// 2026-09-25 第一次照这段跑通：`submit→首个有效反馈 1413 ms；assessment=completed
+// trust=facet_eligible`（读数记在 39d §19 那行"每波末尾那一次真跑"）。
+//
+// 它与上面那条 "P2 fail closed：text 提交 + Critic 未配置" 是**同一条路径的两个世界**：
+// 那里断言的是"没有 Critic 就不猜"，这里断言的是"有 Critic 就真判分"。
+// 这也是 W3-5 迁内核之后**第一次真跑评估那一步**（前面所有读数都是替身）。
+const REAL_BATCH = process.env.REAL_MODEL_BATCH === "1";
+test("真模型一批：text 提交 → 真 Critic 判分 → 结算，并打印提交→首个有效反馈的实测耗时",
+  { skip: !REAL_BATCH && "REAL_MODEL_BATCH≠1：付费调用只在每波末尾手动跑一次" },
+  async () => {
+    // 必须带冻结证据：Critic 的输入构造在"rubric 没有冻结证据"时直接 fail closed
+    // （第一次跑就踩到这里，29 ms 就 not_assessable，钱一分没花）。
+    // 拿回真配置（本文件顶部为可复现性把它们删掉了）。只有这一条用例走真网络，
+    // 而它默认不跑，所以恢复环境变量不会污染同进程里的其它用例。
+    if (!SAVED_ASSESSMENT_CRITIC_URL) {
+      throw new Error("真模型一批需要 .env 里的 ASSESSMENT_CRITIC_URL（否则这条用例等于没跑）");
+    }
+    process.env.ASSESSMENT_CRITIC_URL = SAVED_ASSESSMENT_CRITIC_URL;
+    if (SAVED_ASSESSMENT_CRITIC_KEY) process.env.ASSESSMENT_CRITIC_KEY = SAVED_ASSESSMENT_CRITIC_KEY;
+    const seeded = await seed({ frozenEvidence: true });
+    try {
+      const scope = { workspaceId: seeded.workspaceId, userId: seeded.userId };
+      const run = await withWorkspaceTransaction(scope, async (tx) =>
+        createLearningRunForTest(tx, {
+          ...scope,
+          request: {
+            originV2: { kind: "card", cardId: seeded.cardId, objectiveId: seeded.keyPointId },
+            goal: "stabilize",
+            idempotencyKey: `real-batch-${randomUUID()}`,
+          },
+        }),
+      );
+      const variant = run.activeTask!.activeVariant;
+      const submittedAt = Date.now();
+      await withWorkspaceTransaction(scope, async (tx) =>
+        submitArtifact(tx, {
+          ...scope,
+          runId: run.runId,
+          taskId: run.activeTaskId!,
+          request: {
+            version: 1,
+            variantId: variant.variantId,
+            variantRevision: variant.revision,
+            runRevision: run.revision,
+            taskRevision: run.activeTask!.revision,
+            inputSchemaHash: variant.inputSchemaHash,
+            payload: { kind: "text", text: "因为遗忘在刚学完时最快，间隔复习能在遗忘发生前巩固，所以复习的时间安排直接决定长期记忆。" },
+            idempotencyKey: `real-batch-submit-${randomUUID()}`,
+          },
+        }),
+      );
+
+      let assessment: { status: unknown; trust_class: unknown; rubric_results: unknown } | null = null;
+      for (let round = 0; round < 6; round += 1) {
+        const tick = await runLearningRunProcessingTick(`real-batch-${randomUUID()}`, 10);
+        assert.equal(tick.failed, 0, "真模型这一跑把命令打成了 failed（不是慢，是断）");
+        const rows = await scoped(scope, (tx) => tx`
+          SELECT status, trust_class, rubric_results FROM learning_assessments
+          WHERE run_id = ${run.runId} ORDER BY created_at DESC LIMIT 1
+        `);
+        const row = rows[0];
+        // postgres-js 把裸 SQL 的行标成无名 Row 类型，只能逐字段取出来再收窄。
+        assessment = row
+          ? { status: row.status, trust_class: row.trust_class, rubric_results: row.rubric_results }
+          : null;
+        if (assessment && ["completed", "not_assessable", "failed"].includes(String(assessment.status))) break;
+      }
+      const elapsedMs = Date.now() - submittedAt;
+      process.stderr.write(
+        `[real-model-batch] submit→首个有效反馈 ${elapsedMs} ms；`
+        + `assessment=${assessment ? String(assessment.status) : "无"} trust=${assessment?.trust_class ?? "无"} `
+        + `rubric条数=${Array.isArray(assessment?.rubric_results) ? (assessment!.rubric_results as unknown[]).length : "非数组"}\n`,
+      );
+      assert.ok(assessment, "真 Critic 配好了却没有评估行：入队或 tick 没跑起来");
+      // W0-8 的分位数是 n=91 的读数，这里 n=1，只能当"这一笔落在哪个桶"的读数用，
+      // 不能拿来宣布门槛通过。真正要防的是劣化到分钟级（那说明迁内核把重试串成了等待）。
+      assert.equal(String(assessment!.status), "completed",
+        `真模型应当判得出来，实际=${String(assessment!.status)}（not_assessable 说明 provider 或解析坏了）`);
+      assert.ok(elapsedMs < 30_000, `单次评估等了 ${elapsedMs} ms，已超过内核 2 次尝试的合理预算`);
+      assert.ok(Array.isArray(assessment!.rubric_results) && (assessment!.rubric_results as unknown[]).length >= 1,
+        "strict 合同：每条冻结 rubric 目标要恰好一条判定");
+      assert.ok(assessment!.trust_class, "判分要落出 trustClass");
+    } finally {
+      await seeded.cleanup();
+    }
+  });

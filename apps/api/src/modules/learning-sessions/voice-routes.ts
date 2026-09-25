@@ -43,6 +43,7 @@ import {
   companionVoiceSpeakSegmentRequestV2Schema,
 } from "@ailearn/shared/companion-voice-contracts";
 import { siliconFlowTranscribe, SiliconFlowAsrError } from "./voice-providers/siliconflow-asr.ts";
+import { currentApiWorkspaceTransaction } from "../../db/client.ts";
 import {
   COMPANION_RATE_LIMITS,
   companionRateLimit,
@@ -635,6 +636,8 @@ export async function voiceRoutes(app: FastifyInstance) {
           asrProvider: {
             transcribe: (buf, fn) => siliconFlowTranscribe(buf, fn, {
               apiKey: process.env.SILICONFLOW_API_KEY,
+              scope: { workspaceId: req.session.workspaceId, userId: req.session.userId },
+              currentActiveTransaction: currentApiWorkspaceTransaction,
             }),
           },
           asrProviderName: "siliconflow",
@@ -662,6 +665,8 @@ export async function voiceRoutes(app: FastifyInstance) {
     try {
       const result = await siliconFlowTranscribe(new Uint8Array(audio), filename, {
         apiKey: process.env.SILICONFLOW_API_KEY,
+        scope: { workspaceId: req.session.workspaceId, userId: req.session.userId },
+        currentActiveTransaction: currentApiWorkspaceTransaction,
       });
       return reply.send({
         text: result.text,

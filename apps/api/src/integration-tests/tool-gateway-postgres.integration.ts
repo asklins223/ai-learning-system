@@ -4,8 +4,11 @@
  * 覆盖：通用工具 proposal 创建（校验/幂等）→ confirm 后确定性执行——
  * pause_learning_run（真实暂停）、request_hint_level（exposure-first）、
  * switch_task_variant（变体切换）、defer_review（展示层，不动 official
- * dueAt）、plan_understanding_route（真实 RoutePlan）、focus_graph_node
- * （导航 succeeded + route）、记忆候选 confirm/reject（revision CAS）。
+ * dueAt）、focus_graph_node（导航 succeeded + route）、记忆候选
+ * confirm/reject（revision CAS）。
+ *
+ * `plan_understanding_route` 的用例已随该 kind 整条删除（2026-09-24，39d W2-1）：
+ * 它唯一的 producer 是伴星工具 `companion_plan_route`，30 天真实流量 0 次调用。
  */
 
 import { after, test } from "node:test";
@@ -13,6 +16,7 @@ import assert from "node:assert/strict";
 import postgres from "postgres";
 import { randomUUID } from "node:crypto";
 import { createLearningRunForTest, seedV2Fixture } from "./helpers/v2-card-fixture.ts";
+import { learningRunAssistanceConsequenceV1 } from "@ailearn/shared/learning-run-contracts";
 
 // 测试专用 checkpoint 密钥（同 AUTH_SURFACE_MANIFEST_SECRET 模式；模块级
 // 读取发生在 import 时，必须在动态 import 前设置）。
@@ -33,7 +37,6 @@ const { createCompanionToolProposal, decideCompanionProposal } = await import(
 const { closeDatabase } = await import("../db/client.ts");
 const { withWorkspaceTransaction } = await import("../db/client.ts");
 const { upsertMemory } = await import("../modules/companion-conversation/memory-service.ts");
-const { issueCheckpointToken } = await import("../modules/understanding/projection-checkpoint.ts");
 const { CompanionConversationError } = await import("../modules/companion-conversation/turn-service.ts");
 
 interface Seeded {
@@ -313,6 +316,15 @@ test("§18.1：request_hint_level——confirm 后 exposure-first（事件 + rev
     });
     assert.equal(rows.ev.length, 1);
     assert.ok(rows.revision > 1);
+    // 那句后果由合同生成（39d W2-4 #14）。钉在这里而不是"看着像就行"：
+    // 桥里曾经自己抄了一份「本题降级为练习」，那样改策略时这句话不会跟着变。
+    const summary = await sql.begin(async (tx) => {
+      await tx`SELECT set_config('app.workspace_id', ${seeded.workspaceId}, true)`;
+      await tx`SELECT set_config('app.user_id', ${seeded.userId}, true)`;
+      return tx`SELECT result_safe_summary FROM companion_action_proposals WHERE id = ${proposal.proposalId}`;
+    });
+    assert.equal(summary[0].result_safe_summary,
+      `已揭示提示（${learningRunAssistanceConsequenceV1()}）`);
   } finally {
     await seeded.cleanup();
   }
@@ -330,6 +342,7 @@ test("§18.1：switch_task_variant——confirm 切换 active variant", async ()
       runId: run.runId,
       taskId: run.activeTask!.taskId,
       alternativeId,
+      reason: "这一题我想用说的",
     });
     const result = await confirmProposal(seeded, proposal.proposalId, proposal.payloadSha256);
     assert.equal(result.status, "succeeded");
@@ -339,6 +352,18 @@ test("§18.1：switch_task_variant——confirm 切换 active variant", async ()
       return tx`SELECT status FROM learning_task_variants WHERE id = ${alternativeId}`;
     });
     assert.equal(rows[0].status, "active");
+    // 换题这一次修订要带得上理由：理由走的是**同一份提案载荷**，不是事后补的说法。
+    // 少了这一格断言，"工具收了 reason 但没人落库"会一路静默。
+    const events = await sql.begin(async (tx) => {
+      await tx`SELECT set_config('app.workspace_id', ${seeded.workspaceId}, true)`;
+      await tx`SELECT set_config('app.user_id', ${seeded.userId}, true)`;
+      return tx`SELECT payload ->> 'reason' AS reason, payload ->> 'activeVariantId' AS active_variant
+        FROM learning_run_events
+        WHERE run_id = ${run.runId} AND event_type = 'learning_task.variant_switched'`;
+    });
+    assert.equal(events.length, 1, "换题事件应当只有一条");
+    assert.equal(events[0].reason, "这一题我想用说的");
+    assert.equal(events[0].active_variant, alternativeId);
   } finally {
     await seeded.cleanup();
   }
@@ -397,44 +422,10 @@ test("§18.1：defer_review——只写展示层，不改 official dueAt；gener
   }
 });
 
-test("§18.1：plan_understanding_route——confirm 创建真实 RoutePlan + resultRef=routePlanId", async () => {
-  const seeded = await seedBase();
-  try {
-    const token = issueCheckpointToken({
-      workspaceId: seeded.workspaceId,
-      userId: seeded.userId,
-      lastCanonicalEventId: null,
-      lastPracticeEventId: null,
-      capturedAt: new Date().toISOString(),
-    });
-    assert.ok(token, "checkpoint token 已签发（测试密钥在位）");
-    const proposal = await createToolProposal(seeded, {
-      kind: "plan_understanding_route",
-      request: {
-        version: 1,
-        intent: "repair_gap",
-        targetKeyPointId: seeded.keyPointId,
-        maxSteps: 3,
-        lens: "current_target",
-        filter: { showArchived: false },
-        expectedCheckpointToken: token!,
-        idempotencyKey: `tg-plan-${randomUUID()}`,
-      },
-    });
-    const result = await confirmProposal(seeded, proposal.proposalId, proposal.payloadSha256);
-    assert.equal(result.status, "succeeded");
-    assert.ok(result.resultRef, "resultRef = routePlanId");
-    const rows = await sql.begin(async (tx) => {
-      await tx`SELECT set_config('app.workspace_id', ${seeded.workspaceId}, true)`;
-      await tx`SELECT set_config('app.user_id', ${seeded.userId}, true)`;
-      return tx`SELECT intent FROM understanding_route_plans WHERE id = ${result.resultRef}`;
-    });
-    assert.equal(rows.length, 1);
-    assert.equal(rows[0].intent, "repair_gap");
-  } finally {
-    await seeded.cleanup();
-  }
-});
+// `plan_understanding_route` 的集测已删除（2026-09-24，39d W2-1）：该 kind 与其唯一
+// producer（伴星工具 `companion_plan_route`）整条删除，理由见
+// `companion-conversation-contracts.ts` 里那段注释。**`POST /understanding/routes/plan`
+// 那条 HTTP 路径与 `route-plan-service` 未动**，它的覆盖在 understanding 模块自己的测试里。
 
 test("§18.1：记忆候选 confirm/reject——revision CAS；stale revision 409", async () => {
   const seeded = await seedBase();

@@ -171,3 +171,45 @@ export class WorkspaceTransactionScope<
     return normalized;
   }
 }
+
+/** 外部调用撞在活动事务上时抛的那一个。**它是编程错误，不是业务失败**，
+ *  所以不许被当成可重试错误咽下去。 */
+export class ExternalCallInsideTransactionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ExternalCallInsideTransactionError";
+  }
+}
+
+/**
+ * 公共外部调用边界（模型／转写／图片解析／对象存储）之前的那道检查（D5 §5.2 第二件）。
+ *
+ * 判据是「**当前异步作用域有没有活动事务**」，不是「这段代码文本里有没有出现
+ * `transaction`」——后者是 39c §10 点名要避免的假绿：`AsyncLocalStorage` 会跟着
+ * await 链走，所以**隐式嵌套**（外层开了事务、内层某个函数顺手发了一次 HTTP）
+ * 一样会被这道检查拒掉。
+ *
+ * 两个进程各自接自己那一份 scope：`apps/api/src/db/client.ts` 的 `apiScope`、
+ * `workers/ai-worker/src/db.ts` 的 `workerScope`——把 `scope.current()` 的结果
+ * 传进来就行，本函数不需要知道是哪一侧。
+ *
+ * 抛错之外还要**记一条开发错误**（含调用点）：被拒的调用常常来自"今天还没修完"的
+ * 已知违例，只有日志能把"谁在锁上等模型"这件事列出来，而不是每次靠人撞见。
+ */
+export function assertOutsideWorkspaceTransaction(options: {
+  /** 哪一类外部调用，例如 "AI 模型调用"／"转写"／"对象存储读取"。 */
+  readonly boundary: string;
+  /** 调用点标签（模块＋用途），会进开发错误与异常消息。 */
+  readonly caller: string;
+  /** `scope.current()` 的原样结果；`undefined` 表示这一层没有活动事务。 */
+  readonly activeTransaction: unknown;
+  readonly reportDevelopmentError?: (message: string) => void;
+}): void {
+  if (options.activeTransaction === undefined) return;
+  const message =
+    `外部调用被拒：${options.boundary}（调用点 ${options.caller}）落在活动事务里。`
+    + "持业务行锁等外部响应会把并发读写一起钉住（39c §5.2 / D5 §5.1 实测两处）。"
+    + "正确形状是三段：短事务准备 → 事务外执行 → 短事务核对并保存。";
+  options.reportDevelopmentError?.(message);
+  throw new ExternalCallInsideTransactionError(message);
+}

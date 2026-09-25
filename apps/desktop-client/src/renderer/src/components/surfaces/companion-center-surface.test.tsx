@@ -799,3 +799,75 @@ describe("the companion center reads the shell's companion session", () => {
     expect(screen.getByRole("tab", { name: "动态" }).getAttribute("aria-controls")).toBe(second?.id);
   });
 });
+
+describe("the star map expansion publishes what that screen shows (39d W2-7)", () => {
+  function published() {
+    return useRoomStore.getState().pageReadableView?.view ?? null;
+  }
+
+  it("展开星图后：计数那格、三个筛选、节点索引行都取自屏幕", async () => {
+    installApi();
+    renderCompanionCenter();
+    fireEvent.click(await screen.findByRole("tab", { name: "记忆" }));
+    await screen.findByRole("button", { name: "查看关联星图" });
+    // 列表那一格先登记过；展开之后必须由星图接手（不是残留）。
+    expect(published()?.filters?.some((entry) => entry.label === "记忆类型")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "查看关联星图" }));
+    await screen.findByRole("listbox", { name: "星图等价节点索引" });
+    // 星图是**读回来的**：等到那一格真的换成星图那份再断言（等"目标态"，不是等"发过东西"）。
+    await waitFor(() => expect(published()?.filters?.some((entry) => entry.label === "记忆类型")).toBe(true));
+
+    const view = published()!;
+    expect(view.pageId).toBe("companion");
+    expect(view.statusLine).toBe(document.querySelector(".companion-map-view__head > span")?.textContent);
+    expect(view.statusLine).toMatch(/个节点 · \d+ 条关系/);
+    const triggers = [...document.querySelectorAll(".companion-map-view__filters .companion-select > button span")]
+      .map((node) => node.textContent);
+    expect(triggers.length).toBeGreaterThanOrEqual(3);
+    expect(view.filters?.map((entry) => entry.value).slice(0, 3)).toEqual(triggers.slice(0, 3));
+
+    const buttons = [...document.querySelectorAll(".companion-map-index button")];
+    const items = view.items ?? [];
+    expect(items).toHaveLength(buttons.length);
+    items.forEach((entry, index) => {
+      const cell = buttons[index].textContent ?? "";
+      expect(cell).toBe(entry.label);
+    });
+    const groupTitles = [...document.querySelectorAll(".companion-map-index h4")].map((node) => node.querySelector("span")?.previousSibling?.textContent?.trim());
+    expect(new Set(view.items!.map((entry) => entry.state))).toEqual(
+      new Set(groupTitles.filter((title): title is string => Boolean(title))),
+    );
+  });
+
+  it("收着星图回到列表：登记换回列表那份，两套筛选不并存", async () => {
+    installApi();
+    renderCompanionCenter();
+    fireEvent.click(await screen.findByRole("tab", { name: "记忆" }));
+    fireEvent.click(await screen.findByRole("button", { name: "查看关联星图" }));
+    await screen.findByRole("listbox", { name: "星图等价节点索引" });
+    await waitFor(() => expect(published()?.filters?.some((entry) => entry.label === "记忆类型")).toBe(true));
+    fireEvent.click(screen.getByRole("button", { name: /返回记忆列表/ }));
+    await waitFor(() => expect(published()?.filters?.some((entry) => entry.label === "记忆类型")).toBe(false));
+    expect(published()?.filters?.some((entry) => entry.label === "类型")).toBe(true);
+  });
+
+  /**
+   * 星图读回来是失败的：屏幕上换成「记忆星图当前不可用」这张纸，登记必须跟着换。
+   * 这一条钉的是过去真发生过的形状——报错纸已经盖掉清单，那一格却还在报节点计数。
+   * 三个下拉在屏幕上还在，但读不到时只给状态与原因（与伴星中心其余分区同一口径）。
+   */
+  it("星图读不到：那一格跟着换成不可用，不留下节点计数", async () => {
+    const api = installApi();
+    api.companion.memory.starMap.mockRejectedValue(new Error("star map unavailable"));
+    renderCompanionCenter();
+    fireEvent.click(await screen.findByRole("tab", { name: "记忆" }));
+    fireEvent.click(screen.getByRole("button", { name: "查看关联星图" }));
+    await screen.findByText("记忆星图当前不可用");
+
+    const view = published()!;
+    expect(view.statusLine).toBe(document.querySelector(".companion-map-view__canvas .companion-section-state strong")?.textContent);
+    expect(view.notice).toContain("记忆星图当前不可用");
+    expect(view.items).toBeUndefined();
+    expect(view.filters).toBeUndefined();
+  });
+});

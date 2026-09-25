@@ -204,6 +204,7 @@ import {
 } from "@ailearn/shared/note-image-upload-contracts";
 import {
   assistantDeliveryV2Schema,
+  assistantContextRenewResultV2Schema,
   assistantContextSnapshotV2Schema,
   mainPageContextInputV2Schema,
   type AssistantContextSnapshotV2,
@@ -1944,12 +1945,13 @@ export class DesktopGateway {
     return parsed.data;
   }
 
-  async listObjectives(options: { lifecycle?: "active" | "archived" | "superseded"; cursor?: string; limit?: number } = {}, requestId?: string): Promise<ObjectiveListPageV3> {
+  async listObjectives(options: { lifecycle?: "active" | "archived" | "superseded"; cursor?: string; limit?: number; noteId?: string } = {}, requestId?: string): Promise<ObjectiveListPageV3> {
     await this.ensureConnected(requestId);
     const query = new URLSearchParams();
     if (options.lifecycle) query.set("lifecycle", options.lifecycle);
     if (options.cursor) query.set("cursor", options.cursor);
     if (options.limit !== undefined) query.set("limit", String(options.limit));
+    if (options.noteId) query.set("noteId", options.noteId);
     const suffix = query.toString();
     const result = await this.request(`/v2/learning-objectives${suffix ? `?${suffix}` : ""}`, { method: "GET" }, true, true, requestId);
     const parsed = objectiveListPageV3Schema.safeParse(result.body);
@@ -2343,10 +2345,14 @@ export class DesktopGateway {
       true,
       true,
     );
-    const parsed = assistantContextSnapshotV2Schema.safeParse(result.body);
+    const parsed = assistantContextRenewResultV2Schema.safeParse(result.body);
     if (!parsed.success) throw new DesktopGatewayFailure("unsupported_contract", "user_action");
     if (generation !== this.companionBridgeGeneration || !this.companionBridgeContext) return;
-    this.companionBridgeContext.snapshot = parsed.data;
+    this.companionBridgeContext.snapshot = {
+      ...this.companionBridgeContext.snapshot,
+      revision: parsed.data.revision,
+      expiresAt: parsed.data.expiresAt,
+    };
   }
 
   async setCompanionBridgeContext(
@@ -2384,7 +2390,14 @@ export class DesktopGateway {
     if (generation !== this.companionBridgeGeneration) return this.companionBridgeState(false);
     this.companionBridgeContext = { page, snapshot: parsed.data };
     this.companionBridgeRenewTimer = setInterval(() => {
-      void this.renewCompanionBridgeContext(generation).catch(() => this.clearCompanionBridgeLocalState());
+      void this.renewCompanionBridgeContext(generation).catch(() => {
+        const page = this.companionBridgeContext?.page;
+        this.clearCompanionBridgeLocalState();
+        // 续租失败不能只清本地状态：渲染层按内容去重发布，屏上没变就不会再推一次，
+        // 于是这一页对她永久消失（30 秒租约到期后没有生产者）。手里这份 page 就是
+        // 屏幕当前状态，重新 publish 一次才是自愈。
+        if (page) void this.setCompanionBridgeContext(page).catch(() => undefined);
+      });
     }, 10_000);
     return this.companionBridgeState(true, parsed.data);
   }

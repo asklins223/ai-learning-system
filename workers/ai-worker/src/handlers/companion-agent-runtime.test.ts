@@ -18,6 +18,8 @@ import {
   FINAL_ANSWER_HOLD_CHARS,
   boundedToolCallIdentity,
   actionSteerBudget,
+  companionStepRequiresTool,
+  companionStepToolShape,
   joinVisibleSegmentsDeduped,
   partitionPersonaPatch,
   planStepSteer,
@@ -30,6 +32,8 @@ import {
   currentPageToolResult,
 } from "./companion-agent-runtime.ts";
 import { NOTE_SEARCH_MAX_TERMS, noteSearchTerms } from "./companion-dialogue-content.ts";
+import { companionNeedsTool } from "./companion-tool-intent.ts";
+import { MockProvider } from "../lib/providers/mock.ts";
 import { CompanionStreamStoppedError } from "./companion-dialogue-stream.ts";
 import type { AIProvider } from "../lib/ai-provider.ts";
 
@@ -76,22 +80,34 @@ test("工具解析：guided 自动执行可逆低风险，其余写操作一律�
   assert.ok(getCompanionAgentTool("companion_list_reminders")?.riskClass === "read");
 });
 
-test("工具解析：full 权限 = 用户预授权，只有不可逆动作仍需确认", () => {
+test("工具解析：full 权限 = 用户预授权，但命令住在提案那条路的工具不因此失去执行处", () => {
   // 2026-09-19 对齐权限分级原设计：full 是用户的事前授权，consequential 不再
   // 逐步确认（自动跳转/自动设置）；irreversible 仍是安全底线。
+  //
+  // 2026-09-25 改了一条判据（#16 量的那面墙）：`companion_start_learning` 这类工具
+  // **worker 侧没有直执行器**，命令本体只在 API 的提案确认里执行。full 档原先把它判成
+  // "预授权 ⇒ 直执行"，于是走到 switch 的 default 抛「这一步我这边还做不了」——
+  // **guided 档出提案卡能用，full 档反而失败**，权限越高越差。现在 full 档对这些工具
+  // 同样出提案（免确认那一步仍欠，见 §19 那行的说明）。
   const start = getCompanionAgentTool("companion_start_learning");
   assert.ok(start);
   assert.equal(start.requiresConfirmation, true);
   assert.deepEqual(canUseCompanionAgentTool("full", start), {
     allowed: true,
-    requiresConfirmation: false,
+    requiresConfirmation: true,
   });
   // guided 档维持逐次确认（默认档必须保守）。
   assert.deepEqual(canUseCompanionAgentTool("guided", start), {
     allowed: true,
     requiresConfirmation: true,
   });
-  const irreversible = { riskClass: "irreversible" as const, requiresConfirmation: false };
+  // 控制端点：full 档**仍然**是预授权档——worker 能自己执行的可逆低风险工具不许被
+  // 顺手拖回确认档（否则这条改动就把 full 档整个抹平成 guided，而那不是要修的东西）。
+  const activeness = getCompanionAgentTool("companion_set_activeness");
+  assert.ok(activeness);
+  assert.equal(canUseCompanionAgentTool("full", activeness).requiresConfirmation, false,
+    "full 档的直执行能力被误伤：可逆低风险工具应当仍然免确认");
+  const irreversible = { name: "synthetic_irreversible", riskClass: "irreversible" as const, requiresConfirmation: false };
   assert.equal(canUseCompanionAgentTool("full", irreversible).requiresConfirmation, true);
 });
 
@@ -754,4 +770,132 @@ test("read_current_page：工具已注册、是读类、只读权限下也给她
     resolveAllCompanionAgentTools("read_only").some((tool) => tool.name === "companion_read_current_page"),
     "只读权限下也应该能读页面",
   );
+});
+
+// ── 39d W2-4：动作通道收口（P3-alt + `tools`/`tool_choice` 那对不变量） ─────
+
+test("P3-alt：分类器读不到（null）按「要工具」走，只有明确说了 false 才算不要", async () => {
+  // 三值里 null 不是"不需要"，是**没读到答复**（超时／异常／形状不对）。原判据
+  // `=== true` 把这两支合成一支，fail-open 的产物就是"我帮你找一下"落在屏上。
+  assert.equal(companionStepRequiresTool(null), true, "读不到东西时不许放行纯正文那一步");
+  assert.equal(companionStepRequiresTool(false), false, "明确说了不要工具，就别强制");
+  assert.equal(companionStepRequiresTool(true), true);
+
+  // 上面那句是判据，这一句是**"读不到真的会发生"**：provider 炸了的时候
+  // `companionNeedsTool` 回的就是 null（不是 false）。两头接起来才是 fail-closed。
+  const broken = {
+    chatCompletion: async () => {
+      throw new Error("provider down");
+    },
+  } as unknown as AIProvider;
+  const decision = await companionNeedsTool(broken, [{ role: "user", content: "帮我把那篇笔记打开" }], new AbortController().signal);
+  assert.equal(decision, null, "分类器的失败形状是 null（这条变了，上面那条判据就不成立了）");
+  assert.equal(companionStepRequiresTool(decision), true);
+});
+
+test("不变量：任何一步都不许同时出现 tools:[] 与 toolChoice:\"required\"", () => {
+  const offered = [{ name: "companion_read_context", description: "读上下文", parameters: {} }];
+  const step = (finalAnswerOnly: boolean, requiresTool: boolean, toolCallCount: number, tools = offered) =>
+    companionStepToolShape({ tools, finalAnswerOnly, requiresTool, toolCallCount });
+
+  // 该强制的那一格真的要强制（否则下面那条"从不违规"可以靠"从不 required"糊过去）。
+  assert.equal(step(false, true, 0).toolChoice, "required");
+  assert.equal(step(false, false, 0).toolChoice, "auto", "没让她做事就别逼模型编一个工具调用");
+  assert.equal(step(false, true, 1).toolChoice, "auto", "已经调过工具了，第二步该让她说话");
+  assert.equal(step(true, true, 0).tools.length, 0, "终答步必须收走工具面");
+  assert.equal(step(true, true, 0).toolChoice, "auto", "收走工具面的那一步绝不能再要求必须调工具");
+
+  // 穷举四个入参的全部组合——"不许同时出现"是一句对**所有**输入成立的话，
+  // 只挑几个例子等于没验（P3-alt 之后 requiresTool 为真的轮次变多，这一对
+  // 一旦在某个没想到的组合里成立，就是每轮 400）。
+  let pairs = 0;
+  for (const hasTools of [true, false]) {
+    for (const finalAnswerOnly of [true, false]) {
+      for (const requiresTool of [true, false]) {
+        for (const toolCallCount of [0, 1]) {
+          const shape = step(finalAnswerOnly, requiresTool, toolCallCount, hasTools ? offered : []);
+          pairs += 1;
+          assert.ok(
+            !(shape.tools.length === 0 && shape.toolChoice === "required"),
+            `tools:[] 配 required（hasTools=${hasTools} final=${finalAnswerOnly} requires=${requiresTool} calls=${toolCallCount}）`,
+          );
+        }
+      }
+    }
+  }
+  assert.equal(pairs, 16);
+});
+
+test("mock 守 provider 合同：required 必回工具调用，工具面为空则当场炸", async () => {
+  // 39b §9.5：mock 以前**完全不理** `toolChoice`，所以"required 生效了"这类断言全是空转。
+  const mock = new MockProvider();
+  const base = {
+    role: "companion_agent" as const,
+    systemPrompt: "s",
+    messages: [{ role: "user" as const, content: "帮我把那篇笔记打开" }],
+    maxTokens: 100,
+    temperature: 0.4,
+  };
+  const forced = await mock.executeAgentTurn({
+    ...base,
+    tools: [{ name: "companion_read_context", description: "读上下文", parameters: {} }],
+    toolChoice: "required",
+  });
+  assert.equal(forced.toolCalls.length, 1, "required 这一档必须回一个工具调用");
+  assert.equal(forced.content, null, "required 那一档不产正文（宁可安静几秒）");
+
+  // 会红的那一格要**只**由 toolChoice 决定：上面那条在"没读过工具结果"时本来就会回
+  // 工具调用（mock 的默认剧本），拿它当证据等于什么都没测。这一步先喂一条工具结果
+  // ——没有 required 时 mock 会照实回正文收尾，有了 required 就必须继续调工具。
+  const afterToolResult = await mock.executeAgentTurn({
+    ...base,
+    messages: [
+      ...base.messages,
+      // `content: ""` 而不是 null：内部 `AgentMessage` 的形状是 string|parts，
+      // 这里要表达的"这一步没有正文"用空串就够，mock 也只看有没有 tool 消息。
+      { role: "assistant", content: "", toolCalls: [{ id: "c1", name: "companion_read_context", arguments: {} }] },
+      { role: "tool", content: "已读取：{notes:[]}", toolCallId: "c1" },
+    ],
+    tools: [{ name: "companion_read_context", description: "读上下文", parameters: {} }],
+    toolChoice: "required",
+  });
+  assert.equal(afterToolResult.toolCalls.length, 1,
+    "required 在'已经读过一次工具结果'那一步也必须生效（否则这一档根本没被实现）");
+  const autoInstead = await mock.executeAgentTurn({
+    ...base,
+    messages: [
+      ...base.messages,
+      // `content: ""` 而不是 null：内部 `AgentMessage` 的形状是 string|parts，
+      // 这里要表达的"这一步没有正文"用空串就够，mock 也只看有没有 tool 消息。
+      { role: "assistant", content: "", toolCalls: [{ id: "c1", name: "companion_read_context", arguments: {} }] },
+      { role: "tool", content: "已读取：{notes:[]}", toolCallId: "c1" },
+    ],
+    tools: [{ name: "companion_read_context", description: "读上下文", parameters: {} }],
+    toolChoice: "auto",
+  });
+  assert.equal(autoInstead.toolCalls.length, 0, "auto 那一档不该被 mock 偷偷升级成必调工具");
+  assert.match(String(autoInstead.content), /已读取伴星工具结果/);
+
+  // 那一对的真实形状就是 400：mock 必须**跟着炸**，否则将来谁把这对拼出来，
+  // 测试只会显示成"模型没听话"，归因直接归错。
+  await assert.rejects(
+    () => mock.executeAgentTurn({ ...base, tools: [], toolChoice: "required" }),
+    /tool_choice=required 但工具面为空/,
+  );
+
+  // 分类器那一支也必须回合同形状。以前它回的是 `{"status":"mock"}`——合法 JSON、
+  // 没有 needsTool 键 ⇒ 每个 mock 驱动的用例都站在"读不到"那一格上。
+  const judged = await mock.chatCompletion([
+    { role: "system", content: "你只判断下一步是否必须调用应用工具。只输出 JSON：{\"needsTool\":true}" },
+    { role: "user", content: "帮我复习光合作用" },
+  ], { maxTokens: 60, temperature: 0, responseFormat: "json_object" });
+  assert.equal(JSON.parse(judged.content).needsTool, false);
+  const judgedAction = await mock.chatCompletion([
+    { role: "system", content: "你只判断下一步是否必须调用应用工具。只输出 JSON：{\"needsTool\":true}" },
+    { role: "user", content: "打开那篇笔记【mock:wants-tool】" },
+  ], { maxTokens: 60, temperature: 0, responseFormat: "json_object" });
+  assert.equal(JSON.parse(judgedAction.content).needsTool, true);
+  assert.equal(await companionNeedsTool(mock, [
+    { role: "user", content: "打开那篇笔记【mock:wants-tool】" },
+  ], new AbortController().signal), true, "整条链（mock 答复 → 分类器解析）要接得上");
 });

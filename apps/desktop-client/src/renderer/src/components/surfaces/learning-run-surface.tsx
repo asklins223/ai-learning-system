@@ -47,6 +47,9 @@ import { useCompanionHomeProjection } from "../../app/companion-home-projection"
 import { speakCompanionLine, type CompanionSpeechHandle } from "../../app/companion-voice-playback";
 import { HudPage } from "../hud/HudPage";
 import { useHudPage } from "../hud/use-hud-page";
+import { usePageReadableView } from "../hud/use-page-readable-view";
+import { HUD_PAGES } from "../hud/hud-pages";
+import type { PageReadableV1 } from "@ailearn/shared/companion-bridge-contracts";
 import { reviewTargetFromReturnContract } from "../review-focus";
 import { resultPollDelayMs } from "../result-polling";
 import { indexedPublicLabel } from "../learning-run-labels";
@@ -211,6 +214,22 @@ function thisTimeVerdicts(result: LearningRunResultV2 | undefined): {
  * 已证明部分」——那行字和上面四条「回忆 · 说清了」并排时，读起来就是产品在自己
  * 打自己脸（31 号文档 P1/P6）。练习本就不写理解账本，这是合同，直接讲出来。
  */
+/**
+ * 处理中阶段的标题（"正在记录可信学习结果" / "回答已锁定，正在评估" / phaseLabels）。
+ *
+ * 提成模块级是为了**只有一份算式**：它既被工作台那行 `<h2>` 用（`:2781` 那个三元），
+ * 也被可读视图用——而可读视图的 `useMemo` 必须落在组件里那个 `if (!snapshot)` 提前
+ * return **之前**（Hooks 顺序恒定），所以它不能直接引用那行 `<h2>` 旁边的 `processingHeadline`。
+ * 两处各写一份迟早分叉，而分叉不报错。
+ */
+function processingHeadlineFor(phase: LearningRunPublicSnapshotV2["phase"]): string {
+  return phase === "committing"
+    ? "正在记录可信学习结果"
+    : phase === "assessing"
+      ? "回答已锁定，正在评估"
+      : phaseLabels[phase];
+}
+
 function provenLedgerText(result: LearningRunResultV2): string {
   if (result.demonstratedFacets.length) return facetText(result.demonstratedFacets, "");
   if (result.outcome === "practice_completed") return "这次是练习，所以不写进理解账本。";
@@ -488,7 +507,9 @@ function actionRequestFor(action: LearningRunAllowedActionV2): DesktopLearningRu
     case "retry_commit":
       return { kind: action.kind };
     case "switch_variant":
-      return { kind: action.kind, alternativeId: action.alternativeId };
+      // 这一格说的是"谁发起的换题"：学习页这颗按钮按下去，理由就是用户自己按了它。
+      // 伴星那条路不经过这里——她的理由从工具参数带过来（39d W2-4 #13）。
+      return { kind: action.kind, alternativeId: action.alternativeId, reason: "用户在页面上按了换一题" };
     case "request_hint":
       return { kind: action.kind, level: action.level };
     case "activate_followup":
@@ -2369,6 +2390,45 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
     </button>
   );
 
+  /**
+   * 学习页／结果页登记给伴星读的可读视图（doc 37 / 39d W2-2 的 P4-a）。
+   *
+   * **必须放在下面那个 `if (!snapshot)` 提前 return 之前**：React 要求 hook 顺序恒定，
+   * 而这个组件下面有提前 return——放在它之后会得到 `Rendered more hooks than during the
+   * previous render`（本文件真踩过一次，测试逮住的）。所以它只能依赖"提前 return 之前
+   * 就存在"的东西：`resultState`（`:1386`）、`showResult`（`:1469`）、`snapshot`（`:1340`）。
+   *
+   * **两屏互斥**：顶层 `{result || terminal ? (A) : (B)}` 在 `:2580` 与它的 `:2760` 分叉，
+   * A 段 = result 屏（`:2655` 的 `<b>本次掌握</b>` = `provenLedgerText(result)`）、
+   * B 段 = assessment 屏（`:2781` 的 `<h2>`）。`showResult` 与 `result || terminal` 同一件事
+   * ——`:1492` 那个 effect 就是按 `showResult` 通知外层切 page 的。
+   *
+   * 字段只登记核过渲染处的那几个；`metrics` 故意留空（这一屏的计数与步进字没逐个核，
+   * 少登记的后果只是她读不到那一项，登记错的后果是她读到一个屏幕上根本没有的说法）。
+   */
+  const readableView = useMemo<PageReadableV1 | null>(() => {
+    const resultValue = resultState.kind === "result" ? resultState.value.result : null;
+    if (showResult) {
+      if (!resultValue) return null;
+      return {
+        pageId: "result",
+        title: HUD_PAGES.result.title.slice(0, 120),
+        statusLine: provenLedgerText(resultValue).slice(0, 160),
+      };
+    }
+    if (!snapshot) return null;
+    const phase = resultState.kind === "pending" ? resultState.phase : snapshot.phase;
+    const headline = snapshot.activeTask !== null && phase === "active"
+      ? snapshot.target.publicSummary
+      : processingHeadlineFor(phase);
+    return {
+      pageId: "assessment",
+      title: HUD_PAGES.assessment.title.slice(0, 120),
+      statusLine: headline.slice(0, 160),
+    };
+  }, [resultState, showResult, snapshot]);
+  usePageReadableView(readableView);
+
   if (!snapshot) {
     if (loading) {
       return (
@@ -2457,11 +2517,7 @@ function LearningRunBody({ runId, onExit, onPageChange }: LearningRunBodyProps) 
       ? `先补上「${facetText(result.gapFacets.slice(0, 1), "")}」`
       : returnTargetLabel(returnTarget);
   const recoveryHeading = recovery === "draft" ? "草稿版本需要同步" : "上一动作结果需要确认";
-  const processingHeadline = processingPhase === "committing"
-    ? "正在记录可信学习结果"
-    : processingPhase === "assessing"
-      ? "回答已锁定，正在评估"
-      : phaseLabels[processingPhase];
+  const processingHeadline = processingHeadlineFor(processingPhase);
   const busy = pendingAction !== null || pendingHintAction !== null || actionBusy || resyncing || recovery !== null;
   const actionLinks = [
     ...alternativeActions,

@@ -3,6 +3,8 @@ import { test } from "node:test";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
 import {
+  assertOutsideWorkspaceTransaction,
+  ExternalCallInsideTransactionError,
   WorkspaceTransactionScope,
   type ActiveWorkspaceTransaction,
   type WorkspaceContextQueryable,
@@ -177,4 +179,64 @@ test("two scopes keep independent async-local stores", async () => {
     assert.equal(first.current(), active);
     assert.equal(second.current(), undefined);
   });
+});
+
+// ── 外部调用边界那道检查（D5 §5.2 第二件）────────────────────────────────
+
+test("外部调用边界：事务外放行，事务内拒绝并记一条开发错误", async () => {
+  const scope = makeScope<string>(false);
+  const context = scope.normalize({ workspaceId: WORKSPACE_ID, userId: USER_ID });
+  const { queryable } = makeQueryable();
+  const active: ActiveWorkspaceTransaction<string, WorkspaceContextQueryable> = {
+    context, transaction: queryable, open: true,
+  };
+  const reported: string[] = [];
+  const check = (activeTransaction: unknown) => assertOutsideWorkspaceTransaction({
+    boundary: "AI 模型调用", caller: "workspace-transaction.test", activeTransaction,
+    reportDevelopmentError: (message) => reported.push(message),
+  });
+
+  // 没有活动事务：一个字都不记、不抛。
+  check(scope.current());
+  assert.deepEqual(reported, []);
+
+  await scope.run(active, async () => {
+    assert.throws(() => check(scope.current()), ExternalCallInsideTransactionError);
+    assert.equal(reported.length, 1);
+    // 开发错误必须自带"是谁、在哪、该改成什么"，否则日志里那条等同于"你错了"。
+    assert.match(reported[0], /AI 模型调用/);
+    assert.match(reported[0], /workspace-transaction\.test/);
+    assert.match(reported[0], /短事务准备/);
+  });
+
+  // 事务作用域退出之后放行（同一条检查在两个时点给出不同答案，才算它在读作用域）。
+  reported.length = 0;
+  assert.doesNotThrow(() => check(scope.current()));
+  assert.deepEqual(reported, []);
+});
+
+test("隐式外层事务也要被拒：判据不是「这段代码里有没有 transaction 字样」", async () => {
+  const scope = makeScope<string>(false);
+  const context = scope.normalize({ workspaceId: WORKSPACE_ID, userId: USER_ID });
+  const { queryable } = makeQueryable();
+  const active: ActiveWorkspaceTransaction<string, WorkspaceContextQueryable> = {
+    context, transaction: queryable, open: true,
+  };
+
+  // 三层深：最外面开了事务，中间只是普通 await，最里面那个函数根本不知道
+  // 自己在事务里——今天那两处"事务内调模型"就是这个形状（D5 §5.1）。
+  async function leafSendsExternalCall(): Promise<void> {
+    assertOutsideWorkspaceTransaction({
+      boundary: "转写", caller: "深层函数（未接收 tx 参数）", activeTransaction: scope.current(),
+    });
+  }
+  async function middleLayer(): Promise<void> {
+    await leafSendsExternalCall();
+  }
+
+  await scope.run(active, async () => {
+    await assert.rejects(() => middleLayer(), ExternalCallInsideTransactionError);
+  });
+  // 事务之外同一个深层函数正常放行——"被拒"来自作用域，不是来自函数本身。
+  await assert.doesNotReject(() => middleLayer());
 });

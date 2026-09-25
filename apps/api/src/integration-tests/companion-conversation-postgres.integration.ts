@@ -30,6 +30,7 @@ import { exportCompanionDataStream } from "../modules/companion-conversation/com
 import { transcribeCompanionDialogueAudio } from "../modules/learning-sessions/companion-voice-service.ts";
 import { execFileSync } from "node:child_process";
 import { closeDatabase } from "../db/client.ts";
+import { companionLeakGateVersionV1 } from "@ailearn/shared/companion-leak-gates";
 
 /**
  * 直接种一条 **active run**，不经 service —— 因为它**不会入队 job**。
@@ -178,7 +179,8 @@ test("P2 原子 turn create：user message + run + turn.accepted event + job + c
       await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
       await tx`SELECT set_config('app.user_id', ${userId}, true)`;
       const message = await tx`SELECT seq, role, kind, blocks, client_message_id FROM companion_messages WHERE id = ${body.userMessageId}`;
-      const run = await tx`SELECT generation, status, idempotency_key_hash, job_id FROM companion_turn_runs WHERE id = ${body.runId}`;
+      const run = await tx`SELECT generation, status, idempotency_key_hash, job_id,
+                           leak_gate_version FROM companion_turn_runs WHERE id = ${body.runId}`;
       const event = await tx`SELECT seq, type, payload FROM companion_stream_events WHERE conversation_id = ${conversationId} AND seq = ${body.eventCursor}`;
       const conv = await tx`SELECT next_message_seq, next_event_seq, next_generation, title, title_source FROM companion_conversations WHERE id = ${conversationId}`;
       const job = run[0]?.job_id
@@ -191,6 +193,11 @@ test("P2 原子 turn create：user message + run + turn.accepted event + job + c
     assert.equal(rows.message[0].kind, "text");
     assert.equal(rows.message[0].client_message_id, clientMessageId);
     assert.equal(rows.run[0].status, "accepted");
+    // 生产者钉子（39d #28）：新起的一发必须带上它产出的那一版闸。
+    // 上一版我把这条写在 `sql.begin` 回调里 `return` 的后面 ⇒ 是不可达的死代码，
+    // 摘掉生产者它照样绿；这一次放在真会跑到的位置，并要求变异会红。
+    assert.equal(rows.run[0].leak_gate_version, companionLeakGateVersionV1(),
+      "新回合没写入 leak_gate_version（NULL 只允许是这一列落地前的历史行）");
     assert.equal(rows.event[0].type, "turn.accepted");
     assert.equal(Number(rows.conv[0].next_message_seq), 2);
     assert.equal(Number(rows.conv[0].next_event_seq), 2);

@@ -12,7 +12,7 @@ import { randomUUID } from "node:crypto";
 import { companionGroundedTutorGrantV1Schema } from "@ailearn/shared";
 import { sha256Utf8V1 } from "@ailearn/shared/content-hash";
 import { canonicalJsonV1 } from "@ailearn/shared/content-hash";
-import { addV2ObjectiveToWorkspace, cleanupWorkspaceTables } from "./helpers/v2-card-fixture.ts";
+import { addV2ObjectiveToWorkspace, addV2ObjectiveWithoutCard, seedObjectiveNoteEvidence, cleanupWorkspaceTables } from "./helpers/v2-card-fixture.ts";
 import { withWorkspaceTransaction } from "../db/client.ts";
 
 const CONN = process.env.DATABASE_URL_API ?? "postgres://ailearn:ailearn_dev@localhost:5432/ailearn";
@@ -340,6 +340,69 @@ test("P5 §6.7：LearningRun context grant 签发（HMAC + 5min TTL）", async (
     assert.match(typedGrant.signature, /^[a-f0-9]{64}$/, "HMAC-SHA256 签名");
     const ttlMs = new Date(typedGrant.expiresAt).getTime() - Date.now();
     assert.ok(ttlMs <= 5 * 60_000 && ttlMs > 4 * 60_000, "5min TTL");
+  } finally {
+    await cleanup();
+  }
+});
+
+/**
+ * W4-2（2026-09-25）：**没有卡的目标也必须进她那一侧的候选，而且她代开的那一轮真开得起来。**
+ *
+ * 这一条要挡的事故形状：入口在 `action-resolver` 那边放开了，桥接这一侧却还留着
+ * "origin 一定是 card" 的假设。那种半放开最阴——两边各自的用例都绿，症状是
+ * "用户在页面上点得到，伴星说这个我开不了"。所以断言分三段：候选在不在、
+ * 候选带的是哪一种 origin、她确认之后**库里那一行**的 origin 是什么。
+ */
+test("P5 §6.7：无卡目标也进她的候选，确认后真的开出那一轮（origin=today）", async () => {
+  const { workspaceId, userId, cleanup } = await seedBase();
+  const objective = await addV2ObjectiveWithoutCard(sql, workspaceId, userId, {
+    objectiveStatement: "无卡桥接测试目标",
+    publicSummary: "无卡桥接",
+  });
+  // 零依据的无卡目标会被冻结链 fail closed（那是另一条用例测的行为）；
+  // 这一条要的是"能开出去"的那一支，所以把笔记依据种齐。
+  await seedObjectiveNoteEvidence(sql, { workspaceId, userId, ...objective });
+  try {
+    const ctx = await resolveCompanionLearningContext({ workspaceId, userId });
+    const candidate = ctx.learningRunStartCandidate;
+    assert.ok(candidate, "无卡的 active 目标必须进她的候选（主行动已是 create_run）");
+    if (!candidate) return;
+    assert.deepEqual(candidate.originV2, { kind: "today", objectiveId: objective.objectiveId });
+    // 没有概念名时，那个词取**服务端这一条 action 自己的 label**（不是桥接硬写的一句）。
+    assert.equal(candidate.title, "开始学习");
+
+    const { createCompanionMenuProposal, decideCompanionProposal } = await import(
+      "../modules/companion-conversation/learning-action-bridge.ts"
+    );
+    const created = await createCompanionMenuProposal({
+      workspaceId, userId,
+      body: {
+        version: 1, clientMessageId: randomUUID(), candidateId: "learning_run_start",
+        expectedContextRevision: ctx.contextRevision,
+        expectedPayloadSha256: candidate.payloadSha256,
+        sourceSurface: "pet",
+      },
+      idempotencyKey: randomUUID(),
+    }) as { proposal: { proposalId: string } };
+    const decided = await decideCompanionProposal({
+      workspaceId, userId, proposalId: created.proposal.proposalId,
+      decision: "confirm",
+      expectedPayloadSha256: candidate.payloadSha256,
+      idempotencyKey: randomUUID(),
+    }) as { status: string; resultRef?: string };
+    assert.equal(decided.status, "succeeded", "她代开无卡那一轮不许被任何一侧悄悄拒掉");
+    const resultRef = decided.resultRef;
+    assert.ok(resultRef, "resultRef 应携带新 LearningRun id");
+
+    const rows = await sql.begin(async (tx) => {
+      await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
+      await tx`SELECT set_config('app.user_id', ${userId}, true)`;
+      return tx`SELECT origin->>'kind' AS origin_kind, origin->>'objectiveId' AS objective_id, phase
+                FROM learning_runs WHERE id = ${resultRef}`;
+    });
+    assert.equal(rows[0]?.origin_kind, "today", "库里那一行记的 origin 必须就是无卡那一种");
+    assert.equal(rows[0]?.objective_id, objective.objectiveId);
+    assert.equal(rows[0]?.phase, "active");
   } finally {
     await cleanup();
   }

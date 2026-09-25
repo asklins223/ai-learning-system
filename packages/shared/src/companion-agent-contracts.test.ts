@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   canUseCompanionAgentTool,
+  COMPANION_PROPOSAL_EXECUTED_TOOLS,
   companionAgentToolEventV1Schema,
   isVisionGatedCompanionTool,
 } from "./companion-agent-contracts.ts";
@@ -13,9 +14,9 @@ import {
 } from "./companion-agent-registry.ts";
 
 test("Agent permission levels keep hard confirmation boundaries", () => {
-  const read = { riskClass: "read" as const, requiresConfirmation: false };
-  const reversible = { riskClass: "reversible_low" as const, requiresConfirmation: false };
-  const dangerous = { riskClass: "irreversible" as const, requiresConfirmation: false };
+  const read = { name: "synthetic_read", riskClass: "read" as const, requiresConfirmation: false };
+  const reversible = { name: "synthetic_reversible", riskClass: "reversible_low" as const, requiresConfirmation: false };
+  const dangerous = { name: "synthetic_irreversible", riskClass: "irreversible" as const, requiresConfirmation: false };
 
   assert.deepEqual(canUseCompanionAgentTool("read_only", read), {
     allowed: true,
@@ -26,13 +27,29 @@ test("Agent permission levels keep hard confirmation boundaries", () => {
   assert.equal(canUseCompanionAgentTool("guided", { ...reversible, requiresConfirmation: true }).requiresConfirmation, true);
   assert.equal(canUseCompanionAgentTool("full", dangerous).requiresConfirmation, true);
   // full = 用户预授权（2026-09-19 对齐原设计）：授权档位下不再逐步确认，
-  // 只有 irreversible 仍是安全底线。
+  // 只有 irreversible 仍是安全底线。**但这条只对"worker 真能自己执行"的工具成立**——
+  // 命令住在提案那条路的六条走下面那条断言，别让 full 档去找一个不存在的执行器。
   assert.equal(canUseCompanionAgentTool("full", reversible).requiresConfirmation, false);
   assert.equal(
-    canUseCompanionAgentTool("full", { riskClass: "consequential" as const, requiresConfirmation: true })
+    canUseCompanionAgentTool("full", { name: "synthetic_direct", riskClass: "consequential" as const, requiresConfirmation: true })
       .requiresConfirmation,
     false,
   );
+
+  // 六条提案执行的工具：三档都要出提案（full 档曾经判成"直执行"，于是撞 no direct
+  // executor——权限越高越不能用，这条就是钉住那个反差不再回来）。
+  for (const name of COMPANION_PROPOSAL_EXECUTED_TOOLS) {
+    const definition = getCompanionAgentTool(name);
+    assert.ok(definition, `${name} 必须在 registry 里`);
+    assert.equal(
+      canUseCompanionAgentTool("full", definition).requiresConfirmation,
+      true,
+      `${name} 的命令在提案确认那条路执行，full 档不许改判成直执行`,
+    );
+    assert.equal(canUseCompanionAgentTool("guided", definition).requiresConfirmation, true, name);
+  }
+  // 正控制：这份清单不是空集（空集时上面那个循环"全绿"等于什么都没判）。
+  assert.ok(COMPANION_PROPOSAL_EXECUTED_TOOLS.size >= 6, `清单只剩 ${COMPANION_PROPOSAL_EXECUTED_TOOLS.size} 条`);
 
   const focusGraph = getCompanionAgentTool("companion_focus_graph");
   assert.ok(focusGraph);

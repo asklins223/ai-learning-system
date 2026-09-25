@@ -1249,7 +1249,13 @@ async function runV2PlanPhase(
   const { workspaceId, runId } = job;
   const useLLM = process.env.CARD_GENERATION_V2_LLM === "true";
 
-  return withWorkerWorkspaceTransaction({ workspaceId, userId: null }, async (tx) => {
+  // ── 短事务 A：门闩 + 读输入 + 路由事件（D5 §5.2 第三件第 1 步，39d W3-2）────
+  // 这里原来是一整段**分钟级事务**：入口 `FOR UPDATE` 拿到 run 行锁后一路持到规划
+  // 跑完，于是"持业务行锁等外部模型"（D5 §5.1 实测的两处之一，`:1417`）。
+  // 双跑防护本来就不挂在这把锁上：`fenceV2OutboxLease`（outbox 租约）在入口挡
+  // "要不要发起这次付费调用"，同一道闩在短事务 B 开头再核一次挡提交；锁只管它
+  // 自己注释里那句话——串行化"同一 run 在同一时刻的两个提交"。
+  const prepared = await withWorkerWorkspaceTransaction({ workspaceId, userId: null }, async (tx) => {
     // 1. Load run（FOR UPDATE 行锁：防止同 run 的双 job 并发跑完整 LLM 管道，
     //    避免 TOCTOU 双份计费/双写终态。在 withWorkerWorkspaceTransaction 事务内
     //    持锁到提交，契合 W2。）
@@ -1406,33 +1412,56 @@ async function runV2PlanPhase(
       publicSummary: r.public_summary,
     }));
 
-    // 4a. 构造 providers（LLM 或确定性）
-    const providers = useLLM
-      ? await buildProvidersForRun({ workspaceId, job, semanticSpec, governanceContext })
-      : null;
-
-    // 5. Execute Planner
-    //    H5/M1：阶段边界检查——租约已丢失或预算已耗尽时不再发起新的付费调用。
-    throwIfPipelineAborted(signal);
-    const plannerResult = await executePlanner({
-      runId,
-      workspaceId,
+    return {
+      kind: "plan" as const,
       inputSnapshot,
       semanticSpec,
-      blocks: scopedBlocks,
+      scopedBlocks,
       unsupportedSourceBlocks,
       existingObjectives,
-      clientHardMaxCards: inputSnapshot?.rawRequest?.quantity?.hardMaxCards,
-      extractionProvider: providers ? providers.plannerExtraction : undefined,
-      // M3：把 sealed 证据清单与取消信号交给 planner（prompt 中"从可用证据 ID
-      // 列表选择 evidenceRefIds"此前无从满足，existingObjectives 也恒为空）。
-      evidenceList: sealed.evidenceManifest.evidence.map((e) => ({
-        evidenceSnapshotId: e.evidenceSnapshotId,
-        quoteHash: e.quoteHash ?? null,
-      })),
-      signal,
-    });
+      evidenceManifest: sealed.evidenceManifest,
+    };
+  });
 
+  // 重放（上一遍已交计划）与终态让路：这两支**不发起付费调用**，原样返回。
+  if (prepared.kind !== "plan") return prepared;
+
+  // ── 事务外：这一版计划的付费调用 ──────────────────────────────────────────
+  // 4a. 构造 providers（LLM 或确定性）。它也搬出来了：provider 选择要读治理与
+  //     配置，留在事务里等于让"读配置"也跟着持锁。
+  const providers = useLLM
+    ? await buildProvidersForRun({
+        workspaceId, job, semanticSpec: prepared.semanticSpec, governanceContext,
+      })
+    : null;
+
+  // 5. Execute Planner
+  //    H5/M1：阶段边界检查——租约已丢失或预算已耗尽时不再发起新的付费调用。
+  throwIfPipelineAborted(signal);
+  const plannerResult = await executePlanner({
+    runId,
+    workspaceId,
+    inputSnapshot: prepared.inputSnapshot,
+    semanticSpec: prepared.semanticSpec,
+    blocks: prepared.scopedBlocks,
+    unsupportedSourceBlocks: prepared.unsupportedSourceBlocks,
+    existingObjectives: prepared.existingObjectives,
+    clientHardMaxCards: prepared.inputSnapshot?.rawRequest?.quantity?.hardMaxCards,
+    extractionProvider: providers ? providers.plannerExtraction : undefined,
+    // M3：把 sealed 证据清单与取消信号交给 planner（prompt 中"从可用证据 ID
+    // 列表选择 evidenceRefIds"此前无从满足，existingObjectives 也恒为空）。
+    evidenceList: prepared.evidenceManifest.evidence.map((e) => ({
+      evidenceSnapshotId: e.evidenceSnapshotId,
+      quoteHash: e.quoteHash ?? null,
+    })),
+    signal,
+  });
+
+  // ── 短事务 B：再核门闩 → 写这一版计划 → 推状态 ────────────────────────────
+  // A 与 B 之间隔着一次外部调用，那期间租约可能被 reaper 拿走、job 可能已 aborted。
+  // 拒收靠的是本事务**结尾**那两道 `fenceV2OutboxLease`（两个返回分支各一道）：
+  // 它们与上面的写在同一个事务里，核对不过就整段回滚——旧尝试的规划结果一行都落不下去。
+  return withWorkerWorkspaceTransaction({ workspaceId, userId: null }, async (tx) => {
     // 6. Persist plan
     const plan = plannerResult.plan;
     // 2026-08-16（实机验证，溯源日志）：planner 阶段结果摘要。

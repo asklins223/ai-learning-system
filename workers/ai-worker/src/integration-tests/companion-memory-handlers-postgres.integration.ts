@@ -71,12 +71,15 @@ const job = {
 } as unknown as Parameters<typeof runCompanionMemoryEmbeddingRebuild>[0];
 
 async function setConsent(granted: boolean): Promise<void> {
+  // 同意从 `workspaces` 搬到了 `user_ai_settings`（迁移 0237，按 user_id 键，DROP 了
+  // workspaces 那三列）。夹具原来还在写旧列，这个文件的两条用例自 0237 起就地 42703——
+  // 只因为 `v1.0` 不在 CI 的 push 分支上，才一直没人看到它红。
   await admin`
-    UPDATE workspaces
-    SET ai_consent_version = ${granted ? "v1" : null},
-        ai_consent_at = ${granted ? new Date() : null},
-        ai_consent_by = ${granted ? userId : null}
-    WHERE id = ${workspaceId}
+    INSERT INTO user_ai_settings (user_id, consent_version, consent_at)
+    VALUES (${userId}, ${granted ? "v1" : null}, ${granted ? new Date() : null})
+    ON CONFLICT (user_id) DO UPDATE
+      SET consent_version = EXCLUDED.consent_version,
+          consent_at = EXCLUDED.consent_at
   `;
 }
 

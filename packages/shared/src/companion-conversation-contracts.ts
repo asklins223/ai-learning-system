@@ -596,6 +596,7 @@ export const proposedLearningActionPayloadV1Schema = z.discriminatedUnion("kind"
     runId: z.string().uuid(),
     taskId: z.string().uuid(),
     alternativeId: z.string().min(1).max(200),
+    reason: z.string().min(1).max(200),
   }).strict(),
   z.object({
     kind: z.literal("request_hint_level"),
@@ -611,10 +612,11 @@ export const proposedLearningActionPayloadV1Schema = z.discriminatedUnion("kind"
     deferredUntil: z.string().datetime(),
     reasonCode: deferReviewReasonCodeV1Schema,
   }).strict(),
-  z.object({
-    kind: z.literal("plan_understanding_route"),
-    request: understandingRoutePlanRequestV1Schema,
-  }).strict(),
+  // `plan_understanding_route` 已删除（2026-09-24，39d W2-1）：它唯一的 producer 是
+  // `companion_plan_route`，而那个工具的参数曾是 `z.record(z.unknown())`——31 个工具里
+  // 唯一能改状态却零字段校验的写工具；全窗口 30 天真实流量 **0 次调用**（总盘 144 轮 /
+  // 181 次调用），连一条状态行都没有。按 AGENTS.md 与 39b §9.8 的规则整条删。
+  // `route-plan-service` 本身**保留**：它同时服务 HTTP 路由 `POST /understanding/routes/plan`。
   z.object({
     kind: z.literal("focus_graph_node"),
     keyPointId: z.string().uuid(),

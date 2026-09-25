@@ -1,12 +1,15 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Archive, CalendarDays, ChevronDown, ChevronLeft, ChevronRight, Database, Download, MessageCircle, Pencil, Pin, RefreshCw, Search, Sparkles, Trash2, X } from "lucide-react";
 import type { CompanionActivityDeliveryV1, CompanionActivityTimelineV1, CompanionDailyFailureReasonV1, CompanionDailySummaryV1, CompanionExportKindV1, CompanionHistoryItemV1, CompanionMemoryItemV1, CompanionMemoryKindV1, CompanionPersonaProfileV1, CompanionPersonaPresetV1, CompanionPersonaV1 } from "@ailearn/shared/companion-memory-desktop-contracts";
 import type { CompanionJourneyAction, CompanionJourneyBootstrap } from "@ailearn/shared/companion-journey-contracts";
 import type { CompanionLearningContextV1 } from "@ailearn/shared/companion-conversation-contracts";
+import type { PageReadableV1 } from "@ailearn/shared/companion-bridge-contracts";
 import { CompanionQuoteBlock, CompanionRecordImage, MonthCalendar } from "../companion/CompanionChatRecord";
 import { CompanionSelect, type CompanionSelectOption } from "./companion-select";
 import { diaryDayLabel, shiftIsoDate, todayIsoDate } from "./companion-diary-day";
 import { formatDate, formatRelative } from "./surface-data";
+import { usePageReadableView } from "../hud/use-page-readable-view";
+import { HUD_PAGES } from "../hud/hud-pages";
 
 export type Section<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly message: string };
 
@@ -120,6 +123,12 @@ type MemoryPanelProps = {
   onFocus: (id: string) => void; onAction: (action: "confirm" | "pin" | "unpin" | "archive" | "restore" | "dismiss" | "remove") => void;
   onConfirmDelete: (value: boolean) => void; onCreateOpen: (value: boolean) => void; onCreateContent: (value: string) => void; onCreateKind: (value: CompanionMemoryKindV1) => void; onCreate: () => void; onSummarize: () => void; onCorrectionOpen: (value: boolean) => void; onCorrectionContent: (value: string) => void; onCorrect: () => void; onRetry: () => void;
 };
+const MEMORY_LIST_UNAVAILABLE = "记忆列表当前不可用";
+const MEMORY_LIST_EMPTY = {
+  message: "没有符合条件的记忆",
+  detail: "清空筛选或手动添加一条记忆。",
+} as const;
+
 export function MemoryPanel(props: MemoryPanelProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -136,9 +145,54 @@ export function MemoryPanel(props: MemoryPanelProps) {
     form.querySelector<HTMLTextAreaElement>("textarea")?.focus({ preventScroll: true });
     form.scrollIntoView({ block: "nearest", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
   }, [props.correctionOpen, props.createOpen]);
-  if (!props.section.ok) return <SectionState message="记忆列表当前不可用" detail={props.section.message} onRetry={props.onRetry} />;
-  const visible = props.items.filter((item) => (props.kind === "all" || item.kind === props.kind) && (props.pinFilter === "all" || props.pinFilter === "pinned" && item.pinned || props.pinFilter === "candidate" && item.candidate) && (!props.query.trim() || item.content.toLowerCase().includes(props.query.trim().toLowerCase())))
-    .sort((a, b) => Number(b.candidate) - Number(a.candidate) || b.updatedAt.localeCompare(a.updatedAt));
+  /**
+   * 这份清单**只能在这里算一次**：它既决定屏上露出哪几行，也决定登记给伴星读哪几行。
+   * 壳层手里只有未筛的 `props.items`，让壳层去发布就得把下面这两行再抄一遍——
+   * 那就是"同一个数两个来源"（39d W2-3 那两个统计分岔的成因）。
+   */
+  const visible = useMemo(() => props.items
+    .filter((item) => (props.kind === "all" || item.kind === props.kind) && (props.pinFilter === "all" || props.pinFilter === "pinned" && item.pinned || props.pinFilter === "candidate" && item.candidate) && (!props.query.trim() || item.content.toLowerCase().includes(props.query.trim().toLowerCase())))
+    .sort((a, b) => Number(b.candidate) - Number(a.candidate) || b.updatedAt.localeCompare(a.updatedAt)),
+  [props.items, props.kind, props.pinFilter, props.query]);
+  const memoryReadableView = useMemo<PageReadableV1 | null>(() => {
+    // 读不到时这一格整块被换成了那句说明：清单、筛选下拉都在屏幕上消失了，
+    // 所以那份未筛的 `props.items` **一行都不许登记**（用例抓到过一次：
+    // 只把 statusLine 换成"不可用"、条目照登，等于让她报出屏幕上根本没有的清单）。
+    if (!props.section.ok) {
+      return {
+        pageId: "companion",
+        title: HUD_PAGES.companion.title,
+        statusLine: MEMORY_LIST_UNAVAILABLE,
+        notice: `${MEMORY_LIST_UNAVAILABLE}：${props.section.message.slice(0, 60)}`,
+      };
+    }
+    const rows = visible
+      // 正文为空的行屏幕上也是一个空 `<strong>`，没有话可登记——跳过它，
+      // 而不是编一句"（空）"给她念。
+      .filter((item) => item.content.trim().length > 0)
+      .slice(0, 12)
+      .map((item, index) => ({
+        ordinal: index + 1,
+        label: item.content.slice(0, 120),
+        state: `${MEMORY_KIND_LABEL[item.kind]}· ${MEMORY_STATE_LABEL[memoryState(item)]}`,
+      }));
+    const optionLabel = (options: ReadonlyArray<CompanionSelectOption<string>>, value: string) =>
+      options.find((option) => option.value === value)?.label ?? value;
+    return {
+      pageId: "companion",
+      title: HUD_PAGES.companion.title,
+      statusLine: props.notice ?? props.error ?? (visible.length === 0 ? MEMORY_LIST_EMPTY.message : undefined),
+      filters: [
+        { label: "类型", value: optionLabel(MEMORY_LIST_KIND_OPTIONS, props.kind).slice(0, 40) },
+        { label: "状态", value: optionLabel(MEMORY_PIN_OPTIONS, props.pinFilter).slice(0, 40) },
+        ...(props.query.trim() ? [{ label: "关键词", value: props.query.trim().slice(0, 40) }] : []),
+      ],
+      ...(rows.length > 0 ? { items: rows } : {}),
+      ...(visible.length === 0 ? { notice: `${MEMORY_LIST_EMPTY.message}：${MEMORY_LIST_EMPTY.detail}` } : {}),
+    };
+  }, [props.error, props.kind, props.notice, props.pinFilter, props.query, props.section, visible]);
+  usePageReadableView(memoryReadableView);
+  if (!props.section.ok) return <SectionState message={MEMORY_LIST_UNAVAILABLE} detail={props.section.message} onRetry={props.onRetry} />;
   return <div ref={panelRef} className="companion-panel-stack"><div className="companion-panel-heading"><div className="companion-heading-actions"><button type="button" disabled={props.busy !== null} data-busy={props.busy === "summarize" || undefined} onClick={props.onSummarize}>{props.busy === "summarize" ? "整理中…" : "整理近期对话"}</button><button type="button" onClick={() => props.onCreateOpen(!props.createOpen)}>{props.createOpen ? "取消" : "手动添加"}</button></div></div>
     {props.createOpen ? <div className="companion-inline-form"><CompanionSelect paper ariaLabel="新记忆类型" value={props.createKind} options={MEMORY_KIND_OPTIONS} onChange={props.onCreateKind} /><textarea value={props.createContent} maxLength={200} onChange={(event) => props.onCreateContent(event.target.value)} placeholder="写下希望伴星长期记住的事实" aria-label="新记忆内容" /><button type="button" className="primary" disabled={!props.createContent.trim() || props.busy !== null} data-busy={props.busy === "create" || undefined} onClick={props.onCreate}>{props.busy === "create" ? "正在保存…" : "保存记忆"}</button></div> : null}
     <label className="companion-search"><Search size={14} aria-hidden="true" /><input value={props.query} onChange={(event) => props.onQuery(event.target.value)} placeholder="筛选记忆列表" aria-label="筛选记忆列表" />{props.query ? <button type="button" className="companion-search__clear" onClick={() => props.onQuery("")} aria-label="清空记忆列表搜索"><X size={13} /></button> : null}</label>
@@ -148,7 +202,7 @@ export function MemoryPanel(props: MemoryPanelProps) {
   {(() => {
     const detailCard = props.focus ? (<article className="companion-memory-detail"><div className="companion-memory-detail__meta"><span>{MEMORY_KIND_LABEL[props.focus.kind]}</span><span>{MEMORY_STATE_LABEL[memoryState(props.focus)]}</span><span>重要度 {Math.round(props.focus.importance * 100)}%</span></div>{props.correctionOpen ? <div className="companion-inline-form"><textarea value={props.correctionContent} maxLength={200} onChange={(event) => props.onCorrectionContent(event.target.value)} aria-label="纠正后的记忆内容" /><div className="companion-action-row"><button type="button" className="primary" disabled={!props.correctionContent.trim() || props.correctionContent.trim() === props.focus.content || props.busy !== null} data-busy={props.busy === "correct" || undefined} onClick={props.onCorrect}>{props.busy === "correct" ? "正在纠正…" : "保存为待确认记忆"}</button><button type="button" onClick={() => props.onCorrectionOpen(false)}>取消</button></div></div> : <strong>{props.focus.content}</strong>}<small>更新于 {formatRelative(props.focus.updatedAt)}</small><div className="companion-action-row">{props.focus.candidate ? <button type="button" className="primary" disabled={props.busy !== null} onClick={() => props.onAction("confirm")}>确认写入</button> : null}{!props.focus.candidate && !props.focus.archived ? <button type="button" disabled={props.busy !== null} onClick={() => props.onAction(props.focus!.pinned ? "unpin" : "pin")}><Pin size={13} />{props.focus.pinned ? "取消固定" : "固定"}</button> : null}{!props.correctionOpen && !props.focus.archived ? <button type="button" disabled={props.busy !== null} onClick={() => props.onCorrectionOpen(true)}><Pencil size={13} />纠正</button> : null}{!props.focus.candidate ? <button type="button" disabled={props.busy !== null} onClick={() => props.onAction(props.focus!.archived ? "restore" : "archive")}><Archive size={13} />{props.focus.archived ? "恢复" : "归档"}</button> : null}{props.focus.candidate ? <button type="button" disabled={props.busy !== null} onClick={() => props.onAction("dismiss")}>暂不采用</button> : null}<MemoryDeleteAction active={props.confirmDelete} busy={props.busy !== null} onOpen={() => props.onConfirmDelete(true)} onCancel={() => props.onConfirmDelete(false)} onConfirm={() => props.onAction("remove")} /></div></article>) : null;
   return <div className="companion-memory-workspace">
-    <div className="companion-record-list" aria-label="记忆列表">{visible.length === 0 ? <div className="companion-empty-with-action"><SectionState message="没有符合条件的记忆" detail="清空筛选或手动添加一条记忆。" /><button type="button" onClick={() => { props.onQuery(""); props.onKind("all"); props.onPinFilter("all"); }}>清除筛选</button></div> : visible.map((item) => <button key={item.memoryItemId} type="button" aria-pressed={props.focus?.memoryItemId === item.memoryItemId} className={[props.focus?.memoryItemId === item.memoryItemId ? "is-selected" : null, item.archived ? "is-archived" : null].filter(Boolean).join(" ") || undefined} onClick={() => props.onFocus(item.memoryItemId)}><strong>{item.content}</strong><span><i className={`is-${memoryState(item)}`} aria-hidden="true" /><em>{MEMORY_KIND_LABEL[item.kind]}</em>· {MEMORY_STATE_LABEL[memoryState(item)]} · {formatRelative(item.updatedAt)}</span></button>)}</div>
+    <div className="companion-record-list" aria-label="记忆列表">{visible.length === 0 ? <div className="companion-empty-with-action"><SectionState message={MEMORY_LIST_EMPTY.message} detail={MEMORY_LIST_EMPTY.detail} /><button type="button" onClick={() => { props.onQuery(""); props.onKind("all"); props.onPinFilter("all"); }}>清除筛选</button></div> : visible.map((item) => <button key={item.memoryItemId} type="button" aria-pressed={props.focus?.memoryItemId === item.memoryItemId} className={[props.focus?.memoryItemId === item.memoryItemId ? "is-selected" : null, item.archived ? "is-archived" : null].filter(Boolean).join(" ") || undefined} onClick={() => props.onFocus(item.memoryItemId)}><strong>{item.content}</strong><span><i className={`is-${memoryState(item)}`} aria-hidden="true" /><em>{MEMORY_KIND_LABEL[item.kind]}</em>· {MEMORY_STATE_LABEL[memoryState(item)]} · {formatRelative(item.updatedAt)}</span></button>)}</div>
     <aside className="companion-memory-focus" aria-label="所选记忆详情">{detailCard ?? <SectionState message="选择一条记忆" detail="查看它的内容与可用操作。" />}</aside>
   </div>;
   })()}
@@ -156,9 +210,51 @@ export function MemoryPanel(props: MemoryPanelProps) {
 }
 
 type DialoguePanelProps = { section: Section<{ version: 1; items: CompanionHistoryItemV1[]; nextCursor: string | null }>; items: CompanionHistoryItemV1[]; cursor: string | null; query: string; searching: boolean; loadingMore: boolean; error: string | null; onQuery: (value: string) => void; onSearch: () => void; onLoadMore: () => void; onContinue: () => void; onRetry: () => void };
+const DIALOGUE_UNAVAILABLE = "连续对话当前不可用";
+const DIALOGUE_EMPTY = {
+  message: "还没有对话记录",
+  detail: "开始交流后，消息会连续出现在这里。",
+} as const;
+const DIALOGUE_NO_BODY = "这条记录不含可展示正文。";
+/** 行首那个说话人字：屏上 `<b>` 里就是这三个词，她念的也必须是同一份。 */
+function dialogueRoleLabel(role: CompanionHistoryItemV1["role"]): string {
+  return role === "user" ? "你" : role === "assistant" ? "伴星" : "系统";
+}
+/** `.companion-result-status` 那一格：搜索中 / 找到 N 条 / 什么都没有。 */
+function dialogueResultLine(props: DialoguePanelProps): string {
+  return props.searching ? "正在搜索对话" : props.query.trim() ? `找到 ${props.items.length} 条对话` : "";
+}
+
 export function DialoguePanel(props: DialoguePanelProps) {
-  if (!props.section.ok) return <SectionState message="连续对话当前不可用" detail={props.section.message} onRetry={props.onRetry} />;
-  return <div className="companion-panel-stack"><div className="companion-panel-heading"><h3>连续对话</h3><p>按全局时间排列；内部数据分段不会显示在这里。</p><button type="button" className="primary" onClick={props.onContinue}><MessageCircle size={14} />继续交流</button></div><form className="companion-search" onSubmit={(event) => { event.preventDefault(); props.onSearch(); }}><Search size={14} aria-hidden="true" /><input value={props.query} onChange={(event) => props.onQuery(event.target.value)} placeholder="搜索全部对话正文" aria-label="搜索全部对话正文" /><button type="submit" disabled={props.searching}>{props.searching ? "搜索中" : "搜索"}</button></form><p className="companion-result-status" aria-live="polite">{props.searching ? "正在搜索对话" : props.query.trim() ? `找到 ${props.items.length} 条对话` : ""}</p>{props.error ? <p className="companion-error" role="alert">{props.error}</p> : null}{props.cursor ? <button type="button" className="companion-load-more" disabled={props.loadingMore} onClick={props.onLoadMore}>{props.loadingMore ? "正在读取更早记录…" : "加载更早记录"}</button> : null}<div className="companion-thread">{props.items.length === 0 ? <SectionState message="还没有对话记录" detail="开始交流后，消息会连续出现在这里。" /> : props.items.map((item) => <article key={item.messageId} tabIndex={-1} className={`is-${item.role}`} id={`companion-message-${item.messageId}`}><span><b>{item.role === "user" ? "你" : item.role === "assistant" ? "伴星" : "系统"}</b><time>{formatRelative(item.createdAt)}</time></span>{paragraphLines(messageText(item) || "这条记录不含可展示正文。").map((paragraph, index) => <p key={index}>{paragraph}</p>)}{item.kind === "cancelled" ? <small>这是一条被你停止的未完成回复。</small> : null}</article>)}</div></div>;
+  const dialogueReadableView = useMemo<PageReadableV1 | null>(() => {
+    // 这一格只有一行清单和几句状态字，**没有本地二次筛选**：`props.items` 就是
+    // 服务端按关键词回给这一屏的那一批，屏上露出的也就是它（与记忆那一格不同）。
+    if (!props.section.ok) {
+      return {
+        pageId: "companion",
+        title: HUD_PAGES.companion.title,
+        statusLine: DIALOGUE_UNAVAILABLE,
+        notice: `${DIALOGUE_UNAVAILABLE}：${props.section.message.slice(0, 60)}`,
+      };
+    }
+    const resultLine = dialogueResultLine(props);
+    const rows = props.items.slice(0, 12).map((item, index) => ({
+      ordinal: index + 1,
+      label: (paragraphLines(messageText(item) || DIALOGUE_NO_BODY)[0] ?? DIALOGUE_NO_BODY).slice(0, 120),
+      state: dialogueRoleLabel(item.role),
+    }));
+    return {
+      pageId: "companion",
+      title: HUD_PAGES.companion.title,
+      statusLine: resultLine || props.error || (props.items.length === 0 ? DIALOGUE_EMPTY.message : undefined),
+      ...(props.query.trim() ? { filters: [{ label: "关键词", value: props.query.trim().slice(0, 40) }] } : {}),
+      ...(rows.length > 0 ? { items: rows } : {}),
+      ...(props.items.length === 0 ? { notice: `${DIALOGUE_EMPTY.message}：${DIALOGUE_EMPTY.detail}` } : {}),
+    };
+  }, [props.error, props.items, props.query, props.searching, props.section]);
+  usePageReadableView(dialogueReadableView);
+  if (!props.section.ok) return <SectionState message={DIALOGUE_UNAVAILABLE} detail={props.section.message} onRetry={props.onRetry} />;
+  return <div className="companion-panel-stack"><div className="companion-panel-heading"><h3>连续对话</h3><p>按全局时间排列；内部数据分段不会显示在这里。</p><button type="button" className="primary" onClick={props.onContinue}><MessageCircle size={14} />继续交流</button></div><form className="companion-search" onSubmit={(event) => { event.preventDefault(); props.onSearch(); }}><Search size={14} aria-hidden="true" /><input value={props.query} onChange={(event) => props.onQuery(event.target.value)} placeholder="搜索全部对话正文" aria-label="搜索全部对话正文" /><button type="submit" disabled={props.searching}>{props.searching ? "搜索中" : "搜索"}</button></form><p className="companion-result-status" aria-live="polite">{dialogueResultLine(props)}</p>{props.error ? <p className="companion-error" role="alert">{props.error}</p> : null}{props.cursor ? <button type="button" className="companion-load-more" disabled={props.loadingMore} onClick={props.onLoadMore}>{props.loadingMore ? "正在读取更早记录…" : "加载更早记录"}</button> : null}<div className="companion-thread">{props.items.length === 0 ? <SectionState message={DIALOGUE_EMPTY.message} detail={DIALOGUE_EMPTY.detail} /> : props.items.map((item) => <article key={item.messageId} tabIndex={-1} className={`is-${item.role}`} id={`companion-message-${item.messageId}`}><span><b>{dialogueRoleLabel(item.role)}</b><time>{formatRelative(item.createdAt)}</time></span>{paragraphLines(messageText(item) || DIALOGUE_NO_BODY).map((paragraph, index) => <p key={index}>{paragraph}</p>)}{item.kind === "cancelled" ? <small>这是一条被你停止的未完成回复。</small> : null}</article>)}</div></div>;
 }
 
 type ActivityPanelProps = {
@@ -183,6 +279,37 @@ function isPendingDelivery(item: CompanionActivityDeliveryV1): boolean {
   return !item.expired && DELIVERY_PENDING_STATES.includes(item.state);
 }
 
+/**
+ * 动态那一格的屏上文本，各写一次：`SectionState`／卡片标题与登记给伴星的可读视图
+ * 引用同一份（视图字段写错不会红，抄成两处迟早分叉）。
+ */
+const ACTIVITY_SECTIONS = { learning: "继续学习", journey: "伴星旅程", feed: "最近动态" } as const;
+const ACTIVITY_LINES = {
+  learningUnavailable: "学习上下文当前不可用",
+  learningNothing: { message: "当前没有可继续的学习", detail: "这里只列出系统从真实学习状态里挑出的候选。" },
+  journeyUnavailable: "旅程当前不可用",
+  journeyInvite: { title: "开始第一段学习旅程", summary: "从你自己的资料开始，伴星会跟随真实进度。" },
+  journeySkipped: { title: "旅程邀请已跳过", summary: "需要时可以重新开始，不会补造任何里程碑。" },
+  journeyNone: { message: "目前没有进行中的旅程", detail: "新的状态更新会在这里出现。" },
+  feedUnavailable: "主动投递当前不可用",
+  feedEmpty: { message: "目前没有新的动态", detail: "新的邀请、主动投递和状态更新会出现在这里。" },
+  feedNoPending: { message: "没有待处理的动态", detail: "处理完的会收进下面的历史记录。" },
+} as const;
+
+/** 旅程那张卡的标题与副行：屏上怎么写，她就读到什么（两处共用，不各拼一遍）。 */
+function journeyCardTitle(journey: { currentStep: string | null }): string {
+  return journey.currentStep ? `当前步骤：${JOURNEY_STEP_LABEL[journey.currentStep] ?? "继续学习旅程"}` : "旅程状态";
+}
+function journeyCardSummary(journey: { status: string; branch: string }): string {
+  return journey.status === "recoverable_error"
+    ? "这一步暂时没有完成，可以直接重试。"
+    : `${JOURNEY_STATUS_LABEL[journey.status] ?? "状态已更新"} · ${JOURNEY_BRANCH_LABEL[journey.branch] ?? "当前学习路径"}`;
+}
+/** 收起来那一段的标题：她自己不点开就看不到里面的行，但"有多少条"是写在这行上的。 */
+function resolvedGroupLabel(count: number): string {
+  return `历史动态 · ${count} 条`;
+}
+
 export function ActivityPanel(props: ActivityPanelProps) {
   const journeyState = props.section.ok ? props.section.value : null;
   const learningContext = props.learningContextSection.ok ? props.learningContextSection.value : null;
@@ -191,6 +318,49 @@ export function ActivityPanel(props: ActivityPanelProps) {
   const pending = props.deliveries.filter(isPendingDelivery);
   const resolved = props.deliveries.filter((item) => !isPendingDelivery(item));
 
+  /**
+   * 这一格登记给伴星读的是**三段各自那一刻露出的那一行**（39d W2-7）。
+   *
+   * `state` 一律是"这一行来自哪一段"（同一个字段同一个含义）；投递自己的
+   * "待处理"那一层不进这个字段。**只有展开才看得到的历史动态不登记成条目**，
+   * 但收着的那一行标题上写着条数，所以把它原样放进 `notice`——她要知道
+   * "还有 N 条在这段折叠里"，又不能报出屏幕上看不见的内容。
+   */
+  const activityReadableView = useMemo<PageReadableV1 | null>(() => {
+    const rows: Array<{ label: string; state: string }> = [];
+    const push = (label: string, state: string) => {
+      if (rows.length < 12) rows.push({ label, state });
+    };
+    if (!props.learningContextSection.ok) push(ACTIVITY_LINES.learningUnavailable, ACTIVITY_SECTIONS.learning);
+    else if (resumeCandidate) push(resumeCandidate.title, ACTIVITY_SECTIONS.learning);
+    else if (startCandidate) push(startCandidate.title, ACTIVITY_SECTIONS.learning);
+    else push(ACTIVITY_LINES.learningNothing.message, ACTIVITY_SECTIONS.learning);
+
+    if (!journeyState) push(ACTIVITY_LINES.journeyUnavailable, ACTIVITY_SECTIONS.journey);
+    else if (journeyState.journey) push(journeyCardTitle(journeyState.journey), ACTIVITY_SECTIONS.journey);
+    else if (journeyState.invitation.status === "offered" || journeyState.invitation.status === "deferred") push(ACTIVITY_LINES.journeyInvite.title, ACTIVITY_SECTIONS.journey);
+    else if (journeyState.invitation.status === "skipped") push(ACTIVITY_LINES.journeySkipped.title, ACTIVITY_SECTIONS.journey);
+    else if (journeyState.invitation.status === "accepted") push(ACTIVITY_LINES.journeyNone.message, ACTIVITY_SECTIONS.journey);
+
+    if (!props.deliverySection.ok) push(ACTIVITY_LINES.feedUnavailable, ACTIVITY_SECTIONS.feed);
+    else if (props.deliveries.length === 0) push(ACTIVITY_LINES.feedEmpty.message, ACTIVITY_SECTIONS.feed);
+    else if (pending.length === 0) push(ACTIVITY_LINES.feedNoPending.message, ACTIVITY_SECTIONS.feed);
+    else pending.forEach((item) => push(item.label, ACTIVITY_SECTIONS.feed));
+
+    return {
+      pageId: "companion",
+      title: HUD_PAGES.companion.title,
+      ...(props.error ? { statusLine: props.error.slice(0, 160) } : {}),
+      items: rows.map((row, index) => ({
+        ordinal: index + 1,
+        label: row.label.slice(0, 120),
+        state: row.state.slice(0, 40),
+      })),
+      ...(resolved.length > 0 ? { notice: resolvedGroupLabel(resolved.length) } : {}),
+    };
+  }, [journeyState, learningContext, pending, props.deliverySection, props.error, props.learningContextSection, resolved.length, resumeCandidate, startCandidate]);
+  usePageReadableView(activityReadableView);
+
   return <div className="companion-panel-stack">
     <div className="companion-panel-heading"><div><h3>动态</h3><p>邀请、旅程与主动状态只列出系统允许你做的动作。</p></div></div>
     {props.error ? <p className="companion-error" role="alert">{props.error}</p> : null}
@@ -198,37 +368,37 @@ export function ActivityPanel(props: ActivityPanelProps) {
     <section className="companion-activity-feed" aria-label="学习衔接">
       <h4>继续学习</h4>
       {!props.learningContextSection.ok
-        ? <SectionState message="学习上下文当前不可用" detail={props.learningContextSection.message} onRetry={props.onRetry} />
+        ? <SectionState message={ACTIVITY_LINES.learningUnavailable} detail={props.learningContextSection.message} onRetry={props.onRetry} />
         : resumeCandidate
           ? <article className="companion-activity-card"><div><strong>{resumeCandidate.title}</strong><p>{resumeCandidate.targetSummary}</p><small>{resumeCandidate.impactSummary}</small></div><button type="button" className="primary" onClick={() => props.onResumeLearning(resumeCandidate.runId)}>继续学习</button></article>
           : startCandidate
             ? <article className="companion-activity-card"><div><strong>{startCandidate.title}</strong><p>{startCandidate.targetSummary}</p><small>{startCandidate.impactSummary}</small></div><button type="button" onClick={() => props.onOpenObjective(startCandidate.objectiveId)}>查看目标</button></article>
-            : <SectionState message="当前没有可继续的学习" detail="这里只列出系统从真实学习状态里挑出的候选。" />}
+            : <SectionState message={ACTIVITY_LINES.learningNothing.message} detail={ACTIVITY_LINES.learningNothing.detail} />}
     </section>
 
     <section className="companion-activity-feed" aria-label="伴星旅程">
       <h4>伴星旅程</h4>
-      {!journeyState ? <SectionState message="旅程当前不可用" detail={!props.section.ok ? props.section.message : undefined} onRetry={props.onRetry} /> : <>
+      {!journeyState ? <SectionState message={ACTIVITY_LINES.journeyUnavailable} detail={!props.section.ok ? props.section.message : undefined} onRetry={props.onRetry} /> : <>
         {(journeyState.invitation.status === "offered" || journeyState.invitation.status === "deferred") && !journeyState.journey ? <article className="companion-activity-card"><Sparkles size={18} /><div><strong>开始第一段学习旅程</strong><p>从你自己的资料开始，伴星会跟随真实进度。</p></div><button type="button" className="primary" disabled={props.busy} onClick={() => props.onStart("start_journey")}>开始旅程</button></article> : null}
         {journeyState.invitation.status === "skipped" && !journeyState.journey ? <article className="companion-activity-card"><div><strong>旅程邀请已跳过</strong><p>需要时可以重新开始，不会补造任何里程碑。</p></div><button type="button" disabled={props.busy} onClick={() => props.onStart("replay")}>重新邀请</button></article> : null}
-        {journeyState.journey ? <article className="companion-activity-card is-journey"><div><strong>{journeyState.journey.currentStep ? `当前步骤：${JOURNEY_STEP_LABEL[journeyState.journey.currentStep] ?? "继续学习旅程"}` : "旅程状态"}</strong><p>{journeyState.journey.status === "recoverable_error" ? "这一步暂时没有完成，可以直接重试。" : `${JOURNEY_STATUS_LABEL[journeyState.journey.status] ?? "状态已更新"} · ${JOURNEY_BRANCH_LABEL[journeyState.journey.branch] ?? "当前学习路径"}`}</p></div><div className="companion-action-row">{journeyState.journey.status === "active" ? <button type="button" disabled={props.busy} onClick={() => props.onAction({ kind: "pause" })}>暂停</button> : null}{journeyState.journey.status === "paused" ? <button type="button" className="primary" disabled={props.busy} onClick={() => props.onAction({ kind: "resume", resumeToken: journeyState.journey!.resumeTokenRef })}>继续</button> : null}{journeyState.journey.status === "recoverable_error" && journeyState.journey.error?.retryable ? <button type="button" className="primary" disabled={props.busy} onClick={() => props.onAction({ kind: "retry" })}>重试</button> : null}{journeyState.journey.status === "active" || journeyState.journey.status === "paused" ? <button type="button" disabled={props.busy} onClick={() => props.onAction({ kind: "skip" })}>结束旅程</button> : null}</div></article> : null}
+        {journeyState.journey ? <article className="companion-activity-card is-journey"><div><strong>{journeyCardTitle(journeyState.journey)}</strong><p>{journeyCardSummary(journeyState.journey)}</p></div><div className="companion-action-row">{journeyState.journey.status === "active" ? <button type="button" disabled={props.busy} onClick={() => props.onAction({ kind: "pause" })}>暂停</button> : null}{journeyState.journey.status === "paused" ? <button type="button" className="primary" disabled={props.busy} onClick={() => props.onAction({ kind: "resume", resumeToken: journeyState.journey!.resumeTokenRef })}>继续</button> : null}{journeyState.journey.status === "recoverable_error" && journeyState.journey.error?.retryable ? <button type="button" className="primary" disabled={props.busy} onClick={() => props.onAction({ kind: "retry" })}>重试</button> : null}{journeyState.journey.status === "active" || journeyState.journey.status === "paused" ? <button type="button" disabled={props.busy} onClick={() => props.onAction({ kind: "skip" })}>结束旅程</button> : null}</div></article> : null}
         {/* 旅程是空间级的：另一个空间的旅程不在这里露出（2026-09-22 裁决）。 */}
-        {!journeyState.journey && journeyState.invitation.status === "accepted" ? <SectionState message="目前没有进行中的旅程" detail="新的状态更新会在这里出现。" /> : null}
+        {!journeyState.journey && journeyState.invitation.status === "accepted" ? <SectionState message={ACTIVITY_LINES.journeyNone.message} detail={ACTIVITY_LINES.journeyNone.detail} /> : null}
       </>}
     </section>
 
     <section className="companion-activity-feed companion-activity-feed--inbox" aria-label="主动投递与状态更新">
       <h4>最近动态</h4>
       {!props.deliverySection.ok
-        ? <SectionState message="主动投递当前不可用" detail={props.deliverySection.message} onRetry={props.onRetry} />
+        ? <SectionState message={ACTIVITY_LINES.feedUnavailable} detail={props.deliverySection.message} onRetry={props.onRetry} />
         : props.deliveries.length === 0
-          ? <SectionState message="目前没有新的动态" detail="新的邀请、主动投递和状态更新会出现在这里。" />
+          ? <SectionState message={ACTIVITY_LINES.feedEmpty.message} detail={ACTIVITY_LINES.feedEmpty.detail} />
           : <>
             {pending.length > 0
               ? pending.map((item) => <ActivityDeliveryCard key={item.deliveryId} item={item} busy={props.busy} onPresent={props.onPresent} onDelivery={props.onDelivery} />)
-              : <SectionState message="没有待处理的动态" detail="处理完的会收进下面的历史记录。" />}
+              : <SectionState message={ACTIVITY_LINES.feedNoPending.message} detail={ACTIVITY_LINES.feedNoPending.detail} />}
             {resolved.length > 0 ? <details className="companion-delivery-group">
-              <summary>历史动态 · {resolved.length} 条</summary>
+              <summary>{resolvedGroupLabel(resolved.length)}</summary>
               <div>{resolved.map((item) => <ActivityDeliveryCard key={item.deliveryId} item={item} busy={props.busy} onPresent={props.onPresent} onDelivery={props.onDelivery} />)}</div>
             </details> : null}
           </>}
@@ -258,6 +428,15 @@ function ActivityDeliveryCard({ item, busy, onPresent, onDelivery }: {
 
   return <article ref={ref} className={`companion-delivery-card is-${item.state}${item.expired ? " is-expired" : ""}`}><div><strong>{item.label}</strong><small>{formatRelative(item.createdAt)} · {item.expired ? "已失效" : item.state === "acted" ? "已处理" : item.state === "dismissed" ? "已忽略" : "待处理"}</small></div>{!item.expired && DELIVERY_PENDING_STATES.includes(item.state) ? <div className="companion-action-row"><button type="button" className="primary" disabled={busy} onClick={() => onDelivery(item, "acted")}>{item.target.kind === "none" ? "知道了" : "查看"}</button><button type="button" disabled={busy} onClick={() => onDelivery(item, "dismissed")}>忽略</button></div> : null}</article>;
 }
+
+/**
+ * 日记那一格屏上就那几句状态字，各写一次：`SectionState` 与登记给伴星的可读视图
+ * 共用同一份（视图字段写错不会红，抄成两处迟早分叉）。
+ */
+const DIARY_LOADING = "正在读取日记";
+const DIARY_UNAVAILABLE = "日记当前不可用";
+const DIARY_DAY_FAILED = "这一天她没能写下来";
+const DIARY_DAY_EMPTY = "这一天还没有日记";
 
 export function DiaryPanel(props: {
   section: Section<CompanionDailySummaryV1> | null;
@@ -291,9 +470,51 @@ export function DiaryPanel(props: {
     document.addEventListener("keydown", onKeyDown);
     return () => { document.removeEventListener("pointerdown", onPointerDown); document.removeEventListener("keydown", onKeyDown); };
   }, [calendarOpen]);
-  if (props.loading && !props.section) return <SectionState message="正在读取日记" />;
-  if (!props.section) return <SectionState message="日记当前不可用" detail={props.failure ?? undefined} onRetry={props.onRetry} />;
-  if (!props.section.ok) return <SectionState message="日记当前不可用" detail={props.section.message} onRetry={props.onRetry} />;
+  const diaryReadableView = useMemo<PageReadableV1 | null>(() => {
+    const shell = (statusLine: string, notice?: string): PageReadableV1 => ({
+      pageId: "companion",
+      title: HUD_PAGES.companion.title,
+      statusLine,
+      ...(notice ? { notice } : {}),
+    });
+    if (props.loading && !props.section) return shell(DIARY_LOADING);
+    if (!props.section) return shell(DIARY_UNAVAILABLE, props.failure ? `${DIARY_UNAVAILABLE}：${props.failure.slice(0, 60)}` : undefined);
+    if (!props.section.ok) return shell(DIARY_UNAVAILABLE, `${DIARY_UNAVAILABLE}：${props.section.message.slice(0, 60)}`);
+    const daily = props.section.value;
+    const day = props.date ?? daily.date ?? todayIsoDate();
+    if (daily.status !== "generated") {
+      // 这一屏上面那颗日期胶囊仍然写着（`companion-date-nav` 在这句状态之前渲染），
+      // 所以日期进 `filters`；`statusLine` **只用屏上那句原话**，不拼成"原话 · 日期"
+      // ——拼出来的那一句屏幕上根本没有（同一条规矩在这一批里第三次应验）。
+      const line = daily.status === "failed" ? DIARY_DAY_FAILED : DIARY_DAY_EMPTY;
+      const detail = daily.status === "failed" ? DIARY_FAILURE_DETAIL[daily.failureReason ?? "unknown"] : undefined;
+      return {
+        ...shell(line, detail ? `${line}：${detail}` : undefined),
+        filters: [{ label: "日期", value: diaryDayLabel(day).slice(0, 40) }],
+      };
+    }
+    // 只登记她自己写的那几段正文（`<p class="companion-diary-prose">`）；
+    // 引文块与图片块由别的组件渲染，这里没有可逐字对上的屏幕文本，就不编。
+    const prose = daily.blocks.filter((block) => block.type === "text" && block.text.trim().length > 0);
+    return {
+      pageId: "companion",
+      title: HUD_PAGES.companion.title,
+      statusLine: daily.generatedAt ? `生成于 ${formatDate(daily.generatedAt)}` : "生成时间未提供",
+      filters: [{ label: "日期", value: diaryDayLabel(day).slice(0, 40) }],
+      ...(prose.length > 0
+        ? {
+            items: prose.slice(0, 12).map((block, index) => ({
+              ordinal: index + 1,
+              label: (block as { text: string }).text.slice(0, 120),
+            })),
+          }
+        : {}),
+    };
+  }, [props.date, props.failure, props.loading, props.section]);
+  usePageReadableView(diaryReadableView);
+  if (props.loading && !props.section) return <SectionState message={DIARY_LOADING} />;
+  if (!props.section) return <SectionState message={DIARY_UNAVAILABLE} detail={props.failure ?? undefined} onRetry={props.onRetry} />;
+  if (!props.section.ok) return <SectionState message={DIARY_UNAVAILABLE} detail={props.section.message} onRetry={props.onRetry} />;
   const daily = props.section.value; const anchor = props.date ?? daily.date ?? todayIsoDate(); const today = todayIsoDate();
   return <div className="companion-panel-stack">
     <div className="companion-panel-heading"><div><h3>日记</h3><p>伴星会将每天的旅程写成日记展示在这里。</p></div></div>
@@ -325,7 +546,7 @@ export function DiaryPanel(props: {
           <small>{daily.generatedAt ? `生成于 ${formatDate(daily.generatedAt)}` : "生成时间未提供"}</small>
           {daily.memory ? <button type="button" onClick={() => props.onMemory(daily.memory!.memoryItemId)}>查看关联记忆</button> : null}
         </article>
-      : <SectionState message={daily.status === "failed" ? "这一天她没能写下来" : "这一天还没有日记"} detail={daily.status === "failed" ? DIARY_FAILURE_DETAIL[daily.failureReason ?? "unknown"] : undefined} />}
+      : <SectionState message={daily.status === "failed" ? DIARY_DAY_FAILED : DIARY_DAY_EMPTY} detail={daily.status === "failed" ? DIARY_FAILURE_DETAIL[daily.failureReason ?? "unknown"] : undefined} />}
   </div>;
 }
 
@@ -360,8 +581,47 @@ function CompanionNameRow(props: { readonly current: string; readonly busy: bool
   </div>;
 }
 
+const PERSONA_UNAVAILABLE = "人格档案当前不可用";
+const PERSONA_SECTIONS = { appearance: "人格外观", boundaries: "边界" } as const;
+/** 活跃度那三个词的屏上写法：分段按钮与她读到的那一格共用一份。 */
+function activenessLabel(value: CompanionPersonaProfileV1["activeness"] | undefined): string | null {
+  if (value === "quiet") return "安静";
+  if (value === "moderate") return "适度";
+  if (value === "active") return "活跃";
+  return null;
+}
+
 export function PersonaPanel(props: PersonaPanelProps) {
-  if (!props.section.ok || !props.persona) return <SectionState message="人格档案当前不可用" detail={!props.section.ok ? props.section.message : undefined} onRetry={props.onRetry} />;
+  const personaReadableView = useMemo<PageReadableV1 | null>(() => {
+    const profile = props.persona?.profile ?? null;
+    if (!props.section.ok || !props.persona) {
+      return {
+        pageId: "companion",
+        title: HUD_PAGES.companion.title,
+        statusLine: PERSONA_UNAVAILABLE,
+        ...(!props.section.ok ? { notice: `${PERSONA_UNAVAILABLE}：${props.section.message.slice(0, 60)}` } : {}),
+      };
+    }
+    const rows: Array<{ label: string; state: string }> = [];
+    const push = (label: string, state: string) => {
+      if (label.trim() && rows.length < 12) rows.push({ label, state });
+    };
+    props.persona.presets.forEach((preset) => push(preset.name, PERSONA_SECTIONS.appearance));
+    BOUNDARY_ITEMS.forEach(([, label]) => push(label, PERSONA_SECTIONS.boundaries));
+    const presetName = props.persona.presets.find((preset) => preset.presetId === profile?.presetId)?.name;
+    return {
+      pageId: "companion",
+      title: HUD_PAGES.companion.title,
+      statusLine: props.notice ?? props.error ?? undefined,
+      filters: [
+        ...(presetName ? [{ label: "当前预设", value: presetName.slice(0, 40) }] : []),
+        ...(activenessLabel(profile?.activeness) ? [{ label: "活跃度", value: activenessLabel(profile?.activeness)!.slice(0, 40) }] : []),
+      ],
+      items: rows.map((row, index) => ({ ordinal: index + 1, label: row.label.slice(0, 120), state: row.state.slice(0, 40) })),
+    };
+  }, [props.error, props.notice, props.persona, props.section]);
+  usePageReadableView(personaReadableView);
+  if (!props.section.ok || !props.persona) return <SectionState message={PERSONA_UNAVAILABLE} detail={!props.section.ok ? props.section.message : undefined} onRetry={props.onRetry} />;
   const profile = props.persona.profile;
   return <div className="companion-panel-stack companion-persona-groups">
     <div className="companion-panel-heading"><div><h3>人格</h3><p>预设、活跃度与边界都会存进你的档案，立刻对伴星生效。</p></div></div>
@@ -372,23 +632,65 @@ export function PersonaPanel(props: PersonaPanelProps) {
       {profile ? <CompanionNameRow current={profile.name} busy={props.busy !== null} onRename={props.onRename} /> : null}
     </section>
     <section>
-      <h4>人格外观</h4><p>选择系统提供的完整人格预设。</p>
+      <h4>{PERSONA_SECTIONS.appearance}</h4><p>选择系统提供的完整人格预设。</p>
       <div className="companion-choice-grid">{props.persona.presets.map((preset) => <button key={preset.presetId} type="button" aria-pressed={profile?.presetId === preset.presetId} className={profile?.presetId === preset.presetId ? "is-selected" : undefined} disabled={props.busy !== null} onClick={() => props.onPreset(preset)}><strong>{preset.name}</strong><span>{preset.speakingStyle}</span></button>)}</div>
       <button type="button" disabled={!profile || props.busy !== null} onClick={props.onReset}>恢复系统默认人格</button>
     </section>
     <section>
       <h4>活跃度</h4><p>她一次说多少、日记写多细。<strong>多久主动开口一次不在这里</strong>——那由账户页的「主动介入」决定。</p>
-      <div className="companion-segmented">{(["quiet", "moderate", "active"] as const).map((value) => <button key={value} type="button" aria-pressed={profile?.activeness === value} className={profile?.activeness === value ? "is-selected" : undefined} disabled={!profile || props.busy !== null} onClick={() => props.onActiveness(value)}>{value === "quiet" ? "安静" : value === "moderate" ? "适度" : "活跃"}</button>)}</div>
+      <div className="companion-segmented">{(["quiet", "moderate", "active"] as const).map((value) => <button key={value} type="button" aria-pressed={profile?.activeness === value} className={profile?.activeness === value ? "is-selected" : undefined} disabled={!profile || props.busy !== null} onClick={() => props.onActiveness(value)}>{activenessLabel(value)}</button>)}</div>
     </section>
     <section>
-      <h4>边界</h4><p>每项都是独立授权，关闭后伴星不会把它当成默认同意。</p>
+      <h4>{PERSONA_SECTIONS.boundaries}</h4><p>每项都是独立授权，关闭后伴星不会把它当成默认同意。</p>
       <div className="companion-boundaries">{BOUNDARY_ITEMS.map(([key, label, detail]) => <button key={key} type="button" role="switch" aria-checked={profile?.boundaries[key] === true} disabled={!profile || props.busy !== null} onClick={() => props.onBoundary(key)}><span><strong>{label}</strong><small>{detail}</small></span><span className="companion-switch" data-on={profile?.boundaries[key] === true || undefined} aria-hidden="true"><i /></span></button>)}</div>
     </section>
   </div>;
 }
 
 type DataPanelProps = { busy: string | null; error: string | null; notice: string | null; dangerConfirm: "memory" | "history" | "audit" | null; conflictItems: CompanionMemoryItemV1[] | null; onDangerConfirm: (value: "memory" | "history" | "audit" | null) => void; onConflicts: () => void; onResolveConflict: (keepId: string, removeId: string) => void; onRebuild: () => void; onExport: (kind: CompanionExportKindV1) => void; onDanger: (kind: "memory" | "history" | "audit") => void; diagnostics: { mapVersion: number | null; memoryCount: number; historyCount: number } };
+const DATA_SECTIONS = { check: "检查与整理", export: "导出副本", danger: "清除数据" } as const;
+const DATA_CHECK_ROWS = { conflicts: "检查记忆冲突", conflictsIdle: "按需检查待处理的冲突", rebuild: "整理记忆检索索引" } as const;
+const CONFLICT_PICK_LINE = "选择要保留的记忆";
+/** 三颗危险按钮：标题与说明各一份，屏上与她读到的都是这一处。 */
+const DANGER_ACTIONS = [
+  { kind: "memory", title: "清空全部记忆", detail: "删除长期记忆、候选和星图关系；连续对话与人格保留。" },
+  { kind: "history", title: "清空连续对话记录", detail: "删除对话和动态收件记录；记忆、人格、旅程与操作记录保留。" },
+  { kind: "audit", title: "删除操作与邀请记录", detail: "删除当前工作区内你的安全操作与邀请记录；不会重新触发邀请。" },
+] as const;
+
 export function DataPanel(props: DataPanelProps) {
+  /**
+   * 这一格登记的是**屏上此刻列出的那些操作**（39d W2-7）。开发诊断那段不在内：
+   * 它只在 DEV 构建渲染，不是给用户读的事实；危险操作只登记标题——展开确认后才
+   * 看得到的说明不进载荷（同"折叠里的行不算露出"那条）。
+   */
+  const dataReadableView = useMemo<PageReadableV1 | null>(() => {
+    const rows: Array<{ label: string; state: string }> = [
+      { label: DATA_CHECK_ROWS.conflicts, state: DATA_SECTIONS.check },
+      { label: DATA_CHECK_ROWS.rebuild, state: DATA_SECTIONS.check },
+      ...(["all", "memory", "audit"] as const).map((kind) => ({ label: EXPORT_COPY[kind].label, state: DATA_SECTIONS.export })),
+      ...DANGER_ACTIONS.map((action) => ({ label: action.title, state: DATA_SECTIONS.danger })),
+      // 查出冲突之后，那一段是真的铺开在屏上（不是 `<details>` 里）：分组提示与
+      // 每一条候选正文都登记，否则她只知道"有冲突"却不知道要她在留哪一条。
+      ...(props.conflictItems && props.conflictItems.length > 1
+        ? [{ label: CONFLICT_PICK_LINE, state: DATA_SECTIONS.check },
+            ...props.conflictItems.map((item) => ({ label: item.content, state: DATA_SECTIONS.check }))]
+        : []),
+    ].slice(0, 12);
+    return {
+      pageId: "companion",
+      title: HUD_PAGES.companion.title,
+      statusLine: props.notice ?? props.error ?? undefined,
+      metrics: [{
+        label: "记忆冲突",
+        value: (props.conflictItems === null
+          ? DATA_CHECK_ROWS.conflictsIdle
+          : `发现 ${props.conflictItems.length} 条冲突记录`).slice(0, 40),
+      }],
+      items: rows.map((row, index) => ({ ordinal: index + 1, label: row.label.slice(0, 120), state: row.state.slice(0, 40) })),
+    };
+  }, [props.conflictItems, props.error, props.notice]);
+  usePageReadableView(dataReadableView);
   const conflictGroups = props.conflictItems ? Object.values(props.conflictItems.reduce<Record<string, CompanionMemoryItemV1[]>>((groups, item) => {
     if (item.conflictGroup) (groups[item.conflictGroup] ??= []).push(item);
     return groups;
@@ -398,25 +700,23 @@ export function DataPanel(props: DataPanelProps) {
     {props.error ? <p className="companion-error" role="alert">{props.error}</p> : null}
     {props.notice ? <p className="companion-notice" role="status">{props.notice}</p> : null}
     <section>
-      <h4>检查与整理</h4><p>这些操作只整理真实记录，不会生成新的学习内容。</p>
+      <h4>{DATA_SECTIONS.check}</h4><p>这些操作只整理真实记录，不会生成新的学习内容。</p>
       <div className="companion-data-actions">
-        <button type="button" disabled={props.busy !== null} onClick={props.onConflicts}><AlertTriangle size={14} /><span><strong>检查记忆冲突</strong><small>{props.conflictItems === null ? "按需检查待处理的冲突" : `发现 ${props.conflictItems.length} 条冲突记录`}</small></span></button>
-        {conflictGroups?.map((group) => group.length > 1 ? <div key={group[0].conflictGroup ?? group[0].memoryItemId} className="companion-conflict-group"><strong>选择要保留的记忆</strong>{group.map((item) => <button key={item.memoryItemId} type="button" disabled={props.busy !== null} onClick={() => props.onResolveConflict(item.memoryItemId, group.find((candidate) => candidate.memoryItemId !== item.memoryItemId)!.memoryItemId)}><span>{item.content}</span><small>保留此条</small></button>)}</div> : null)}
-        <button type="button" disabled={props.busy !== null} onClick={props.onRebuild}><Database size={14} /><span><strong>整理记忆检索索引</strong><small>只更新查找能力，不改动记忆正文</small></span></button>
+        <button type="button" disabled={props.busy !== null} onClick={props.onConflicts}><AlertTriangle size={14} /><span><strong>{DATA_CHECK_ROWS.conflicts}</strong><small>{props.conflictItems === null ? DATA_CHECK_ROWS.conflictsIdle : `发现 ${props.conflictItems.length} 条冲突记录`}</small></span></button>
+        {conflictGroups?.map((group) => group.length > 1 ? <div key={group[0].conflictGroup ?? group[0].memoryItemId} className="companion-conflict-group"><strong>{CONFLICT_PICK_LINE}</strong>{group.map((item) => <button key={item.memoryItemId} type="button" disabled={props.busy !== null} onClick={() => props.onResolveConflict(item.memoryItemId, group.find((candidate) => candidate.memoryItemId !== item.memoryItemId)!.memoryItemId)}><span>{item.content}</span><small>保留此条</small></button>)}</div> : null)}
+        <button type="button" disabled={props.busy !== null} onClick={props.onRebuild}><Database size={14} /><span><strong>{DATA_CHECK_ROWS.rebuild}</strong><small>只更新查找能力，不改动记忆正文</small></span></button>
       </div>
     </section>
     <section>
-      <h4>导出副本</h4><p>通过系统保存窗口把当前数据保存到本机。</p>
+      <h4>{DATA_SECTIONS.export}</h4><p>通过系统保存窗口把当前数据保存到本机。</p>
       <div className="companion-data-actions">
         {(["all", "memory", "audit"] as const).map((kind) => <button key={kind} type="button" disabled={props.busy !== null} onClick={() => props.onExport(kind)}><Download size={14} /><span><strong>{EXPORT_COPY[kind].label}</strong><small>{EXPORT_COPY[kind].detail}</small></span></button>)}
       </div>
     </section>
     <section className="companion-danger-zone">
-      <h4>清除数据</h4><p>清除后无法在应用内恢复；每项只影响说明中列出的内容。</p>
+      <h4>{DATA_SECTIONS.danger}</h4><p>清除后无法在应用内恢复；每项只影响说明中列出的内容。</p>
       <div className="companion-data-actions">
-        <DangerAction active={props.dangerConfirm === "memory"} busy={props.busy === "memory"} title="清空全部记忆" detail="删除长期记忆、候选和星图关系；连续对话与人格保留。" onOpen={() => props.onDangerConfirm("memory")} onCancel={() => props.onDangerConfirm(null)} onConfirm={() => props.onDanger("memory")} />
-        <DangerAction active={props.dangerConfirm === "history"} busy={props.busy === "history"} title="清空连续对话记录" detail="删除对话和动态收件记录；记忆、人格、旅程与操作记录保留。" onOpen={() => props.onDangerConfirm("history")} onCancel={() => props.onDangerConfirm(null)} onConfirm={() => props.onDanger("history")} />
-        <DangerAction active={props.dangerConfirm === "audit"} busy={props.busy === "audit"} title="删除操作与邀请记录" detail="删除当前工作区内你的安全操作与邀请记录；不会重新触发邀请。" onOpen={() => props.onDangerConfirm("audit")} onCancel={() => props.onDangerConfirm(null)} onConfirm={() => props.onDanger("audit")} />
+        {DANGER_ACTIONS.map((action) => <DangerAction key={action.kind} active={props.dangerConfirm === action.kind} busy={props.busy === action.kind} title={action.title} detail={action.detail} onOpen={() => props.onDangerConfirm(action.kind)} onCancel={() => props.onDangerConfirm(null)} onConfirm={() => props.onDanger(action.kind)} />)}
       </div>
     </section>
     {import.meta.env.DEV ? <section><h4>开发诊断</h4><p>仅开发构建可见；不提供制造提案或手工注入事件。</p><dl className="companion-diagnostics"><div><dt>记忆图谱</dt><dd>{props.diagnostics.mapVersion ? `V${props.diagnostics.mapVersion}` : "不可用"}</dd></div><div><dt>记忆节点</dt><dd>{props.diagnostics.memoryCount}</dd></div><div><dt>已读历史</dt><dd>{props.diagnostics.historyCount}</dd></div></dl></section> : null}

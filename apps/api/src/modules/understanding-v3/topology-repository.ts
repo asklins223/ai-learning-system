@@ -35,7 +35,7 @@ import {
 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { learningRuns, canonicalLearningEventOutbox, practiceTrailEventOutbox } from "@ailearn/shared/db-schema/learning-runs";
 import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
-import { resolvePrimaryActionV3, type ActionResolverInputV3 } from "../learning-objectives/action-resolver.ts";
+import { pickLatestCompletedRunV3, resolvePrimaryActionV3, type ActionResolverInputV3 } from "../learning-objectives/action-resolver.ts";
 import { readAnswerModePreference } from "../companion-shell/answer-mode-preference.ts";
 import type {
   UnderstandingNodeProjectionV3,
@@ -254,7 +254,8 @@ export async function buildTopologySnapshotV3(
   const allRunRows = objectiveIds.length > 0
     ? boundedCollection(
         await tx
-          .select({ runId: learningRuns.id, phase: learningRuns.phase, origin: learningRuns.origin, createdAt: learningRuns.createdAt })
+          .select({ runId: learningRuns.id, phase: learningRuns.phase, origin: learningRuns.origin, createdAt: learningRuns.createdAt,
+            outcome: sql<string | null>`${learningRuns.result}->>'outcome'`, updatedAt: learningRuns.updatedAt })
           .from(learningRuns)
           .where(and(
             eq(learningRuns.workspaceId, ctx.workspaceId),
@@ -272,6 +273,7 @@ export async function buildTopologySnapshotV3(
       )
     : [];
   const runByObjective = new Map<string, { runId: string; phase: string }>();
+  const outcomeRowsByObjective = new Map<string, { runId: string; outcome: unknown; updatedAt: Date }[]>();
   const allRunIds: string[] = [];
   const runIdToObjective = new Map<string, string>();
   for (const run of allRunRows) {
@@ -279,6 +281,9 @@ export async function buildTopologySnapshotV3(
     if (objectiveId && objectiveIdSet.has(objectiveId)) {
       allRunIds.push(run.runId);
       runIdToObjective.set(run.runId, objectiveId);
+      const outcomes = outcomeRowsByObjective.get(objectiveId) ?? [];
+      outcomes.push({ runId: run.runId, outcome: run.outcome, updatedAt: run.updatedAt });
+      outcomeRowsByObjective.set(objectiveId, outcomes);
       if ((ACTIVE_RUN_PHASES as readonly string[]).includes(run.phase) && !runByObjective.has(objectiveId)) {
         runByObjective.set(objectiveId, { runId: run.runId, phase: run.phase });
       }
@@ -597,7 +602,6 @@ export async function buildTopologySnapshotV3(
       lifecycle: objective.lifecycle as ActionResolverInputV3["lifecycle"],
       successorObjectiveId,
       successorCardId,
-      hasActiveCard: cardId !== null,
       cardId,
       activeRun: activeRun ? { runId: activeRun.runId } : null,
       hasPriorFormalResult: lastCanonicalEventId !== null,
@@ -606,6 +610,12 @@ export async function buildTopologySnapshotV3(
       initialDeferred,
       practiceOnly: exposedObjectives.has(objective.objectiveId),
       practiceReasonCodes: exposedObjectives.has(objective.objectiveId) ? ["exposed"] : [],
+      // 与列表／详情页同一个判据（`pickLatestCompletedRunV3`）。**一处已知的窄窗口**：
+      // 上面那条 runs 查询带上限护栏（按 `createdAt DESC` 截断，被丢掉的是更老的历史），
+      // 而这里取的是"有结论的行里 `updatedAt` 最大"——一个目标的历史多到越过上限、
+      // 且老的那轮判得比新的那轮晚时，星图可能看不见列表能看见的那一轮。截断本身已经
+      // 记在 `truncation` 台账里（`boundedCollection` 会喊），不是静默的。
+      lastResultOutcome: pickLatestCompletedRunV3(outcomeRowsByObjective.get(objective.objectiveId) ?? [])?.outcome ?? null,
       answerModePreference,
     };
     const primaryAction = resolvePrimaryActionV3(actionInput);

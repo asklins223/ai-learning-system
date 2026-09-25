@@ -88,20 +88,53 @@ export class MockProvider implements AIProvider {
        */
       const scriptedWithheldViolation = request.messages.some((message) =>
         message.role === "user" && String(message.content ?? "").includes("【mock:tool-after-withheld】"));
-      const wantsToolCall = scriptedWithheldViolation || !toolResult;
-      const outputText = toolResult
-        ? `已读取伴星工具结果：${String(toolResult.content).slice(0, 400)}`
-        : request.tools.length > 0
-          ? "我先读取一下当前上下文。"
-          : "我在这里，准备好陪你学习了。";
+      /**
+       * 剧本 `【mock:fact-span】`：终答**引用读数目录**（`{{f:key}}`，39b §9.4 / 39d W2-5）。
+       * 真实模型会不会这么写，只有真跑能证；但"她写了就必须被服务端换成目录里的值、
+       * 标记永不下发到屏幕"这条管道要在集测里能被验——所以照 `【mock:tool-after-withheld】`
+       * 的同一个办法给 mock 开一个口子。
+       */
+      const scriptedFactSpan = request.messages.some((message) =>
+        message.role === "user" && String(message.content ?? "").includes("【mock:fact-span】"));
+      /**
+       * 剧本 `【mock:leak-answer】`：她**把答案原句念回给用户**（39d W2-6 要记的那件事）。
+       * 记账判据是服务端算的（她这句话与本题题面/答案的连续重合），所以这里只负责
+       * "复述一句夹具里那条 canonical answer"——真实模型会不会这么说是另一件事，
+       * 归每波末尾那一次真跑。
+       */
+      const scriptedLeak = request.messages.some((message) =>
+        message.role === "user" && String(message.content ?? "").includes("【mock:leak-answer】"));
+      const wantsToolCall = ((scriptedWithheldViolation || !toolResult) && !scriptedFactSpan && !scriptedLeak)
+        // `tool_choice:"required"` 是 provider 原生机制（39b §9.5）。mock 以前**完全不理它**，
+        // 于是"required 生效了"这类断言全是空转——它按自己的偏好回话，看起来却像模型照办了。
+        // 现在按真实合同走：这一档下必须回 tool_calls。
+        || request.toolChoice === "required";
+      if (request.toolChoice === "required" && request.tools.length === 0) {
+        // 真实 provider 在这一对上直接 400（2026-09-22 那 3 次 INTERNAL_ERROR 里 2 次的成因）。
+        // 让 mock 也**当场炸**，任何把这对拼出来的改法就会在测试里红，而不是变成
+        // "模型自己没听话"这种归因错误的读数。
+        throw new Error("mock provider: tool_choice=required 但工具面为空（真实 provider 会 400）");
+      }
+      const outputText = scriptedFactSpan
+        ? "你今天学了 {{f:today_minutes}} 分钟，继续加油。"
+        : scriptedLeak
+          ? "复利效应是本金产生利息后加入本金继续生息的现象，这样说清楚了吗？"
+          : toolResult
+          ? `已读取伴星工具结果：${String(toolResult.content).slice(0, 400)}`
+          : request.tools.length > 0
+            ? "我先读取一下当前上下文。"
+            : "我在这里，准备好陪你学习了。";
       if (wantsToolCall) {
         const contextTool = request.tools.find((tool) => tool.name === "companion_read_context");
-        if (contextTool || scriptedWithheldViolation) {
+        // required 这一档下"没找到那个顺手的工具"不能变成"干脆不回 tool_calls"——
+        // 那正好是要被测的那个违约形状。挑工具面上第一个能点的（参数由用例自己给形状）。
+        const chosen = contextTool ?? (request.toolChoice === "required" ? request.tools[0] : undefined);
+        if (chosen || scriptedWithheldViolation) {
           toolCalls.push({
             // id 每步唯一：同毫秒的两次 `Date.now()` 会让"工具事件覆盖的调用集合
             // 与审计行同一批"那条断言随机变红。
             id: `call_companion_context_${randomUUID()}`,
-            name: "companion_read_context",
+            name: chosen?.name ?? "companion_read_context",
             arguments: {},
           });
         }
@@ -252,6 +285,25 @@ fingerprint: `mock:${this.modelId}:${this.visionModelId}:native_tools`,
     const userContent = typeof userMessage?.content === "string"
       ? userMessage.content
       : "";
+
+    /**
+     * 工具意图分类器（`companion-tool-intent.ts`）问的是"下一步是否必须调用工具"，
+     * 并要求只回 `{"needsTool":true|false}`。mock 以前回的是那句 `{"status":"mock"}`
+     * ——JSON 合法但没有那个键 ⇒ 分类器**恒为 null**，而 null 走的正是 fail-open 那一支。
+     * 于是所有 mock 驱动的用例都悄悄站在"分类器读不到东西"这个非默认状态上。
+     * 现在按合同回一个布尔（默认 false＝不需要工具，与这些用例本来的形状一致），
+     * 需要"她说要做事"那一支的用例用 `【mock:wants-tool】` 点名。
+     */
+    const isToolIntentCall = messages.some((message) =>
+      message.role === "system"
+      && String(typeof message.content === "string" ? message.content : "").includes("needsTool"));
+    if (isToolIntentCall) {
+      const needsTool = messages.some((message) =>
+        message.role === "user"
+        && String(typeof message.content === "string" ? message.content : "").includes("【mock:wants-tool】"));
+      const decided = JSON.stringify({ needsTool });
+      return { content: decided, usage: this.estimateUsage(userContent, decided) };
+    }
 
     const content = JSON.stringify({ status: "mock", message: "Mock chat completion response" });
 

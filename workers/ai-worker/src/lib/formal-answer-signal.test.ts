@@ -63,7 +63,10 @@ describe("判据只有一份", () => {
       if (entry === "node_modules" || entry === "dist") continue;
       const full = join(dir, entry);
       if (statSync(full).isDirectory()) sources(full, out);
-      else if (entry.endsWith(".ts") && !entry.endsWith(".test.ts") && !entry.endsWith(".integration.ts")) {
+      // 测试专用件不进扫描集：`integration-tests/` 整个目录都是（那里有造数夹具，
+      // 夹具当然要写 purpose='formal'，把算它一份"判据分叉"是误伤）。
+      else if (entry.endsWith(".ts") && !entry.endsWith(".test.ts") && !entry.endsWith(".integration.ts")
+        && !full.split(/[\\/]/).includes("integration-tests")) {
         out.push(full);
       }
     }
@@ -90,7 +93,9 @@ describe("判据只有一份", () => {
 
   it("语音投递那条路上确实问了这条判据（不是只写了没人调）", () => {
     const dialogue = readFileSync(join(WORKER_ROOT, "src", "handlers", "companion-dialogue.ts"), "utf8");
-    assert.match(dialogue, /isFormalAnswerInProgress\(tx,/);
+    // 判据函数改名成"取身份"（`findFormalAnswerTarget`）：静音与暴露记账共用同一次
+    // 读取，boolean 只是它的非空判断。这条断言盯的还是"语音那条路问了这道判据"。
+    assert.match(dialogue, /findFormalAnswerTarget\(tx,/);
     assert.match(dialogue, /if \(voiceDeliveryDecision !== "delivered"\) return;/);
   });
 });

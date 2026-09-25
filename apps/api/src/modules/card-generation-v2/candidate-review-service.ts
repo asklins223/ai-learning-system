@@ -6,7 +6,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { withWorkspaceTransaction } from "../../db/client.ts";
 import type { ApiTransaction } from "../../db/client.ts";
 import {
@@ -404,6 +404,34 @@ async function handleEdit(
 
 // ─── merge ───────────────────────────────────────────────────────────────────
 
+/**
+ * 一个计划目标槽位（同一 run、同一 plan 版本、同一个 `plan_objective_local_id`）
+ * 里"下一号"候选 revision。
+ *
+ * 为什么按**槽位**算而不是 `父候选.revision + 1`：唯一索引
+ * `cg_v2_cand_plan_objective_revision_idx` 的键里根本没有 `candidate_id`，
+ * revision 在这张表上编的就是"那一格的第几版"；而被合并进动作的那一版
+ * 不一定是那一格里最新的一版（`edit` 会先把它顶到 2），按父候选自己的号加一
+ * 会撞在既有那一行上。
+ */
+async function nextPlanSlotRevision(
+  tx: ApiTransaction,
+  workspaceId: string,
+  runId: string,
+  slot: { planVersion: number; planObjectiveLocalId: string },
+): Promise<number> {
+  const rows = await tx
+    .select({ maxRevision: sql<number>`coalesce(max(${cardGenerationCandidatesV2.revision}), 0)::int` })
+    .from(cardGenerationCandidatesV2)
+    .where(and(
+      eq(cardGenerationCandidatesV2.workspaceId, workspaceId),
+      eq(cardGenerationCandidatesV2.runId, runId),
+      eq(cardGenerationCandidatesV2.planVersion, slot.planVersion),
+      eq(cardGenerationCandidatesV2.planObjectiveLocalId, slot.planObjectiveLocalId),
+    ));
+  return Number(rows[0]?.maxRevision ?? 0) + 1;
+}
+
 async function handleMerge(
   tx: ApiTransaction,
   ctx: RunContext,
@@ -429,9 +457,16 @@ async function handleMerge(
 
   // 创建合并后的新候选
   const mergedCandidateId = randomUUID();
-  const newRevision = 1;
   const newCandidateRevisionId = randomUUID();
   const firstCandidate = candidates[0];
+  // 合并产物落在第一个父候选的计划目标槽位上（`plan_objective_local_id` 沿用父级
+  // 是既有语义，激活侧按 `candidateRevisionId` 选候选、不看 revision 号，
+  // 见 activation-service.ts:312-320），因此 revision 必须续上**那一格**的序号：
+  // 写死 1 会与第一个父候选自己那一行撞唯一索引，合并动作当场 500。
+  const newRevision = await nextPlanSlotRevision(tx, ctx.workspaceId, runId, {
+    planVersion: firstCandidate.planVersion,
+    planObjectiveLocalId: firstCandidate.planObjectiveLocalId,
+  });
 
   // §17.4：mergedDraft 是用户对合并产物的编辑 patch——叠加到首个父候选的完整
   // draft 上（与 edit 的 applyPatch 语义一致），否则 canonicalAnswer/rubric/

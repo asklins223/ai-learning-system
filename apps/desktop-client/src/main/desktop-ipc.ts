@@ -533,7 +533,7 @@ const sourceImageGetInputSchema = z.strictObject({
 const noteListInputSchema = z.strictObject({ ...m1InputBase, cursor: z.string().min(1).max(128).optional(), limit: z.number().int().min(1).max(100).optional(), trashed: z.boolean().optional() });
 const noteCreateInputSchema = z.strictObject({ ...m1InputBase, request: desktopNoteCreateRequestSchema });
 const noteIdInputSchema = z.strictObject({ ...m1InputBase, noteId: uuidSchema });
-const objectiveListInputSchema = z.strictObject({ ...m1InputBase, cursor: z.string().min(1).max(128).optional(), limit: z.number().int().min(1).max(100).optional(), lifecycle: z.enum(["active", "archived", "superseded"]).optional() });
+const objectiveListInputSchema = z.strictObject({ ...m1InputBase, cursor: z.string().min(1).max(128).optional(), limit: z.number().int().min(1).max(100).optional(), lifecycle: z.enum(["active", "archived", "superseded"]).optional(), noteId: uuidSchema.optional() });
 const objectiveGetInputSchema = z.strictObject({ ...m1InputBase, objectiveId: uuidSchema });
 const searchGlobalInputSchema = z.strictObject({ ...m1InputBase, query: z.string().trim().min(1).max(500), type: z.enum(["note", "source", "objective"]).optional(), limit: z.number().int().min(1).max(50).optional(), cursor: z.string().min(1).max(512).optional() });
 const noteGetInputSchema = z.strictObject({ ...m1InputBase, noteId: uuidSchema });
@@ -2770,7 +2770,7 @@ export function registerM1DesktopIpc(options: DesktopIpcRegistrationOptions): AI
   installHandler(DESKTOP_IPC_CHANNELS.objectiveList, objectiveListInputSchema, options, async (_event, _window, input) => {
     requireM2Route(contract, "objective.library");
     assertEpoch(input.meta, activeWorkspaceEpoch);
-    return gateway.listObjectives({ lifecycle: input.lifecycle, cursor: input.cursor, limit: input.limit }, input.meta.requestId);
+    return gateway.listObjectives({ lifecycle: input.lifecycle, cursor: input.cursor, limit: input.limit, noteId: input.noteId }, input.meta.requestId);
   }, () => activeWorkspaceEpoch > 0 ? activeWorkspaceEpoch : undefined, objectiveListPageV3Schema);
 
   installHandler(DESKTOP_IPC_CHANNELS.objectiveGet, objectiveGetInputSchema, options, async (_event, _window, input) => {

@@ -1369,6 +1369,15 @@ BEGIN
       to_regprocedure('public.ailearn_purge_old_ai_audit_log(integer,integer)')
     AND p.oid IS DISTINCT FROM
       to_regprocedure('public.ailearn_find_resumable_companion_journey(uuid,uuid)')
+    -- 0273／0276：空间离开时的记忆退役与整空间解散，都是 API 路由显式调的
+    -- SECURITY DEFINER 函数。下面"该有的授权不能缺"那份反向清单里已经列了它们，
+    -- 而这里的白名单漏了——三处要一起改（迁移 GRANT／上面的 GRANT 块／这里），
+    -- 少改一处的表现是**全新库根本起不来**（这道检查在引导时就 RAISE），
+    -- 而不是某个功能静默失败。
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_retire_workspace_memories_on_departure(uuid,uuid)')
+    AND p.oid IS DISTINCT FROM
+      to_regprocedure('public.ailearn_dissolve_workspace(uuid,uuid)')
     AND NOT EXISTS (
       SELECT 1 FROM pg_depend d
       WHERE d.objid = p.oid AND d.deptype = 'e'

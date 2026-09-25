@@ -28,7 +28,9 @@ function snapshot(overrides: Partial<HereAndNowSnapshot> = {}): HereAndNowSnapsh
     noteReference: null,
     imagesReadable: false,
     currentPage: null,
+    livePageView: null,
     learningStats: null,
+    factSpans: null,
     boundaryFacts: null,
     ...overrides,
   };
@@ -44,18 +46,75 @@ test("答应的提醒会出现在她知道的当下（不记得自己许过约�
 
 test("用户点名的笔记：找到就给 id，没找到也不给她「它不存在」这个结论", () => {
   const found = renderHereAndNow(snapshot({
-    noteReference: { title: "欧姆定律生成验收", found: true, noteId: "b4ab4749-d888-4b93-9019-e33b74679206", ageLabel: "4 天前", imageCount: 0, opening: null },
+    noteReference: { title: "欧姆定律生成验收", found: true, noteId: "b4ab4749-d888-4b93-9019-e33b74679206", ageLabel: "4 天前", imageCount: 0, opening: null, openRuns: [], nearest: null },
   }));
   assert.ok(found?.includes("b4ab4749-d888-4b93-9019-e33b74679206"));
   assert.ok(found?.includes("companion_read_note"));
 
   const missing = renderHereAndNow(snapshot({
-    noteReference: { title: "欧姆定律生成验收", found: false, noteId: null, ageLabel: null, imageCount: 0, opening: null },
+    noteReference: { title: "欧姆定律生成验收", found: false, noteId: null, ageLabel: null, imageCount: 0, opening: null, openRuns: [], nearest: null },
   }));
   assert.ok(missing?.includes("按标题没找到"));
   // 关键：这一行必须把她推向"再查一次/照实说"，而不是让她有依据地下假结论
   assert.ok(missing?.includes("companion_search_notes"));
   assert.ok(!missing?.includes("不存在"));
+});
+
+/**
+ * "库里没有匹配"由服务端替她说完，还附赠一个更接近的真东西（39b §9.3 第二行）。
+ *
+ * 这一行是**未命中**时才有的：没有它，她手上只有一个"没找到"，于是"库里没有这篇"
+ * 这句话在她的世界里就是成立的（那正是实机里可证伪的那句假阴性）。
+ */
+test("《标题》没对上时给出最接近的一篇，命中时反而不能提", () => {
+  const withNearest = renderHereAndNow(snapshot({
+    noteReference: {
+      title: "欧姆定律生成验收", found: false, noteId: null, ageLabel: null, imageCount: 0, opening: null,
+      openRuns: [], nearest: { title: "欧姆定律生成验收稿", score: 0.62 },
+    },
+  }));
+  assert.ok(withNearest?.includes("最接近的是《欧姆定律生成验收稿》"));
+  assert.ok(withNearest?.includes("0.62"), "相似度要一起给，她才能判断该不该信这一条");
+  assert.ok(withNearest?.includes("不要替笔记库下"));
+
+  const found = renderHereAndNow(snapshot({
+    noteReference: {
+      title: "欧姆定律生成验收", found: true, noteId: "b4ab4749-d888-4b93-9019-e33b74679206",
+      ageLabel: "4 天前", imageCount: 0, opening: null, openRuns: [], nearest: null,
+    },
+  }));
+  assert.ok(!found?.includes("最接近的是"), "命中时还提最接近的，等于把真对象说成近似的");
+});
+
+/**
+ * `start`/`resume` 的服务端回填（39b §9.8 的 C1）：用户说"继续学《X》"，她手上要
+ * **先**有"这篇有几轮、什么状态、runId 是哪个"——否则那两个工具只能服务端替她挑最近一条，
+ * 挑错了用户看不出为什么动的不是这一篇。
+ */
+test("点名的笔记上有没结束的轮次：给出轮数与 runId，并指向 resume", () => {
+  const block = renderHereAndNow(snapshot({
+    noteReference: {
+      title: "数据库索引优化策略", found: true, noteId: "b4ab4749-d888-4b93-9019-e33b74679206",
+      ageLabel: "2 小时前", imageCount: 0, opening: null, nearest: null,
+      openRuns: [
+        { id: "11111111-1111-4111-8111-111111111111", phase: "paused" },
+        { id: "22222222-2222-4222-8222-222222222222", phase: "active" },
+      ],
+    },
+  }));
+  assert.ok(block?.includes("有 1 轮学习正在进行中"));
+  assert.ok(block?.includes("有 1 轮学习在暂停中"));
+  assert.ok(block?.includes("22222222-2222-4222-8222-222222222222"), "进行中的那一轮没给 runId");
+  assert.ok(block?.includes("companion_resume_learning"), "没把她推向「接着这一轮」，她会另起一轮");
+
+  // 反向对照：没有没结束的轮次时一个字都不提（多写的"0 轮"就是噪音，也可能被她念出来）。
+  const none = renderHereAndNow(snapshot({
+    noteReference: {
+      title: "数据库索引优化策略", found: true, noteId: "b4ab4749-d888-4b93-9019-e33b74679206",
+      ageLabel: "2 小时前", imageCount: 0, opening: null, openRuns: [], nearest: null,
+    },
+  }));
+  assert.ok(!none?.includes("在暂停中"));
 });
 
 /**
@@ -68,7 +127,7 @@ test("用户点名的笔记：找到就给 id，没找到也不给她「它不�
 test("有图就先把图数交给她：看不了时禁止承诺，能看时指向 companion_read_image", () => {
   const denied = renderHereAndNow(snapshot({
     imagesReadable: false,
-    noteReference: { title: "IndexTTS 2.5", found: true, noteId: "a7aa823c-f2cf-4b3d-bda1-37a6eca14bce", ageLabel: "3 天前", imageCount: 6, opening: null },
+    noteReference: { title: "IndexTTS 2.5", found: true, noteId: "a7aa823c-f2cf-4b3d-bda1-37a6eca14bce", ageLabel: "3 天前", imageCount: 6, opening: null, openRuns: [], nearest: null },
   }));
   assert.ok(denied?.includes("6 张图"));
   assert.ok(denied?.includes("图片外发没开启"));
@@ -78,14 +137,14 @@ test("有图就先把图数交给她：看不了时禁止承诺，能看时指�
 
   const readable = renderHereAndNow(snapshot({
     imagesReadable: true,
-    noteReference: { title: "IndexTTS 2.5", found: true, noteId: "a7aa823c-f2cf-4b3d-bda1-37a6eca14bce", ageLabel: "3 天前", imageCount: 2, opening: null },
+    noteReference: { title: "IndexTTS 2.5", found: true, noteId: "a7aa823c-f2cf-4b3d-bda1-37a6eca14bce", ageLabel: "3 天前", imageCount: 2, opening: null, openRuns: [], nearest: null },
   }));
   assert.ok(readable?.includes("companion_read_image"));
   assert.ok(!readable?.includes("图片外发没开启"), "政策开着时不能告诉她看不了");
 
   // 没图时一个字都不提：多出来的那句"另有一张图"本身就是假事实。
   const none = renderHereAndNow(snapshot({
-    noteReference: { title: "欧姆定律", found: true, noteId: "b4ab4749-d888-4b93-9019-e33b74679206", ageLabel: "4 天前", imageCount: 0, opening: null },
+    noteReference: { title: "欧姆定律", found: true, noteId: "b4ab4749-d888-4b93-9019-e33b74679206", ageLabel: "4 天前", imageCount: 0, opening: null, openRuns: [], nearest: null },
   }));
   assert.ok(!none?.includes("张图"));
 });
@@ -206,19 +265,18 @@ test("asksForLearningStats：只认明确在要学习数据的说法", () => {
   }
 });
 
-test("问到学习数据时，真值在她开口之前就在场；没问就一行都不加", () => {
+test("问到学习数据时：环境块只给指路，数值由 <fact_spans> 渲染（一处一个来源）", () => {
   const stats = {
     todayMinutes: 33, weekMinutes: 154, dueReviews: 25,
     dueNext24Hours: 8, activeCards: 16, noteCount: 11,
   };
   const asked = renderHereAndNow(snapshot({ learningStats: stats }))!;
-  assert.match(asked, /今日 33 分钟，本周 154 分钟，到期复习 25 项/);
-  assert.match(asked, /活跃卡片 16 张，笔记 11 篇/);
-  // 这一句才是这次修复的重点：历史里的旧数必须被明确降级
-  // （实机她先说"今天 50 分钟"再查出 33，然后在同一条消息里改口）。
-  assert.match(asked, /只用这一行的数字/);
+  // 39d W2-5：数值**撤出环境块**，只留指路与防复读那半句（历史里的旧数仍要被降级）。
+  assert.match(asked, /可报的读数在 <fact_spans> 里/);
+  assert.match(asked, /要报就写 \{\{f:key\}\}/);
   assert.match(asked, /历史对话里.*可能已经变/);
-  assert.doesNotMatch(renderHereAndNow(snapshot()) ?? "", /只用这一行的数字/);
+  assert.doesNotMatch(asked, /33 分钟/, "数值不许在环境块里再渲染一遍（那样就有两处来源了）");
+  assert.doesNotMatch(renderHereAndNow(snapshot()) ?? "", /可报的读数在 <fact_spans> 里/);
   // 工具与环境块共用同一份摘要，口径不能两份。
   assert.equal(summarizeLearningStats(stats), "今日 33 分钟，本周 154 分钟，到期复习 25 项");
 });
@@ -280,8 +338,42 @@ test("点名的笔记找到时，快照里带出真开头并注明不许往下�
     noteReference: {
       title: "欧姆定律生成验收", found: true, noteId: "b4ab4749-d888-4b93-9019-e33b74679206",
       ageLabel: "4 天前", imageCount: 0, opening: "欧姆定律说明，在电阻不变时，电流与电压成正比。",
+      openRuns: [], nearest: null,
     },
   }));
   assert.ok(block?.includes("这篇的开头是：「欧姆定律说明，在电阻不变时，电流与电压成正比。」"));
   assert.ok(block?.includes("不要照这段往下补"), "要同时点名边界：只有开头，更长的还得去读");
+});
+
+/**
+ * 当前屏的**状态行**折进环境块（39d W2-2，worker 侧感知通道）。
+ *
+ * 她过去只读得到"用户正在看笔记《X》"，读不到那一屏上正在发生什么——而后者才是用户
+ * 问"这一页怎么了"时要答的东西。`statusLine` 来自该页自己发布的 `readable_view`
+ * （P4-a 五页登记，逐字），所以这一条的可见行为必须钉住。
+ */
+test("当前屏有状态行时，折进「用户正在看」后面那一行", () => {
+  const block = renderHereAndNow(snapshot({
+    currentPage: { kind: "笔记", title: "数据库索引优化策略", statusLine: "● 有改动还没保存" },
+  }));
+  assert.ok(block?.includes("用户正在看笔记《数据库索引优化策略》"));
+  assert.ok(block?.includes("这一屏：● 有改动还没保存"), "状态行要逐字带过去");
+});
+
+test("没有状态行时不多渲染那一行（少一行好过多一行假的）", () => {
+  const block = renderHereAndNow(snapshot({
+    currentPage: { kind: "笔记", title: "数据库索引优化策略", statusLine: null },
+  }));
+  assert.ok(block?.includes("用户正在看笔记《数据库索引优化策略》"));
+  assert.ok(!block?.includes("这一屏："), "statusLine 为 null 时不该出现这一行");
+});
+
+test("状态行过长时截断，不把整段塞进环境块", () => {
+  const long = "● ".concat("很长的状态说明".repeat(20));
+  const block = renderHereAndNow(snapshot({
+    currentPage: { kind: "笔记", title: "X", statusLine: long },
+  }));
+  assert.ok(block);
+  assert.ok(!block.includes(long), "原样的超长状态行不该整段进块");
+  assert.ok(block.includes("这一屏："));
 });

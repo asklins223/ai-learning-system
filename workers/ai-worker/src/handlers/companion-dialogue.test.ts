@@ -547,8 +547,11 @@ test("hereAndNow 注入 <here_and_now> 数据块并点名它的用法", () => {
   const system = String(messages[0].content);
   assert.match(system, /现在：2026-09-20 19:17 周日（晚上）/);
   // 「可以自然引用、据此主动开启话题」是被实测否决的旧说法：用户只说「嘿嘿」，
-  // 她就"自然地"回了一句"今天已经学了 42 分钟"。这条断言钉住新口径。
-  assert.match(system, /用户没问学习情况，就不要报数字/);
+  // 她就"自然地"回了一句"今天已经学了 42 分钟"。
+  // 39d W2-5 起口径再往前走一步：不是"不要报数字"，而是"要报就读目录里的键"——
+  // 禁止句换成指针句，因为没问到的键**根本不在目录里**。
+  assert.match(system, /要报\*\*具体读数\*\*/);
+  assert.match(system, /见 <fact_spans>/);
   assert.doesNotMatch(system, /可以自然引用，也可以据此主动开启话题/);
   // 排在记忆块之前：越靠前的约束对小模型的遵循度越高。
   assert.ok(system.indexOf("<here_and_now>") < system.indexOf("<memory_data>"),
@@ -594,6 +597,31 @@ test("conversation_summary 不算数字的合法出处", () => {
   assert.match(kept, /到期待复习 25 项/, "环境快照仍是出处");
   assert.doesNotMatch(kept, /23 分钟/, "摘要里的数字不能当出处");
   assert.ok(!kept.includes("conversation_summary"), "整块都不许进白名单");
+});
+
+// 实体先行解析的产物要进白名单：它是**这一轮**服务端现查的对象事实（39d W2-3），
+// 与"几周前说过的话"不是一回事。漏了这一条，她照着块里的 id 说事时会被当成没出处的数字。
+test("this_turn_facts 算数字的合法出处", () => {
+  const context = [
+    "<this_turn_facts>", "《数据库索引优化策略》正文 3 块，1 张图", "</this_turn_facts>",
+    "<memory_data>", "偏好：喜欢语音（今年听了 12 次）", "</memory_data>",
+  ].join("\n");
+  const kept = keepRecomputedBlocks(context);
+  assert.match(kept, /正文 3 块/, "这一轮现查的事实块被剥掉了");
+  assert.doesNotMatch(kept, /12 次/, "非白名单块（记忆）里的数字不该跟着一起放行");
+});
+
+test("事实块作为独立数据块进 system，C 层前言点它的用处与边界", () => {
+  const messages = buildCompanionPersonaMessages({
+    userText: "第四张到点了吗",
+    recentMessages: [],
+    pageContext: null,
+    thisTurnFacts: "<this_turn_facts>\n- 「第四张」：学习卡《索引的选择性》（cardId=abc）。\n</this_turn_facts>",
+  });
+  const system = String(messages[0]?.content ?? "");
+  assert.match(system, /cardId=abc/);
+  assert.match(system, /<this_turn_facts>/, "前言里没点名这块，模型不知道它是什么");
+  assert.match(system, /不代表库里没有/, "没有挡住「服务端没解析出来」被她读成「库里没有」");
 });
 
 test("环境快照原文不得被当成正文回显出去", () => {

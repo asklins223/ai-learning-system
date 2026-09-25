@@ -31,6 +31,27 @@
 `list_task_queue` 查的是 `learning_tasks JOIN learning_runs`，与卡片生成那套
 `card_generation_*` 表毫无关系。"队列是空的"是一个真答案，回答的是无关的问题。
 
+> **上面四段的现状（2026-09-25 逐条按源码复核；本文是历史记录，取数请以下面为准）**
+>
+> 1. **"30 个工具里没有一个读界面"已不成立**：注册表现读仍是 **30 条**，但这一条已经是其中之一
+>    （`companion_read_current_page`，`packages/shared/src/companion-agent-registry.ts:80`）。
+>    数字没变是因为同一批里删了 0 调用的 `plan_route`（−1）＋加了这条（＋1）——
+>    **别把"30"当成同一个盘子**。
+> 2. **两个通道分开了，别混着读**：对话链落库那份 `companionPageContextV1Schema` **仍是 5 个变体**
+>    （`companion-conversation-contracts.ts:323`，`generating` 至今不在里面）；但**读侧**
+>    `mainPageContextInputV2Schema.pageKind` 已是 **11 档**（`companion-bridge-contracts.ts:481-484`），
+>    渲染层也**不再只映射 today/queue/graph**——现读 **8 个组件发 11 个 `pageId`**
+>    （`home`、`card_generation_review`、`card_generation_progress`、`today`、`review_queue`、
+>    `note_library`、`note_read`/`note_edit`、`star_map`、`assessment`、`result`）。
+> 3. **"她从不读那条实时通道"已被 39 系列的 W2-2 做掉**：`companion-here-and-now.ts` 的
+>    `resolveCurrentPage` 现在每轮先读 `assistant_page_contexts` 的实时行，把 `readable_view`
+>    折进「用户正在看…」并多渲染一行「这一屏：{statusLine}」；`run.page_context` 退为兜底。
+>    W2-6 又用同一次读出的 `interaction_state`／`entity_refs` 判"在不在作答页"。
+>    ⇒ 本节的"四段断点"里**只有第 4 段仍然是待办**（本文自己 §4 那句"每页约 10 行"指的是登记，
+>    剩 9 页见 39d §7 W2-7）。
+> 4. **未复核**：推送的 memo 依赖里有没有进度——`companion-chat-session.tsx` 此刻正被并行会话改，
+>    在这里写读数会归因错。
+
 ## 3. 机制：一条通道加一种载荷，不是每页一个查询
 
 服务端**没有任何**反向拉渲染层的途径（全仓唯一入站是 client-initiated GET SSE，单向；
@@ -83,6 +104,16 @@ goal-detail / assessment / result / search / settings / companion / resumable / 
 login / register）尚未登记——她们那几页现在读到的是「这一页还没有登记可读内容」，
 不是错的读数。每页约 10 行。
 
+> **更正（2026-09-25，按现读名单逐项对过）**：上面那句"其余 11 个"**与实际列出的名单不符**——
+> 那个括号里是 **16 个**名字。而且这份名单此后已经变动两次，别再从这里取数：
+> `login` / `register` 两档在 W2-1 作为死分支删掉了（渲染层从不发布它们），
+> `notes` / `note-read` / `note-edit` / `assessment` / `result` 五页已在 W2-2（P4-a）登记完。
+> **16 − 2 − 5 = 9**，剩下的 9 页与 `39d-implementation-task-breakdown-2026-09-24.md` §7 的
+> **W2-7** 名单逐项一致（sources / source-detail / goals / goal-detail / search / resumable /
+> settings / companion / space）。§7「没做的」第 4 条同此更正。
+> （另记一句口径：`HUD_PAGES` 的**页面键**与这里说的"页"不是同一套数——一个组件可以按状态
+> 发两个 `pageId`（`CardGenerationSurface` 两条、`notebook-surface` 两条），别把两者混着减。）
+
 ## 5. 验收
 
 ### 确定性（先跑完这些，再花模型的钱）
@@ -132,11 +163,22 @@ context 行（内容就是屏上那一份：`已写出 3 / 4 张候选` + 三条
 1. **她读页面仍然是"问了才读"**。`<here_and_now>` 里那句「用户正在看…」仍只认
    `PAGE_KIND_LABELS` 那 9 个 pageKind，`generating` 不在其中——也就是说她不主动知道
    用户在哪一屏，只有调了这个工具才知道。要不要把视图也主动注入环境块，是下一个决定。
+   **→ 这条已被 39 系列的 W2-2 做掉（2026-09-25 复核）**：`companion-here-and-now.ts` 的
+   `resolveCurrentPage` 现在**先读 `assistant_page_contexts` 的实时行**，把 `readable_view`
+   折进「用户正在看…」并多渲染一行「这一屏：{statusLine}」，`run.page_context` 退为兜底。
+   顺带更正一个数：`PAGE_KIND_LABELS` 现读是 **10 档**（不是 9）。
 2. **`open_page` 白名单里没有卡片生成页**（home/today/review/star_map/conversation/
-   source/settings）。她现在读得到那一屏，却仍然跳不回去。
+   source/settings）。她现在读得到那一屏，却仍然跳不回去。（**仍未解决**，且已查明不是加一行能
+   解决的：`allowedMainRouteV2Schema` 里根本没有 `card_generation` 这一档，而 `open_page` 只收
+   **无参**落点 ⇒ 要接得先有路由 kind 或带参的打开动作，属设计决定。词表一处已收敛成
+   `COMPANION_PAGE_DESTINATIONS_V2`，见 39d §7 W2-1）
 3. **`TOOL_LABELS` 缺 5 个工具的中文标签**（`pause_learning` / `resume_learning` /
    `request_hint` / `switch_task_variant` / `plan_route`），落到界面上是「正在处理…」。
-4. 其余 11 个页面未登记可读视图（见 §4 末尾）。
+   **→ 已做掉（W2-1）**：补齐 26→31，并且**判据改成从注册表现读的集合相等断言**
+   （`apps/desktop-client/src/renderer/src/app/companion-tool-labels.test.ts`）——不再手抄第二份名单；
+   `plan_route` 随后整条删除（全窗口 0 次调用）。
+4. 其余 11 个页面未登记可读视图（见 §4 末尾）。**→ 数字与去向见 §4 上方那条更正**：
+   实为 16，P4-a 已登记 5 页，剩 9 页在 **W2-7**。
 5. dev 库上 `0275` / `0276` 的 hash 记账与对象状态不一致（表已存在但 ledger 没记），
    `npm run db:migrate` 会停在 0275 并挡住后面每一条。本轮按语句单独把 0277 应用了，
    **没有替并行会话补那两条的账**——那是他们的在途工作。

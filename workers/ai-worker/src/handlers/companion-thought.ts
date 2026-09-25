@@ -17,6 +17,8 @@
 import { sql } from "drizzle-orm";
 import { isFormalAnswerInProgress } from "../lib/formal-answer-signal.ts";
 import { createHash } from "node:crypto";
+import { companionLeakGateVersionV1 } from "@ailearn/shared/companion-leak-gates";
+import type { WorkerTransaction } from "../db.ts";
 import { readCompanionThoughtJobPayload } from "@ailearn/shared";
 import {
   proactiveCadenceMs,
@@ -45,6 +47,7 @@ import {
 } from "./companion-dialogue-content.ts";
 import { enqueueSystemEventDelivery } from "./companion-delivery-write.ts";
 import { loadHereAndNow, renderHereAndNow } from "./companion-here-and-now.ts";
+import { readStreakDays, resolveFactSpans } from "./companion-fact-spans.ts";
 import type { JobPayload } from "./index.ts";
 
 // ── 类型 ─────────────────────────────────────────────────────────────────
@@ -591,6 +594,31 @@ interface MaterialRow extends Record<string, unknown> {
   ms_since_last_cue: number | null;
 }
 
+/**
+ * 候选入念库那一发 INSERT 的**唯一**落点。单独拎出来不是为了好看：`leak_gate_version`
+ * （39d #28）今天只有这一处写它的地方，而它要有库级证据——写在大 handler 深处的那条语句
+ * 没有任何用例跑得动（念头链路要 job＋模型），拎出来才能让用例用真的 SQL 钉住它。
+ */
+export async function insertThoughtCandidateV1(
+  tx: WorkerTransaction,
+  actor: { workspaceId: string; userId: string },
+  candidate: ThoughtCandidate,
+): Promise<string | null> {
+  const rows = await tx.execute<{ id: string }>(sql`
+    INSERT INTO assistant_thoughts
+      (workspace_id, user_id, source, topic, dedupe_key, text, grounding,
+       status, urgency, familiarity_required, expires_at, leak_gate_version)
+    VALUES
+      (${actor.workspaceId}, ${actor.userId}, ${candidate.source}, ${candidate.topic}, ${candidate.dedupeKey},
+       ${candidate.text}, ${JSON.stringify(candidate.grounding)}::jsonb,
+       'candidate', ${candidate.urgency}, ${candidate.familiarityRequired},
+       now() + (${THOUGHT_LIMITS.candidateTtlHours} * interval '1 hour'),
+       ${companionLeakGateVersionV1()})
+    RETURNING id
+  `);
+  return (Array.isArray(rows) ? rows : [])[0]?.id ?? null;
+}
+
 export async function runCompanionThought(job: JobPayload): Promise<void> {
   const { userId } = readCompanionThoughtJobPayload(job.payload);
   await assertJobLease(job);
@@ -736,19 +764,9 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
       conversationId: null,
     });
 
-    // 连续学习天数：取最近 14 条日记（新→旧），learningRunsCompleted>0 连续计数。
-    const streakRows = await tx.execute<{ date: string; runs: number }>(sql`
-      SELECT date, COALESCE((facts->>'learningRunsCompleted')::int, 0)
-        + COALESCE((facts->>'learningRunsCreated')::int, 0) AS runs
-      FROM companion_daily_summaries
-      WHERE workspace_id = ${job.workspaceId} AND user_id = ${userId}
-      ORDER BY date DESC LIMIT 14
-    `);
-    let streakDays = 0;
-    for (const entry of (Array.isArray(streakRows) ? streakRows : [])) {
-      if (Number(entry.runs) > 0) streakDays += 1;
-      else break;
-    }
+    // 连续学习天数：与"用户问"那条链**共用同一份判据**（39d W2-5 抽出去的那份），
+    // 两处各写一遍就会出现"她说连续 3 天、气泡说连续 4 天"。
+    const streakDays = await readStreakDays(tx, { workspaceId: job.workspaceId, userId });
 
     const boundaries = (row.boundaries ?? {}) as Record<string, unknown>;
     const quietHours = accountRows[0]?.quiet_hours as CompanionQuietHours | null;
@@ -918,18 +936,7 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
   if (toInsert.length > 0) {
     await withJobTransaction(job, async (tx) => {
       for (const candidate of toInsert) {
-        const rows = await tx.execute<{ id: string }>(sql`
-          INSERT INTO assistant_thoughts
-            (workspace_id, user_id, source, topic, dedupe_key, text, grounding,
-             status, urgency, familiarity_required, expires_at)
-          VALUES
-            (${job.workspaceId}, ${userId}, ${candidate.source}, ${candidate.topic}, ${candidate.dedupeKey},
-             ${candidate.text}, ${JSON.stringify(candidate.grounding)}::jsonb,
-             'candidate', ${candidate.urgency}, ${candidate.familiarityRequired},
-             now() + (${THOUGHT_LIMITS.candidateTtlHours} * interval '1 hour'))
-          RETURNING id
-        `);
-        const id = (Array.isArray(rows) ? rows : [])[0]?.id;
+        const id = await insertThoughtCandidateV1(tx, { workspaceId: job.workspaceId, userId }, candidate);
         if (id) candidateIds.set(candidate.dedupeKey, id);
       }
     });
@@ -980,6 +987,26 @@ export async function runCompanionThought(job: JobPayload): Promise<void> {
       if (picked) expression = picked;
     } catch (err) {
       logger.warn({ jobId: job.id, err: err instanceof Error ? err.message : String(err) }, "companion thought expression llm failed; template fallback");
+    }
+
+    // P2（39d W2-5）：气泡**没有读数目录**（她主动开口时没人在问），所以占位符一律
+    // 按"目录外的键"处理——丢掉那半句、正文照留。不渲染的话用户会看到 `{{f:...}}`。
+    const spanResolved = resolveFactSpans(expression, {});
+    if (spanResolved.dropped.length > 0) {
+      logger.warn(
+        { jobId: job.id, dropped: spanResolved.dropped.length },
+        "companion thought referenced fact spans; proactive bubbles have no catalog",
+      );
+    }
+    expression = spanResolved.text;
+    if (expression.trim().length === 0) {
+      await withJobTransaction(job, async (tx) => {
+        await tx.execute(sql`
+          UPDATE assistant_thoughts SET status = 'suppressed', updated_at = now()
+          WHERE id = ${thoughtId}
+        `);
+      });
+      continue;
     }
 
     // 送达前最后一道：定稿句子仍然是"数字 + 量词"的读数，这条就不送。

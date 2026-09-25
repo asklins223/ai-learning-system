@@ -13,6 +13,8 @@ import {
 } from "../../app/desktop-client";
 import { HudPage } from "../hud/HudPage";
 import { useHudPage } from "../hud/use-hud-page";
+import { usePageReadableView } from "../hud/use-page-readable-view";
+import type { PageReadableV1 } from "@ailearn/shared/companion-bridge-contracts";
 import {
   SurfaceDataState,
   daysSince,
@@ -200,6 +202,46 @@ export function NoteLibrarySurface() {
     return loaded.filter((note) => withinTab(note.updatedAt, tab)
       && (needle ? note.title.toLocaleLowerCase("zh-CN").includes(needle) : true));
   }, [loaded, query, tab]);
+  /**
+   * 笔记库登记给伴星读的可读视图（doc 37 / 39d W2-2 的 P4-a）。
+   *
+   * 字段全部**照抄这一页已经在渲染的那一份**，不重算（判据要求「屏上那句话与视图字段
+   * 逐字相同」；重算迟早分叉，而分叉不会报错——`usePageReadableView` 那边不合合同只是
+   * 不发布，症状仅仅是"她偶尔读不到这一页"）：
+   *  - `statusLine` ← `:814` 那两句话（回收站模式是另一句，`:812`）；
+   *  - `metrics` ← `loaded.length` 与 `total`（`:787` 的「已读 N / M」）；
+   *  - `items` ← **`shelfCovers`**，即 `:640-652` 真正渲染的那一列书封：label 是
+   *    `<h3>{note.title}</h3>`，state 是 `<small>` 那行「已有版本 · 3 小时前」。
+   *    刻意**不取 `indexed`**：那是按 tab/搜索词筛出来的行，而这一屏默认展示的是书封列；
+   *    取错列表会让"她读到的这一段"与用户眼前看到的不是同一批。
+   */
+  const readableView = useMemo<PageReadableV1 | null>(() => {
+    if (!loaded.length && !trash) return null;
+    return {
+      pageId: "note_library",
+      title: trash ? "笔记库 · 回收站" : "笔记库",
+      statusLine: (trash
+        ? `回收站里已读取 ${trash.items.length} 篇；恢复后会回到上面的列表。`
+        : `已读取 ${loaded.length} 篇，共 ${total} 篇；继续加载可以读到更早的笔记，搜索或筛选时会自动读完剩余部分。`
+      ).slice(0, 160),
+      metrics: [
+        { label: "已读", value: `${loaded.length} 篇` },
+        { label: "总数", value: `${total} 篇` },
+      ],
+      ...(shelfCovers.length > 0
+        ? {
+            items: shelfCovers.slice(0, 12).map((note, index) => ({
+              ordinal: index + 1,
+              label: note.title.slice(0, 120),
+              state: [note.currentVersionId ? "已有版本" : "等待首版", formatRelative(note.updatedAt)]
+                .join(" · ").slice(0, 40),
+            })),
+          }
+        : {}),
+    };
+  }, [loaded.length, shelfCovers, total, trash]);
+  usePageReadableView(readableView);
+
   /**
    * "全部" is the server's own count. The other tabs filter what has been read,
    * so while the cursor still has pages their number is a floor, not a total —

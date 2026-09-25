@@ -2357,7 +2357,12 @@ export interface AILearnDesktopApiM2 extends AILearnDesktopApiM1 {
     };
   };
   readonly objective: {
-    list(input: { meta: RequestMetaV1; cursor?: string; limit?: number; lifecycle?: "active" | "archived" | "superseded" }): Promise<GatewayResultV1<z.infer<typeof objectiveListPageV3Schema>>>;
+    /**
+     * `noteId` 按「笔记来源」收窄（39d W4-2）：笔记页要知道自己这一篇有没有目标。
+     * 主进程 schema、网关与 `GET /v2/learning-objectives` 早已收这一格，声明此前
+     * 漏了——漏在声明上不会报错，只会让调用处绕路（曾在此处写过一个交叉类型别名）。
+     */
+    list(input: { meta: RequestMetaV1; cursor?: string; limit?: number; lifecycle?: "active" | "archived" | "superseded"; noteId?: Uuid }): Promise<GatewayResultV1<z.infer<typeof objectiveListPageV3Schema>>>;
     get(input: { meta: RequestMetaV1; objectiveId: Uuid }): Promise<GatewayResultV1<z.infer<typeof learningObjectiveSurfaceV3Schema>>>;
   };
   readonly review: {

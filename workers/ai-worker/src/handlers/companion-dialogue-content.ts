@@ -574,8 +574,10 @@ export function unverifiedQuoteClaims(replyText: string, sourcesText: string): s
 }
 
 export function keepRecomputedBlocks(text: string): string {
+  // 只有"本轮重算出来的块"算数字出处。`this_turn_facts` 在列：它是服务端这一轮现查的
+  // 对象事实（39d W2-3），与她几周前说过的摘要不是一回事。
   return (text.match(
-    /<(?:here_and_now|page_context|selection_data|grounded_target)[\s\S]*?<\/(?:here_and_now|page_context|selection_data|grounded_target)>/g,
+    /<(?:here_and_now|this_turn_facts|fact_spans|page_context|selection_data|grounded_target)[\s\S]*?<\/(?:here_and_now|this_turn_facts|fact_spans|page_context|selection_data|grounded_target)>/g,
   ) ?? []).join("\n");
 }
 
@@ -755,6 +757,19 @@ export function buildCompanionPersonaMessages(input: {
    */
   hereAndNow?: string | null;
   /**
+   * 本轮指称事实块（`<this_turn_facts>`，39d W2-3）：用户这句话点到的对象是谁、在不在、
+   * 状态如何——服务端在她说之前先查好。null = 这一轮没有可解析的指称（或超预算丢弃）。
+   *
+   * 与环境块分开传，是因为两块回答的不是同一个问题：`<here_and_now>` 是"她现在知道
+   * 什么"，这一块是"用户这句话指的是哪个东西"。混在一起会让 C 层前言只能笼统地说一句。
+   */
+  thisTurnFacts?: string | null;
+  /**
+   * 这一轮**可以报**的读数目录（`<fact_spans>`，39d W2-5）：`key = 值` 若干行。
+   * null = 这一轮没有可问出来的读数（她写了占位符也会被丢掉）。
+   */
+  factSpans?: string | null;
+  /**
    * 更早对话的摘要块（方案 29 §11 C1），null = 这个会话还没有摘要。
    *
    * 历史回放只带最近 20 条，再往前的对话她本来是不可见的；这一块就是那段记忆。
@@ -909,9 +924,28 @@ export function buildCompanionPersonaMessages(input: {
     // 也可以据此主动开启话题"——那正是她被教出来的动作。规则离输出段越近越有用，
     // 所以"数字是用来把握分寸的、不是用来念的"放在这里而不是数据块开头。
     presentDataBlocks.push(
-      "<here_and_now> 是她此刻的感知，不是要念的稿子：用户没问学习情况，就不要报数字"
-      + "（几分钟、几张卡、多少条）。这些数是用来把握分寸的，要提就化成话"
-      + "（「今天状态不错」），别念原值；用户问了才照实说。",
+      "<here_and_now> 是她此刻的感知，不是要念的稿子：这些数是用来把握分寸的，要提就化成话"
+      + "（「今天状态不错」）。要报**具体读数**（几分钟、几张卡、多少条）时不要自己写数值，"
+      + "写占位符，由服务端填——见 <fact_spans>。",
+    );
+  }
+  if (input.factSpans) {
+    // 规则在这里**只写一遍**：她写 `{{f:key}}`，值由服务端填。目录里没有的读数
+    // 这一轮就不报——"没问就不要报数"从叮嘱变成"她没有可报的对象"（39b §9.2）。
+    presentDataBlocks.push(
+      "<fact_spans> 是这一轮可以报的读数（key = 值）：正文里要报哪个就写 {{f:key}}，"
+      + "服务端会在下发前把它换成真实数值；不要自己写数值、也不要用历史对话里的旧数。"
+      + "目录里没有的读数，这一轮就不报。",
+    );
+  }
+  if (input.thisTurnFacts) {
+    // 这一块是**反脆弱**的：它替她挡掉"库里没有这篇/这项"这类可证伪的假阴性，
+    // 所以前言要说清两件事——可以直接当事实用；这里没提到的对象**不代表不存在**
+    // （否则她会把"服务端没解析出来"当成"库里没有"，那正是要修的那个错）。
+    presentDataBlocks.push(
+      "<this_turn_facts> 是服务端**在你开口之前**查出来的对象事实（用户这句话指的是谁、"
+      + "在不在、状态如何）：直接照它说，不要再去猜或另编一个 id。这里没有提到的对象"
+      + "不代表库里没有——它只说明这一轮没解析出指称；不确定就调用工具或照实说不确定。",
     );
   }
   if (activeMemories.length > 0) {
@@ -983,6 +1017,9 @@ export function buildCompanionPersonaMessages(input: {
   const dataBlocks = [
     ...(dataBlocksPreamble ? ["", dataBlocksPreamble] : []),
     ...(input.hereAndNow ? ["", input.hereAndNow] : []),
+    // 事实块紧贴环境块：它是对**用户这句话**的定锚，越靠近 user 那一轮越有效。
+    ...(input.thisTurnFacts ? ["", input.thisTurnFacts] : []),
+    ...(input.factSpans ? ["", input.factSpans] : []),
     ...(input.conversationSummary ? ["", input.conversationSummary] : []),
     ...(memoryDataBlock ? ["", memoryDataBlock] : []),
     ...(selectionDataBlock ? ["", selectionDataBlock] : []),

@@ -419,6 +419,149 @@ export interface V2ObjectiveOnlySeeded {
 }
 
 /**
+ * 「笔记 ＋ 目标 ＋ 目标修订」这三件的唯一种法（**不含卡**）。
+ * `seedV2ObjectiveOnly`（自带新工作区）与 `addV2ObjectiveWithoutCard`（挂到已有工作区）
+ * 共用它——两处各写一份 INSERT，将来加一列 NOT NULL 就会只改到一半。
+ */
+async function insertObjectiveWithoutCard(
+  tx: postgres.Sql,
+  seed: {
+    readonly workspaceId: string;
+    readonly userId: string;
+    readonly noteId: string;
+    readonly noteVersionId: string;
+    readonly objectiveId: string;
+    readonly objectiveRevisionId: string;
+    readonly opts: V2FixtureOptions;
+  },
+) {
+  const { workspaceId, userId, noteId, noteVersionId, objectiveId, objectiveRevisionId, opts } = seed;
+  const objectiveStatement = opts.objectiveStatement ?? "理解复利效应";
+  const publicSummary = opts.publicSummary ?? "复利效应";
+  const knowledgeForm = opts.knowledgeForm ?? "definition";
+  const canonicalAnswerJson = opts.canonicalAnswerJson ?? DEFAULT_CANONICAL_ANSWER;
+
+  await tx`INSERT INTO notes (id, workspace_id, title, created_by)
+    VALUES (${noteId}, ${workspaceId}, 'fixture-note', ${userId})`;
+  await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
+    VALUES (${noteVersionId}, ${noteId}, ${workspaceId}, 1,
+      ${tx.json({ blocks: [{ type: "paragraph", content: objectiveStatement }] })},
+      'fixture-hash', ${userId})`;
+
+  await tx`INSERT INTO learning_objectives_v2
+    (id, workspace_id, objective_id, semantic_identity_class_id, semantic_identity_policy_version,
+     semantic_target_fingerprint, lifecycle, lifecycle_epoch, current_objective_revision_id, current_revision)
+    VALUES (gen_random_uuid(), ${workspaceId}, ${objectiveId}, 'fixture:class', 'sem-id-v1',
+            ${SHA256_HEX}, 'active', 1, ${objectiveRevisionId}, 1)`;
+
+  await tx`INSERT INTO learning_objective_revisions_v2
+    (id, workspace_id, objective_revision_id, objective_id, revision, objective_statement, public_summary,
+     knowledge_form, preferred_intents, canonical_answer, learning_support, scoring_rubric, relations,
+     evidence_bindings, semantic_target_fingerprint, target_revision_hash, private_payload_hash)
+    VALUES (gen_random_uuid(), ${workspaceId}, ${objectiveRevisionId}, ${objectiveId}, 1,
+            ${objectiveStatement}, ${publicSummary}, ${knowledgeForm}, ARRAY['recall'],
+            ${canonicalAnswerJson}::jsonb,
+            ${DEFAULT_LEARNING_SUPPORT}::jsonb,
+            ${DEFAULT_SCORING_RUBRIC}::jsonb,
+            '[]'::jsonb, '[]'::jsonb, ${SHA256_HEX}, ${TARGET_REVISION_HASH}, ${PRIVATE_PAYLOAD_HASH})`;
+}
+
+/**
+ * 往**已经存在**的工作区里加一个「有笔记依据、没有学习卡」的 active Objective。
+ *
+ * 这一档过去在夹具里造不出来（`addV2ObjectiveToWorkspace` 总是连卡片一起种），
+ * 所以"目标不依赖卡"这条路（W3-4 打通、W4-2 放开入口）在跨表对账的集测里从没被测过：
+ * 计数四件套（Dashboard／列表／星图／表行数）与主行动装配都必须认得无卡目标。
+ */
+export async function addV2ObjectiveWithoutCard(
+  sql: postgres.Sql,
+  workspaceId: string,
+  userId: string,
+  opts: V2FixtureOptions = {},
+): Promise<{ objectiveId: string; objectiveRevisionId: string; noteId: string; noteVersionId: string }> {
+  const noteId = randomUUID();
+  const noteVersionId = randomUUID();
+  const objectiveId = opts.objectiveId ?? randomUUID();
+  const objectiveRevisionId = randomUUID();
+  await sql.begin(async (tx) => {
+    await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
+    await tx`SELECT set_config('app.user_id', ${userId}, true)`;
+    await insertObjectiveWithoutCard(tx as unknown as postgres.Sql, {
+      workspaceId, userId, noteId, noteVersionId, objectiveId, objectiveRevisionId, opts,
+    });
+  });
+  return { objectiveId, objectiveRevisionId, noteId, noteVersionId };
+}
+
+/**
+ * 给一个目标种「笔记依据」那五件（快照／可用态／绑定／来源行）。
+ *
+ * 这段形状原来只写在 `target-snapshot-cardless-postgres.integration.ts` 里。
+ * 现在桥接侧也要造一个"真的开得出轮次"的无卡目标（零依据会被 fail closed 成
+ * `target_evidence_missing`），两边各抄一份五表 INSERT 是下次加列必漏一处的形状，
+ * 所以搬到这里共用；三个 `opts` 分支（`withEvidence:false` 只留锚、`withOrigin:false`
+ * 不留来源行、`noteId` 指向别的笔记）就是那份文件用来分开测三种拒法的开关，语义保持不变。
+ */
+export async function seedObjectiveNoteEvidence(
+  sql: postgres.Sql,
+  target: {
+    readonly workspaceId: string;
+    readonly userId: string;
+    readonly objectiveId: string;
+    readonly objectiveRevisionId: string;
+    readonly noteId: string;
+    readonly noteVersionId: string;
+  },
+  opts: { readonly noteId?: string; readonly withOrigin?: boolean; readonly withEvidence?: boolean } = {},
+): Promise<string> {
+  const evidenceSnapshotId = randomUUID();
+  const evidenceNoteId = opts.noteId ?? target.noteId;
+  await sql.begin(async (tx) => {
+    await tx`SELECT set_config('app.workspace_id', ${target.workspaceId}, true)`;
+    await tx`SELECT set_config('app.user_id', ${target.userId}, true)`;
+    if (opts.withEvidence === false) {
+      // 只留版本锚、不留任何依据：这条形状专门测"零依据"那一判，
+      // 免得它与"没有锚"那一条共用同一个出口而分不出来。
+      await tx`INSERT INTO learning_objective_origins_v2
+        (id, workspace_id, origin_id, objective_id, objective_revision_id, origin_kind,
+         note_id, note_version_id, evidence_snapshot_ids, integrity)
+        VALUES (gen_random_uuid(), ${target.workspaceId}, ${randomUUID()}, ${target.objectiveId},
+                ${target.objectiveRevisionId}, 'note', ${target.noteId}, ${target.noteVersionId},
+                '{}'::uuid[], 'verified')`;
+      return evidenceSnapshotId;
+    }
+    await tx`INSERT INTO evidence_snapshots_v2
+      (id, workspace_id, evidence_snapshot_id, evidence_snapshot_hash, source_snapshot_id,
+       note_id, start_offset, end_offset, protected_quote_ref, modality,
+       block_content_hash, source_content_hash)
+      VALUES (gen_random_uuid(), ${target.workspaceId}, ${evidenceSnapshotId}, ${"b".repeat(64)},
+              ${randomUUID()}, ${evidenceNoteId}, 0, 12,
+              ${`evidence://snapshot/${evidenceSnapshotId}`}, 'text',
+              ${"e".repeat(64)}, ${"f".repeat(64)})`;
+    await tx`INSERT INTO evidence_eligibility_states_v2
+      (id, workspace_id, eligibility_id, evidence_snapshot_id, status, eligibility_epoch, eligibility_vector_hash)
+      VALUES (gen_random_uuid(), ${target.workspaceId}, ${randomUUID()}, ${evidenceSnapshotId},
+              'usable', 1, ${"a".repeat(64)})`;
+    await tx`INSERT INTO learning_objective_evidence_bindings_v2
+      (id, workspace_id, binding_id, objective_revision_id, target_unit_kind, target_unit_id,
+       evidence_snapshot_id, relation, support_strength, semantic_support_report_id,
+       semantic_support_report_hash, binding_hash)
+      VALUES (gen_random_uuid(), ${target.workspaceId}, ${randomUUID()}, ${target.objectiveRevisionId},
+              'rubric', 'fixture-rubric-u1', ${evidenceSnapshotId}, 'entails', 'direct',
+              ${randomUUID()}, ${"c".repeat(64)}, ${"d".repeat(64)})`;
+    if (opts.withOrigin !== false) {
+      await tx`INSERT INTO learning_objective_origins_v2
+        (id, workspace_id, origin_id, objective_id, objective_revision_id, origin_kind,
+         note_id, note_version_id, evidence_snapshot_ids, integrity)
+        VALUES (gen_random_uuid(), ${target.workspaceId}, ${randomUUID()}, ${target.objectiveId},
+                ${target.objectiveRevisionId}, 'note', ${target.noteId}, ${target.noteVersionId},
+                ARRAY[${evidenceSnapshotId}]::uuid[], 'verified')`;
+    }
+  });
+  return evidenceSnapshotId;
+}
+
+/**
  * 只创建 V2 Objective（不含 Card），用于不需要 Card 的场景。
  * cleanup 同 seedV2Fixture。
  */
@@ -433,11 +576,6 @@ export async function seedV2ObjectiveOnly(
   const objectiveId = opts.objectiveId ?? randomUUID();
   const objectiveRevisionId = randomUUID();
 
-  const objectiveStatement = opts.objectiveStatement ?? "理解复利效应";
-  const publicSummary = opts.publicSummary ?? "复利效应";
-  const knowledgeForm = opts.knowledgeForm ?? "definition";
-  const canonicalAnswerJson = opts.canonicalAnswerJson ?? DEFAULT_CANONICAL_ANSWER;
-
   await sql.begin(async (tx) => {
     await tx`SELECT set_config('app.workspace_id', ${workspaceId}, true)`;
     await tx`SELECT set_config('app.user_id', ${userId}, true)`;
@@ -449,29 +587,9 @@ export async function seedV2ObjectiveOnly(
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role)
       VALUES (${workspaceId}, ${userId}, 'owner')`;
 
-    await tx`INSERT INTO notes (id, workspace_id, title, created_by)
-      VALUES (${noteId}, ${workspaceId}, 'fixture-note', ${userId})`;
-    await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
-      VALUES (${noteVersionId}, ${noteId}, ${workspaceId}, 1,
-        ${tx.json({ blocks: [{ type: "paragraph", content: objectiveStatement }] })},
-        'fixture-hash', ${userId})`;
-
-    await tx`INSERT INTO learning_objectives_v2
-      (id, workspace_id, objective_id, semantic_identity_class_id, semantic_identity_policy_version,
-       semantic_target_fingerprint, lifecycle, lifecycle_epoch, current_objective_revision_id, current_revision)
-      VALUES (gen_random_uuid(), ${workspaceId}, ${objectiveId}, 'fixture:class', 'sem-id-v1',
-              ${SHA256_HEX}, 'active', 1, ${objectiveRevisionId}, 1)`;
-
-    await tx`INSERT INTO learning_objective_revisions_v2
-      (id, workspace_id, objective_revision_id, objective_id, revision, objective_statement, public_summary,
-       knowledge_form, preferred_intents, canonical_answer, learning_support, scoring_rubric, relations,
-       evidence_bindings, semantic_target_fingerprint, target_revision_hash, private_payload_hash)
-      VALUES (gen_random_uuid(), ${workspaceId}, ${objectiveRevisionId}, ${objectiveId}, 1,
-              ${objectiveStatement}, ${publicSummary}, ${knowledgeForm}, ARRAY['recall'],
-              ${canonicalAnswerJson}::jsonb,
-              ${DEFAULT_LEARNING_SUPPORT}::jsonb,
-              ${DEFAULT_SCORING_RUBRIC}::jsonb,
-              '[]'::jsonb, '[]'::jsonb, ${SHA256_HEX}, ${TARGET_REVISION_HASH}, ${PRIVATE_PAYLOAD_HASH})`;
+    await insertObjectiveWithoutCard(tx as unknown as postgres.Sql, {
+      workspaceId, userId, noteId, noteVersionId, objectiveId, objectiveRevisionId, opts,
+    });
   });
 
   const cleanup = () => cleanupWorkspaceTables(sql, workspaceId, userId);

@@ -113,6 +113,18 @@ export async function setWorkerTransactionContext(
   return workerScope.applyContext(transaction, context);
 }
 
+/**
+ * 当前异步作用域里有没有活动的 worker 事务（`undefined` = 没有）。
+ *
+ * 给**公共外部调用边界**用的那一个读数（D5 §5.2 第二件、39d W3-2）：判据必须是
+ * "当前作用域有没有活动事务"，不是"这段代码文本里有没有 `transaction`"——
+ * `AsyncLocalStorage` 沿 await 链传播，所以顺手发一次 HTTP 的**隐式嵌套**也读得到。
+ * API 侧的同一条读数是 `apps/api/src/db/client.ts` 里那份 scope。
+ */
+export function currentWorkerWorkspaceTransaction(): unknown {
+  return workerScope.current();
+}
+
 export interface WorkerWorkspaceTransactionOptions {
   /**
    * 强制开一条**独立**事务，即使当前已经处在 worker 事务作用域里（默认会加入它）。

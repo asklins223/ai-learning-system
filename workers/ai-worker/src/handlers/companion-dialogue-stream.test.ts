@@ -26,7 +26,9 @@ const READ_FIXTURE = {
   userId: "33333333-3333-4333-8333-333333333333",
 } as unknown as ReadContext;
 
-function deliveryWithRecorder(options: { flushChars?: number; flushIntervalMs?: number } = {}) {
+function deliveryWithRecorder(
+  options: { flushChars?: number; flushIntervalMs?: number; factSpanValues?: Record<string, string> } = {},
+) {
   const written: string[] = [];
   const delivery = createCompanionStreamDelivery({
     ctx: { workspaceId: "44444444-4444-4444-8444-444444444444" },
@@ -35,6 +37,7 @@ function deliveryWithRecorder(options: { flushChars?: number; flushIntervalMs?: 
     notifyCompanionEvent: async () => undefined,
     flushChars: options.flushChars,
     flushIntervalMs: options.flushIntervalMs,
+    factSpanValues: options.factSpanValues,
     writeVisible: async (text) => {
       written.push(text);
       return true;
@@ -249,5 +252,56 @@ describe("reconcileStreamedText", () => {
       validated: { ok: false, reason: "json_envelope_leak" },
     });
     assert.deepEqual(result, { ok: false, reason: "json_envelope_leak" });
+  });
+});
+
+/**
+ * 39d W2-5：目录渲染发生在**下发之前**。
+ *
+ * 这一条是"用户永远不该看到 `{{f:...}}`"的唯一机械保证：她能写占位符，而占位符是否
+ * 变成数字、写成目录外的键会怎样，全在交付管线这一层。契约两条——完整占位符渲染成目录
+ * 里的值；**没写完的那半截不下发**（否则用户会先看到半个标记）。
+ */
+describe("fact spans 在下发前渲染", () => {
+  it("完整占位符渲染成目录里的值，且已下发文本是最终文本的前缀", async () => {
+    const { delivery } = deliveryWithRecorder({
+      flushChars: 1,
+      flushIntervalMs: 0,
+      factSpanValues: { today_minutes: "42" },
+    });
+    const raw = "今天你学了 {{f:today_minutes}} 分钟，挺稳的。";
+    await delivery.onRawDelta(raw);
+    const finished = await delivery.finish();
+    assert.ok(finished.ok);
+    assert.equal(finished.text, "今天你学了 42 分钟，挺稳的。");
+    assert.ok(!finished.text.includes("{{"), "占位符漏到下发了");
+  });
+
+  it("半截占位符不下发；补全之后才一起出现", async () => {
+    const { delivery } = deliveryWithRecorder({
+      flushChars: 1,
+      flushIntervalMs: 0,
+      factSpanValues: { today_minutes: "42" },
+    });
+    await delivery.onRawDelta("今天你学了 {{f:today_min");
+    // 半截占位符里的下划线让它所在的那一行**整行压住**（markdown 不稳定字符那条规矩），
+    // 所以此刻一个字符都没下发——比"发到标记之前"更严，也正是要的：半个标记不发。
+    assert.equal(delivery.deliveredChars(), 0);
+    await delivery.onRawDelta("utes}} 分钟。");
+    const finished = await delivery.finish();
+    assert.ok(finished.ok);
+    assert.equal(finished.text, "今天你学了 42 分钟。");
+  });
+
+  it("目录外的键：那半句丢掉，正文照留", async () => {
+    const { delivery } = deliveryWithRecorder({
+      flushChars: 1,
+      flushIntervalMs: 0,
+      factSpanValues: {},
+    });
+    await delivery.onRawDelta("你还有 {{f:due_count}} 项到期。别急，慢慢来。");
+    const finished = await delivery.finish();
+    assert.ok(finished.ok);
+    assert.equal(finished.text, "别急，慢慢来。");
   });
 });

@@ -354,5 +354,18 @@ const desktopApi: AILearnDesktopApiM2 = {
   }
 }
 
-contextBridge.exposeInMainWorld('ailearnDesktop', Object.freeze(api))
-contextBridge.exposeInMainWorld('ailearn', deepFreeze(desktopApi))
+/**
+ * **只在主 frame 暴露桥。**
+ *
+ * Electron 官方文档（WebPreferences · `nodeIntegrationInSubFrames`）写着："All your
+ * preloads will load for every iframe"——preload **会**注入每一个子 frame。今天没有子
+ * frame 所以这条从未被触发；一旦动态讲解的产物以 iframe 落地（39d W0-4 / D4），
+ * 不拦就会把 `ailearnDesktop` / `ailearn` 两条 IPC 桥**静默**暴露给一段不可信内容。
+ *
+ * 主 frame 的行为一个字节都不变。守卫的顺序刻意放在最后一次 `exposeInMainWorld` 之前：
+ * 上面全部是模块级纯计算（没有副作用），所以早退不留下半个初始化状态。
+ */
+if (process.isMainFrame) {
+  contextBridge.exposeInMainWorld('ailearnDesktop', Object.freeze(api))
+  contextBridge.exposeInMainWorld('ailearn', deepFreeze(desktopApi))
+}

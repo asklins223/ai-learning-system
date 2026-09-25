@@ -90,19 +90,40 @@ const REGISTERED_TOOLS: readonly RegisteredTool[] = [
   // 以前这份枚举手抄一遍，结果「今日」「设置」服务端能发、客户端没有分支，
   // 而笔记库/学习卡/查找三页她根本说不出名字，只能被就近塞进来源库和星图。
   tool("companion_open_page", companionOpenPageDescriptionV2(), "read", false, { type: "object", properties: { page: { type: "string", enum: [...companionPageKindValuesV2] } }, required: ["page"], additionalProperties: false }, z.object({ page: companionPageKindSchemaV2 }).strict()),
-  tool("companion_get_learning_stats", "读取学习数据统计：今天/本周学了多久、到期复习数、活跃卡片数、笔记数等（与首页同一口径）。**只在用户问自己学了多久/进度如何时调用**；她跟你打招呼、闲聊、或只是接着上一个话题时不要调，也不要把这些数字主动报给用户。", "read", false, emptyParameters, emptyArguments),
+  // 描述里原有一句"（与首页同一口径）"——**2026-09-24 删掉**（39d W2-3 的对账核实）。
+  // 那句话不是注释，是一条**需要断言的关系**，而逐字段核过之后它**只在三项上成立**：
+  // 笔记数 / 活跃卡数 / 到期数两侧同源（`notes` / `learning_cards_v2` / `review_schedules`），
+  // 而 `todayMinutes` / `weekMinutes` 读的 `learning_metric_events` **在 `apps/api/src/modules`
+  // 全域零命中**——首页的统计端点根本不读时长表，两个字段**没有可比对象**。
+  // 在把口径对齐（或让对账测试只断言那三项）之前，不保留一句没人验的等价声明。
+  tool("companion_get_learning_stats", "读取学习数据统计：今天/本周学了多久、到期复习数、活跃卡片数、笔记数等。**只在用户问自己学了多久/进度如何时调用**；她跟你打招呼、闲聊、或只是接着上一个话题时不要调。要报读数时写 `{{f:key}}` 由服务端填（见 <fact_spans>），不要自己写数值。", "read", false, emptyParameters, emptyArguments),
   tool("companion_list_task_queue", "列出当前学习运行里排着的任务（含进度和第几步）。用户问「我接下来要做什么」「还有什么任务」时调用。", "read", false, emptyParameters, emptyArguments),
   tool("companion_list_due_reviews", "列出到期（或快到期）的复习卡，带卡片标题和到期时间。用户问「有什么要复习的」时调用。", "read", false, { type: "object", properties: { limit: { type: "integer", minimum: 1, maximum: 20 } }, additionalProperties: false }, z.object({ limit: z.number().int().min(1).max(20).optional() }).strict()),
   tool("companion_open_card", "打开一个已存在的学习卡片。cardId 直接用到期复习列表给的那个 id 就行。", "read", false, { type: "object", properties: { cardId: { type: "string", minLength: 1, maxLength: 120 } }, required: ["cardId"], additionalProperties: false }, z.object({ cardId: uuid }).strict()),
-  tool("companion_focus_graph", "聚焦知识图谱中的节点。", "reversible_low", false, { type: "object", properties: { keyPointId: { type: "string", minLength: 1, maxLength: 120 }, lens: { type: "string", enum: ["current_target", "evidence", "provenance", "issues"] } }, required: ["keyPointId", "lens"], additionalProperties: false }, z.object({ keyPointId: uuid, lens: z.enum(["current_target", "evidence", "provenance", "issues"]) }).strict()),
-  tool("companion_start_learning", "开始一个新的学习运行。", "consequential", true, emptyParameters, emptyArguments),
-  tool("companion_resume_learning", "恢复当前学习运行。", "consequential", true, emptyParameters, emptyArguments),
+  // 参数名从 `keyPointId` 改成 `objectiveId`（2026-09-24，39d W2-1）：执行体打的是
+  // `learning_objectives_v2.objective_id`，而库里的 `key_point_id` 是另一个 id-space
+  // （`validation_assistance_exposures.key_point_id → card_key_points.id`）。顺带把
+  // 模型可见的 JSON schema 从 `minLength/maxLength` 收成 `format: "uuid"`——与 zod 那份
+  // 成对，理由同上面三条。
+  tool("companion_focus_graph", "聚焦知识图谱中的某个学习目标。", "reversible_low", false, { type: "object", properties: { objectiveId: { type: "string", format: "uuid" }, lens: { type: "string", enum: ["current_target", "evidence", "provenance", "issues"] } }, required: ["objectiveId", "lens"], additionalProperties: false }, z.object({ objectiveId: uuid, lens: z.enum(["current_target", "evidence", "provenance", "issues"]) }).strict()),
+  // `noteId` **可选**（39d W2-1 的裁定，2026-09-24）：给了就按那篇笔记收窄查找范围，
+  // 修掉"无法指名哪一篇、服务端只能挑最近一条"；不给就保持今天的行为。
+  // **不做必填**——查过数据：208 个 objective 里只有 22 个有 origin 行（其中 active 且带
+  // note origin 的 17 个），必填会让 194 个 active objective 里的 177 个失去入口，
+  // 违反 39b §11「中途任何一批停下，系统行为不会比今天差」。必填留给 W3-4
+  // （无卡目标进冻结链 + note-origin 目标创建路径落地之后）。
+  tool("companion_start_learning", "开始一个新的学习运行。用户说了是哪篇笔记时带上 noteId，就从那篇开始；没说就别猜。", "consequential", true, { type: "object", properties: { noteId: { type: "string", format: "uuid" } }, additionalProperties: false }, z.object({ noteId: uuid.optional() }).strict()),
+  // 同上：`noteId` 可选，给了就只在那篇笔记的轮次里找。
+  tool("companion_resume_learning", "恢复当前学习运行。用户说了是哪篇笔记时带上 noteId，就只恢复那篇上的轮次；没说就别猜。", "consequential", true, { type: "object", properties: { noteId: { type: "string", format: "uuid" } }, additionalProperties: false }, z.object({ noteId: uuid.optional() }).strict()),
   // 以下动作改学习状态或排程数据：即使可逆也算 consequential，guided 档必须确认。
-  tool("companion_pause_learning", "暂停当前学习运行。", "consequential", true, { type: "object", properties: { runId: { type: "string", minLength: 1, maxLength: 120 } }, required: ["runId"], additionalProperties: false }, z.object({ runId: uuid }).strict()),
-  tool("companion_request_hint", "请求当前任务的提示。", "consequential", true, { type: "object", properties: { runId: { type: "string", minLength: 1, maxLength: 120 }, taskId: { type: "string", minLength: 1, maxLength: 120 }, level: { type: "integer", minimum: 1, maximum: 3 } }, required: ["runId", "taskId", "level"], additionalProperties: false }, z.object({ runId: uuid, taskId: uuid, level: z.union([z.literal(1), z.literal(2), z.literal(3)]) }).strict()),
-  tool("companion_switch_task_variant", "切换当前任务的题目变体。", "consequential", true, { type: "object", properties: { runId: { type: "string", minLength: 1, maxLength: 120 }, taskId: { type: "string", minLength: 1, maxLength: 120 }, alternativeId: { type: "string", minLength: 1, maxLength: 120 } }, required: ["runId", "taskId", "alternativeId"], additionalProperties: false }, z.object({ runId: uuid, taskId: uuid, alternativeId: z.string().min(1).max(200) }).strict()),
+  // `format: "uuid"` 不是装饰：模型看得见的这份 schema 与下面 zod 那份**必须成对**。
+  // 这三条原先写的是 `minLength/maxLength`，而 zod 收紧成 `uuid` —— 模型按宽的那份
+  // 组织参数、服务端按严的那份拒绝，而 W2-4 的 S1 探针要量的正是"参数不合 schema 的比例"，
+  // 两侧不一致会让那个读数量错东西。
+  tool("companion_pause_learning", "暂停当前学习运行。", "consequential", true, { type: "object", properties: { runId: { type: "string", format: "uuid" } }, required: ["runId"], additionalProperties: false }, z.object({ runId: uuid }).strict()),
+  tool("companion_request_hint", "请求当前任务的提示。", "consequential", true, { type: "object", properties: { runId: { type: "string", format: "uuid" }, taskId: { type: "string", format: "uuid" }, level: { type: "integer", minimum: 1, maximum: 3 } }, required: ["runId", "taskId", "level"], additionalProperties: false }, z.object({ runId: uuid, taskId: uuid, level: z.union([z.literal(1), z.literal(2), z.literal(3)]) }).strict()),
+  tool("companion_switch_task_variant", "切换当前任务的题目变体。reason 写用户为什么要换这一题（换法本身不记理由，只有这句会进这次修订的记录）。", "consequential", true, { type: "object", properties: { runId: { type: "string", format: "uuid" }, taskId: { type: "string", format: "uuid" }, alternativeId: { type: "string", minLength: 1, maxLength: 120 }, reason: { type: "string", minLength: 1, maxLength: 200 } }, required: ["runId", "taskId", "alternativeId", "reason"], additionalProperties: false }, z.object({ runId: uuid, taskId: uuid, alternativeId: z.string().min(1).max(200), reason: z.string().min(1).max(200) }).strict()),
   tool("companion_defer_review", "延期当前复习提醒。", "consequential", true, { type: "object", properties: { scheduleId: { type: "string", format: "uuid" }, scheduleGeneration: { type: "integer", minimum: 0 }, deferredUntil: { type: "string", format: "date-time" }, reasonCode: { type: "string", enum: ["user_requested", "temporary_unavailable"] } }, required: ["scheduleId", "scheduleGeneration", "deferredUntil", "reasonCode"], additionalProperties: false }, z.object({ scheduleId: uuid, scheduleGeneration: z.number().int().nonnegative(), deferredUntil: z.string().datetime(), reasonCode: z.enum(["user_requested", "temporary_unavailable"]) }).strict()),
-  tool("companion_plan_route", "规划一条学习理解路线。", "consequential", true, { type: "object", properties: { request: { type: "object" } }, required: ["request"], additionalProperties: false }, z.object({ request: z.record(z.unknown()) }).strict()),
   // auto-set / auto-fill（2026-09-19 权限分级对齐原设计）：可逆的低风险写入。
   // requiresConfirmation=true 使 guided 档仍走提案确认；full 档视用户预授权直接执行。
   // kind 枚举与 assistant_memory_items.kind 的 DB CHECK 约束同源（见迁移）。

@@ -19,9 +19,13 @@
 
 import { sql } from "drizzle-orm";
 import { noteVisibleSqlText } from "@ailearn/shared/note-visibility";
+import { reviewScheduleTargetsConsumableCardPredicate } from "@ailearn/shared/review-consumable-target";
 import type { WorkerTransaction } from "../db.ts";
 import { normalizeWorkspaceAIPolicy } from "../lib/governance.ts";
 import { noteSearchTerms, parsePageContext } from "./companion-dialogue-content.ts";
+import { askableFactSpanKeys, loadFactSpans } from "./companion-fact-spans.ts";
+import { readLivePageView, type LivePageView } from "./companion-live-view.ts";
+import { findNearestNoteTitle, findNoteRuns } from "./companion-note-reads.ts";
 
 const FALLBACK_TIMEZONE = "Asia/Shanghai";
 
@@ -36,17 +40,38 @@ export function visibleCompanionCardSourceCondition(userId: string) {
   ))`;
 }
 
-/** 与复习队列同一可消费口径：到期排程必须指向有效目标和可见卡片。外层别名固定为 s。 */
-export function visibleCompanionDueReviewCondition(userId: string) {
-  return sql`(s.subject_type = 'card' AND EXISTS (
-    SELECT 1 FROM learning_objectives_v2 o
-    JOIN learning_cards_v2 c ON c.objective_id = o.objective_id
-      AND c.workspace_id = o.workspace_id AND c.lifecycle = 'active'
-    WHERE o.objective_id = s.subject_id
-      AND o.workspace_id = s.workspace_id
-      AND o.lifecycle = 'active'
-      AND ${visibleCompanionCardSourceCondition(userId)}
-  ))`;
+/**
+ * 可见笔记数——**唯一一句话**（环境块的 `noteCount` 与 `readLearningStats` 的
+ * `note_count` 共用，且与首页 `/stats/overview` 的 `noteCount` 同一规则）。
+ *
+ * 为什么合成一句：`readLearningStats` 的那一支原先只判 `workspace_id` + `deleted_at`，
+ * 于是协作空间里她答"笔记 12 篇"会把别人**私有**笔记算进去，而首页那一格是"我看得见的
+ * 笔记有几篇"（`stats/service.ts` 的批次 4.5）。这条分岔是 W2-3 的对账测试抓到的
+ * （`companion-stats-home-parity-postgres.integration.ts`），两处从此共用一个算式。
+ */
+export function visibleCompanionNoteCountSql(scope: { workspaceId: string; userId: string }) {
+  return sql`(SELECT count(*) FROM notes n
+    WHERE n.workspace_id = ${scope.workspaceId} AND n.deleted_at IS NULL
+      AND ${sql.raw(noteVisibleSqlText("n", `'${scope.userId}'::uuid`))})`;
+}
+
+/**
+ * 到期排程"还能不能消费"——**直接复用复习队列那一条判据**（`@ailearn/shared/review-consumable-target`）。
+ *
+ * 这里曾经是**手抄的一份**：形状与队列那条一样，但多带了一条"卡的来源笔记要对本人可见"。
+ * 后果不是"更安全"，而是**两个都叫"到期复习"的数在协作空间里不相等**——用户点进队列看到
+ * 3 条，她说 2 条，于是"没有到期的"这句话在她那里成立（G2 的假阴性）。2026-09-24 的
+ * 对账测试把这个分岔逮住（`companion-stats-home-parity-postgres.integration.ts`），
+ * 现在两处共用一个函数，改一处两边一起变。
+ *
+ * 外层别名固定为 s（三条查询都是 `FROM review_schedules s`）。
+ */
+export function visibleCompanionDueReviewCondition() {
+  return reviewScheduleTargetsConsumableCardPredicate({
+    subjectType: sql`s.subject_type`,
+    subjectId: sql`s.subject_id`,
+    workspaceId: sql`s.workspace_id`,
+  });
 }
 
 export interface HereAndNowSnapshot {
@@ -78,7 +103,15 @@ export interface HereAndNowSnapshot {
    * 这是**本轮免费预计算**而不是工具：她要么知道用户在哪儿，要么这一轮根本不知道
    * 该问什么。title 只有在实体级页面（笔记/卡片）才解析得出来，其余只有页面类型。
    */
-  currentPage: { kind: string; title: string | null } | null;
+  currentPage: { kind: string; title: string | null; statusLine: string | null } | null;
+  /**
+   * 上面那一行的**原始实时行**（bridge 的 pageKind 原值 + items）。
+   *
+   * `currentPage` 是给人看的中文标签形态，这一份是给判据用的：实体先行解析要拿
+   * `items[].ordinal` 落"第 N 张"这种指称。两处共用同一次读（`readLivePageView`），
+   * 所以不会出现"她说你在这一屏、却认不出这一屏的第 3 项"这种分叉。
+   */
+  livePageView: LivePageView | null;
   /**
    * 最近一条还没兑现的提醒（她答应过的事）。不放进快照，她就只能"当场记住"，
    * 转头又问用户"你要我提醒什么"——许过约却不记得，比从没答应更伤信任。
@@ -95,9 +128,28 @@ export interface HereAndNowSnapshot {
   noteReference: {
     title: string; found: boolean; noteId: string | null; ageLabel: string | null;
     imageCount: number; opening: string | null;
+    /**
+     * 这篇笔记上还没结束的轮次（`start`/`resume` 的服务端回填，39b §9.8 的 C1）。
+     * 与事实块里的那一段同源（`findNoteRuns`）——两处各写一条 SQL 迟早一个说 1 轮、
+     * 一个说 2 轮。
+     */
+    openRuns: { id: string; phase: string }[];
+    /**
+     * 没匹配上时"最接近的一篇"（39b §9.3 那第二行的价值所在：把"库里没有这篇"由服务端
+     * 替她说完，还附赠一个更接近的真东西，她就没有编造的必要）。判据与实体先行解析
+     * 共用一份（`companion-note-reads`）。
+     */
+    nearest: { title: string; score: number } | null;
   } | null;
   /** 图片外发政策是否开着（决定"有图但看不了"这句话怎么说）。 */
   imagesReadable: boolean;
+  /**
+   * 这一轮**可以报**的读数目录（P2，39d W2-5）：`{ key → 值 }` ＋ 送进 prompt 的块。
+   *
+   * 没问就是 null（`askable` 由用户输入决定）——"没问就不要报数"从此不是叮嘱，
+   * 而是**她没有可报的键**：她写 `{{f:key}}`，值由服务端渲染；目录外的键整句丢掉。
+   */
+  factSpans: { values: Record<string, string>; block: string } | null;
   /**
    * 学习统计真值——**只在用户这一轮问到学习数据时**才非空。
    *
@@ -216,22 +268,20 @@ export async function readLearningStats(
         WHERE s.workspace_id = ${scope.workspaceId} AND s.user_id = ${scope.userId}
           AND s.status = 'pending' AND s.next_review_at <= now()
           AND (s.user_deferred_until IS NULL OR s.user_deferred_until <= now())
-          AND ${visibleCompanionDueReviewCondition(scope.userId)}
+          AND ${visibleCompanionDueReviewCondition()}
       ) AS due_reviews,
       (SELECT count(*) FROM review_schedules s
         WHERE s.workspace_id = ${scope.workspaceId} AND s.user_id = ${scope.userId}
           AND s.status = 'pending'
           AND coalesce(s.user_deferred_until, s.next_review_at) > now()
           AND coalesce(s.user_deferred_until, s.next_review_at) <= now() + interval '24 hours'
-          AND ${visibleCompanionDueReviewCondition(scope.userId)}
+          AND ${visibleCompanionDueReviewCondition()}
       ) AS due_next_24h,
       (SELECT count(*) FROM learning_cards_v2 c
         WHERE c.workspace_id = ${scope.workspaceId} AND c.lifecycle = 'active'
           AND ${visibleCompanionCardSourceCondition(scope.userId)}
       ) AS active_cards,
-      (SELECT count(*) FROM notes
-        WHERE workspace_id = ${scope.workspaceId} AND deleted_at IS NULL
-      ) AS note_count
+      ${visibleCompanionNoteCountSql(scope)} AS note_count
   `);
   const row = (Array.isArray(rows) ? rows : [])[0] ?? null;
   return {
@@ -307,7 +357,11 @@ export function ageLabel(minutes: number): string {
  * 她只需要负责读和说。
  */
 export function extractNoteTitleReference(userText: string): string | null {
-  const title = userText.match(/《([^》\n]{1,30})》/)?.[1]?.trim();
+  // 「X」与《X》同级：中文里带书名号的写法不止一种（39b §9.3 规则① 写的是《X》／「X」）。
+  // 实测 30 天真实流量里「」形态 0 次、只有《》8 次，但两种都得认——只认一种时，
+  // 另一种写法会退化成"她其实手上有这篇却当成没有"。
+  const match = userText.match(/《([^》\n]{1,30})》|「([^」\n]{1,30})」/);
+  const title = (match?.[1] ?? match?.[2])?.trim();
   return title ? title : null;
 }
 
@@ -377,7 +431,7 @@ export async function loadHereAndNow(
     WHERE s.workspace_id = ${scope.workspaceId} AND s.user_id = ${scope.userId}
       AND s.status = 'pending' AND s.next_review_at <= now()
       AND (s.user_deferred_until IS NULL OR s.user_deferred_until <= now())
-      AND ${visibleCompanionDueReviewCondition(scope.userId)}
+      AND ${visibleCompanionDueReviewCondition()}
   `);
 
   // 今日学习量：按**用户本地日**切，不按 UTC 日——否则早上看到的"今日"是昨天下午。
@@ -393,9 +447,7 @@ export async function loadHereAndNow(
   // 标题，并把这些标题注进 prompt 外发模型——审查原文把它记成"中"，但它和
   // `companion_read_note` 是同一类越界：空间隔离挡不住同空间的别人。
   const noteCountRows = await tx.execute<{ n: string }>(sql`
-    SELECT count(*) n FROM notes n
-    WHERE n.workspace_id = ${scope.workspaceId} AND n.deleted_at IS NULL
-      AND ${sql.raw(noteVisibleSqlText("n", `'${scope.userId}'::uuid`))}
+    SELECT ${visibleCompanionNoteCountSql(scope)} n
   `);
   const noteRows = await tx.execute<{ title: string; age_minutes: string }>(sql`
     SELECT n.title, EXTRACT(EPOCH FROM (now() - n.updated_at)) / 60 age_minutes
@@ -422,7 +474,7 @@ export async function loadHereAndNow(
   const noteRefTitleMatch = noteRefTerms.length === 0
     ? sql`n.title = ${noteRefTitle ?? ""}`
     : sql`${sql.join(noteRefTerms.map((term) => sql`n.title ILIKE ${`%${term}%`}`), sql` AND `)}`;
-  const noteRefRows = noteRefTitle
+  const noteRefRows: { id: string; title: string; age_minutes: string; image_count: string; opening: string | null }[] = noteRefTitle
     ? await tx.execute<{ id: string; title: string; age_minutes: string; image_count: string; opening: string | null }>(sql`
         SELECT n.id, n.title,
                EXTRACT(EPOCH FROM (now() - n.updated_at)) / 60 age_minutes,
@@ -444,6 +496,17 @@ export async function loadHereAndNow(
         ORDER BY (n.title = ${noteRefTitle}) DESC, n.updated_at DESC
         LIMIT 1
       `)
+    : [];
+
+  // 没匹配上时才找"最接近的一篇"（39b §9.3 规则① 的第二行）。放在"没找到"这一支里，
+  // 是因为命中路径本来就不该多付一次查询；而未命中恰恰是她最容易说出假阴性结论的那一刻。
+  const noteRefNearest = noteRefTitle && !noteRefRows[0]
+    ? await findNearestNoteTitle(tx, scope, noteRefTitle)
+    : null;
+  // 这一篇上还没结束的轮次（只在命中时才查）：用户说"继续学《X》"走的就是这一支，
+  // 回填放在这里，"这篇已有 1 轮在暂停中"才对最常见的说法成立。
+  const noteRefRuns = noteRefRows[0]
+    ? (await findNoteRuns(tx, scope, [noteRefRows[0].id])).get(noteRefRows[0].id) ?? []
     : [];
 
   const reminderRows = await tx.execute<{ text: string; fire_at_local: string }>(sql`
@@ -468,11 +531,17 @@ export async function loadHereAndNow(
     policyRows[0]?.data_policy as Parameters<typeof normalizeWorkspaceAIPolicy>[0],
   ).sendImageContent === true;
 
+  // P2（39d W2-5）：这一轮她**可以报**的读数目录（没问就没有键）。
+  // 读的触发条件是"问数的两种形态之一"：`asksForLearningStats`（口语问法）或
+  // `askableFactSpanKeys`（逐键的疑问词＋量词）——后者更细，必须并进来，否则
+  // "我笔记有几篇"这种会被判成"要报数"却一次查询都不发、目录空着。
+  const factSpanKeys = askableFactSpanKeys(scope.userText);
   // 用户这一轮问到学习数据，就在她开口之前把真值算好（见 HereAndNowSnapshot.learningStats）。
   // 没问到就一次查询都不发——这条支路的开销必须是"问了才付"。
-  const learningStats = asksForLearningStats(scope.userText)
+  const learningStats = (asksForLearningStats(scope.userText) || factSpanKeys.length > 0)
     ? await readLearningStats(tx, scope)
     : null;
+  const factSpans = await loadFactSpans(tx, scope, factSpanKeys, learningStats);
   // 边界缺省按"允许"读，与念头管线（`boundaries.allowNudgeLearning !== false`）同一口径：
   // 两处的默认值不一样时，"她以为关着/其实开着"这类分裂又会回来。
   const profileBoundaries = (petRow?.boundaries ?? {}) as Record<string, unknown>;
@@ -483,6 +552,10 @@ export async function loadHereAndNow(
       allowVoiceTags: profileBoundaries.allowVoiceTags !== false,
     }
     : null;
+
+  // 用户此刻停在哪一屏：**只读一次**，中文标签与判据两份输出都从这一行来
+  // （`resolveCurrentPage` 渲染"用户正在看…"，实体先行解析拿 `items[].ordinal`）。
+  const livePageView = await readLivePageView(tx, scope);
 
   return {
     localTime: clock?.local_time ?? "",
@@ -518,16 +591,29 @@ export async function loadHereAndNow(
           ageLabel: ageLabel(Number(noteRefRows[0].age_minutes)),
           imageCount: Number(noteRefRows[0].image_count ?? 0),
           opening: noteOpeningExcerpt(noteRefRows[0].opening),
+          openRuns: noteRefRuns.map((run) => ({ id: run.id, phase: run.phase })),
+          nearest: null,
         }
-        : { title: noteRefTitle, found: false, noteId: null, ageLabel: null, imageCount: 0, opening: null })
+        : {
+          title: noteRefTitle,
+          found: false,
+          noteId: null,
+          ageLabel: null,
+          imageCount: 0,
+          opening: null,
+          openRuns: [],
+          nearest: noteRefNearest,
+        })
       : null,
     imagesReadable,
     learningStats,
+    factSpans: factSpans ? { values: factSpans.values, block: factSpans.block as string } : null,
     boundaryFacts,
     nextReminder: reminderRows[0]
       ? { text: reminderRows[0].text, fireAtLocal: reminderRows[0].fire_at_local }
       : null,
-    currentPage: await resolveCurrentPage(tx, scope),
+    currentPage: await resolveCurrentPage(tx, scope, livePageView),
+    livePageView,
   };
 }
 
@@ -575,8 +661,29 @@ export const PAGE_KIND_LABELS: Record<string, string> = {
  */
 async function resolveCurrentPage(
   tx: WorkerTransaction,
-  scope: { workspaceId: string; pageContext?: unknown },
-): Promise<{ kind: string; title: string | null } | null> {
+  scope: { workspaceId: string; userId: string; pageContext?: unknown },
+  livePageView: LivePageView | null,
+): Promise<{ kind: string; title: string | null; statusLine: string | null } | null> {
+  // ── 实时那条优先（39b §9.6：「只留实时那条」）─────────────────────────────
+  // `assistant_page_contexts` 是渲染层逐屏发布的**实时行**（带 `readable_view`），
+  // 而 `scope.pageContext` 是 `run.page_context` 那个**审计字段**（`sanitizeContext`
+  // 收窄后的副本）。同一个"我在哪一屏"过去只从审计字段取，所以她读不到那一屏上正在
+  // 发生什么；更早的版本则是同一份"我在哪"算了两遍（宽的那份只有调工具才读）。
+  //
+  // 顺序刻意是"实时优先、审计兜底"而不是"只留实时"：P4-b/P4-c 那 11 页还没登记
+  // `readable_view`（W2-7），此刻把审计那条删掉会让这些页从"知道在哪一屏"退化成
+  // "什么都不知道"——违反 39b §11「中途任何一批停下，系统行为不会比今天差」。
+  // 等 16 页全登记完，兜底那一支才谈得上删。
+  //
+  // `home`/`other` 有意跳过：人 idle 在首页，注入"用户正在看：首页"对模型是纯噪音。
+  if (livePageView && livePageView.pageKind !== "other" && livePageView.pageKind !== "home") {
+    return {
+      kind: PAGE_KIND_LABELS[livePageView.pageKind] ?? livePageView.pageKind,
+      title: livePageView.title,
+      statusLine: livePageView.statusLine,
+    };
+  }
+
   const context = parsePageContext(scope.pageContext);
   const pageKind = typeof context?.pageKind === "string" ? context.pageKind : null;
   if (!pageKind || pageKind === "other" || pageKind === "home") return null;
@@ -596,7 +703,7 @@ async function resolveCurrentPage(
         AND deleted_at IS NULL
       LIMIT 1
     `);
-    return { kind: label, title: rows[0]?.title ?? null };
+    return { kind: label, title: rows[0]?.title ?? null, statusLine: null };
   }
   if (cardRef) {
     const rows = await tx.execute<{ cue: string | null }>(sql`
@@ -605,9 +712,9 @@ async function resolveCurrentPage(
         AND workspace_id = ${scope.workspaceId}
       LIMIT 1
     `);
-    return { kind: label, title: rows[0]?.cue ?? null };
+    return { kind: label, title: rows[0]?.cue ?? null, statusLine: null };
   }
-  return { kind: label, title: null };
+  return { kind: label, title: null, statusLine: null };
 }
 
 
@@ -658,13 +765,12 @@ export function renderHereAndNow(snapshot: HereAndNowSnapshot): string | null {
     lines.push(`到期待复习 ${snapshot.dueReviews} 项`);
   }
   if (snapshot.learningStats) {
-    const stats = snapshot.learningStats;
     // 这一行是 §9.66 缺陷① 的解法：她以前先念历史里的旧数、再调工具、再在同一条
     // 消息里改口。真值必须在**她说之前**就在场，历史里的同类数字要被明确降级。
-    lines.push(`用户这一轮问的是学习数据，以下是刚查出来的真值：今日 ${stats.todayMinutes} 分钟，`
-      + `本周 ${stats.weekMinutes} 分钟，到期复习 ${stats.dueReviews} 项，`
-      + `24 小时内到期 ${stats.dueNext24Hours} 项，活跃卡片 ${stats.activeCards} 张，笔记 ${stats.noteCount} 篇。`
-      + "只用这一行的数字；历史对话里出现过的同类数字是更早的时刻，可能已经变了。");
+    // 39d W2-5：**数值从这里撤出**了——P2 之后它们由 `<fact_spans>` 渲染（一处一个来源），
+    // 她照键写、服务端填。防复读那半句保留：历史里的同类数字仍然是更早的时刻。
+    lines.push("用户这一轮问的是学习数据：可报的读数在 <fact_spans> 里，"
+      + "正文里要报就写 {{f:key}}，不要自己写数值；历史对话里出现过的同类数字是更早的时刻，可能已经变了。");
   }
   if (snapshot.boundaryFacts) {
     const b = snapshot.boundaryFacts;
@@ -683,6 +789,9 @@ export function renderHereAndNow(snapshot: HereAndNowSnapshot): string | null {
   if (snapshot.currentPage) {
     const page = snapshot.currentPage;
     lines.push(`用户正在看${page.kind}${page.title ? `《${truncate(page.title, 24)}》` : ""}`);
+    // 那一屏的**状态行**（来自该页自己发布的 `readable_view.statusLine`，逐字）。
+    // 有它她才能回答"这一页怎么了"，而没有它只能说"你在笔记页"——后者帮不上忙。
+    if (page.statusLine) lines.push(`这一屏：${truncate(page.statusLine, 60)}`);
   }
   if (snapshot.nextReminder) {
     lines.push(`你已经答应：${snapshot.nextReminder.fireAtLocal} 提醒用户「${truncate(snapshot.nextReminder.text, 30)}」`);
@@ -692,9 +801,27 @@ export function renderHereAndNow(snapshot: HereAndNowSnapshot): string | null {
     lines.push(ref.found
       ? `用户提到的《${truncate(ref.title, 24)}》在笔记库里，noteId=${ref.noteId}（${ref.ageLabel}写的）；要看正文就调用 companion_read_note 用这个 id。`
       // 没找到时**不把"它不存在"当结论交给她**——那正是实机里她零工具却脱口而出的假阴性。
-      : `按标题没找到《${truncate(ref.title, 24)}》这篇笔记：标题可能记岔，或者它其实是一张卡片。先调用 companion_search_notes 换个关键词再查；查不到就照实说没查到，不要替笔记库下"没有这东西"的结论。`);
+      // 39b §9.3：这一行的价值在于"库里没有匹配"由服务端替她说完，还附赠一个更接近的
+      // 真东西——她就没有编造的必要，也不会把"我没查到"说成"库里没有"。
+      : `按标题没找到《${truncate(ref.title, 24)}》这篇笔记${ref.nearest
+        ? `；最接近的是《${truncate(ref.nearest.title, 24)}》（相似度 ${ref.nearest.score.toFixed(2)}）`
+        : ""}：标题可能记岔，或者它其实是一张卡片。先调用 companion_search_notes 换个关键词再查；查不到就照实说没查到，不要替笔记库下"没有这东西"的结论。`);
     // 只给开头一段，并点名"更长的原文还是要去读"：给全篇等于让她抄一个可能已经
     // 过期、也没进历史的版本，而那正是要修的东西。
+    // "这篇还有 N 轮没结束"（39b §9.8 的 C1）：用户说"继续学《X》"时，她手上要先有
+    // "有几轮、在哪个状态、runId 是哪个"，否则 start/resume 只能靠服务端挑最近一条。
+    if (ref.found && ref.openRuns.length > 0) {
+      const paused = ref.openRuns.filter((run) => run.phase === "paused").length;
+      const running = ref.openRuns.length - paused;
+      const parts: string[] = [];
+      if (running > 0) {
+        parts.push(`有 ${running} 轮学习正在进行中（runId=${ref.openRuns.find((run) => run.phase !== "paused")?.id}）`);
+      }
+      if (paused > 0) {
+        parts.push(`有 ${paused} 轮学习在暂停中（runId=${ref.openRuns.find((run) => run.phase === "paused")?.id}）`);
+      }
+      lines.push(`这一篇${parts.join("，")}：要接着学就用这个 runId 调用 companion_resume_learning，不要另起一轮。`);
+    }
     if (ref.found && ref.opening) {
       lines.push(`这篇的开头是：「${ref.opening}」（只到第一句为止；要更长的原文仍然要调用 companion_read_note 去读，不要照这段往下补。）`);
     }

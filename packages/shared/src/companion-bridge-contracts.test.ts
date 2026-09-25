@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  assistantContextRenewResultV2Schema,
   assistantDeliveryV2Schema,
   companionSystemEventV2Schema,
   inPageCommandEnvelopeV2Schema,
@@ -282,4 +283,28 @@ test("页面词表：每一页都过得了路由白名单，也都带一个桌�
   }
   // 正控制：表读到东西了，而不是循环空跑。
   assert.equal(COMPANION_PAGE_DESTINATIONS_V2.length, 10);
+});
+
+test("renew 的响应合同就是那两个字段，多一字段少一字段都不算", () => {
+  // 这条存在的理由：桌面端原先拿 publish 那份整快照的 schema 去解 renew 的响应，
+  // 服务端只回 {revision, expiresAt} ⇒ 每一次续租都在客户端被判"合同不合"，
+  // catch 里清掉本地上下文并停掉定时器——屏上内容不变时渲染层不再重推，
+  // 于是她读不到这一页（实测 expires_at-issued_at 恒为 30＋10 秒）。
+  assert.equal(
+    assistantContextRenewResultV2Schema.safeParse({
+      revision: "a".repeat(64),
+      expiresAt: new Date(0).toISOString(),
+    }).success,
+    true,
+  );
+  assert.equal(assistantContextRenewResultV2Schema.safeParse({ revision: "r" }).success, false);
+  // publish 的整快照形状拿来当 renew 的响应必须被拒（`.strict()` 还在，两侧不会又混起来）。
+  assert.equal(
+    assistantContextRenewResultV2Schema.safeParse({
+      revision: "r",
+      expiresAt: new Date(0).toISOString(),
+      contextId: uuid(),
+    }).success,
+    false,
+  );
 });

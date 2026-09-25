@@ -2,8 +2,8 @@
  * 方案 20 C5：LearningTargetSnapshotV2 Adapter。
  *
  * §16.1–16.3:
- * - PREPARE 从激活的 LearningObjectiveV2 + LearningCardV2 冻结完整
- *   LearningTargetSnapshotV2（全部 §16.1 字段）；
+ * - PREPARE 从激活的 LearningObjectiveV2 冻结完整 LearningTargetSnapshotV2
+ *   （全部 §16.1 字段；LearningCardV2 **由必备降为可选**，39d W3-4／D1 §4.3）；
  * - 正式链路（planner/structured/critic/commit）只消费 frozen snapshot，
  *   不再直接读取 card_key_points.claim/quoteText（表已删除）；
  * - run/objective identity is carried by the V2 snapshot contract.
@@ -23,6 +23,7 @@ import {
   learningTargetSnapshotsV2,
   learningObjectivesV2,
   learningObjectiveRevisionsV2,
+  learningObjectiveOriginsV2,
   learningCardsV2,
   learningCardPublicationRevisionsV2,
   learningObjectiveEvidenceBindingsV2,
@@ -340,16 +341,70 @@ export function computePublishedTargetEligibility(input: {
 }
 
 /**
+ * 无卡冻结的依据判据（D1 §4.3 里"无卡有依据"与"无卡无依据"两行的分界）。三条都要过：
+ * ① 一条依据都没有 ⇒ 拒（不许出现"既没卡也没依据"的空快照）；
+ * ② 该目标修订必须有**笔记版本锚**——版本只存在 `learning_objective_origins_v2`
+ *    的 note 来源上（evidence 快照只有 `note_id`，没有 `note_version_id`）；
+ * ③ 每条依据必须出自那篇笔记。
+ * 三种不满足都 fail closed 成同一个码：对用户它都是"这个目标还没有可冻结的原稿依据"，
+ * 差别只在服务端消息里（不放宽成"当作没卡处理"）。
+ */
+async function requireNoteBackedEvidence(
+  tx: ApiTransaction,
+  workspaceId: string,
+  objectiveRevisionId: string,
+  evidence: LearningTargetSnapshotV2["target"]["evidence"],
+): Promise<void> {
+  if (evidence.length === 0) {
+    throw new TargetSnapshotError("target_evidence_missing",
+      `无卡目标没有可冻结的笔记依据：objective_revision=${objectiveRevisionId}`);
+  }
+  const originRows = await tx
+    .select({ noteId: learningObjectiveOriginsV2.noteId })
+    .from(learningObjectiveOriginsV2)
+    .where(and(
+      eq(learningObjectiveOriginsV2.workspaceId, workspaceId),
+      eq(learningObjectiveOriginsV2.objectiveRevisionId, objectiveRevisionId),
+      eq(learningObjectiveOriginsV2.originKind, "note"),
+    ))
+    .limit(1);
+  const noteId = originRows[0]?.noteId;
+  if (!noteId) {
+    throw new TargetSnapshotError("target_evidence_missing",
+      `无卡目标缺笔记版本锚（origins 里没有 note 来源）：objective_revision=${objectiveRevisionId}`);
+  }
+  const snapshotIds = [...new Set(evidence.map((e) => e.evidenceSnapshotId))];
+  // 同 loadEvidenceClosure 的 R32：数组参数用显式 `{uuid,...}::uuid[]` 字面量
+  // （drizzle+postgres-js 对数组参数序列化不可靠）。id 全部来自本库行，无注入面。
+  const snapshotIdsLiteral = `{${snapshotIds.join(",")}}`;
+  const foreign = await tx
+    .select({ id: evidenceSnapshotsV2.evidenceSnapshotId })
+    .from(evidenceSnapshotsV2)
+    .where(and(
+      eq(evidenceSnapshotsV2.workspaceId, workspaceId),
+      sql`${evidenceSnapshotsV2.evidenceSnapshotId} = ANY(${snapshotIdsLiteral}::uuid[])`,
+      sql`${evidenceSnapshotsV2.noteId} IS DISTINCT FROM ${noteId}`,
+    ))
+    .limit(1);
+  if (foreign.length > 0) {
+    throw new TargetSnapshotError("target_evidence_missing",
+      `无卡目标的依据不都出自它那篇笔记：evidence=${foreign[0].id} 属于另一篇笔记`);
+  }
+}
+
+/**
  * §16.1: 从激活的 LearningObjectiveV2 + LearningCardV2 冻结完整 TargetSnapshot。
  *
- * PREPARE 流程唯一入口（§16.2 step 3–7）：
- *  1. workspace-scoped active Objective；
+ * PREPARE 流程唯一入口（§16.2 step 3–7，卡前置按 39d W3-4 改成三分支）：
+ *  1. workspace-scoped active Objective（**必备**，查不到 fail closed）；
  *  2. current objective revision；
- *  3. active Card（查不到 fail closed；禁静默用 revision 1）；
- *  4. current publication revision（public/reveal payload hash）；
- *  5. evidence closure（binding + snapshot hash + eligibility, 全 usable）；
- *  6. planning exposure（objective-scoped）+ eligibility ceiling；
- *  7. 组装 §16.1 对象，snapshotHash，持久化，返回。
+ *  3. evidence closure（binding + snapshot hash + eligibility, 全 usable）——
+ *     先于卡判定，因为"没卡"这条出路要拿它当依据判据；
+ *  4. Card：**可选**。有卡 ⇒ 照旧查 current publication revision（查不到仍 fail closed，
+ *     禁静默用 revision 1）；无卡 ⇒ 必须"该修订有笔记版本锚 ＋ 全部依据出自那篇笔记"，
+ *     否则 fail closed 为 `target_evidence_missing`（不许既没卡也没依据地空冻结）；
+ *  5. planning exposure（objective-scoped）+ eligibility ceiling；
+ *  6. 组装 §16.1 对象，snapshotHash，持久化，返回。
  * 任一 fail closed。
  */
 export async function freezeTargetSnapshotV2(
@@ -400,8 +455,13 @@ export async function freezeTargetSnapshotV2(
       `Objective revision not found: ${objective.currentObjectiveRevisionId}`);
   }
 
-  // 3. active Card（§16.2 step 2/3：PREPARE 必须 workspace-scoped 查到 active
-  //    Card，查不到 fail closed）
+  // 3. evidence closure —— **先于**卡判定。无卡那条出路要拿它当依据判据，
+  //    而它自身仍然逐条 fail closed（缺快照 / 缺 eligibility / 非 usable 一律拒）。
+  const evidenceClosure = await loadEvidenceClosure(tx, workspaceId, revision.objectiveRevisionId);
+
+  // 4. Card：**由必备降为可选**（39d W3-4 / D1 §4.3 的三分支）。
+  //    放宽的只有"必须有卡"这一条：上面两步（active Objective ＋ current revision）
+  //    一个字没动——无卡 ≠ 无目标，目标必须先落成正式目标才有资格进冻结链。
   const cardRows = await tx
     .select()
     .from(learningCardsV2)
@@ -411,36 +471,53 @@ export async function freezeTargetSnapshotV2(
       eq(learningCardsV2.lifecycle, "active"),
     ))
     .limit(1);
-  const card = cardRows[0];
-  if (!card) {
-    throw new TargetSnapshotError("card_not_found_or_inactive",
-      `Active card not found for objective: ${objectiveId}`);
-  }
-  const cardId = card.cardId;
-  const cardRevision = card.cardRevision;
-  const publicationRevision = card.currentPublicationRevision;
+  const card = cardRows[0] ?? null;
 
-  // 4. current publication revision → public/reveal payload hash
-  const pubRows = await tx
-    .select({
-      publicPayloadHash: learningCardPublicationRevisionsV2.publicPayloadHash,
-      revealPayloadHash: learningCardPublicationRevisionsV2.revealPayloadHash,
-    })
-    .from(learningCardPublicationRevisionsV2)
-    .where(and(
-      eq(learningCardPublicationRevisionsV2.workspaceId, workspaceId),
-      eq(learningCardPublicationRevisionsV2.cardId, cardId),
-      eq(learningCardPublicationRevisionsV2.publicationRevision, publicationRevision),
-    ))
-    .limit(1);
-  const pub = pubRows[0];
-  if (!pub) {
-    throw new TargetSnapshotError("card_publication_not_found",
-      `Card publication revision not found: ${cardId}@${publicationRevision}`);
+  // 5. 有卡：publication revision 照旧（查不到仍 fail closed）；
+  //    无卡：必须"该修订有笔记版本锚、且全部依据都出自那篇笔记"，否则拒。
+  let publicPayloadHash: string | null;
+  let revealPayloadHash: string | null;
+  if (card) {
+    const pubRows = await tx
+      .select({
+        publicPayloadHash: learningCardPublicationRevisionsV2.publicPayloadHash,
+        revealPayloadHash: learningCardPublicationRevisionsV2.revealPayloadHash,
+      })
+      .from(learningCardPublicationRevisionsV2)
+      .where(and(
+        eq(learningCardPublicationRevisionsV2.workspaceId, workspaceId),
+        eq(learningCardPublicationRevisionsV2.cardId, card.cardId),
+        eq(learningCardPublicationRevisionsV2.publicationRevision, card.currentPublicationRevision),
+      ))
+      .limit(1);
+    const pub = pubRows[0];
+    if (!pub) {
+      throw new TargetSnapshotError("card_publication_not_found",
+        `Card publication revision not found: ${card.cardId}@${card.currentPublicationRevision}`);
+    }
+    publicPayloadHash = pub.publicPayloadHash;
+    revealPayloadHash = pub.revealPayloadHash;
+  } else {
+    await requireNoteBackedEvidence(
+      tx, workspaceId, revision.objectiveRevisionId, evidenceClosure.evidence,
+    );
+    publicPayloadHash = null;
+    revealPayloadHash = null;
   }
-
-  // 5. evidence closure
-  const evidenceClosure = await loadEvidenceClosure(tx, workspaceId, revision.objectiveRevisionId);
+  const cardId = card?.cardId ?? null;
+  const cardRevision = card?.cardRevision ?? null;
+  const publicationRevision = card?.currentPublicationRevision ?? null;
+  // cardContentEpoch 是 `notNull` 列（也是快照哈希的一部分）：有卡时它就是 PREPARE
+  // 传进来的"卡内容能力 epoch"；无卡时那个数字描述的是卡内容变没变，对本目标
+  // 没有语义 ⇒ 改用目标自己的 lifecycle epoch（D1 §4.3 明写"不许用 0 蒙混"）。
+  // 今天没有任何比较读它（提交复验比的是 objectiveLifecycleEpoch，
+  // 见 run-processing-tick.ts 的 revalidateV2CommitEpochs），所以两种取值不互相打脸；
+  // 谁要新增比较，必须先按"有没有卡"分支。
+  if (!Number.isInteger(objectiveLifecycleEpoch) || objectiveLifecycleEpoch < 1) {
+    throw new TargetSnapshotError("card_content_epoch_invalid",
+      `无卡冻结需要一个 >=1 的 objective lifecycle epoch 作为内容 epoch，读到 ${objectiveLifecycleEpoch}`);
+  }
+  const cardContentEpoch = card ? input.cardContentEpoch : objectiveLifecycleEpoch;
 
   // 6. planning exposure
   const planningExposure = await loadPlanningExposure(
@@ -504,7 +581,7 @@ export async function freezeTargetSnapshotV2(
     workspaceId,
     userId,
     runId,
-    cardContentEpoch: input.cardContentEpoch,
+    cardContentEpoch: cardContentEpoch,
     objectiveLifecycleEpoch,
     target: {
       objectiveId,
@@ -512,8 +589,8 @@ export async function freezeTargetSnapshotV2(
       cardId,
       publicationRevision,
       cardRevision,
-      publicPayloadHash: pub.publicPayloadHash,
-      revealPayloadHash: pub.revealPayloadHash,
+      publicPayloadHash: publicPayloadHash,
+      revealPayloadHash: revealPayloadHash,
       objectiveStatement: revision.objectiveStatement,
       publicSummary: revision.publicSummary,
       knowledgeForm,
@@ -543,13 +620,13 @@ export async function freezeTargetSnapshotV2(
     objectiveRevision: revision.revision,
     semanticTargetFingerprint,
     targetRevisionHash,
-    cardContentEpoch: input.cardContentEpoch,
+    cardContentEpoch: cardContentEpoch,
     objectiveLifecycleEpoch,
     cardId,
     publicationRevision,
     cardRevision,
-    publicPayloadHash: pub.publicPayloadHash,
-    revealPayloadHash: pub.revealPayloadHash,
+    publicPayloadHash: publicPayloadHash,
+    revealPayloadHash: revealPayloadHash,
     canonicalAnswerHash,
     learningSupportHash,
     rubricHash,
@@ -576,7 +653,7 @@ export async function freezeTargetSnapshotV2(
     cardId,
     publicationRevision,
     cardRevision,
-    publicPayloadHash: pub.publicPayloadHash,
+    publicPayloadHash: publicPayloadHash,
     publicSummary: revision.publicSummary,
     semanticTargetFingerprint,
     targetRevisionHash,
@@ -596,13 +673,13 @@ export async function freezeTargetSnapshotV2(
     semanticIdentityClassId: objective.semanticIdentityClassId,
     semanticIdentityPolicyVersion: objective.semanticIdentityPolicyVersion,
     objectiveLifecycleEpoch,
-    cardContentEpoch: input.cardContentEpoch,
+    cardContentEpoch: cardContentEpoch,
     assistanceSnapshotHash: null,
     cardId,
     publicationRevision,
     cardRevision,
-    publicPayloadHash: pub.publicPayloadHash,
-    revealPayloadHash: pub.revealPayloadHash,
+    publicPayloadHash: publicPayloadHash,
+    revealPayloadHash: revealPayloadHash,
     evidenceBindingSetHash: evidenceClosure.evidenceBindingSetHash,
     evidenceEligibilityVectorHash: evidenceClosure.evidenceEligibilityVectorHash,
     planningExposure: planningExposure as never,
@@ -625,7 +702,7 @@ export async function freezeTargetSnapshotV2(
     publicTarget,
     objectiveLifecycleEpoch,
     evidenceEligibilityVectorHash: evidenceClosure.evidenceEligibilityVectorHash,
-    cardContentEpoch: input.cardContentEpoch,
+    cardContentEpoch: cardContentEpoch,
   };
 }
 

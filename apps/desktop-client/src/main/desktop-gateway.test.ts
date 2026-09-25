@@ -2425,3 +2425,141 @@ describe("DesktopGateway · 重认证那道门不该把空间换掉", () => {
     expect((await gateway.getSession()).workspace?.workspaceId).toBe(PERSONAL);
   });
 });
+
+describe("DesktopGateway · 伴星「这一页」的租约每 10 秒要真续上", () => {
+  const USER_ID = "11111111-1111-4111-8111-111111111111";
+  const PERSONAL = "22222222-2222-4222-8222-222222222222";
+  const EMAIL = "member@example.test";
+  const CONTEXT_ID = "55555555-5555-4555-8555-555555555555";
+  const PAGE = {
+    routeRef: { kind: "home" },
+    pageKind: "today",
+    entityRefs: [],
+    interactionState: "idle",
+    capabilityHints: [],
+    sensitivity: "normal",
+  };
+  const ISSUED_AT = new Date(0).toISOString();
+
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+
+  /** publish 回的是整份快照（服务端 `buildContextSnapshot`），renew 只回两个字段。 */
+  const snapshotBody = (expiresAt: string) => ({
+    version: 2,
+    contextId: CONTEXT_ID,
+    accountSessionId: "acct-1",
+    deviceSessionId: "dev-1",
+    workspaceId: PERSONAL,
+    userId: USER_ID,
+    pageInstanceId: "page-instance-1",
+    revision: "rev-1",
+    issuedAt: ISSUED_AT,
+    expiresAt,
+    ...PAGE,
+  });
+
+  function bridgeHarness(renewReply: (tick: number) => { status: number; body: unknown }) {
+    const requests: string[] = [];
+    let renewTick = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      const method = String(init?.method ?? "GET");
+      requests.push(`${method} ${url}`);
+      if (url.endsWith("/health")) return healthResponse();
+      if (url.endsWith("/challenge")) {
+        return trustResponse(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      }
+      if (url.endsWith("/auth/login")) {
+        return json({
+          token: "tok-1",
+          ctx: { userId: USER_ID, workspaceId: PERSONAL, membershipRole: "owner" },
+          workspaces: [{
+            workspaceId: PERSONAL, workspaceName: "我的个人空间", role: "owner",
+            workspaceType: "personal", isPersonal: true, leftAt: null,
+          }],
+        });
+      }
+      if (url.endsWith("/auth/me")) {
+        return json({
+          userId: USER_ID,
+          workspaceId: PERSONAL,
+          email: EMAIL,
+          role: "owner",
+          displayName: null,
+          avatarUrl: null,
+          workspaceName: "我的个人空间",
+          workspaceType: "personal",
+          isPersonal: true,
+          personalWorkspaceId: PERSONAL,
+          workspaceEpoch: 1,
+        });
+      }
+      if (url.endsWith("/renew")) {
+        renewTick += 1;
+        const reply = renewReply(renewTick);
+        return json(reply.body, reply.status);
+      }
+      if (url.includes("/companion/bridge/contexts")) {
+        if (method === "DELETE") return json({});
+        return json(snapshotBody(new Date(30_000).toISOString()), 201);
+      }
+      throw new Error(`unexpected URL ${url}`);
+    });
+    const count = (verb: string, suffix: string) =>
+      requests.filter((entry) => entry.startsWith(`${verb} `) && entry.endsWith(suffix)).length;
+    return { count, requests };
+  }
+
+  async function bridgeReady(gateway: DesktopGateway) {
+    await gateway.connect();
+    await gateway.login(EMAIL, "pw");
+  }
+
+  it("续租响应只有 revision/expiresAt 时：租约照续，不多发一次 publish", async () => {
+    // 服务端 renewContext 的返回形状（context-service.ts:182）——拿整份快照的
+    // schema 去解它必然失败，失败的那条 catch 会把上下文清掉、停掉定时器，
+    // 而渲染层按内容去重发布：屏上没变就不会再推，于是她从此读不到这一页。
+    // 本仓实测过这条链的产物：assistant_page_contexts 里 expires_at-issued_at
+    // 恒为 30＋10 秒（只续上一拍），48 小时里 335 次 renew 200 对 427 次 publish。
+    const { count } = bridgeHarness((tick) => ({
+      status: 200,
+      body: { revision: "rev-1", expiresAt: new Date((30 + tick * 10) * 1000).toISOString() },
+    }));
+    const gateway = new DesktopGateway(environment());
+    await bridgeReady(gateway);
+    vi.useFakeTimers();
+    try {
+      const published = await gateway.setCompanionBridgeContext(PAGE as never, "req-1");
+      expect(published.active).toBe(true);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(count("POST", "/renew")).toBe(2);
+      expect(count("POST", "/companion/bridge/contexts")).toBe(1);
+      // 内容没变时再登记一次：走的是本地去重，报回来的必须是**续租后**那份到期时间。
+      const again = await gateway.setCompanionBridgeContext(PAGE as never, "req-2");
+      expect(again).toMatchObject({ active: true, revision: "rev-1", expiresAt: new Date(50_000).toISOString() });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("续租被服务端拒了（行没了）：拿手里这份 page 重新 publish，而不是永久变暗", async () => {
+    const { count } = bridgeHarness(() => ({
+      status: 404,
+      body: { error: "context_not_found", message: "页面上下文不存在或已撤销" },
+    }));
+    const gateway = new DesktopGateway(environment());
+    await bridgeReady(gateway);
+    vi.useFakeTimers();
+    try {
+      await gateway.setCompanionBridgeContext(PAGE as never, "req-1");
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(count("POST", "/renew")).toBe(1);
+      expect(count("POST", "/companion/bridge/contexts")).toBe(2);
+      const state = await gateway.setCompanionBridgeContext(PAGE as never, "req-2");
+      expect(state.active).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

@@ -1906,10 +1906,68 @@
       "tag": "0272_drop_duplicate_indexes",
       "breakpoints": true
     },
-    {"idx": 272, "version": "7", "when": 1789800000028, "tag": "0273_retire_workspace_memories_on_departure", "breakpoints": true},
-    {"idx": 273, "version": "7", "when": 1789800000029, "tag": "0274_allow_note_purge_by_retiring_cards_first", "breakpoints": true},
-    {"idx": 274, "version": "7", "when": 1789800000030, "tag": "0275_evidence_quote_copies_v2", "breakpoints": true},
-    {"idx": 275, "version": "7", "when": 1789800000031, "tag": "0276_dissolve_workspace_function", "breakpoints": true},
-    {"idx": 276, "version": "7", "when": 1789800000032, "tag": "0277_page_readable_view_in_context", "breakpoints": true}
+    {
+      "idx": 272,
+      "version": "7",
+      "when": 1789800000028,
+      "tag": "0273_retire_workspace_memories_on_departure",
+      "breakpoints": true
+    },
+    {
+      "idx": 273,
+      "version": "7",
+      "when": 1789800000029,
+      "tag": "0274_allow_note_purge_by_retiring_cards_first",
+      "breakpoints": true
+    },
+    {
+      "idx": 274,
+      "version": "7",
+      "when": 1789800000030,
+      "tag": "0275_evidence_quote_copies_v2",
+      "breakpoints": true
+    },
+    {
+      "idx": 275,
+      "version": "7",
+      "when": 1789800000031,
+      "tag": "0276_dissolve_workspace_function",
+      "breakpoints": true
+    },
+    {
+      "idx": 276,
+      "version": "7",
+      "when": 1789800000032,
+      "tag": "0277_page_readable_view_in_context",
+      "breakpoints": true
+    },
+    {
+      "idx": 277,
+      "version": "7",
+      "when": 1789800001032,
+      "tag": "0278_proposal_auto_confirm",
+      "breakpoints": true
+    },
+    {
+      "idx": 278,
+      "version": "7",
+      "when": 1789800002032,
+      "tag": "0279_turn_run_leak_gate_version",
+      "breakpoints": true
+    },
+    {
+      "idx": 279,
+      "version": "7",
+      "when": 1789800003032,
+      "tag": "0280_thought_leak_gate_version",
+      "breakpoints": true
+    },
+    {
+      "idx": 280,
+      "version": "7",
+      "when": 1789800004032,
+      "tag": "0281_drop_memory_item_expires_at",
+      "breakpoints": true
+    }
   ]
 }

@@ -476,7 +476,7 @@ test("proposedLearningActionPayload：accepts §18 全部工具 kind", () => {
   const memoryId = "823e4567-e89b-12d3-a456-426614174000";
   const cases: unknown[] = [
     { kind: "pause_learning_run", runId },
-    { kind: "switch_task_variant", runId, taskId, alternativeId: "variant-2" },
+    { kind: "switch_task_variant", runId, taskId, alternativeId: "variant-2", reason: "这一题我想换成语音说" },
     { kind: "request_hint_level", runId, taskId, level: 2 },
     {
       kind: "defer_review",
@@ -484,19 +484,6 @@ test("proposedLearningActionPayload：accepts §18 全部工具 kind", () => {
       scheduleGeneration: 3,
       deferredUntil: "2026-08-20T09:00:00.000Z",
       reasonCode: "user_requested",
-    },
-    {
-      kind: "plan_understanding_route",
-      request: {
-        version: 1,
-        intent: "repair_gap",
-        targetKeyPointId: keyPointId,
-        maxSteps: 3,
-        lens: "current_target",
-        filter: { showArchived: false },
-        expectedCheckpointToken: "v1:ws:uid:evt",
-        idempotencyKey: "route:tool:1",
-      },
     },
     { kind: "focus_graph_node", keyPointId, lens: "evidence" },
     { kind: "restore_graph_viewport", runId },

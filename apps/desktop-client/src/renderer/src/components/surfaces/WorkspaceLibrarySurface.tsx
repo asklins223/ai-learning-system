@@ -32,6 +32,7 @@ import type {
   DesktopNoteListItem,
   DesktopNoteListPage,
 } from "@ailearn/shared/desktop-surface-contracts";
+import type { PageReadableV1 } from "@ailearn/shared/companion-bridge-contracts";
 import type {
   LearningObjectivePrimaryActionV3,
   LearningObjectiveSurfaceV3,
@@ -52,6 +53,7 @@ import { startObjectiveJourney } from "./objective-primary-action";
 import { ObjectiveProgressBand } from "./ObjectiveProgressBand";
 import { progressSegmentForState } from "./objective-progress-band";
 import {
+  freshnessLabel,
   formatObjectiveDateTime,
   formatObjectiveState,
   objectiveStateHint,
@@ -68,6 +70,8 @@ import {
   type ObjectiveLibraryFilter,
 } from "./objective-library-view-state";
 import { useHudPage } from "../hud/use-hud-page";
+import { usePageReadableView } from "../hud/use-page-readable-view";
+import { HUD_PAGES } from "../hud/hud-pages";
 import { cardStrategyLabel } from "./card-strategy-presentation";
 import {
   objectiveQuestRegion,
@@ -175,14 +179,6 @@ function formatLifecycle(value: LearningObjectiveSurfaceV3["content"]["lifecycle
     archived: "已归档",
     superseded: "已有后继版本",
     blocked_content_upgrade: "等待内容更新",
-  }[value];
-}
-
-function formatFreshness(value: LearningObjectiveSurfaceV3["content"]["freshness"]): string {
-  return {
-    fresh: "来源内容最新",
-    source_outdated: "来源已有更新",
-    legacy_unreviewed: "旧来源待复核",
   }[value];
 }
 
@@ -456,11 +452,95 @@ export function ObjectiveLibrarySurface() {
     }
   };
 
+  /**
+   * 这一屏登记给伴星读的可读视图（39d W2-7）。
+   *
+   * **远征册默认是收起来的**：收着的时候屏幕上只有焦点卡与纸上远征图，每个区域
+   * 最多露出两颗节点。所以条目按"当前露出的是哪一份清单"取——收着取远征图那几颗，
+   * 打开才取册子里的行；关键词与筛选也**只在打开时登记**。把看不见的行登记进去，
+   * 她就可能报出一屏根本没显示的东西（屏上那句"另有 N 个目标在远征册"就是为这件事写的）。
+   */
+  const indexCountLine
+    = page?.nextCursor ? `已载入 ${page.items.length} / ${page.total ?? 0} 条` : `共 ${page?.total ?? 0} 条`;
+  const regionMoreLine = (nodeCount: number) => `另有 ${nodeCount - 2} 个目标在远征册`;
+  const truncatedRegion = QUEST_REGIONS
+    .map((region) => ({ region, count: questGroups[region.key].length }))
+    .find((entry) => entry.count > 2) ?? null;
+  const activeFilterBucket = FILTER_BUCKETS.find((bucket) => bucket.key === filter) ?? null;
+  const questNodes = QUEST_REGIONS.flatMap((region) => questGroups[region.key]
+    .slice(0, 2)
+    .map((item) => ({ item, stateLine: formatObjectiveState(item.personalState.state) })));
+  const NO_ACTIVE_GOAL_EMPTY = {
+    message: "还没有活跃目标",
+    detail: "从笔记生成或确认目标后，会在这里形成理解路线。",
+  } as const;
+  const goalsNotice
+    = focusFailure
+      ? focusFailure.slice(0, 200)
+      : !activeGoal
+        ? `${NO_ACTIVE_GOAL_EMPTY.message}：${NO_ACTIVE_GOAL_EMPTY.detail}`
+        : indexOpen
+          ? visibleGoals.length === 0
+            ? `已载入范围内没有匹配目标：${page?.nextCursor ? "可以继续读取后面的目标，或更换条件。" : "换一个关键词或筛选条件。"}`
+            : pageFailure
+              ? pageFailure.slice(0, 200)
+              : !page?.nextCursor && page && page.items.length > 0
+                ? "已读到全部目标"
+                : null
+          : truncatedRegion
+            ? regionMoreLine(truncatedRegion.count)
+            : null;
+  const readableView = useMemo<PageReadableV1 | null>(() => {
+    if (loading && !page) return null;
+    const listRows = indexOpen
+      ? orderedVisibleGoals.slice(0, 12).map((item) => ({
+          title: item.conceptLabel ?? item.primaryNoteTitle ?? "未命名学习卡",
+          state: formatObjectiveState(item.personalState.state),
+        }))
+      : questNodes.map((node) => ({ title: node.item.conceptLabel ?? node.item.primaryNoteTitle ?? "未命名学习卡", state: node.stateLine }));
+    return {
+      pageId: "goals",
+      title: HUD_PAGES.goals.title,
+      statusLine: activeGoal ? activeMode?.description ?? activeMode?.label ?? "" : NO_ACTIVE_GOAL_EMPTY.message,
+      metrics: [
+        ...(activeGoal
+          ? [
+              { label: "卡型", value: cardStrategyLabel(activeGoal.cardStrategy).slice(0, 40) },
+              { label: "状态", value: formatObjectiveState(activeGoal.personalState.state).slice(0, 40) },
+            ]
+          : []),
+        { label: "远征册", value: indexCountLine.slice(0, 40) },
+        ...QUEST_REGIONS.map((region) => ({
+          label: region.label,
+          value: `${questGroups[region.key].length} 个`,
+        })),
+      ].slice(0, 6),
+      ...(indexOpen && (query.trim() || filter !== "all")
+        ? {
+            filters: [
+              ...(query.trim() ? [{ label: "关键词", value: query.trim().slice(0, 40) }] : []),
+              ...(filter !== "all" && activeFilterBucket
+                ? [{ label: "筛选", value: activeFilterBucket.label.slice(0, 40) }]
+                : []),
+            ],
+          }
+        : {}),
+      ...(listRows.length > 0
+        ? { items: listRows.map((row, index) => ({ ordinal: index + 1, label: row.title.slice(0, 120), state: row.state.slice(0, 40) })) }
+        : {}),
+      ...(goalsNotice ? { notice: goalsNotice } : {}),
+    };
+  }, [
+    activeGoal, activeMode, activeFilterBucket, filter, goalsNotice, indexCountLine, indexOpen,
+    loading, orderedVisibleGoals, page, query, questGroups, questNodes, visibleGoals.length,
+  ]);
+  usePageReadableView(readableView);
+
   return (
-    <ApprovedSurfaceFrame family="workshop" eyebrow="学习证据" headingId="objective-library-title" title="学习卡" detail="沿着真实学习证据，一关一关走到真正掌握">
+    <ApprovedSurfaceFrame family="workshop" eyebrow="学习证据" headingId="objective-library-title" title={HUD_PAGES.goals.title} detail="沿着真实学习证据，一关一关走到真正掌握">
       {loading ? <SurfaceDataState kind="loading" message="正在读取学习卡" detail="状态和进度都来自服务器，不是本机推算的。" /> : null}
       {!loading && failure ? <SurfaceDataState kind="error" message="学习卡暂时不可用" detail={failure} onRetry={() => void load()} /> : null}
-      {!loading && !failure && !activeGoal ? <SurfaceDataState kind="empty" message="还没有活跃目标" detail="从笔记生成或确认目标后，会在这里形成理解路线。" /> : null}
+      {!loading && !failure && !activeGoal ? <SurfaceDataState kind="empty" message={NO_ACTIVE_GOAL_EMPTY.message} detail={NO_ACTIVE_GOAL_EMPTY.detail} /> : null}
       {!loading && !failure && activeGoal ? (
         <div className="objective-expedition">
           <div className="objective-expedition__landscape">
@@ -543,7 +623,7 @@ export function ObjectiveLibrarySurface() {
                       ))}
                       {!nodes.length ? <li className="objective-quest-region__empty">这片区域暂时没有目标</li> : null}
                     </ol>
-                    {nodes.length > 2 ? <p className="objective-quest-region__more">另有 {nodes.length - 2} 个目标在远征册</p> : null}
+                    {nodes.length > 2 ? <p className="objective-quest-region__more">{regionMoreLine(nodes.length)}</p> : null}
                   </section>
                 );
               })}
@@ -559,7 +639,7 @@ export function ObjectiveLibrarySurface() {
           }}>
             <button ref={indexToggleRef} type="button" className="objective-expedition__index-toggle" aria-expanded={indexOpen} aria-controls={indexOpen ? "objective-expedition-index-body" : undefined} onClick={() => setIndexOpen((open) => !open)}>
               <span><Search size={16} aria-hidden="true" /><strong id="goal-ledger-title"><span className="objective-expedition__open-label">打开远征册</span><span className="objective-expedition__close-label">关闭远征册</span></strong></span>
-              <small>{page?.nextCursor ? `已载入 ${page.items.length} / ${page.total ?? 0} 条` : `共 ${page?.total ?? 0} 条`}</small>
+              <small>{indexCountLine}</small>
               <X className="objective-expedition__close-icon" size={19} aria-hidden="true" />
             </button>
             {indexOpen ? <div id="objective-expedition-index-body" className="objective-expedition__index-body">
@@ -613,6 +693,32 @@ export function ObjectiveLibrarySurface() {
 function formatRunPhase(phase: string): string {
   return (learningRunPhaseLabels as Record<string, string>)[phase] ?? phase;
 }
+
+/**
+ * 简报页那几句状态字各写一次（39d W2-7）：JSX 与登记给伴星的可读视图共用同一份。
+ * 抄成两处就是两个来源，而**视图字段写错不会红**。
+ */
+const NO_OBJECTIVE_SELECTED_EMPTY = {
+  message: "还没有选择学习卡",
+  detail: "从学习卡列表点开一张卡后，会直接进入完整详情。",
+} as const;
+const OBJECTIVE_BRIEF_LINES = {
+  loading: "正在读取目标详情",
+  unavailable: "目标详情暂时不可用",
+} as const;
+const PRIMARY_NOTE_MISSING_LINE = "尚未关联主笔记";
+const ORIGIN_EMPTY_LINE = "还没有可公开的出处";
+
+/** 出处那一行的事实句：完整度，以及**真的留了**当时引用的原文时才追加条数。 */
+function originFactsLine(origin: LearningObjectiveSurfaceV3["sources"]["origins"][number]): string {
+  return `${formatOriginIntegrity(origin.integrity)}${origin.evidenceSnapshotIds.length ? ` · ${origin.evidenceSnapshotIds.length} 条原文证据` : ""}`;
+}
+const initialValidationLabels = {
+  ready: "现在可以挑战",
+  deferred: "等待开放",
+  idle: "还没开始",
+  completed: "已经答过",
+} as const;
 
 const previousResultLabels = {
   demonstrated: "已证明掌握",
@@ -701,11 +807,87 @@ export function ObjectiveDetailSurface() {
     setActiveRunId(previousResult.runId);
     invoke("validate");
   };
+
+  /**
+   * 这一屏登记给伴星读的可读视图（39d W2-7）。
+   *
+   * `title` 用**这一张卡自己的名字**（`<h3>` 那一行，与阅读面拿笔记标题同一种做法），
+   * 不是外框那三个词——这一页外框写"挑战简报"、页面注册表写"学习卡详情"、卡自己的
+   * 标题又是第三个，三个词里只有卡名是"这一页在讲什么"的答案。
+   * 三条事实（正式验证／当前旅程／复习安排）直接取那一列 `<li>` 上屏上的字面，
+   * 条目取"资料卷宗"里真正展开的那些出处。
+   */
+  const BRIEF_TITLE = "挑战简报";
+  const detailNotice
+    = !activeObjectiveId
+      ? `${NO_OBJECTIVE_SELECTED_EMPTY.message}：${NO_OBJECTIVE_SELECTED_EMPTY.detail}`
+      : failure
+        ? `${OBJECTIVE_BRIEF_LINES.unavailable}：${failure.slice(0, 60)}`
+        : actionFailure
+          ? actionFailure.slice(0, 200)
+          : objective && !objective.sources.primaryNote
+            ? PRIMARY_NOTE_MISSING_LINE
+            : objective && objective.sources.origins.length === 0
+              ? ORIGIN_EMPTY_LINE
+              : null;
+  const briefReadableView = useMemo<PageReadableV1 | null>(() => {
+    if (!activeObjectiveId) {
+      return {
+        pageId: "goal_detail",
+        title: BRIEF_TITLE,
+        statusLine: NO_OBJECTIVE_SELECTED_EMPTY.message,
+        notice: `${NO_OBJECTIVE_SELECTED_EMPTY.message}：${NO_OBJECTIVE_SELECTED_EMPTY.detail}`,
+      };
+    }
+    if (!objective || !content || !detailState) return null;
+    return {
+      pageId: "goal_detail",
+      title: (content.conceptLabel ?? "未命名学习卡").slice(0, 120),
+      statusLine: objectiveStateHint(detailState).slice(0, 160),
+      metrics: [
+        { label: "卡型", value: cardStrategyLabel(content.cardStrategy).slice(0, 40) },
+        { label: "状态", value: formatObjectiveState(detailState).slice(0, 40) },
+        { label: "练习", value: `${objective.personal.practiceTrailCount} 次练习`.slice(0, 40) },
+        {
+          label: "正式验证",
+          value: (objective.personal.initialValidation
+            ? objective.personal.initialValidation.status === "ready" && objective.personal.lastCanonicalAt
+              ? "可以再次挑战"
+              : initialValidationLabels[objective.personal.initialValidation.status]
+            : "还没安排").slice(0, 40),
+        },
+        {
+          label: "当前旅程",
+          value: (objective.personal.activeRun ? formatRunPhase(objective.personal.activeRun.phase) : "尚未开始").slice(0, 40),
+        },
+        {
+          label: "复习安排",
+          value: (objective.personal.review
+            ? objective.personal.review.status === "due"
+              ? "已经到期"
+              : formatObjectiveDateTime(objective.personal.review.dueAt)
+            : "正式验证后安排").slice(0, 40),
+        },
+      ],
+      ...(objective.sources.origins.length > 0
+        ? {
+            items: objective.sources.origins.slice(0, 12).map((origin, index) => ({
+              ordinal: index + 1,
+              label: formatOriginKind(origin.kind).slice(0, 120),
+              state: originFactsLine(origin).slice(0, 40),
+            })),
+          }
+        : {}),
+      ...(detailNotice ? { notice: detailNotice } : {}),
+    };
+  }, [activeObjectiveId, content, detailNotice, detailState, objective]);
+  usePageReadableView(briefReadableView);
+
   return (
-    <ApprovedSurfaceFrame family="workshop" eyebrow="远征简报" headingId="objective-detail-title" title="挑战简报" detail="先看要证明什么，再决定现在是否出发">
-      {!activeObjectiveId ? <SurfaceDataState kind="empty" message="还没有选择学习卡" detail="从学习卡列表点开一张卡后，会直接进入完整详情。" /> : null}
-      {activeObjectiveId && loading ? <SurfaceDataState kind="loading" message="正在读取目标详情" detail="这里只显示公开内容，不含答案和评分规则。" /> : null}
-      {activeObjectiveId && !loading && failure ? <SurfaceDataState kind="error" message="目标详情暂时不可用" detail={failure} onRetry={() => void load()} /> : null}
+    <ApprovedSurfaceFrame family="workshop" eyebrow="远征简报" headingId="objective-detail-title" title={BRIEF_TITLE} detail="先看要证明什么，再决定现在是否出发">
+      {!activeObjectiveId ? <SurfaceDataState kind="empty" message={NO_OBJECTIVE_SELECTED_EMPTY.message} detail={NO_OBJECTIVE_SELECTED_EMPTY.detail} /> : null}
+      {activeObjectiveId && loading ? <SurfaceDataState kind="loading" message={OBJECTIVE_BRIEF_LINES.loading} detail="这里只显示公开内容，不含答案和评分规则。" /> : null}
+      {activeObjectiveId && !loading && failure ? <SurfaceDataState kind="error" message={OBJECTIVE_BRIEF_LINES.unavailable} detail={failure} onRetry={() => void load()} /> : null}
       {activeObjectiveId && !loading && !failure && objective && content && detailState ? (
         <div className="objective-brief">
           <article className="objective-brief__board">
@@ -736,7 +918,7 @@ export function ObjectiveDetailSurface() {
                   submitted={objective.personal.practiceTrailCount > 0}
                 />
                 <ul>
-                  <li><CheckCircle2 size={16} aria-hidden="true" /><span>正式验证</span><strong>{objective.personal.initialValidation ? objective.personal.initialValidation.status === "ready" && objective.personal.lastCanonicalAt ? "可以再次挑战" : ({ ready: "现在可以挑战", deferred: "等待开放", idle: "还没开始", completed: "已经答过" } as const)[objective.personal.initialValidation.status] : "还没安排"}</strong></li>
+                  <li><CheckCircle2 size={16} aria-hidden="true" /><span>正式验证</span><strong>{objective.personal.initialValidation ? objective.personal.initialValidation.status === "ready" && objective.personal.lastCanonicalAt ? "可以再次挑战" : initialValidationLabels[objective.personal.initialValidation.status] : "还没安排"}</strong></li>
                   <li><Clock3 size={16} aria-hidden="true" /><span>当前旅程</span><strong>{objective.personal.activeRun ? formatRunPhase(objective.personal.activeRun.phase) : "尚未开始"}</strong></li>
                   <li><CalendarClock size={16} aria-hidden="true" /><span>复习安排</span><strong>{objective.personal.review ? (objective.personal.review.status === "due" ? "已经到期" : formatObjectiveDateTime(objective.personal.review.dueAt)) : "正式验证后安排"}</strong></li>
                 </ul>
@@ -766,15 +948,15 @@ export function ObjectiveDetailSurface() {
             <details className="objective-brief__dossier">
               <summary><span><Layers3 size={16} aria-hidden="true" /><strong>资料卷宗</strong></span><small>{objective.sources.origins.length} 条来源 · {evidenceSnapshotCount} 条原文证据</small></summary>
               <div className="objective-brief__dossier-body">
-                {objective.sources.primaryNote ? <button type="button" className="v3-primary-note" onClick={() => openPrimaryNote(objective.sources.primaryNote!)}><FileText size={17} aria-hidden="true" /><span><small>主笔记</small><strong>{objective.sources.primaryNote.title}</strong></span><ChevronRight size={16} aria-hidden="true" /></button> : <div className="v3-primary-note v3-primary-note--missing"><AlertTriangle size={17} aria-hidden="true" /><span><small>主笔记</small><strong>尚未关联主笔记</strong></span></div>}
+                {objective.sources.primaryNote ? <button type="button" className="v3-primary-note" onClick={() => openPrimaryNote(objective.sources.primaryNote!)}><FileText size={17} aria-hidden="true" /><span><small>主笔记</small><strong>{objective.sources.primaryNote.title}</strong></span><ChevronRight size={16} aria-hidden="true" /></button> : <div className="v3-primary-note v3-primary-note--missing"><AlertTriangle size={17} aria-hidden="true" /><span><small>主笔记</small><strong>{PRIMARY_NOTE_MISSING_LINE}</strong></span></div>}
                 {objective.sources.missingOrigin ? <p className="v3-lineage-warning"><AlertTriangle size={14} aria-hidden="true" />部分来源还没对上，验证前建议先补齐。</p> : null}
                 <div className="v3-origin-list">
-                  {objective.sources.origins.length ? objective.sources.origins.map((origin, index) => <article key={origin.originId} className="v3-origin-row"><span className="v3-origin-row__index">{String(index + 1).padStart(2, "0")}</span><div><div><strong>{formatOriginKind(origin.kind)}</strong><span>{formatSupportGrade(origin.supportGrade)}</span></div><p>{formatOriginIntegrity(origin.integrity)}{origin.evidenceSnapshotIds.length ? ` · ${origin.evidenceSnapshotIds.length} 条原文证据` : ""}</p><small>{origin.kind === "imported" ? `导入批次 ${origin.importBatchRef}` : formatOriginTrace(origin)}</small></div></article>) : <div className="v3-origin-empty"><FolderOpen size={19} aria-hidden="true" /><strong>还没有可公开的出处</strong><span>这里不会用示例证据填充空白。</span></div>}
+                  {objective.sources.origins.length ? objective.sources.origins.map((origin, index) => <article key={origin.originId} className="v3-origin-row"><span className="v3-origin-row__index">{String(index + 1).padStart(2, "0")}</span><div><div><strong>{formatOriginKind(origin.kind)}</strong><span>{formatSupportGrade(origin.supportGrade)}</span></div><p>{originFactsLine(origin)}</p><small>{origin.kind === "imported" ? `导入批次 ${origin.importBatchRef}` : formatOriginTrace(origin)}</small></div></article>) : <div className="v3-origin-empty"><FolderOpen size={19} aria-hidden="true" /><strong>{ORIGIN_EMPTY_LINE}</strong><span>这里不会用示例证据填充空白。</span></div>}
                 </div>
                 <footer className="v3-lineage-boundary"><strong>公开边界</strong><p>这里只讲来源关系和学习状态；标准答案、评分依据和原文段落不会提前出现。</p></footer>
               </div>
             </details>
-            <footer className="objective-brief__revision"><span>{formatKnowledgeForm(content.knowledgeForm)} · {formatFreshness(content.freshness)} · {formatLifecycle(content.lifecycle)} · 更新于 {formatObjectiveDateTime(objective.updatedAt)}</span></footer>
+            <footer className="objective-brief__revision"><span>{formatKnowledgeForm(content.knowledgeForm)} · {freshnessLabel(content.freshness)} · {formatLifecycle(content.lifecycle)} · 更新于 {formatObjectiveDateTime(objective.updatedAt)}</span></footer>
           </article>
         </div>
       ) : null}

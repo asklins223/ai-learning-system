@@ -4,10 +4,13 @@ import type {
   DesktopSourceNotesPage,
   DesktopSourceSegment,
 } from "@ailearn/shared/desktop-surface-contracts";
+import type { PageReadableV1 } from "@ailearn/shared/companion-bridge-contracts";
 import { useRoomStore } from "../../app/room-store";
 import { createRequestMeta, gatewayErrorMessage, unwrapGatewayResult, RendererGatewayError } from "../../app/desktop-client";
 import { HudPage } from "../hud/HudPage";
 import { useHudPage } from "../hud/use-hud-page";
+import { usePageReadableView } from "../hud/use-page-readable-view";
+import { HUD_PAGES } from "../hud/hud-pages";
 import {
   SurfaceDataState,
   formatDate,
@@ -47,6 +50,22 @@ type SourceDetailProjection = {
 
 /** A note that already holds the same content, as the API reported it. */
 type DuplicateNote = { readonly noteId: string; readonly title: string };
+
+/**
+ * 屏上那几句状态字各写一次：JSX 与登记给伴星的可读视图共用同一份表达式。
+ * 抄成两处就是两个来源——而视图字段写错了**不会红**（只有 `usePageReadableView`
+ * 那道形状校验会喊），最后只会变成"她说的与屏幕上不是一句"。
+ */
+const NO_SOURCE_SCREEN = {
+  message: "还没有选择来源",
+  detail: "从来源库打开一份材料后，这里会直接铺开它的正文与解析结果。",
+} as const;
+const SOURCE_GONE_SCREEN = {
+  message: "这份来源已经不在当前工作区",
+  detail: "它可能被移除或归档，返回来源库可以继续查找其它材料。",
+} as const;
+const STALLED_SCREEN_LINE = "解析还在进行，页面已停止自动刷新。";
+const NO_NOTE_SCREEN_LINE = "还没有基于这份材料建立的笔记；开始写笔记会从它的片段直接起稿。";
 
 /** Page 06 — one source read as a spread: the text on the left, its shape on the right. */
 export function SourceDetailSurface() {
@@ -108,10 +127,79 @@ export function SourceDetailSurface() {
   }, [notes]);
 
   const focusSegment = useMemo(() => pickFocusSegment(segments), [segments]);
+  /**
+   * 页边那条批注的标题。以前只写 `片段 02`（那是**序号**补零），而同一屏的页签写着
+   * `片段 2`（那是**条数**）——同样的四个字两个含义（笔记页同一族写法在 39d §19 修过，
+   * 伴星照着念会念出"只挂了 1 段（标着 00）"这种自相矛盾的话）。
+   */
+  const focusSegmentClipLabel = focusSegment
+    ? `第 ${focusSegment.ordinal + 1} 段，共 ${segments.length} 段`
+    : "没有可看的片段";
   const structureLine = useMemo(
     () => describeStructure(segments, source?.status),
     [segments, source?.status],
   );
+
+  /**
+   * 这一屏登记给伴星读的可读视图（39d W2-7）。
+   *
+   * 标题＝`<h2>` 里那份**已提交**的来源标题（改名框里那份是草稿，没落库就不算屏上
+   * 那一句）；状态行＝"解析与结构"下面那句 `structureLine`；四个数全部复用页面已经
+   * 在渲染的派生值（`<div className="meta">` 的状态与类型、页签上的片段数与笔记数）；
+   * 条目＝右栏"关联笔记"那一批，`state` 就是每行 `<small>` 的前半句。
+   *
+   * `notice` 是一条**按优先级选出来的**屏上原话：读不到 ＞ 刚做过什么的回执 ＞
+   * 停止自动刷新 ＞ 没有正文 ＞ 没有笔记 ＞ 笔记只列了最近几篇。
+   * 没有一份是推断出来的。
+   */
+  const notesTruncatedLine
+    = notes.length > 1 && noteTotal > notes.length
+      ? `共 ${noteTotal} 篇，这里列出最近 ${notes.length} 篇。`
+      : null;
+  const detailNotice
+    = !activeSourceId
+      ? `${NO_SOURCE_SCREEN.message}：${NO_SOURCE_SCREEN.detail}`
+      : failure
+        ? `来源详情暂时不可用：${failure.slice(0, 60)}`
+        : !source
+          ? `${SOURCE_GONE_SCREEN.message}：${SOURCE_GONE_SCREEN.detail}`
+          : notice?.text
+            ? notice.text.slice(0, 200)
+            : stalled
+              ? STALLED_SCREEN_LINE
+              : segments.length === 0
+                ? parseStateLine(source.status)
+                : notes.length === 0
+                  ? NO_NOTE_SCREEN_LINE
+                  : notesTruncatedLine;
+  const readableView = useMemo<PageReadableV1 | null>(() => {
+    // 选了某一份材料、却还没读到它：什么都不登记，别把上一份的残留留给这一页。
+    if (activeSourceId && !source && !failure) return null;
+    return {
+      pageId: "source_detail",
+      title: source?.title ?? HUD_PAGES["source-detail"].title,
+      statusLine: source ? structureLine : NO_SOURCE_SCREEN.message,
+      metrics: source
+        ? [
+            { label: "状态", value: formatSourceStatus(source.status) },
+            { label: "类型", value: `${formatSourceKindLabel(source)}来源` },
+            { label: "片段", value: `${segments.length}` },
+            { label: "关联笔记", value: `${noteTotal}` },
+          ]
+        : [],
+      ...(notes.length > 0
+        ? {
+            items: notes.slice(0, 12).map((note, index) => ({
+              ordinal: index + 1,
+              label: `《${note.title}》`.slice(0, 120),
+              state: (note.currentVersionId ? "正在编辑" : "还没有版本").slice(0, 40),
+            })),
+          }
+        : {}),
+      ...(detailNotice ? { notice: detailNotice } : {}),
+    };
+  }, [activeSourceId, detailNotice, failure, noteTotal, notes, segments.length, source, structureLine]);
+  usePageReadableView(readableView);
 
   // Another source is another page: a half-typed title or an unconfirmed note
   // must not follow the reader into it.
@@ -468,7 +556,7 @@ export function SourceDetailSurface() {
   return (
     <HudPage page="source-detail">
       {!activeSourceId ? (
-        <SurfaceDataState kind="empty" message="还没有选择来源" detail="从来源库打开一份材料后，这里会直接铺开它的正文与解析结果。" />
+        <SurfaceDataState kind="empty" message={NO_SOURCE_SCREEN.message} detail={NO_SOURCE_SCREEN.detail} />
       ) : null}
       {activeSourceId && loading ? (
         <SurfaceDataState kind="loading" message="正在读取来源详情" detail="正文片段和关联笔记都来自服务器。" />
@@ -477,7 +565,7 @@ export function SourceDetailSurface() {
         <SurfaceDataState kind="error" message="来源详情暂时不可用" detail={failure} onRetry={() => void reload()} />
       ) : null}
       {activeSourceId && !loading && !failure && !source ? (
-        <SurfaceDataState kind="empty" message="这份来源已经不在当前工作区" detail="它可能被移除或归档，返回来源库可以继续查找其它材料。" />
+        <SurfaceDataState kind="empty" message={SOURCE_GONE_SCREEN.message} detail={SOURCE_GONE_SCREEN.detail} />
       ) : null}
 
       {!loading && !failure && source ? (
@@ -531,13 +619,13 @@ export function SourceDetailSurface() {
               <p className="sub">{structureLine}</p>
               {stalled ? (
                 <p className="surface-notice" role="status">
-                  解析还在进行，页面已停止自动刷新。
+                  {STALLED_SCREEN_LINE}
                   <button type="button" className="text-action" onClick={retryRead}>重新读取</button>
                 </p>
               ) : null}
               {focusSegment ? (
                 <div className="margin-note">
-                  <b>片段 {String(focusSegment.ordinal + 1).padStart(2, "0")}</b>
+                  <b>{focusSegmentClipLabel}</b>
                   <br />
                   “{excerpt(segmentText(focusSegment))}”
                   <div className="small">{segmentLabel(focusSegment)}</div>
@@ -560,7 +648,7 @@ export function SourceDetailSurface() {
               <div className="rule" />
               <h3 className="serif">关联笔记</h3>
               {notes.length === 0 ? (
-                <p className="sub">还没有基于这份材料建立的笔记；开始写笔记会从它的片段直接起稿。</p>
+                <p className="sub">{NO_NOTE_SCREEN_LINE}</p>
               ) : notes.length === 1 ? (
                 // The mockup's single line, for the single-note case: naming the
                 // note twice (here and in a list) would only add noise.

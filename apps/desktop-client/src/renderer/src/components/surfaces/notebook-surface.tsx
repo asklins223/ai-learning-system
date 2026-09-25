@@ -12,7 +12,11 @@ import type {
 } from "@ailearn/shared/card-generation-desktop-contracts";
 import type { RoomProjectionV1 } from "@ailearn/shared/room-projection-contracts";
 import type { DesktopNoteVersionItem, DesktopSourceDetail } from "@ailearn/shared/desktop-surface-contracts";
-import type { LearningObjectiveSurfaceV3 } from "@ailearn/shared/learning-objective-surface-contracts";
+import type {
+  LearningObjectivePrimaryActionV3,
+  LearningObjectiveSurfaceV3,
+  ObjectiveSurfaceFreshnessV3,
+} from "@ailearn/shared/learning-objective-surface-contracts";
 import type { NoteBlockProjectionV1, NoteDetailV1 } from "@ailearn/shared/note-projection-contracts";
 import { useRoomStore } from "../../app/room-store";
 import { SpaceShareButton, noteShareScopeLabel } from "../space-share-control";
@@ -26,6 +30,8 @@ import {
 import { imageOnlyFiles } from "../../app/source-intake";
 import { HudPage } from "../hud/HudPage";
 import { useHudPage } from "../hud/use-hud-page";
+import { usePageReadableView } from "../hud/use-page-readable-view";
+import type { PageReadableV1 } from "@ailearn/shared/companion-bridge-contracts";
 import type { HudPageId } from "../hud/hud-pages";
 import {
   SurfaceDataState,
@@ -40,6 +46,8 @@ import {
   isCardGenerationInFlight,
   isLiveGenerationForNote,
 } from "./card-generation-status";
+import { freshnessLabel, primaryActionDescription, primaryActionLabel } from "./objective-state-copy";
+import { startObjectiveJourney } from "./objective-primary-action";
 import { parseMarkdownTable } from "./note-blocks";
 import { isHorizontalRule, noteInlineDisplayText, noteInlineImages, renderNoteInline } from "./note-reading-inline";
 import { sourceImageObjectKeyFromUrl } from "@ailearn/shared/source-image-contracts";
@@ -67,6 +75,24 @@ type NotebookProjection = {
   readonly source: DesktopSourceDetail | null;
   readonly sourceFailure: string | null;
   readonly objective: LearningObjectiveSurfaceV3 | null;
+  /**
+   * 这篇笔记自己的学习目标，以及它的主行动（39d W4-2 第三刀）。
+   *
+   * 上面那个 `objective` 只在"目标是房间焦点、且它的主笔记就是这一篇"时才留下，
+   * 笔记页因此从来没有过自己的主要动作。这一读按 `noteId` 收窄到"起源于这一篇"
+   * 的 active 目标（`limit: 1`，顺序由服务端定）；读不到就是 null，那一行不画。
+   */
+  readonly noteObjective: {
+    readonly objectiveId: string;
+    readonly primaryAction: LearningObjectivePrimaryActionV3;
+    /**
+     * §3.2 第六种情况（正文有实质修改）不看这一页自己的版本号——服务端已经按
+     * origin 的 `noteVersionId` 与笔记当前版本比过（`surface-service.ts` 的
+     * `computeFreshness`），客户端再比一次就是第二个裁决处（而且它比不出
+     * `legacy_unreviewed` 那一档）。徽标直接用它这个值。
+     */
+    readonly freshness: ObjectiveSurfaceFreshnessV3;
+  } | null;
   readonly capabilities: CapabilityProjectionV1;
   /**
    * The workspace's one live Card Generation run (owner only; Member sees an
@@ -266,6 +292,8 @@ function sentenceRange(text: string, at: number, length: number): readonly [numb
 export function NotebookSurface() {
   const invoke = useRoomStore((state) => state.invoke);
   const setActiveCardGenerationRunId = useRoomStore((state) => state.setActiveCardGenerationRunId);
+  const setActiveObjectiveId = useRoomStore((state) => state.setActiveObjectiveId);
+  const setActiveRunId = useRoomStore((state) => state.setActiveRunId);
   const activeNoteRef = useRoomStore((state) => state.activeNoteRef);
   // 协同流只在协作空间里存在（personal 按门控不建长连接），所以订阅与否看它。
   const spaceIdentity = useRoomStore((state) => state.spaceIdentity);
@@ -308,6 +336,9 @@ export function NotebookSurface() {
   const [sharing, setSharing] = useState(false);
   const [startingGeneration, setStartingGeneration] = useState(false);
   const [generationFailure, setGenerationFailure] = useState<string | null>(null);
+  /** 这一次「开始学习/继续作答」在飞，按钮就地禁用，不再开第二条。 */
+  const [startingNoteObjective, setStartingNoteObjective] = useState(false);
+  const [noteObjectiveFailure, setNoteObjectiveFailure] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [options, setOptions] = useState<GenerationOptions>(persistedGenerationOptions);
   const [showAllBlocks, setShowAllBlocks] = useState(false);
@@ -390,6 +421,30 @@ export function NotebookSurface() {
       }
     }
 
+    // 39d W4-2 第三刀：这一篇的学习目标主行动。读不到（老网关没有这条路由、
+    // 这一篇还没有目标、或读取失败）就是 null——整行不画。这一读**必须**在这里
+    // 自己吞掉异常：它是增补，不能让一次失败的附加读取把整篇笔记换成错误页。
+    let noteObjective: NotebookProjection["noteObjective"] = null;
+    try {
+      const objectiveResponse = await api.objective.list({
+        meta: createRequestMeta(epochRef.current),
+        limit: 1,
+        lifecycle: "active",
+        noteId: note.noteId,
+      });
+      if (objectiveResponse.workspaceEpoch) epochRef.current = objectiveResponse.workspaceEpoch;
+      const item = unwrapGatewayResult(objectiveResponse).items[0] ?? null;
+      if (item) {
+        noteObjective = {
+          objectiveId: item.objectiveId,
+          primaryAction: item.primaryAction,
+          freshness: item.freshness,
+        };
+      }
+    } catch {
+      noteObjective = null;
+    }
+
     return {
       note,
       source,
@@ -397,6 +452,7 @@ export function NotebookSurface() {
       objective: focus && focus.objective.sources.primaryNote?.noteId === note.noteId
         ? focus.objective
         : null,
+      noteObjective,
       capabilities: unwrapGatewayResult(capabilityResponse),
       activeGeneration: projection.activeGenerationSummary,
       latestGenerationRun,
@@ -420,6 +476,8 @@ export function NotebookSurface() {
   const source = data?.source ?? null;
   const sourceFailure = data?.sourceFailure ?? null;
   const objective = data?.objective ?? null;
+  /** 这一篇的学习目标主行动；读不到就是 null，那一行整个不画（W4-2 第三刀）。 */
+  const noteObjective = data?.noteObjective ?? null;
   const capabilities = data?.capabilities ?? null;
   const activeGenerations = data?.activeGeneration?.state === "data" ? data.activeGeneration.data : [];
   // 这篇笔记自己的在制批次。一个工作区可以同时有多篇笔记各自在制一批卡，所以
@@ -781,6 +839,37 @@ export function NotebookSurface() {
     }
   };
 
+  /**
+   * 笔记页那一颗主要动作（39d W4-2 第三刀）。
+   *
+   * 执行处只有 `startObjectiveJourney` 一个——列表焦点卡、详情页与这一页共用它，
+   * 按钮上的动词与按下去的去处因此必然一致（31 号文档 P9）。不许在这一页再开
+   * 一条开跑路径；`refresh` / `view_successor` / 等待类由它自己判，不在这里重写。
+   * 先把这个目标认成活动目标再交给它：`validate` 面读的就是 store 里那一个。
+   * `reload` 走 silent：非 silent 的回读会把纸面整个换成加载态，而这条路
+   * （`refresh` 型 action）可能就停在阅读页上。
+   */
+  const startNoteObjective = async () => {
+    const target = noteObjective;
+    if (!target || startingNoteObjective) return;
+    setNoteObjectiveFailure(null);
+    setStartingNoteObjective(true);
+    try {
+      setActiveObjectiveId(target.objectiveId);
+      await startObjectiveJourney(target.primaryAction, {
+        epochRef,
+        setActiveObjectiveId,
+        setActiveRunId,
+        openRunSurface: () => invoke("validate"),
+        reload: () => reload({ silent: true }),
+      });
+    } catch (error) {
+      setNoteObjectiveFailure(gatewayErrorMessage(error));
+    } finally {
+      setStartingNoteObjective(false);
+    }
+  };
+
   // Live status sync while this page stays open: one cardGeneration
   // subscription per known run. Each event triggers a silent re-read of the
   // projection — the entry button and status line follow the run's real step
@@ -857,6 +946,13 @@ export function NotebookSurface() {
     ? formatRelative(objective.personal.lastCanonicalAt)
     : "尚未开始";
   const firstSegment = segments[0] ?? null;
+  /**
+   * 那块资料卡片的名字：**屏上与给她的视图共用这一份**（两边各写一句迟早分叉，而分叉不报错）。
+   * 以前它写的是 `来源片段 00`——那其实是首段的**序号**（0 基补零），可同一页上方还有一行
+   * `来源片段 72` 是**条数**。同四个字在这块屏上表示两个数，她照着念就念出了
+   * 「只挂了 1 段（标着「来源片段 00」）」这种自相矛盾的话（2026-09-25 真窗口量到）。
+   */
+  const firstSegmentClipLabel = firstSegment ? `第 ${firstSegment.ordinal + 1} 段来源片段` : "来源片段";
   // Dirty outranks the last receipt: after a save the state stays "committed"
   // until the next one starts, so checking the receipt first made the line claim
   // "已自动保存" while keystrokes were still uncommitted — and the page's own
@@ -876,6 +972,48 @@ export function NotebookSurface() {
                 : receipt.via === "stream" ? "已写入，正在同步" : "已自动保存"
               : receipt.via === "no_change" ? "没有新的改动，还是那一版" : "已保存"} · ${formatClock(receipt.savedAt)}`
           : "● 已经存好，和服务器上的版本一致";
+
+  /**
+   * 笔记页登记给伴星读的可读视图（doc 37 / 39d W2-2 的 P4-a）。
+   *
+   * 阅读（`note-read`）与编辑（`note-edit`）是**同一条服务端记录的两个模式**，所以共用
+   * 一份视图、只按 `page` 分 `pageId`——像 `CardGenerationSurface` 那样一个调用点分两条。
+   *
+   * 每个字段都**照抄这一页已经在渲染的那一个派生值**，不另算一份：
+   *  - `title` ← `titleValue`（`:1483` 标题输入框的 `value`，阅读页也是它）；
+   *  - `statusLine` ← `saveLabel`（屏上那行保存状态，含 `●` 与相对时间）；
+   *  - `metrics` ← `sourceTitle`（`:1314`「来源：{sourceTitle}」）、
+   *    `validationLabel`（`:1320`「最近验证：{validationLabel}」）；
+   *  - `items[0]` ← `firstSegment` 与屏上共用的 `firstSegmentClipLabel`（39d §19：以前这一格
+   *    抄的是「来源片段 00」那种**序号当计数**的写法，与页眉的条数撞在同一个名词上）。
+   *
+   * 抄现成值而不是重算，是因为这条判据要的是「屏上那句话与视图字段逐字相同」；
+   * 重算一份迟早会与屏上分叉，而分叉**不会报错**——`usePageReadableView` 那边不合合同
+   * 只是不发布，症状仅仅是"她偶尔读不到这一页"。
+   */
+  const readableView = useMemo<PageReadableV1 | null>(() => {
+    if (!note) return null;
+    return {
+      pageId: page === "note-edit" ? "note_edit" : "note_read",
+      // 标题为空时屏上是一个空输入框；这里给的是这一页的名字，不是屏上文字。
+      title: (titleValue.trim() || "未命名笔记").slice(0, 120),
+      statusLine: saveLabel.slice(0, 160),
+      metrics: [
+        { label: "来源", value: sourceTitle.slice(0, 40) },
+        { label: "最近验证", value: validationLabel.slice(0, 40) },
+      ],
+      ...(firstSegment
+        ? {
+            items: [{
+              ordinal: 1,
+              label: excerpt(firstSegment.text).slice(0, 120),
+              state: firstSegmentClipLabel.slice(0, 40),
+            }],
+          }
+        : {}),
+    };
+  }, [firstSegment, note, page, saveLabel, sourceTitle, titleValue, validationLabel]);
+  usePageReadableView(readableView);
 
   const openSource = () => {
     if (!note?.sourceId) return;
@@ -963,7 +1101,7 @@ export function NotebookSurface() {
             note-level evidence binding, so this clip names what it really is:
             the source's first fragment. Calling it 证据 claimed an alignment
             nothing in the record provides. */}
-        <b>{firstSegment ? `来源片段 ${String(firstSegment.ordinal).padStart(2, "0")}` : "来源片段"}</b>
+        <b>{firstSegmentClipLabel}</b>
         <br />
         {firstSegment
           ? excerpt(firstSegment.text)
@@ -1285,6 +1423,30 @@ export function NotebookSurface() {
         <span>{note.sourceId ? `关联来源 ${source?.source.title ?? "暂时读不到"}` : "未关联来源"}</span>
         <span>{objective ? `学习卡：${objective.content.conceptLabel ?? "未命名学习卡"}` : "未关联学习卡"}</span>
       </div>
+      {/* 这一篇的学习区（39d W4-2 第三刀）：只放一个主要动作和一句理由。
+          字面全部来自 `objective-state-copy` 那两份唯一口径（服务端 label 优先），
+          这一页不另写词；执行走 `startObjectiveJourney` 那一条唯一的路。
+          读不到目标、或读取失败时整行不画——它是一块增补，不成空态、不成占位，
+          更不能把笔记本身顶掉。
+          容器叫 `notebook-objective` 而不是复用 `actions`：这一页的 `actions` 那一条规则
+          （`.notebook-actions`）是钉在纸面右下角的绝对定位，流内这一条要的是另一件事。 */}
+      {noteObjective ? (
+        <div className="notebook-objective">
+          <button
+            type="button"
+            className="button primary"
+            disabled={startingNoteObjective}
+            onClick={() => void startNoteObjective()}
+          >
+            {primaryActionLabel(noteObjective.primaryAction)}
+          </button>
+          {noteObjective.freshness === "source_outdated" ? (
+            <p className="small notebook-note">{freshnessLabel(noteObjective.freshness)}</p>
+          ) : null}
+          <p className="small notebook-note">{primaryActionDescription(noteObjective.primaryAction)}</p>
+          {noteObjectiveFailure ? <p className="small notebook-note" role="alert">{noteObjectiveFailure}</p> : null}
+        </div>
+      ) : null}
       <div className="rule" />
       <div className="reading-body">
         {readSourceBlocks.length ? readingBlocks.map((block) => (

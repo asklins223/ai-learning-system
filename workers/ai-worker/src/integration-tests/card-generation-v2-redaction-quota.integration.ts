@@ -36,16 +36,23 @@ const admin = postgres(ADMIN_URL, { max: 2 });
 
 const WORKSPACE_ID = randomUUID();
 const USER_ID = randomUUID();
-const NOTE_ID = randomUUID();
+/**
+ * 每个用例一篇自己的笔记（2026-09-25，与 `card-generation-v2-e2e-subset` 同一处修法）。
+ * 原来整份文件共用一个 `NOTE_ID`，而"这篇笔记已有在制/待审批次"那道守卫按
+ * **(笔记, 人)** 判 —— 于是 §15.7 留下的活批次会直接挡住 §22.6 的第一次创建。
+ */
+const createdNoteIds: string[] = [];
 
 const CONTENT =
   "边际效用递减：在其他条件不变时，随着某种商品消费量的增加，每增加一单位消费所带来的额外满足感（边际效用）逐渐减少。";
 
 let seedVersionCounter = 0;
 
-async function seedNote(title: string, content: string): Promise<{ versionId: string }> {
+async function seedNote(title: string, content: string): Promise<{ versionId: string; noteId: string }> {
   const versionId = randomUUID();
   const blockId = randomUUID();
+  const noteId = randomUUID();
+  createdNoteIds.push(noteId);
   seedVersionCounter += 1;
   await admin.begin(async (tx) => {
     await tx`INSERT INTO users (id, email, password_hash)
@@ -57,15 +64,15 @@ async function seedNote(title: string, content: string): Promise<{ versionId: st
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role)
       VALUES (${WORKSPACE_ID}, ${USER_ID}, 'owner') ON CONFLICT DO NOTHING`;
     await tx`INSERT INTO notes (id, workspace_id, title, created_by)
-      VALUES (${NOTE_ID}, ${WORKSPACE_ID}, ${title}, ${USER_ID}) ON CONFLICT (id) DO NOTHING`;
+      VALUES (${noteId}, ${WORKSPACE_ID}, ${title}, ${USER_ID})`;
     await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
-      VALUES (${versionId}, ${NOTE_ID}, ${WORKSPACE_ID}, ${seedVersionCounter}, ${tx.json({ blocks: [{ type: "paragraph", content }] })}, 'rq-hash', ${USER_ID})
+      VALUES (${versionId}, ${noteId}, ${WORKSPACE_ID}, ${seedVersionCounter}, ${tx.json({ blocks: [{ type: "paragraph", content }] })}, 'rq-hash', ${USER_ID})
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO note_blocks (id, version_id, workspace_id, type, content, ordinal)
       VALUES (${blockId}, ${versionId}, ${WORKSPACE_ID}, 'paragraph', ${content}, 1)
       ON CONFLICT (id) DO NOTHING`;
   });
-  return { versionId };
+  return { versionId, noteId };
 }
 
 /**
@@ -217,7 +224,9 @@ before(async () => {
 
 after(async () => {
   await admin`DELETE FROM card_generation_runs_v2 WHERE workspace_id = ${WORKSPACE_ID}`.catch(() => undefined);
-  await admin`DELETE FROM notes WHERE id = ${NOTE_ID}`.catch(() => undefined);
+  for (const id of createdNoteIds) {
+    await admin`DELETE FROM notes WHERE id = ${id}`.catch(() => undefined);
+  }
   await admin`DELETE FROM workspace_members WHERE workspace_id = ${WORKSPACE_ID}`.catch(() => undefined);
   await admin`DELETE FROM workspaces WHERE id = ${WORKSPACE_ID}`.catch(() => undefined);
   await admin`DELETE FROM users WHERE id = ${USER_ID}`.catch(() => undefined);
@@ -452,10 +461,15 @@ test("§22.6：V2 生成配额 — 在途并发上限 + 24h 速率上限 + 幂�
   try {
     process.env.CARD_GENERATION_V2_MAX_INFLIGHT_RUNS = "1";
     process.env.CARD_GENERATION_V2_DAILY_RUN_LIMIT = "50";
-    const { versionId } = await seedNote("quota", CONTENT);
+    // 三篇各管一件事。**"在制那一行"必须挂在另一篇笔记上**：不然先挡住请求的是
+    // "这篇笔记已有在制批次"那道同篇守卫，配额（空间/人级）那条断言根本没被执行到——
+    // 看着像在测配额，其实在测另一道闸。
+    const forFirst = await seedNote("quota-首个批次", CONTENT);
+    const forInflight = await seedNote("quota-在制占位（另一篇）", CONTENT);
+    const forRequest = await seedNote("quota-被请求的那篇", CONTENT);
 
     // 1. 正常创建（在途 0）→ 成功
-    const first = await createRun(versionId);
+    const first = await createRun(forFirst.versionId);
     assert.ok(first.runId, "first run must be created");
 
     // 2. 在途 1（planning）→ 再创建 → 409 concurrency
@@ -467,7 +481,7 @@ test("§22.6：V2 生成配额 — 在途并发上限 + 24h 速率上限 + 幂�
          source_snapshot_hash, source_content_hash, block_manifest_hash,
          asset_manifest_hash, scope_manifest_hash, card_content_epoch,
          review_draft_revision, current_plan_version)
-      VALUES (${inflightRunId}, ${WORKSPACE_ID}, ${USER_ID}, ${NOTE_ID}, ${versionId}, 'planning', ${`inflight-${randomUUID()}`},
+      VALUES (${inflightRunId}, ${WORKSPACE_ID}, ${USER_ID}, ${forInflight.noteId}, ${forInflight.versionId}, 'planning', ${`inflight-${randomUUID()}`},
               ${"a".repeat(64)}, ${"b".repeat(64)}, ${"f".repeat(64)},
               ${"c".repeat(64)}, ${"d".repeat(64)}, ${"e".repeat(64)},
               ${"f".repeat(64)}, ${"g".repeat(64)}, 1, 1, 1)`;
@@ -477,10 +491,10 @@ test("§22.6：V2 生成配额 — 在途并发上限 + 24h 速率上限 + 幂�
     await assert.rejects(
       createGenerationRunV2(
         { workspaceId: WORKSPACE_ID, userId: USER_ID },
-        versionId,
+        forRequest.versionId,
         {
           version: 2,
-          noteVersionId: versionId,
+          noteVersionId: forRequest.versionId,
           sourceScope: { kind: "whole_note" },
           learningGoal: "understand",
           detailThreshold: "balanced",
@@ -496,7 +510,7 @@ test("§22.6：V2 生成配额 — 在途并发上限 + 24h 速率上限 + 幂�
     // 3. 幂等重放豁免：first 的 key + **first 的请求体**重放 → 同 run（不受配额影响）
     const replay = await createGenerationRunV2(
       { workspaceId: WORKSPACE_ID, userId: USER_ID },
-      versionId,
+      forFirst.versionId,
       first.body,
       (await admin`SELECT idempotency_key FROM card_generation_runs_v2 WHERE id = ${first.runId}`)[0].idempotency_key,
     );
@@ -510,10 +524,10 @@ test("§22.6：V2 生成配额 — 在途并发上限 + 24h 速率上限 + 幂�
     await assert.rejects(
       createGenerationRunV2(
         { workspaceId: WORKSPACE_ID, userId: USER_ID },
-        versionId,
+        forRequest.versionId,
         {
           version: 2,
-          noteVersionId: versionId,
+          noteVersionId: forRequest.versionId,
           sourceScope: { kind: "whole_note" },
           learningGoal: "understand",
           detailThreshold: "balanced",

@@ -5,8 +5,13 @@
  * 跨 workspace 实体拒绝（fail closed）→ 白名单外实体 kind 拒绝 →
  * 未知/错误 revision renew 拒绝。
  *
- * 运行：DATABASE_URL_API="postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn"
- *   node --import tsx --test --test-concurrency=1 src/integration-tests/companion-bridge-postgres.integration.ts
+ * 运行（**要给受限角色**，与 CI 一致）：
+ *   DATABASE_URL_API="postgres://ailearn_api:ailearn_dev@127.0.0.1:5432/ailearn" \
+ *     node --import tsx --test --test-concurrency=1 \
+ *     src/integration-tests/companion-bridge-postgres.integration.ts
+ * 不写这个变量时会回落到 `ailearn`（超户、BYPASSRLS）⇒ 本文件全绿也**没验到 RLS**：
+ * 跨用户隔离那条与 `readable_view` 落列这句，都只在受限角色下才有意义：2026-09-25
+ * 第一次按 CI 的形状给受限角色跑，这句裸读就红了（见下面的 set_config）。
  */
 
 import { after, test } from "node:test";
@@ -14,6 +19,7 @@ import assert from "node:assert/strict";
 import postgres from "postgres";
 import { randomUUID } from "node:crypto";
 import type { MainPageContextInputV2 } from "@ailearn/shared";
+import { assistantContextRenewResultV2Schema } from "@ailearn/shared";
 import { seedV2Fixture } from "./helpers/v2-card-fixture.ts";
 
 const CONN = process.env.DATABASE_URL_API ?? "postgres://ailearn:ailearn_dev@127.0.0.1:5432/ailearn";
@@ -97,6 +103,11 @@ test("P5 hydration：publish → renew → revoke 全链 + 失败路径 fail clo
     );
     assert.ok(renewed);
     assert.equal(renewed.revision, snapshot.revision);
+    // renew 的响应形状两侧共指一份合同：桌面端拿 `assistantContextRenewResultV2Schema`
+    // 解它（整份快照的 schema 解不过这两字段，会把租约定时器静默停掉）。
+    // 这里把它改成别的形状而不改共享 schema，这条就会红。
+    assert.deepEqual(Object.keys(renewed).sort(), ["expiresAt", "revision"]);
+    assert.ok(assistantContextRenewResultV2Schema.safeParse(renewed).success);
 
     // renew（错误 revision）→ ContextHydrationError（fail closed）。
     await assert.rejects(
@@ -314,9 +325,16 @@ test("publish：页面可读视图落进 readable_view 列，且只改视图也�
     );
     assert.deepEqual(first.readableView, view, "snapshot 必须带回视图");
 
-    const stored = await sql`
-      SELECT readable_view FROM assistant_page_contexts WHERE id = ${first.contextId}
-    `;
+    // 这句必须带上下文再读：`assistant_page_contexts` 的 RESTRICTIVE 守卫没有"未设上下文"
+    // 那一支，受限角色裸读恒 0 行——红法还特别像产品缺陷（`stored[0]` undefined）。
+    // 以前这里没出事，是因为文件头给的运行串其实是超户（见上面的说明）。
+    const stored = await sql.begin(async (tx) => {
+      await tx`SELECT set_config('app.workspace_id', ${seeded.workspaceId}, true)`;
+      await tx`SELECT set_config('app.user_id', ${seeded.userId}, true)`;
+      return tx`
+        SELECT readable_view FROM assistant_page_contexts WHERE id = ${first.contextId}
+      `;
+    });
     assert.deepEqual((stored[0] as { readable_view: unknown }).readable_view, view,
       "视图必须落进 readable_view 列");
 

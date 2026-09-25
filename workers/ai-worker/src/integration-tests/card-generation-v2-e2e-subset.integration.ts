@@ -63,7 +63,25 @@ const admin = postgres(ADMIN_URL, { max: 2 });
 
 const WORKSPACE_ID = randomUUID();
 const USER_ID = randomUUID();
-const NOTE_ID = randomUUID();
+/**
+ * 每个用例一篇自己的笔记（2026-09-25 修）。
+ *
+ * 原来 30 个用例共用一个 `NOTE_ID`。而"这篇笔记已经有一批在制/待审"那道守卫
+ * （`apps/api/src/modules/card-generation-v2/generation-run-service.ts:186`）是按
+ * **(笔记, 人)** 判的，并且 2026-09-21 为修"旧卡不废弃"从"任意取一行"收紧成
+ * "遍历全部在制行，只要还有一行活着就挡住"——于是只要 C01 留下一批 `review_ready`，
+ * 后面 29 个用例全撞 409。**生产行为是对的**（同篇笔记本来就不该并两批），
+ * 错的是夹具把 30 个用例拴在同一篇笔记上：它们之间唯一的共同点应该是空间和用户。
+ */
+const createdNoteIds: string[] = [];
+
+async function createNote(title: string): Promise<string> {
+  const id = randomUUID();
+  createdNoteIds.push(id);
+  await admin`INSERT INTO notes (id, workspace_id, title, created_by)
+    VALUES (${id}, ${WORKSPACE_ID}, ${title}, ${USER_ID})`;
+  return id;
+}
 
 const OSI_CONTENT =
   "OSI 模型把网络通信分为七层：物理层负责比特流传输；数据链路层负责帧与纠错；网络层负责路由；传输层负责端到端传输；会话层负责会话管理；表示层负责数据格式转换；应用层提供应用接口。";
@@ -74,11 +92,13 @@ let seedVersionCounter = 0;
 async function seedNote(
   title: string,
   content: string,
-): Promise<{ versionId: string; blockId: string }> {
+): Promise<{ versionId: string; blockId: string; noteId: string }> {
   const versionId = randomUUID();
   const blockId = randomUUID();
-  // note_versions_unique_idx 约束 (note_id, version_no) 唯一：同一 NOTE_ID
-  // 下递增 version_no，避免重复 seed 冲突。
+  const noteId = await createNote(title);
+  // note_versions_unique_idx 约束 (note_id, version_no) 唯一：全局递增的
+  // version_no 在"每篇一个版本"的形状下天然不冲突，C21 那种"同一篇再加一版"
+  // 也仍然拿到更大的号。
   seedVersionCounter += 1;
   await admin.begin(async (tx) => {
     await tx`INSERT INTO users (id, email, password_hash)
@@ -89,16 +109,14 @@ async function seedNote(
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role)
       VALUES (${WORKSPACE_ID}, ${USER_ID}, 'owner') ON CONFLICT DO NOTHING`;
-    await tx`INSERT INTO notes (id, workspace_id, title, created_by)
-      VALUES (${NOTE_ID}, ${WORKSPACE_ID}, ${title}, ${USER_ID}) ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
-      VALUES (${versionId}, ${NOTE_ID}, ${WORKSPACE_ID}, ${seedVersionCounter}, ${tx.json({ blocks: [{ type: "paragraph", content }] })}, 'v2-e2e-hash', ${USER_ID})
+      VALUES (${versionId}, ${noteId}, ${WORKSPACE_ID}, ${seedVersionCounter}, ${tx.json({ blocks: [{ type: "paragraph", content }] })}, 'v2-e2e-hash', ${USER_ID})
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO note_blocks (id, version_id, workspace_id, type, content, ordinal)
       VALUES (${blockId}, ${versionId}, ${WORKSPACE_ID}, 'paragraph', ${content}, 1)
       ON CONFLICT (id) DO NOTHING`;
   });
-  return { versionId, blockId };
+  return { versionId, blockId, noteId };
 }
 
 async function createRun(versionId: string, clientRequestId: string, idempotencyKey: string) {
@@ -139,14 +157,13 @@ before(async () => {
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role)
       VALUES (${WORKSPACE_ID}, ${USER_ID}, 'owner') ON CONFLICT DO NOTHING`;
-    await tx`INSERT INTO notes (id, workspace_id, title, created_by)
-      VALUES (${NOTE_ID}, ${WORKSPACE_ID}, 'V2 E2E note', ${USER_ID}) ON CONFLICT (id) DO NOTHING`;
   });
 });
 
 after(async () => {
   await admin`DELETE FROM card_generation_runs_v2 WHERE workspace_id = ${WORKSPACE_ID}`.catch(() => undefined);
-  await admin`DELETE FROM notes WHERE id = ${NOTE_ID}`.catch(() => undefined);
+  // 每个用例都建过自己的笔记：按空间收，别按那一个 id（漏一篇就会挡住下一轮跑）。
+  await admin`DELETE FROM notes WHERE workspace_id = ${WORKSPACE_ID}`.catch(() => undefined);
   await admin`DELETE FROM workspace_members WHERE workspace_id = ${WORKSPACE_ID}`.catch(() => undefined);
   await admin`DELETE FROM workspaces WHERE id = ${WORKSPACE_ID}`.catch(() => undefined);
   await admin`DELETE FROM users WHERE id = ${USER_ID}`.catch(() => undefined);
@@ -431,6 +448,37 @@ async function forceCandidatesPassed(runId: string, reviewDecision: "keep" | "un
     WHERE run_id = ${runId} AND workspace_id = ${WORKSPACE_ID}`;
 }
 
+/**
+ * 代设"审核通过"**并且改掉泄题正面**的版本——给那些要走真实激活的用例用。
+ *
+ * 只把 `quality_state` 改成 `passed` 是不够的：激活侧还有一道 2026-09-18 加的
+ * 发布后闸（`activation-service.ts:791`，与生成侧 `frontLeakageGate` 同一判据），
+ * 它拒的就是"正面逐字照抄答案"。确定性 Author 是占位复制实现，正面必然照抄，
+ * 所以"审核通过"这个自然状态里**本来就应该包含改正面**这件事——报错原文也是这么
+ * 指示审核人的（"请在候选审核中修改正面或拒绝该候选"）。夹具不做这一步，测出来的是
+ * "闸太严"，而真相是"没走完审核动作"。
+ */
+async function forceCandidatesReviewedWithoutLeak(
+  runId: string,
+  reviewDecision: "keep" | "undecided" = "keep",
+) {
+  await admin`
+    UPDATE card_generation_candidates_v2
+    SET quality_state = 'passed',
+        review_decision = ${reviewDecision},
+        presentation_draft = jsonb_set(
+          jsonb_set(
+            presentation_draft,
+            '{front,cue}',
+            '"这一条该用什么说法？"'::jsonb,
+            true),
+          '{front,prompt}',
+          '"用自己的话补出这一条的关键点。"'::jsonb,
+          true),
+        updated_at = now()
+    WHERE run_id = ${runId} AND workspace_id = ${WORKSPACE_ID}`;
+}
+
 async function loadRunAndPlanForActivation(runId: string) {
   const runRow = await admin`
     SELECT review_draft_revision, card_content_epoch, source_snapshot_hash,
@@ -477,7 +525,7 @@ test("C23+C25：activation 幂等重放同 receipt + 恰一 canonical mapping + 
   const runId = (await createRun(versionId, `c23-${randomUUID()}`, `c23-key-${randomUUID()}`)).runId;
   await runPipelineOnce();
   await forceReviewReady(runId);
-  await forceCandidatesPassed(runId);
+  await forceCandidatesReviewedWithoutLeak(runId);
 
   const { runRow, plan } = await loadRunAndPlanForActivation(runId);
   const candidates = await admin`
@@ -863,7 +911,7 @@ test("C14：两个语义重复候选 → 0 passed（全局合并/drop 语义，�
 test("C21：生成期间编辑 Note → 本次绑定 sealed 旧版本，不读取新版本", async () => {
   const V1_CONTENT = "机会成本是指为了得到某种东西而必须放弃的其他东西的价值。";
   const V2_CONTENT = "完全不同的新内容：量子计算利用叠加与纠缠原理，可并行处理大量状态。";
-  const { versionId: v1Id } = await seedNote("编辑竞态", V1_CONTENT);
+  const { versionId: v1Id, noteId: raceNoteId } = await seedNote("编辑竞态", V1_CONTENT);
   const runId = (await createRun(v1Id, `c21-${randomUUID()}`, `c21-key-${randomUUID()}`)).runId;
   // 生成期间编辑 Note：同一 note 新增 v2
   const v2VersionId = randomUUID();
@@ -871,7 +919,7 @@ test("C21：生成期间编辑 Note → 本次绑定 sealed 旧版本，不读�
   seedVersionCounter += 1;
   await admin.begin(async (tx) => {
     await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
-      VALUES (${v2VersionId}, ${NOTE_ID}, ${WORKSPACE_ID}, ${seedVersionCounter}, ${tx.json({ blocks: [{ type: "paragraph", content: V2_CONTENT }] })}, 'v2-e2e-hash-2', ${USER_ID})
+      VALUES (${v2VersionId}, ${raceNoteId}, ${WORKSPACE_ID}, ${seedVersionCounter}, ${tx.json({ blocks: [{ type: "paragraph", content: V2_CONTENT }] })}, 'v2-e2e-hash-2', ${USER_ID})
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO note_blocks (id, version_id, workspace_id, type, content, ordinal)
       VALUES (${v2BlockId}, ${v2VersionId}, ${WORKSPACE_ID}, 'paragraph', ${V2_CONTENT}, 1)
@@ -933,12 +981,13 @@ test("C36：纯感想 → no_cards_recommended 成功终态，不伪造 first_ca
 test("C10：代码块不被文本归一化——typed evidence 缺失时拒绝而非产出乱码卡", async () => {
   const CODE_SNIPPET = "def fib(n):\n    return n if n < 2 else fib(n-1) + fib(n-2)";
   // 纯代码笔记：region evidence（R5 声称）未实现 → 拒绝路径
+  const codeNoteId = await createNote("纯代码笔记");
   const codeVersionId = randomUUID();
   const codeBlockId = randomUUID();
   seedVersionCounter += 1;
   await admin.begin(async (tx) => {
     await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
-      VALUES (${codeVersionId}, ${NOTE_ID}, ${WORKSPACE_ID}, ${seedVersionCounter}, ${tx.json({ blocks: [{ type: "code", content: CODE_SNIPPET }] })}, 'v2-e2e-hash-code', ${USER_ID})
+      VALUES (${codeVersionId}, ${codeNoteId}, ${WORKSPACE_ID}, ${seedVersionCounter}, ${tx.json({ blocks: [{ type: "code", content: CODE_SNIPPET }] })}, 'v2-e2e-hash-code', ${USER_ID})
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO note_blocks (id, version_id, workspace_id, type, content, ordinal)
       VALUES (${codeBlockId}, ${codeVersionId}, ${WORKSPACE_ID}, 'code', ${CODE_SNIPPET}, 1)
@@ -961,13 +1010,14 @@ test("C10：代码块不被文本归一化——typed evidence 缺失时拒绝�
 
   // 混合笔记（文本 + 代码）：文本成候选，代码不被文本归一化进 evidence
   const TEXT_PART = "机会成本是指为了得到某种东西而必须放弃的其他东西的价值。";
+  const mixedNoteId = await createNote("文本加代码混合笔记");
   const mixedVersionId = randomUUID();
   const mixedBlockA = randomUUID();
   const mixedBlockB = randomUUID();
   seedVersionCounter += 1;
   await admin.begin(async (tx) => {
     await tx`INSERT INTO note_versions (id, note_id, workspace_id, version_no, content_json, content_hash, created_by)
-      VALUES (${mixedVersionId}, ${NOTE_ID}, ${WORKSPACE_ID}, ${seedVersionCounter}, ${tx.json({ blocks: [{ type: "paragraph", content: TEXT_PART }, { type: "code", content: CODE_SNIPPET }] })}, 'v2-e2e-hash-mixed', ${USER_ID})
+      VALUES (${mixedVersionId}, ${mixedNoteId}, ${WORKSPACE_ID}, ${seedVersionCounter}, ${tx.json({ blocks: [{ type: "paragraph", content: TEXT_PART }, { type: "code", content: CODE_SNIPPET }] })}, 'v2-e2e-hash-mixed', ${USER_ID})
       ON CONFLICT (id) DO NOTHING`;
     await tx`INSERT INTO note_blocks (id, version_id, workspace_id, type, content, ordinal)
       VALUES (${mixedBlockA}, ${mixedVersionId}, ${WORKSPACE_ID}, 'paragraph', ${TEXT_PART}, 1), (${mixedBlockB}, ${mixedVersionId}, ${WORKSPACE_ID}, 'code', ${CODE_SNIPPET}, 2)
@@ -1093,7 +1143,7 @@ test("C30：archive Card/Objective → lifecycle archived + epoch 前移，历�
   const runId = (await createRun(versionId, `c30-${randomUUID()}`, `c30-key-${randomUUID()}`)).runId;
   await runPipelineOnce();
   await forceReviewReady(runId);
-  await forceCandidatesPassed(runId);
+  await forceCandidatesReviewedWithoutLeak(runId);
 
   const { runRow, plan } = await loadRunAndPlanForActivation(runId);
   const candidates = await admin`
@@ -1722,7 +1772,14 @@ test("C15：审核中 edit 答案 → 新 revision + worker 重跑门禁（check
     "C15 must record recheck_completed event");
 });
 
-test("C16：merge 两个候选 → 新 derived 候选 + lineage；父候选 merged 不可激活；合并产物重跑门禁", async () => {
+// 2026-09-25：这条曾因为**产品缺陷**被显式 skip（合并产物写死 `revision = 1`，与第一个
+// 父候选自己那一行撞 `cg_v2_cand_plan_objective_revision_idx`，合并动作当场 500）。
+// 已按"revision 编的是计划目标槽位里的第几版"修好（`candidate-review-service.ts` 的
+// `nextPlanSlotRevision`），skip 撤掉。槽位归属仍是第一个父候选那一条——激活按
+// `candidateRevisionId` 选候选，不看 revision 号，所以这一条不需要动激活合同。
+test(
+  "C16：merge 两个候选 → 新 derived 候选 + lineage；父候选 merged 不可激活；合并产物重跑门禁",
+  async () => {
   const MERGE_CONTENT =
     "TCP 提供可靠有序的字节流传输。水在标准大气压下 100 摄氏度沸腾。";
   const { versionId } = await seedNote("合并", MERGE_CONTENT);

@@ -49,7 +49,7 @@ import type {
 } from "@ailearn/shared";
 import { DomainError, cardStrategyV2Schema, learningRunOutcomeSchema } from "@ailearn/shared";
 import { listOriginsByObjective, rowToWire } from "./origin-service.ts";
-import { resolvePrimaryActionV3, type ActionResolverInputV3 } from "./action-resolver.ts";
+import { pickLatestCompletedRunV3, resolvePrimaryActionV3, type ActionResolverInputV3 } from "./action-resolver.ts";
 import { readAnswerModePreference } from "../companion-shell/answer-mode-preference.ts";
 import { surfaceQueryDurationSeconds, surfaceSlowQueryTotal } from "../../lib/metrics.ts";
 
@@ -343,11 +343,16 @@ async function assembleObjectiveSurfaceV3Inner(
   // Bug 10 修复：loadActiveRun 查询的活跃 run 是 runIdRows 的子集。
   // 合并为一次查询：先查该 objective 的所有 runs（含 phase + origin），
   // 在内存中同时提取 activeRun 和 runId 列表。
+  // 本轮再把"最近一轮判成了什么"也并进来：它原先是**第二条** SQL（`result IS NOT NULL
+  // ORDER BY updated_at DESC LIMIT 1`），而那条与列表／星图各写一份同一件事，改一处
+  // 就会漏两处。现在三处都走 `pickLatestCompletedRunV3`，这一次查询顺带少一个往返。
   const allRunRows = await tx
     .select({
       runId: learningRuns.id,
       phase: learningRuns.phase,
       createdAt: learningRuns.createdAt,
+      outcome: sql<string | null>`${learningRuns.result}->>'outcome'`,
+      updatedAt: learningRuns.updatedAt,
     })
     .from(learningRuns)
     .where(and(
@@ -361,25 +366,10 @@ async function assembleObjectiveSurfaceV3Inner(
   const activeRun = activeRunRow
     ? { runId: activeRunRow.runId, phase: activeRunRow.phase }
     : null;
-  const latestResultRows = await tx
-    .select({
-      runId: learningRuns.id,
-      outcome: sql<string>`${learningRuns.result}->>'outcome'`,
-      completedAt: learningRuns.updatedAt,
-    })
-    .from(learningRuns)
-    .where(and(
-      eq(learningRuns.workspaceId, ctx.workspaceId),
-      eq(learningRuns.userId, ctx.userId),
-      sql`${learningRuns.origin}->>'objectiveId' = ${objectiveId}`,
-      sql`${learningRuns.result} IS NOT NULL`,
-    ))
-    .orderBy(desc(learningRuns.updatedAt))
-    .limit(1);
-  const lastCompletedRun = latestResultRows[0];
+  const lastCompletedRun = pickLatestCompletedRunV3(allRunRows);
   const lastOutcome = learningRunOutcomeSchema.safeParse(lastCompletedRun?.outcome);
   const latestResult = lastCompletedRun && lastOutcome.success
-    ? { runId: lastCompletedRun.runId, completedAt: lastCompletedRun.completedAt.toISOString(), outcome: lastOutcome.data }
+    ? { runId: lastCompletedRun.runId, completedAt: new Date(lastCompletedRun.updatedAt).toISOString(), outcome: lastOutcome.data }
     : null;
 
   const [initialValidation, review, exposureInfo] = await Promise.all([
@@ -494,7 +484,6 @@ async function assembleObjectiveSurfaceV3Inner(
     lifecycle: objective.lifecycle as ActionResolverInputV3["lifecycle"],
     successorObjectiveId,
     successorCardId,
-    hasActiveCard: Boolean(card),
     cardId: card?.cardId ?? null,
     activeRun,
     hasPriorFormalResult: lastCanonicalAt !== null,
@@ -507,6 +496,7 @@ async function assembleObjectiveSurfaceV3Inner(
       : null,
     practiceOnly: exposureInfo.practiceOnly,
     practiceReasonCodes: exposureInfo.reasonCodes,
+    lastResultOutcome: latestResult?.outcome ?? null,
     answerModePreference,
   };
   const primaryAction = resolvePrimaryActionV3(actionInput);
@@ -571,6 +561,12 @@ export interface ObjectiveListOptions {
   limit: number;
   /** 稳定 cursor：上一页最后一条的 objectiveId。 */
   cursor?: string;
+  /**
+   * 只取**这一篇笔记名下**的目标（39d W4-2 第三刀）：笔记页要报"这一篇的主要动作"，
+   * 而它此前只有"房间焦点恰好是这一篇"时才知道目标是谁（见 notebook-surface 那条注释）。
+   * 归属经 `learning_objective_origins_v2` 的 note 行判——那正是"目标从哪篇笔记来"的唯一出处。
+   */
+  noteId?: string;
 }
 
 /** 辅助：查 cursor 对应的 objective 行（用于 cursor-based 分页的 WHERE 条件）。 */
@@ -619,9 +615,20 @@ async function listObjectiveSurfacesV3Inner(
 
   // 修复：list 查询和 count 查询并行执行，减少总延迟，
   // 同时在同一事务 snapshot 下保证一致性（PostgreSQL 事务内多次读看到同一 snapshot）。
+  // 笔记页那一刀要的：按笔记收窄。走 EXISTS 而不是 JOIN —— 一个目标可能有多条来源行
+  // （多篇笔记各一条），JOIN 会把同一个目标列两次；这里只要"至少有一条来源是这一篇"。
+  const noteCondition = options.noteId
+    ? sql`EXISTS (
+        SELECT 1 FROM ${learningObjectiveOriginsV2} origin
+        WHERE origin.workspace_id = ${ctx.workspaceId}
+          AND origin.objective_id = ${learningObjectivesV2.objectiveId}
+          AND origin.note_id = ${options.noteId}
+      )`
+    : undefined;
   const where = and(
     eq(learningObjectivesV2.workspaceId, ctx.workspaceId),
     eq(learningObjectivesV2.lifecycle, lifecycle),
+    noteCondition ?? undefined,
     cursorCondition ?? undefined,
   );
   // 列表项必须和详情页共享同一个不变量：currentObjectiveRevisionId
@@ -658,6 +665,9 @@ async function listObjectiveSurfacesV3Inner(
       .where(and(
         eq(learningObjectivesV2.workspaceId, ctx.workspaceId),
         eq(learningObjectivesV2.lifecycle, lifecycle),
+        // 与上面那条 rows 查询同一份判据、并且**就地写一遍**：这个 total 是"当前筛选下
+        // 有多少条"，漏了它就会出现"筛出 0 条却说共 3 条"的自相矛盾读数。
+        noteCondition ?? undefined,
         visibleObjectivesCondition(ctx.userId, learningObjectivesV2.objectiveId),
       )),
   ]);
@@ -808,6 +818,10 @@ async function batchAssembleObjectiveSurfacesV3(
           phase: learningRuns.phase,
           origin: learningRuns.origin,
           createdAt: learningRuns.createdAt,
+          // 主动作要看"最近一轮判成了什么"（§3.2 第三种情况）。这两格与
+          // `allRunRows` 同一条查询一起捞，不另开一次往返。
+          outcome: sql<string | null>`${learningRuns.result}->>'outcome'`,
+          updatedAt: learningRuns.updatedAt,
         })
         .from(learningRuns)
         .where(and(
@@ -821,6 +835,7 @@ async function batchAssembleObjectiveSurfacesV3(
     : [];
   // 从 all runs 中同时提取 activeRun 映射和 allRunIds 列表
   const runByObjective = new Map<string, { runId: string; phase: string }>();
+  const outcomeRowsByObjective = new Map<string, { runId: string; outcome: unknown; updatedAt: Date }[]>();
   const allRunIds: string[] = [];
   const runIdToObjective = new Map<string, string>();
   for (const run of allRunRows) {
@@ -829,6 +844,9 @@ async function batchAssembleObjectiveSurfacesV3(
     if (originObjectiveId && objectiveIdSet.has(originObjectiveId)) {
       allRunIds.push(run.runId);
       runIdToObjective.set(run.runId, originObjectiveId);
+      const outcomes = outcomeRowsByObjective.get(originObjectiveId) ?? [];
+      outcomes.push({ runId: run.runId, outcome: run.outcome, updatedAt: run.updatedAt });
+      outcomeRowsByObjective.set(originObjectiveId, outcomes);
       // activeRun = 第一个匹配的 active-phase run（allRunRows 已按 createdAt DESC 排序）
       if ((ACTIVE_RUN_PHASES as readonly string[]).includes(run.phase) && !runByObjective.has(originObjectiveId)) {
         runByObjective.set(originObjectiveId, { runId: run.runId, phase: run.phase });
@@ -1062,7 +1080,6 @@ async function batchAssembleObjectiveSurfacesV3(
       lifecycle,
       successorObjectiveId,
       successorCardId,
-      hasActiveCard: Boolean(card),
       cardId: card?.cardId ?? null,
       activeRun,
       hasPriorFormalResult: lastCanonicalAt !== null,
@@ -1075,6 +1092,7 @@ async function batchAssembleObjectiveSurfacesV3(
         : null,
       practiceOnly: exposedObjectives.has(objectiveId),
       practiceReasonCodes: exposedObjectives.has(objectiveId) ? ["exposed"] : [],
+      lastResultOutcome: pickLatestCompletedRunV3(outcomeRowsByObjective.get(objectiveId) ?? [])?.outcome ?? null,
       answerModePreference,
     };
     const primaryAction = resolvePrimaryActionV3(actionInput);

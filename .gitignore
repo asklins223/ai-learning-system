@@ -44,6 +44,11 @@ scripts/*.mjs
 !scripts/companion-inbox-sse-probe.py
 # 槽位健康探针是常驻工具（退化是 provider 侧的，会随时回来），不是临时探针。
 !scripts/companion-provider-health.mjs
+# 反事实重放台是 39b §10 / 39d W1-1 的交付物，也是 W0-11「删闸第二份证据」的
+# 统计命令：删闸判决要靠它的读数，它不能只活在某台机器上。
+!scripts/companion-gate-counterfactual.py
+# 受限角色包装台：不给这行，本地整组集测就会以超户跑，「RLS 拒绝类」断言会红成产品缺陷（09-25 实测 107/102/5 → 107/107）。
+!scripts/with-restricted-db-urls.py
 apps/web/preview-ui.mjs
 
 # Documentation artifacts (keep source, ignore generated)

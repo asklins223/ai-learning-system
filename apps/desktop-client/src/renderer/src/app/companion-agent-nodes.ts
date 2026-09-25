@@ -73,7 +73,7 @@ export type CompanionAgentNodes = readonly CompanionAgentNode[];
  * 放在客户端、与 `TOOL_ICONS` 同一层：这是**显示**问题，和图标一样只影响渲染，
  * 认不出的工具不猜语义，统一说"正在处理…"（猜错比不认识更坏）。
  */
-const TOOL_LABELS: Record<string, string> = {
+export const TOOL_LABELS: Record<string, string> = {
   // 「正在看你这一页」原本挂在 read_context 上，而那个工具读的是落库的学习上下文、
   // 跟屏幕无关——她一边说"看你这一页"一边什么页面都没看，正是这次误判的界面形状。
   // 现在这句话只属于真正读屏的那个工具。
@@ -103,6 +103,12 @@ const TOOL_LABELS: Record<string, string> = {
   companion_render_diagram: "正在画流程图",
   companion_focus_graph: "正在星图上定位",
   companion_defer_review: "正在把复习往后挪",
+  // 补齐 39b §9.6 点名的 5 个缺口。缺条的后果不是报错，而是**用户看到「正在处理…」**
+  // —— 一句不说明她在做什么的话。所以下面那条集合相等断言是这里唯一的守门人。
+  companion_pause_learning: "正在暂停这一轮",
+  companion_resume_learning: "正在接着学",
+  companion_request_hint: "正在找一条提示",
+  companion_switch_task_variant: "正在换一道题",
 };
 
 /** 一个节点该显示的那句话。工具节点用上面的表；思考/动作节点的 label 本来就是人话。 */

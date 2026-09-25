@@ -403,11 +403,17 @@ export function computeLearningTargetSnapshotHashV2(input: {
   targetRevisionHash: string;
   cardContentEpoch: number;
   objectiveLifecycleEpoch: number;
-  cardId: string;
-  publicationRevision: number;
-  cardRevision: number;
-  publicPayloadHash: string;
-  revealPayloadHash: string;
+  /**
+   * 39d W3-4（D1 §4.3）：无卡目标可以进冻结链，所以这一组卡身份字段可空。
+   * **必须传显式 `null`，不许省键**——`canonicalJsonV2` 把 `undefined` 整个跳过，
+   * 省键与置空算出的是两个不同摘要（同一行数据会在两种构造路径下得到两个 hash）。
+   * 已核对：非空输入下放宽类型不改动摘要（golden 向量见 learning-target-v2-contracts.test.ts）。
+   */
+  cardId: string | null;
+  publicationRevision: number | null;
+  cardRevision: number | null;
+  publicPayloadHash: string | null;
+  revealPayloadHash: string | null;
   canonicalAnswerHash: string;
   learningSupportHash: string;
   rubricHash: string;

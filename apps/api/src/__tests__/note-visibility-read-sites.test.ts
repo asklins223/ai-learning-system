@@ -110,7 +110,8 @@ const OBJECTIVE_SYSTEM_LEVEL_READS: Record<string, number> = {
   "modules/learning-runs/run-processing-tick.ts": 2,
   "modules/review/service.ts": 3,
   // 排程"这条目标还有没有能做的卡"的多态判定：只回答是/否，不返回任何文字。
-  "modules/review/consumer-eligibility.ts": 1,
+  // 2026-09-24（39d W2-3）：这条判据迁去了 `@ailearn/shared/review-consumable-target`
+  // （伴星的到期读数要与队列共用一份），登记随之取消——它已经不在本守卫扫的这棵树里。
   // 复习队列的证据完备性判据（审计 F28）：只回答"这个目标的必选评分点缺哪几个"，
   // 返回的是单元 id，不从这里出去任何目标正文。调用方是队列自己——那批排程已经
   // 按人取过（与上面 `modules/review/service.ts` 那三条同一个理由）。

@@ -502,11 +502,14 @@ function bridgePageContext(input: {
   settingsSection: string;
   readableView: PageReadableV1 | null;
 }): MainPageContextInputV2 {
+  // `credential_surface` 这一档**今天没有任何 HUD 页会产生**：`login`／`register` 两个
+  // HudPageId 死分支已删除（2026-09-24，39d W2-1——没有任何组件发布它们），而真实的
+  // 登录/注册屏由 `DesktopAccessGate` 在 HUD 之外渲染，不经过这条映射。
+  // 契约值本身与服务端那道裁剪**保留**（`companion-agent-runtime.ts:710`）：将来出现
+  // 应用内凭证面时，它仍是把关的那一层，不该因为今天没人用就一起删掉。
   const sensitivity: MainPageContextInputV2["sensitivity"] = input.hudPage === "assessment"
     ? "formal_assessment" as const
-    : input.hudPage === "login" || input.hudPage === "register"
-      ? "credential_surface" as const
-      : "normal" as const;
+    : "normal" as const;
   const base: Pick<MainPageContextInputV2, "interactionState" | "capabilityHints" | "sensitivity" | "readableView"> = {
     interactionState: input.hudPage === "note-edit"
       ? "editing" as const
@@ -517,10 +520,9 @@ function bridgePageContext(input: {
           : "idle" as const,
     capabilityHints: ["open_route"],
     sensitivity,
-    // 凭证页不带任何可读内容（这一层只是少发，真正的裁剪在服务端按 sensitivity 做）。
-    // 挂在 base 上是因为下面每个分支都 `...base`——逐个 return 挂会漏掉某一条分支，
-    // 而漏掉的那条正好是"她偶尔读不到"的那种红。
-    readableView: sensitivity === "credential_surface" ? undefined : (input.readableView ?? undefined),
+    // 可读内容原样发出：渲染层已不可能产生 `credential_surface`（见上），真正的裁剪
+    // 在服务端按 sensitivity 做（`companion-agent-runtime.ts:710`）——那一层没有动。
+    readableView: input.readableView ?? undefined,
   };
   if (input.hudPage === "today") return { ...base, routeRef: { kind: "today" }, pageKind: "today", entityRefs: [] };
   if (input.hudPage === "sources") return { ...base, routeRef: { kind: "source" }, pageKind: "source", entityRefs: [] };

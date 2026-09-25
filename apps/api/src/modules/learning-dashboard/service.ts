@@ -19,7 +19,7 @@ import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
 import { notes } from "@ailearn/shared/db-schema/note";
 import { visibleNotesCondition, visibleObjectivesCondition } from "../note/visibility.ts";
 import type { LearningDashboardV2 } from "@ailearn/shared";
-import { reviewScheduleTargetsConsumableCardPredicate } from "../review/consumer-eligibility.ts";
+import { reviewScheduleTargetsConsumableCardPredicate } from "@ailearn/shared/review-consumable-target";
 import {
   assembleObjectiveSurfaceV3,
   listObjectiveSurfacesV3,

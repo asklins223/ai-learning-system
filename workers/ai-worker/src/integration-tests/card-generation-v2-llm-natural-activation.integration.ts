@@ -115,9 +115,14 @@ async function seedNote(title: string, content: string): Promise<{ versionId: st
     await tx`INSERT INTO users (id, email, password_hash)
       VALUES (${USER_ID}, ${`v2-llm-e2e-${USER_ID}@example.invalid`}, 'unused')
       ON CONFLICT (id) DO NOTHING`;
-    await tx`INSERT INTO workspaces (id, owner_id, name, ai_consent_version, ai_consent_at, ai_consent_by)
-      VALUES (${WORKSPACE_ID}, ${USER_ID}, 'V2 LLM E2E', 'v1', now(), ${USER_ID})
+    await tx`INSERT INTO workspaces (id, owner_id, name)
+      VALUES (${WORKSPACE_ID}, ${USER_ID}, 'V2 LLM E2E')
       ON CONFLICT (id) DO NOTHING`;
+    // 同意自迁移 0237 起住在 `user_ai_settings`（按 user_id 键），`workspaces` 上那三列
+    // 已被 DROP —— 原来这句 INSERT 从 0237 起就 42703，整份文件自那以后没跑起来过。
+    await tx`INSERT INTO user_ai_settings (user_id, consent_version, consent_at)
+      VALUES (${USER_ID}, 'v1', now())
+      ON CONFLICT (user_id) DO UPDATE SET consent_version = 'v1', consent_at = now()`;
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role)
       VALUES (${WORKSPACE_ID}, ${USER_ID}, 'owner') ON CONFLICT DO NOTHING`;
     await tx`INSERT INTO notes (id, workspace_id, title, created_by)
@@ -191,9 +196,14 @@ before(async () => {
     await tx`INSERT INTO users (id, email, password_hash)
       VALUES (${USER_ID}, ${`v2-llm-e2e-${USER_ID}@example.invalid`}, 'unused')
       ON CONFLICT (id) DO NOTHING`;
-    await tx`INSERT INTO workspaces (id, owner_id, name, ai_consent_version, ai_consent_at, ai_consent_by)
-      VALUES (${WORKSPACE_ID}, ${USER_ID}, 'V2 LLM E2E', 'v1', now(), ${USER_ID})
+    await tx`INSERT INTO workspaces (id, owner_id, name)
+      VALUES (${WORKSPACE_ID}, ${USER_ID}, 'V2 LLM E2E')
       ON CONFLICT (id) DO NOTHING`;
+    // 同意自迁移 0237 起住在 `user_ai_settings`（按 user_id 键），`workspaces` 上那三列
+    // 已被 DROP —— 原来这句 INSERT 从 0237 起就 42703，整份文件自那以后没跑起来过。
+    await tx`INSERT INTO user_ai_settings (user_id, consent_version, consent_at)
+      VALUES (${USER_ID}, 'v1', now())
+      ON CONFLICT (user_id) DO UPDATE SET consent_version = 'v1', consent_at = now()`;
     await tx`INSERT INTO workspace_members (workspace_id, user_id, role)
       VALUES (${WORKSPACE_ID}, ${USER_ID}, 'owner') ON CONFLICT DO NOTHING`;
   });

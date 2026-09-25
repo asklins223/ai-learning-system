@@ -6,7 +6,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   buildCriticPrompt,
+  createOpenAICompatibleCritic,
   CriticOutputError,
+  CriticUnavailableError,
   extractCriticJson,
   materializeCriticEvidenceRefs,
   parseCriticOutput,
@@ -176,4 +178,101 @@ test("critic 输出含答案关键内容的 userFacingReason 长度受限（sche
     ),
     CriticOutputError,
   );
+});
+
+// ── W3-5：Critic 跑在公共任务运行基础上之后，重试与分类得有人验 ────────────
+// 这段循环以前没有一条用例走到过（`createOpenAICompatibleCritic` 在测试里从没被构造），
+// 所以"重试几次、哪些失败算瞬时、strict 解析失败算哪一类"全是口头承诺。
+
+const CRITIC_TEST_ENV = {
+  url: "https://critic.test.example/v1/chat/completions",
+  key: "k",
+  model: "m",
+  currentActiveTransaction: () => undefined,
+};
+
+const VERDICT_BODY = (itemId: string) => ({
+  choices: [{ message: { content: JSON.stringify({ verdicts: [{ rubricItemId: itemId, verdict: "covered", userFacingReason: "实质覆盖了目标" }] }) } }],
+});
+
+function criticInputFor(itemId: string) {
+  return {
+    taskPrompt: "什么是索引的选择性？", claim: "选择性衡量列上不同值的比例",
+    evidenceQuotes: ["选择性 = 不同值数 / 总行数"], answerText: "看唯一值占多少",
+    intent: "recall", rubricTargetIds: [itemId],
+  };
+}
+
+const scopeFor = (itemId: string) => ({
+  workspaceId: "11111111-1111-1111-1111-111111111111",
+  userId: "22222222-2222-2222-2222-222222222222",
+  assessmentId: `as-${itemId}`, inputSnapshotHash: "hash-x",
+});
+
+test("Critic 重试：瞬时失败一次后成功 ⇒ 恰好两次尝试，结果照原样返回", async () => {
+  const calls: number[] = [];
+  const critic = createOpenAICompatibleCritic({
+    ...CRITIC_TEST_ENV,
+    requester: async () => {
+      calls.push(calls.length + 1);
+      if (calls.length === 1) return { status: 503, statusText: "busy", body: {} };
+      return { status: 200, statusText: "ok", body: VERDICT_BODY("r1") };
+    },
+  });
+  const verdicts = await critic.assess(criticInputFor("r1"), scopeFor("r1"));
+  assert.equal(calls.length, 2, "瞬时故障该重试一次");
+  assert.deepEqual(verdicts.map((v) => v.rubricItemId), ["r1"]);
+});
+
+test("Critic 重试额度是 1：一直 5xx 也只调两次，然后 fail closed", async () => {
+  let calls = 0;
+  const critic = createOpenAICompatibleCritic({
+    ...CRITIC_TEST_ENV,
+    requester: async () => { calls += 1; return { status: 500, statusText: "boom", body: {} }; },
+  });
+  await assert.rejects(() => critic.assess(criticInputFor("r2"), scopeFor("r2")), CriticUnavailableError);
+  assert.equal(calls, 2, "不许无限重试——那会把 outbox 卡死");
+});
+
+test("Critic 非瞬时 4xx 不重试：请求本身不对，再等一次只是慢一点", async () => {
+  let calls = 0;
+  const critic = createOpenAICompatibleCritic({
+    ...CRITIC_TEST_ENV,
+    requester: async () => { calls += 1; return { status: 401, statusText: "denied", body: {} }; },
+  });
+  await assert.rejects(() => critic.assess(criticInputFor("r3"), scopeFor("r3")), CriticUnavailableError);
+  assert.equal(calls, 1);
+});
+
+test("Critic 输出不合 strict 算形状问题：报 CriticOutputError，不伪装成 provider 不在", async () => {
+  let calls = 0;
+  const critic = createOpenAICompatibleCritic({
+    ...CRITIC_TEST_ENV,
+    requester: async () => {
+      calls += 1;
+      return { status: 200, statusText: "ok", body: { choices: [{ message: { content: '{"verdicts":[]}' } }] } };
+    },
+  });
+  // "provider 抖动"和"答得不合合同"是两种用户可见说法，混起来就会把合同问题
+  // 说成"评估暂时不可用，请稍后再试"。
+  await assert.rejects(() => critic.assess(criticInputFor("r4"), scopeFor("r4")), CriticOutputError);
+  assert.equal(calls, 2, "形状问题也有一次修复机会（与内核的同一条规则）");
+});
+
+test("Critic 在活动事务里被调用 ⇒ 执行边界当场拒绝，一次请求都不发", async () => {
+  let calls = 0;
+  const critic = createOpenAICompatibleCritic({
+    ...CRITIC_TEST_ENV,
+    currentActiveTransaction: () => ({ context: {}, transaction: {}, open: true }),
+    requester: async () => { calls += 1; return { status: 200, statusText: "ok", body: VERDICT_BODY("r5") }; },
+  });
+  await assert.rejects(() => critic.assess(criticInputFor("r5"), scopeFor("r5")), /外部调用被拒/);
+  assert.equal(calls, 0, "边界拒了却还是把请求发出去了");
+});
+
+test("Critic 未配置 ⇒ 仍是 unavailable（迁外壳没改掉这条 fail-closed 入口）", async () => {
+  const critic = createOpenAICompatibleCritic({
+    url: "", key: "", model: "", currentActiveTransaction: () => undefined,
+  });
+  await assert.rejects(() => critic.assess(criticInputFor("r6"), scopeFor("r6")), CriticUnavailableError);
 });

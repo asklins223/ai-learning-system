@@ -3,8 +3,6 @@ import { HUD_PAGES, type HudPageId } from "./hud-pages";
 
 const EXPECTED_PAGES: readonly HudPageId[] = [
   "home",
-  "login",
-  "register",
   "space",
   "sources",
   "source-detail",
@@ -39,19 +37,6 @@ describe("HUD companion surface policies", () => {
         interaction: expect.any(String),
         proactive: expect.any(String),
         draggable: expect.any(Boolean),
-      });
-    }
-  });
-
-  it("hides authentication pages and never requests an interactive actor there", () => {
-    for (const page of ["login", "register"] as const) {
-      expect(HUD_PAGES[page].companion).toEqual({
-        mode: "hidden",
-        seat: "none",
-        framing: "bust",
-        interaction: "none",
-        proactive: "silent",
-        draggable: false,
       });
     }
   });

@@ -518,6 +518,23 @@ export const assistantContextSnapshotV2Schema = mainPageContextInputV2Schema
   })
   .strict();
 
+/**
+ * 续租的响应（文档 16 §14.2：`renewPageContext → { revision, expiresAt }`）。
+ *
+ * 它与 publish 的快照**不是同一个形状**：服务端 `renewContext` 只回这两个字段
+ * （行里没存 accountSessionId/deviceSessionId，凑不出完整快照）。客户端拿
+ * `assistantContextSnapshotV2Schema` 去解它必然失败，而那次失败的后果是清掉本地
+ * 上下文并停掉续租定时器——屏上内容不变时渲染层不会再推一次，于是她从此读不到
+ * 这一页（本仓实测：`expires_at - issued_at` 恒为 30＋10 秒，即只续上一拍）。
+ */
+export const assistantContextRenewResultV2Schema = z
+  .object({
+    revision: z.string().min(1),
+    expiresAt: z.string().min(1),
+  })
+  .strict();
+export type AssistantContextRenewResultV2 = z.infer<typeof assistantContextRenewResultV2Schema>;
+
 export const mainUiEventV2Schema = z.strictObject({
   version: z.literal(2),
   eventId: z.string().min(1),

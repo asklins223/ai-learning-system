@@ -48,6 +48,18 @@ export interface ReadContext {
   accountEpoch: number;
   /** 本轮开始时这个人是否正在正式作答（`lib/formal-answer-signal.ts`，doc 34 L15）。 */
   formalAnswerInProgress: boolean;
+  /**
+   * 正在作答的那一题的**身份**（同一份判据带出来的，doc 34 L15 / 39d W2-6）：
+   * 终态那一笔暴露账目要按它写 objective_id/objective_revision——**这一题冻结的那一版**，
+   * 不是目标当前的那一版。不在正式作答时为 null。
+   */
+  formalAnswerTarget: import("../lib/formal-answer-signal.ts").FormalAnswerTarget | null;
+  /**
+   * 本轮开始时用户停在哪一屏（read 阶段那一次 `readLivePageView`，与 `<here_and_now>`
+   * 同一个读数）。终态记账要判"是不是在作答页问的"（39d W2-6），而**必须在 read 阶段
+   * 判**：她这一轮说完可能已经翻页，用终态那一刻的屏会把一笔没发生的暴露记上。
+   */
+  livePageView: import("./companion-live-view.ts").LivePageView | null;
   pageContext: unknown;
   groundedTutorContext: import("./companion-dialogue-content.ts").GroundedTutorContext | null;
   userText: string;
@@ -58,6 +70,16 @@ export interface ReadContext {
    * 每轮无条件注入，不经工具、不经模型。
    */
   hereAndNow: string | null;
+  /**
+   * `<this_turn_facts>` 数据块（39d W2-3）：用户这句话点到的对象是谁、在不在、状态如何。
+   * null = 这一轮没有可解析的指称，或解析超预算被整块丢弃。
+   */
+  thisTurnFacts: string | null;
+  /**
+   * 这一轮**可以报**的读数目录（39d W2-5）：`values` 用于把 `{{f:key}}` 渲染成真实数值
+   * （下发前统一渲染），`block` 是进 prompt 的 `<fact_spans>`。null = 这一轮没有可报的读数。
+   */
+  factSpans: { values: Record<string, string>; block: string } | null;
   /**
    * `<conversation_summary>` 数据块（方案 29 §11 C1），null = 这个会话还没有摘要。
    * 历史回放只带最近 20 条，更早的那段对话靠这一块对她可见。

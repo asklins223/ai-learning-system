@@ -10,6 +10,7 @@
 // feature-flags、provider-capabilities）拖进 renderer 的编译与打包图里。
 import type {
   LearningObjectivePrimaryActionV3,
+  ObjectiveSurfaceFreshnessV3,
   ObjectivePersonalStateV3,
 } from "@ailearn/shared/learning-objective-surface-contracts";
 
@@ -159,6 +160,20 @@ export function objectiveProgressChips(progress: {
           : `复习 ${days} 天后`);
   }
   return chips;
+}
+
+/**
+ * `content.freshness` 的人话。这一格此前只有目标简报里写着一份（`WorkspaceLibrarySurface`
+ * 的局部函数），笔记页要附「来源已有更新」那枚徽标时面临两个选择：抄一份、或按 PRD
+ * 草稿另写一句「有内容更新」。两条都会让同一个服务端值在两块屏幕上说两个词——
+ * 所以取过来共用（本文件就是为这件事存在的）。
+ */
+export function freshnessLabel(value: ObjectiveSurfaceFreshnessV3): string {
+  return {
+    fresh: "来源内容最新",
+    source_outdated: "来源已有更新",
+    legacy_unreviewed: "旧来源待复核",
+  }[value];
 }
 
 export function primaryActionLabel(action: LearningObjectivePrimaryActionV3): string {

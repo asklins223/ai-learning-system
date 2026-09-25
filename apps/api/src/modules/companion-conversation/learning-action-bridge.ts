@@ -12,7 +12,7 @@
  */
 
 import { sql } from "drizzle-orm";
-import { companionGroundedTutorGrantV1Schema, companionLearningContextV1Schema, companionLearningRunContextV1Schema, companionProposalSnapshotV1Schema, createLearningRunV2RequestSchema, proposedLearningActionPayloadV1Schema, } from "@ailearn/shared";
+import { companionGroundedTutorGrantV1Schema, companionLearningContextV1Schema, companionLearningRunContextV1Schema, companionProposalSnapshotV1Schema, createLearningRunV2RequestSchema, learningRunAssistanceConsequenceV1, proposedLearningActionPayloadV1Schema } from "@ailearn/shared";
 import { sha256Utf8V1, canonicalJsonV1 } from "@ailearn/shared/content-hash";
 import type { CompanionLearningContextV1, LearningRunOriginV2 } from "@ailearn/shared";
 import { withWorkspaceTransaction, type ApiTransaction } from "../../db/client.ts";
@@ -35,7 +35,6 @@ import {
 import { applyAction, createRunV2, getRunPublicView, type CreateLearningRunV2Request } from "../learning-runs/run-service.ts";
 import { LearningRunServiceError } from "../learning-runs/run-errors.ts";
 // 方案 16 §18.1：工具网关第二批执行单元（确定性、同事务）。
-import { createUnderstandingRoutePlan } from "../understanding/route-plan-service.ts";
 import { deferReviewSchedule } from "../review/review-defer-service.ts";
 import { createJob } from "../job/service.ts";
 import {
@@ -199,6 +198,7 @@ async function resolveCompanionLearningContextInTransaction(
   if (actionableObjective) {
     const label = actionableObjective.content.conceptLabel;
     const claimText = label ?? "";
+    const startAction = actionableObjective.primaryAction;
     const payloadV2 = buildStartPayloadV2(actionableObjective);
     const v2Payload = payloadV2 ? {
       kind: "start_learning_run_v2" as const,
@@ -209,8 +209,14 @@ async function resolveCompanionLearningContextInTransaction(
       const proposalPayload = { kind: "start_learning_run_v2" as const, request };
       learningRunStartCandidate = {
       candidateId: "learning_run_start",
+      // 没有概念名时用**服务端这一条 action 自己带的 label**（「开始学习」／「开始首次验证」／
+      // 「再做一次正式挑战」／「开始到期复习」）。这里原来硬写了「开始验证」——那既不是
+      // 这一条动作的词，还把"练习/新学"说成"正式验证"（2026-09-25 量到：无卡目标的候选
+      // title=「开始验证」而 action.label=「开始学习」）。一个用户可见的词只准一个来源。
       title: sanitizeText(claimText, 80)
-        || (actionableObjective.primaryAction.kind === "create_review_run" ? "开始复习" : "开始验证"),
+        || (startAction.kind === "create_run" || startAction.kind === "create_review_run"
+          ? startAction.label
+          : claimText),
       targetSummary: sanitizeText(actionableObjective.content.publicSummary.split("\n")[0]
         || `开始：${claimText}`, 160),
       impactSummary: actionableObjective.personal.review?.status === "due"
@@ -802,7 +808,7 @@ export async function createCompanionToolProposal(args: {
 
 // ─── P5 §6.6 Proposal decision（confirm/reject 原子消费） ───────────────
 
-import { type LearningRunActionV1, type UnderstandingRoutePlanRequestV1 } from "@ailearn/shared";
+import { type LearningRunActionV1 } from "@ailearn/shared";
 
 // §18.1 导航工具（纯导航同步 succeeded）；业务工具在下方分支同步执行。
 const NAVIGATION_KINDS = new Set([
@@ -1107,13 +1113,17 @@ export async function decideCompanionProposal(args: {
             throw new CompanionConversationError("ACTION_STALE", 409, "hint payload is stale");
           }
           action = { kind: "request_hint", level };
-          safeSummary = "已揭示提示（本题降级为练习）";
+          // 措辞由合同生成（39d W2-4 #14）：这句会上屏，而"看了提示会降成练习"
+          // 这件事只有一个真相——`exposureLowersTrust`。
+          safeSummary = `已揭示提示（${learningRunAssistanceConsequenceV1() ?? "本题资格已变化"}）`;
         } else {
           const alternativeId = proposalPayload.alternativeId;
-          if (typeof taskId !== "string" || typeof alternativeId !== "string") {
+          const variantReason = proposalPayload.reason;
+          if (typeof taskId !== "string" || typeof alternativeId !== "string"
+            || typeof variantReason !== "string" || variantReason.length === 0) {
             throw new CompanionConversationError("ACTION_STALE", 409, "variant payload is stale");
           }
-          action = { kind: "switch_variant", alternativeId };
+          action = { kind: "switch_variant", alternativeId, reason: variantReason };
           safeSummary = "已切换题目变体";
         }
         try {
@@ -1145,22 +1155,10 @@ export async function decideCompanionProposal(args: {
         return succeedSyncProposal(tx, args.workspaceId, args.userId, proposal, keyHash, runId, null, safeSummary);
       }
 
-      // ── §18.1：plan_understanding_route（确定性选路，事务内） ──
-      if (kind === "plan_understanding_route") {
-        const request = proposalPayload.request;
-        if (!request || typeof request !== "object") {
-          throw new CompanionConversationError("ACTION_STALE", 409, "route plan payload is stale");
-        }
-        const plan = await createUnderstandingRoutePlan(
-          tx,
-          { workspaceId: args.workspaceId, userId: args.userId },
-          request as UnderstandingRoutePlanRequestV1,
-        );
-        if (plan.status !== "ok") {
-          throw new CompanionConversationError("ACTION_STALE", 409, "route plan is stale");
-        }
-        return succeedSyncProposal(tx, args.workspaceId, args.userId, proposal, keyHash, plan.routePlanId, null, "已规划复习路线");
-      }
+      // `plan_understanding_route` 分支已删除（2026-09-24，39d W2-1）：它的唯一 producer
+      // 是伴星工具 `companion_plan_route`，该工具 30 天真实流量 0 次调用且参数零字段校验，
+      // 已随契约里的 kind 一起整条删。**`createUnderstandingRoutePlan` 与
+      // `route-plan-service` 保留**——HTTP 路由 `POST /understanding/routes/plan` 仍是它的调用方。
 
       // ── §18.1：defer_review（只写展示层 user_deferred_until） ──
       if (kind === "defer_review") {

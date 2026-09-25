@@ -14,8 +14,10 @@
  * rubricItemId / 未知 verdict / 缺条 → parse 失败（fail closed）。
  */
 
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { postJsonToPublicEndpoint } from "@ailearn/shared/public-json-http";
+import { runAiTask, type AiTaskDefinition } from "@ailearn/shared/ai-task-kernel";
+import { postJsonToPublicEndpoint, type PublicJsonRequester } from "@ailearn/shared/public-json-http";
 import { hashCanonicalV2 } from "@ailearn/shared/hash-canonical-v2";
 import type { LearningTargetSnapshotV2 } from "@ailearn/shared";
 import { DomainError } from "@ailearn/shared";
@@ -175,8 +177,21 @@ export function buildCriticPrompt(input: CriticInput): string {
 
 // ─── 传输实现（OpenAI-compatible，SSRF 防护）────────────────────────────
 
+/** 这一次评估调用属于谁、属于哪一行——任务上下文与幂等键的来源（不是给 prompt 用的）。 */
+export interface CriticCallScope {
+  workspaceId: string;
+  userId: string;
+  assessmentId: string;
+  /** 本次作答的输入哈希（进检查点键；没有就传评估行的 payload 哈希）。 */
+  inputSnapshotHash: string;
+}
+
 export interface CriticTransport {
-  assess(input: CriticInput): Promise<RubricVerdictOutput[]>;
+  /**
+   * 第二个参数是**调用环境**，不是评估输入：实现方可以忽略它（结构化类型允许少写参数），
+   * 但生产实现要用它去填任务上下文（谁的 workspace、哪一条 assessment 行）。
+   */
+  assess(input: CriticInput, scope: CriticCallScope): Promise<RubricVerdictOutput[]>;
 }
 
 /**
@@ -186,9 +201,17 @@ export interface CriticTransport {
  * 且单 worker 的 while 循环被该调用串行阻塞数分钟，outbox 停滞。
  */
 const CRITIC_ATTEMPT_TIMEOUT_MS = 55_000;
-/** 瞬时故障（网络/429/5xx）只重试一次，且只在首次尝试很快失败时（见下）。 */
-const CRITIC_RETRY_BACKOFF_MS = 1_000;
-const CRITIC_RETRY_FAST_FAIL_MS = 10_000;
+/**
+ * 整任务预算。<120s（outbox 租约）这条约束以前靠"只在首次 10s 内快失败才重试"
+ * 间接维持；现在由这里直接写住：第二次尝试只能拿到 `taskDeadlineMs` 剩下的那点预算。
+ */
+const CRITIC_TASK_DEADLINE_MS = 110_000;
+/** Critic 提示词与输出合同的版本（评估回执里的 `criticVersion` 就是它，一处一个来源）。 */
+export const CRITIC_PROMPT_VERSION = "critic-snapshot-v2.1";
+
+function describeThrownAsMessage(err: unknown): string {
+  return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+}
 
 function isTransientCriticStatus(status: number): boolean {
   return status === 408 || status === 425 || status === 429 || status >= 500;
@@ -198,76 +221,153 @@ export function createOpenAICompatibleCritic(env: {
   url?: string;
   key?: string;
   model?: string;
-} = {}): CriticTransport {
+  /**
+   * 「当前作用域有没有活动事务」那一个读数（必填）。调用方是 `run-processing-tick`，
+   * 它已经在 API 的连接池作用域里，所以由它传 `currentApiWorkspaceTransaction`。
+   * 为什么不做成可选：可选就等于"忘记核对"是一种可以通过的形状；
+   * 而把 `db/client` 引到本文件来会让 `run-critic.test.ts`（**单元**测试）
+   * 在导入期就建连接池——那正是"用例全绿然后挂住"的一族。
+   */
+  currentActiveTransaction: () => unknown;
+  /**
+   * 发请求那一步。**默认就是带 SSRF 守卫的那一条**（`postJsonToPublicEndpoint`），
+   * 生产不需要传；留这个口子只为把"重试几次、哪些错误算瞬时、哪些算形状问题"
+   * 测出来——那三件事以前只存在于一段没有一条用例跑过的循环里。
+   */
+  requester?: PublicJsonRequester;
+}): CriticTransport {
   return {
-    async assess(input) {
-      // 设计 P0-2（2026-09-15 审计）：此前此处自行读 ASSESSMENT_CRITIC_*，
-      // 与 companion 侧两处实现语义不一致（空串回退与默认模型都不同）。
-      // 现统一走 lib/assessment-critic-config.ts 的单一解析点。
+    /**
+     * 评估这一步跑在公共任务运行基础上（39c §9 第二步 / 39d W3-5）。
+     *
+     * 换掉的是**执行循环**，不是业务边界：
+     *   - HTTP 仍走 `postJsonToPublicEndpoint`（SSRF 守卫是要保留的"有用规则"）；
+     *   - 配置仍走 `resolveAssessmentCriticConfig` 那一处单一解析点；
+     *   - strict 解析与两类 fail-closed 错误（`CriticUnavailableError` /
+     *     `CriticOutputError`）一字不改地往外抛——tick 的 catch 依赖它们，
+     *     把 provider 故障说成"答不出"是最坏的一种误报；
+     *   - **评估行的写入不搬进这里**：`learning_assessments` 是 API 侧的写，
+     *     结算仍在 tick 的第二段短事务里（W3-3 状态格 ④ 把这条边界画出来了）。
+     *
+     * 原来那段自带 2 次尝试的循环里，「只在首次快速失败（< 10s）时才重试」这条特例
+     * **不再单独存在**：它要防的是"两次 55s 越过 120s 租约"，而内核的
+     * `taskDeadlineMs`（110s）+ 第二次尝试只能拿剩余预算，给出的是同一件保证的
+     * 更强版本——总时长由形状兜住，不靠一个数字巧合。
+     */
+    async assess(input, scope) {
       const config = resolveAssessmentCriticConfig(env);
       if (!config) {
         throw new CriticUnavailableError("assessment critic provider not configured");
       }
       const { url, key, model } = config;
-      // 最多两次尝试：瞬时故障（网络抖动/429/5xx）不再一次就打成 not_assessable
-      // （那是把 provider 抖动当成"答不出"，用户只能手动补充）。总时长受
-      // 租约约束：只在首次快速失败（< CRITIC_RETRY_FAST_FAIL_MS）时重试，
-      // 慢调用/超时不重试（否则 2×55s 会越过 120s 租约）。
-      let lastUnavailable: CriticUnavailableError | null = null;
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        const attemptStartedAt = Date.now();
-        let response: { status: number; body: unknown };
-        try {
-          response = await postJsonToPublicEndpoint(
-            url,
-            {
-              Authorization: `Bearer ${key}`,
-              "Content-Type": "application/json",
-            },
-            {
-              model,
-              messages: [
-                { role: "system", content: "你是独立评估者，只输出被要求的 JSON。" },
-                { role: "user", content: input.v2 ? buildCriticPromptV2(input.v2) : buildCriticPrompt(input) },
-              ],
-              response_format: { type: "json_object" },
-              stream: false,
-            },
-            AbortSignal.timeout(CRITIC_ATTEMPT_TIMEOUT_MS),
-          );
-        } catch (err) {
-          // 网络/超时/DNS/代理失败：包装为 CriticUnavailableError（fail closed
-          // ——provider 故障绝不能当成"答错"，也绝不能无限重试卡死 Run）。
-          lastUnavailable = new CriticUnavailableError(
-            `critic provider request failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
-          const elapsed = Date.now() - attemptStartedAt;
-          if (attempt === 0 && elapsed < CRITIC_RETRY_FAST_FAIL_MS) {
-            await new Promise((resolve) => setTimeout(resolve, CRITIC_RETRY_BACKOFF_MS));
-            continue;
+
+      type Verdicts = RubricVerdictOutput[];
+      const task: AiTaskDefinition<CriticInput, Verdicts> = {
+        id: "assessment_critic",
+        version: 1,
+        mode: "structured",
+        // 作答反馈走 interactive_ai 名额，不与批量制卡抢（D5 §3 第 2 条）。
+        resourceClass: "interactive_ai",
+        budget: {
+          maxModelCalls: 2,
+          stepTimeoutMs: CRITIC_ATTEMPT_TIMEOUT_MS,
+          taskDeadlineMs: CRITIC_TASK_DEADLINE_MS,
+          maxAutoRetries: 1,
+        },
+        completion: { kind: "structured_parsed" },
+        usageContext: { modelId: model, promptVersion: CRITIC_PROMPT_VERSION, resourceClass: "interactive_ai" },
+        prepare: async () => input,
+        execute: async (taskInput, step) => {
+          let response: { status: number; body: unknown };
+          try {
+            response = await (env.requester ?? postJsonToPublicEndpoint)(
+              url,
+              {
+                Authorization: `Bearer ${key}`,
+                "Content-Type": "application/json",
+              },
+              {
+                model,
+                messages: [
+                  { role: "system", content: "你是独立评估者，只输出被要求的 JSON。" },
+                  { role: "user", content: taskInput.v2 ? buildCriticPromptV2(taskInput.v2) : buildCriticPrompt(taskInput) },
+                ],
+                response_format: { type: "json_object" },
+                stream: false,
+              },
+              // 单步时长**只由内核的 `step.signal` 管**（它已经是 `min(stepTimeoutMs, 剩余预算)`）。
+              // 这里再套一层 `AbortSignal.timeout(stepTimeoutMs)` 等于给同一个数字第二个来源，
+              // 而且那个更宽松——整任务预算快用完时它会允许这一步超支。
+              step.signal,
+            );
+          } catch (err) {
+            // 网络/超时/DNS/代理失败：可重试那一类，但最终仍 fail closed（内核额度用尽后
+            // 回执是 failed，这里翻成 CriticUnavailableError 交给 tick 写 not_assessable）。
+            return { ok: false, class: "transport", message: describeThrownAsMessage(err) };
           }
-          throw lastUnavailable;
-        }
-        if (response.status < 200 || response.status >= 300) {
-          lastUnavailable = new CriticUnavailableError(`critic provider returned ${response.status}`);
-          // 输出解析类错误只属于 2xx，瞬时状态码才重试。
-          if (attempt === 0 && isTransientCriticStatus(response.status)) {
-            await new Promise((resolve) => setTimeout(resolve, CRITIC_RETRY_BACKOFF_MS));
-            continue;
+          if (response.status < 200 || response.status >= 300) {
+            // 瞬时状态码（408/425/429/5xx）走可重试那一类；其余 4xx 是请求本身不对，
+            // 重试只是白等——原来那句"只对瞬时码重试"的判据搬到这里，语义不变。
+            return isTransientCriticStatus(response.status)
+              ? { ok: false, class: "transport", message: `critic provider returned ${response.status}` }
+              : { ok: false, class: "invalid_input", message: `critic provider returned ${response.status}` };
           }
-          throw lastUnavailable;
-        }
-        const body = response.body as {
-          choices?: Array<{ message?: { content?: string } }>;
-        };
-        const content = body.choices?.[0]?.message?.content;
-        if (typeof content !== "string" || content.length === 0) {
-          throw new CriticOutputError("critic returned empty content");
-        }
-        return parseCriticOutput(content, input.rubricTargetIds);
+          const content = (response.body as { choices?: Array<{ message?: { content?: string } }> })
+            .choices?.[0]?.message?.content;
+          if (typeof content !== "string" || content.length === 0) {
+            return { ok: false, class: "output_shape", message: "critic returned empty content" };
+          }
+          try {
+            return { ok: true as const, output: parseCriticOutput(content, taskInput.rubricTargetIds) };
+          } catch (err) {
+            // 每个 frozen rubric 目标恰好一条、未知枚举、缺条——都是输出形状问题。
+            return { ok: false, class: "output_shape", message: describeThrownAsMessage(err) };
+          }
+        },
+        // 恒等提交：评估行的写入与 run 的身份核对在 tick 的第二段短事务里（见上面的注释）。
+        // 这一步没有可提交的业务写入，所以 `commit` 只把结果原样交回。
+        commit: async (_ctx, _attempt, output) => ({
+          outcome: "committed" as const,
+          output,
+          usage: { modelCalls: 0, promptTokens: 0, completionTokens: 0, elapsedMs: 0, autoRetriesUsed: 0 },
+          failure: null,
+          preservedValidResult: false,
+          resumedFromCheckpoint: false,
+          modelCalls: 0,
+        }),
+      };
+
+      const receipt = await runAiTask(task, {
+        ctx: {
+          workspaceId: scope.workspaceId,
+          userId: scope.userId,
+          inputSnapshotRef: { kind: "artifact", id: scope.assessmentId, hash: scope.inputSnapshotHash },
+          // 评估的上下文与用户可控的权限档无关：这里永远是服务端自己发起的那一档。
+          permissionLevel: "server",
+        },
+        attempt: {
+          taskId: task.id,
+          taskVersion: task.version,
+          attemptId: randomUUID(),
+          // 这条任务没有 `jobs` 行（评估的业务写入在 API 侧的短事务里，租约是
+          // `ailearn_claim_run_processing` 那一层管的）。幂等键带着评估行 id，
+          // 所以台账里"同一次评估的两次尝试"仍然认得出是同一件事。
+          leaseToken: `run-processing:${scope.assessmentId}`,
+          idempotencyKey: `assessment:${scope.assessmentId}`,
+          workspaceId: scope.workspaceId,
+          userId: scope.userId,
+        },
+        currentActiveTransaction: env.currentActiveTransaction,
+        reportDevelopmentError: (message) => process.stderr.write(`[dev-error] ${message}\n`),
+      });
+
+      if (receipt.outcome !== "committed" && receipt.outcome !== "resumed_and_committed") {
+        const failure = receipt.failure;
+        // 形状问题不能伪装成"provider 不在"：那是两种不同的用户可见说法。
+        if (failure?.class === "output_shape") throw new CriticOutputError(failure.message);
+        throw new CriticUnavailableError(`${failure?.class ?? "unknown"}: ${failure?.message ?? "critic provider request failed"}`);
       }
-      // 循环只可能在重试分支退出，这里不可达；保留 fail closed 语义。
-      throw lastUnavailable ?? new CriticUnavailableError("critic provider request failed");
+      return receipt.output as Verdicts;
     },
   };
 }

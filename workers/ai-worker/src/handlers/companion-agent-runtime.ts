@@ -24,6 +24,7 @@ import {
   type AgentTurnRequest,
   type AgentTurnResult,
   type ChatMessage,
+  startRunOriginV2,
 } from "@ailearn/shared";
 import { canonicalJsonV1, sha256Utf8V1 } from "@ailearn/shared/content-hash";
 import { pageReadableV1Schema } from "@ailearn/shared/companion-bridge-contracts";
@@ -604,7 +605,7 @@ const SITE_IMAGE_URL_PREFIX = "/api/uploads/";
 
 function missingImageMessage(assetId: string | null): string {
   return assetId
-    ? "这张图在当前空间里找不到（assetId 只能来自 companion_read_note 返回的 imageAssetIds）"
+    ? "这张图我没找到，可能它已经不在了。"
     : "那篇笔记里没有这张图（可能已经删了，也可能当初只是把图片地址写进了正文）";
 }
 
@@ -960,7 +961,7 @@ async function executeReadTool(
           return rows[0] ?? null;
         },
       );
-      if (!card) throw new CompanionToolError("card not found in current workspace");
+      if (!card) throw new CompanionToolError("这个空间里没有这张学习卡");
       const route = { kind: "card", cardId: card.card_id, objectiveId: card.objective_id };
       const front = [card.cue, card.prompt].filter((part): part is string => Boolean(part?.trim())).join(" — ");
       const cardTitle = (card.cue ?? "").trim();
@@ -1096,7 +1097,7 @@ async function executeReadTool(
           };
         },
       );
-      if (!note) throw new CompanionToolError("note not found in current workspace");
+      if (!note) throw new CompanionToolError("这个空间里没有这篇笔记");
       const body = note.body.slice(0, NOTE_READ_MAX_CHARS);
       // 原文由服务端带出，不让模型转抄：她复述一遍就成了"引用"，而用户没法知道
       // 哪几个字是她改写的。这一块就是她读到的那几行，标题与时间跟着走。
@@ -1143,7 +1144,7 @@ async function executeReadTool(
       const noteId = typeof args.noteId === "string" && args.noteId ? args.noteId : null;
       if (!assetId && !noteId) {
         throw new CompanionToolError(
-          "看图要说是哪张：noteId（那张图所在的笔记）或 assetId（companion_read_note 返回的 imageAssetIds）",
+          "我还不知道要看哪一张图。跟我说说是哪篇笔记里的，或者第几张。",
         );
       }
       const { asset } = await findNoteImageAsset(event, { assetId, noteId, position: 1 });
@@ -1224,7 +1225,7 @@ async function executeReadTool(
       const position = typeof args.position === "number" ? Math.min(20, Math.max(1, Math.floor(args.position))) : 1;
       if (!assetId && !noteId) {
         throw new CompanionToolError(
-          "要显示哪张图：noteId（配合 position 第几张）或 assetId（companion_read_note 返回的 imageAssetIds）",
+          "我还不知道要给你摆哪一张图。说一下是哪篇笔记里的第几张就行。",
         );
       }
       // 这条**不读字节、不出境**，所以不受 sendImageContent 管：图片外发关着时，
@@ -1266,7 +1267,7 @@ async function executeReadTool(
         `),
       );
       const note = (Array.isArray(found) ? found : [])[0];
-      if (!note) throw new CompanionToolError("note not found in current workspace");
+      if (!note) throw new CompanionToolError("这个空间里没有这篇笔记");
       const route = { kind: "note", noteId };
       return {
         value: { route },
@@ -1328,6 +1329,9 @@ async function executeReadTool(
       return taskQueueToolResult(rows);
     }
     case "companion_list_due_reviews": {
+      // 这一份列表与 `companion_get_learning_stats` 的到期数、以及首页的"待复习"必须是
+      // **同一个集合**：以前这里比统计多一层"卡的来源笔记要对本人可见"，于是会出现
+      // "她说 2 项、点进队列有 3 条"（清单比数还短，说不过去）。判据统一到队列那一条。
       const limit = typeof args.limit === "number" ? Math.min(20, Math.max(1, args.limit)) : 8;
       const rows = await withWorkerWorkspaceTransaction(
         { workspaceId: event.ctx.workspaceId, userId: event.read.userId },
@@ -1347,8 +1351,7 @@ async function executeReadTool(
             AND s.status = 'pending'
             AND s.next_review_at <= now()
             AND (s.user_deferred_until IS NULL OR s.user_deferred_until <= now())
-            AND ${visibleCompanionDueReviewCondition(event.read.userId)}
-            AND ${visibleCompanionCardSourceCondition(event.read.userId)}
+            AND ${visibleCompanionDueReviewCondition()}
           ORDER BY s.next_review_at
           LIMIT ${limit}
         `),
@@ -1369,36 +1372,6 @@ async function executeReadTool(
         safeSummary: due.length > 0
           ? `${due.length} 项复习已到期（其中 ${due.filter((item) => item.hasCard).length} 项有卡片）`
           : "目前没有到期的复习",
-      };
-    }
-    case "companion_focus_graph": {
-      // V2：keyPointId 是 objectiveId 的别名。与 companion_open_card 同等的归属校验——
-      // 只做 UUID 格式校验会让模型用任意 UUID 构造前端导航 route。
-      const keyPointId = String(args.keyPointId);
-      const exists = await withWorkerWorkspaceTransaction(
-        { workspaceId: event.ctx.workspaceId, userId: event.read.userId },
-        async (tx) => {
-          const rows = await tx.execute(sql`
-            SELECT objective_id FROM learning_objectives_v2
-            WHERE objective_id = ${keyPointId}
-              AND workspace_id = ${event.ctx.workspaceId}
-              AND lifecycle = 'active'
-            LIMIT 1
-          `);
-          return rows.length > 0;
-        },
-      );
-      if (!exists) throw new CompanionToolError("key point not found in current workspace");
-      const route = {
-        kind: "star_map",
-        keyPointId,
-        lens: String(args.lens),
-      };
-      return {
-        value: { route },
-        route,
-        routeLabel: "在星图里看这个知识点",
-        safeSummary: "已聚焦知识图谱节点",
       };
     }
     case "companion_list_reminders": {
@@ -1452,7 +1425,7 @@ async function executeReadTool(
       };
     }
     default:
-      throw new CompanionToolError("tool is not a read tool");
+      throw new CompanionToolError("这一步不是读取操作，不该走读取那条路");
   }
 }
 
@@ -1500,7 +1473,7 @@ async function executeDirectTool(
           return rows.length > 0 ? ("changed" as const) : ("missing" as const);
         },
       );
-      if (outcome === "missing") throw new CompanionToolError("pet profile not found in current workspace");
+      if (outcome === "missing") throw new CompanionToolError("没找到你这台的伴星档案，这次没有改动");
       if (outcome === "unchanged") {
         return {
           value: { activeness, changed: false },
@@ -1558,9 +1531,11 @@ async function executeDirectTool(
         },
       );
       if (!forgotten) {
-        // message 会进模型上下文：告诉她下一步该做什么，否则她会再编一个 uuid 试一次。
+        // 这句会**同时**上屏（safeSummary）并回进模型上下文，所以两个读者都要顾到：
+        // 屏上这句只说"没找到"；"该先 recall 再删、不许凭印象猜 id"那条指引写在工具自己的
+        // 描述里（`companion-agent-registry.ts:144`），每一次请求都带着，比写在错误里更稳。
         throw new CompanionToolError(
-          "memory not found in current workspace；先用 companion_recall_memory 拿真实的 memoryId",
+          "那一条记忆我没找到，可能它已经不在了。想删哪条的话，先提醒我是哪回的事。",
         );
       }
       return {
@@ -1612,7 +1587,7 @@ async function executeDirectTool(
           return { boundaries: after.boundaries ?? {}, changed, unchangedKeys } as const;
         },
       );
-      if (!outcome) throw new CompanionToolError("pet profile not found in current workspace");
+      if (!outcome) throw new CompanionToolError("没找到你这台的伴星档案，这次没有改动");
       const parts: string[] = [];
       if (Object.keys(outcome.changed).length > 0) parts.push(`已调整边界：${describe(outcome.changed).join("、")}`);
       // 用户没点名要改的项、或改了等于没改的项，都如实说"本来就是这样"，
@@ -1651,7 +1626,7 @@ async function executeDirectTool(
           return (Array.isArray(rows) ? rows : [])[0] ?? null;
         },
       );
-      if (!created) throw new CompanionToolError("reminder insert returned no row");
+      if (!created) throw new CompanionToolError("提醒没能记下，这次没有改动任何东西");
       if (created.in_minutes < 0) {
         // 已经过去的时刻：把刚插的那行作废掉再报错，否则会留下一条永不兑现的
         // pending（兑现函数只认 fire_at <= now()，它会被立刻当作 missed 烧掉，
@@ -1707,8 +1682,47 @@ async function executeDirectTool(
         safeSummary: `已取消提醒「${cancelled.text.slice(0, 40)}」`,
       };
     }
+    case "companion_focus_graph": {
+      // 参数名就是它真正打的那一列（`learning_objectives_v2.objective_id`），不再叫
+      // `keyPointId`（2026-09-24，39d W2-1）：库里 `key_point_id` 是**另一个 id-space**
+      // （`validation_assistance_exposures.key_point_id → card_key_points.id`），用别名
+      // 跨两张表读起来像是在查 key point，实际查的是 objective。
+      // 与 companion_open_card 同等的归属校验——只做 UUID 格式校验会让模型用任意 UUID
+      // 构造前端导航 route。
+      const objectiveId = String(args.objectiveId);
+      const exists = await withWorkerWorkspaceTransaction(
+        { workspaceId: event.ctx.workspaceId, userId: event.read.userId },
+        async (tx) => {
+          const rows = await tx.execute(sql`
+            SELECT objective_id FROM learning_objectives_v2
+            WHERE objective_id = ${objectiveId}
+              AND workspace_id = ${event.ctx.workspaceId}
+              AND lifecycle = 'active'
+            LIMIT 1
+          `);
+          return rows.length > 0;
+        },
+      );
+      if (!exists) throw new CompanionToolError("这个空间里没有这个学习目标");
+      const route = {
+        kind: "star_map",
+        // 这里是唯一一处跨边界改名：`DesktopRouteV1.star_map` 的字段名仍是
+        // `keyPointId`（客户端路由契约，不在 W2-1 的授权范围内），值取自 objectiveId。
+        keyPointId: objectiveId,
+        lens: String(args.lens),
+      };
+      return {
+        value: { route },
+        route,
+        routeLabel: "在星图里看这个知识点",
+        safeSummary: "已聚焦知识图谱节点",
+      };
+    }
     default:
-      throw new CompanionToolError("tool has no direct executor");
+      // 这句会当 `safeSummary` 上屏（渲染层原样取用），所以写给用户而不是工程师：
+      // 走到这里=full 档预授权想直接执行，但这条动作的执行体在 API 侧的提案确认那条路上
+      // （见 companion-tool-executor-ledger.test.ts 那张表），此处什么都不该改。
+      throw new CompanionToolError("这一步我这边还做不了，先停住，没有改动任何东西");
   }
 }
 
@@ -1717,42 +1731,71 @@ async function buildActionPayload(
   toolName: string,
   args: Record<string, unknown>,
 ): Promise<Record<string, unknown> | null> {
+  // `noteId` 可选（39d W2-1）：给了就按那篇笔记收窄，修掉"服务端只能挑最近一条、
+  // 挑错用户看不出为什么"。**不做必填**的理由见 registry 里那段注释（数据不支持）。
+  const noteId = typeof args.noteId === "string" && args.noteId.length > 0
+    ? args.noteId
+    : null;
+
   if (toolName === "companion_resume_learning") {
+    const scoped = noteId !== null;
     const rows = await withWorkerWorkspaceTransaction(
       { workspaceId: event.ctx.workspaceId, userId: event.read.userId },
       (tx) => tx.execute(sql`
-        SELECT id FROM learning_runs
-        WHERE workspace_id = ${event.ctx.workspaceId}
-          AND user_id = ${event.read.userId}
-          AND phase IN ('preparing', 'active', 'assessing', 'checkpoint', 'committing', 'paused')
-        ORDER BY updated_at DESC, id LIMIT 1
+        SELECT r.id FROM learning_runs r
+        WHERE r.workspace_id = ${event.ctx.workspaceId}
+          AND r.user_id = ${event.read.userId}
+          AND r.phase IN ('preparing', 'active', 'assessing', 'checkpoint', 'committing', 'paused')
+          ${scoped
+            // 轮次归属哪篇笔记：经冻结快照的目标 → 目标的 note origin。
+            // 走 EXISTS 而不是 JOIN：一条 run 可能有多个快照版本，JOIN 会出重复行。
+            ? sql`AND EXISTS (
+                 SELECT 1 FROM learning_target_snapshots_v2 s
+                 JOIN learning_objective_origins_v2 o
+                   ON o.objective_id = s.objective_id AND o.workspace_id = r.workspace_id
+                 WHERE s.run_id = r.id AND o.note_id = ${noteId}::uuid
+               )`
+            : sql``}
+        ORDER BY r.updated_at DESC, r.id LIMIT 1
       `),
     );
     const row = rows[0] as { id?: string } | undefined;
     return row?.id ? { kind: "resume_learning_run", runId: row.id } : null;
   }
   if (toolName === "companion_start_learning") {
+    const scoped = noteId !== null;
     const rows = await withWorkerWorkspaceTransaction(
       { workspaceId: event.ctx.workspaceId, userId: event.read.userId },
       (tx) => tx.execute(sql`
         SELECT o.objective_id, c.card_id
         FROM learning_objectives_v2 o
-        JOIN learning_cards_v2 c ON c.objective_id = o.objective_id
+        -- LEFT JOIN：没有卡的目标也是可开的（39d W4-2 已放开页面那一侧的主行动）。
+        -- 原来这里是 INNER JOIN 且「row.card_id 为空就 return null」⇒ 她说「开始学习」
+        -- 对一个无卡目标报"当前不可用"，而同一篇笔记上那颗「开始学习」点得动。
+        LEFT JOIN learning_cards_v2 c ON c.objective_id = o.objective_id
           AND c.workspace_id = o.workspace_id AND c.lifecycle = 'active'
         WHERE o.workspace_id = ${event.ctx.workspaceId}
           -- learning_objectives_v2 没有 user_id 列（迁移 0135/0175）：此前这一条
           -- 谓词让整条 SQL 在计划期就报 "column o.user_id does not exist"，
           -- companion_start_learning 永远不可用。归属边界是 workspace + RLS。
           AND o.lifecycle = 'active'
+          ${scoped
+            ? sql`AND EXISTS (
+                 SELECT 1 FROM learning_objective_origins_v2 g
+                 WHERE g.objective_id = o.objective_id
+                   AND g.workspace_id = o.workspace_id
+                   AND g.note_id = ${noteId}::uuid
+               )`
+            : sql``}
         ORDER BY o.updated_at DESC, o.objective_id LIMIT 1
       `),
     );
-    const row = rows[0] as { objective_id?: string; card_id?: string } | undefined;
-    if (!row?.objective_id || !row.card_id) return null;
+    const row = rows[0] as { objective_id?: string; card_id?: string | null } | undefined;
+    if (!row?.objective_id) return null;
     return {
       kind: "start_learning_run_v2",
       request: {
-        originV2: { kind: "card", cardId: row.card_id, objectiveId: row.objective_id },
+        originV2: startRunOriginV2({ objectiveId: row.objective_id, cardId: row.card_id }),
         goal: "stabilize",
         idempotencyKey: `companion-agent:${event.read.runId}`,
         requestedTimeBudgetSeconds: 180,
@@ -1762,10 +1805,11 @@ async function buildActionPayload(
   const map: Record<string, Record<string, unknown>> = {
     companion_pause_learning: { kind: "pause_learning_run", runId: args.runId },
     companion_request_hint: { kind: "request_hint_level", runId: args.runId, taskId: args.taskId, level: args.level },
-    companion_switch_task_variant: { kind: "switch_task_variant", runId: args.runId, taskId: args.taskId, alternativeId: args.alternativeId },
+    companion_switch_task_variant: { kind: "switch_task_variant", runId: args.runId, taskId: args.taskId, alternativeId: args.alternativeId, reason: args.reason },
     companion_defer_review: { kind: "defer_review", scheduleId: args.scheduleId, scheduleGeneration: args.scheduleGeneration, deferredUntil: args.deferredUntil, reasonCode: args.reasonCode },
-    companion_plan_route: { kind: "plan_understanding_route", request: args.request },
-    companion_focus_graph: { kind: "focus_graph_node", keyPointId: args.keyPointId, lens: args.lens },
+    // 工具参数叫 `objectiveId`，网关载荷的字段名仍是 `keyPointId`（内部提案合同的既有
+    // 名字，本轮不改）——改名发生在这一行，读的人一眼能看出是同一个值换了个边界名。
+    companion_focus_graph: { kind: "focus_graph_node", keyPointId: args.objectiveId, lens: args.lens },
     // auto-set / auto-fill：guided 档提案确认后由 API decision 分支执行
     // （learning-action-bridge decideCompanionProposal 的 save_memory /
     // set_pet_activeness 分支）；full 档不经提案、由 executeDirectTool 直执行。
@@ -1782,7 +1826,7 @@ async function createAgentProposal(
   payload: Record<string, unknown>,
 ): Promise<{ proposalId: string; safeSummary: string }> {
   const parsedPayload = proposedLearningActionPayloadV1Schema.safeParse(payload);
-  if (!parsedPayload.success) throw new CompanionToolError("agent action payload failed domain validation");
+  if (!parsedPayload.success) throw new CompanionToolError("这次要记的内容没通过校验，先没有写入");
   const proposalId = randomUUID();
   const payloadSha256 = sha256Utf8V1(canonicalJsonV1(parsedPayload.data));
   const title = `执行${definition.description.slice(0, 30)}`;
@@ -1796,7 +1840,7 @@ async function createAgentProposal(
         WHERE conversation_id = ${event.read.conversationId} AND status = 'pending'
         LIMIT 1
       `);
-      if (pending[0]) throw new CompanionToolError("another companion action is awaiting confirmation");
+      if (pending[0]) throw new CompanionToolError("还有一件等你确认的事没处理完，先处理那件");
       const counters = await tx.execute<{ next_event_seq: string }>(sql`
         UPDATE companion_conversations
         SET next_event_seq = next_event_seq + 1
@@ -1818,7 +1862,7 @@ async function createAgentProposal(
           AND status IN ('accepted', 'running')
         RETURNING id
       `);
-      if (!fenced[0]) throw new CompanionToolError("companion agent run is no longer active");
+      if (!fenced[0]) throw new CompanionToolError("这一轮已经不在进行中了");
       await tx.execute(sql`
         INSERT INTO companion_action_proposals
           (id, workspace_id, user_id, conversation_id, source_message_id, source_generation,
@@ -1904,6 +1948,38 @@ export function boundedToolCallIdentity(
  * `consequential` 永远不点名，这是安全性质不是风格：一句纠正性提示里出现
  * `companion_start_learning`，等于系统自己把用户没要过的学习运行推上桌。
  */
+/**
+ * 工具意图分类器的三值答复 → 这一步到底要不要强制用工具（39b §9.5 的 P3-alt）。
+ *
+ * `companionNeedsTool` 的 `null` 不是"不需要"，是**读不到**（8 秒超时、provider 异常、
+ * 答复不是那个 JSON 形状）。原来判的是 `=== true`，把这两种混成了一支（fail-open），
+ * 而 fail-open 的产物正是最难看的那条缺陷：「我帮你找一下」说出口了、什么都没查。
+ * 现在 null 按 true 走——宁可安静几秒，不要把一句没兑现的话落到屏上。
+ */
+export function companionStepRequiresTool(decision: boolean | null): boolean {
+  return decision !== false;
+}
+
+/**
+ * 这一步的工具面与 `tool_choice`，**由同一个数组派生**。
+ *
+ * `tools: []` 配 `tool_choice: "required"` 是 provider 直接 400 的那一对（2026-09-22
+ * 实测 3 次 INTERNAL_ERROR 里 2 次是它）。写成两个各带条件的表达式迟早分叉，
+ * 而 P3-alt 之后"要工具"的轮次变多，分叉的代价会从偶发变成每轮。
+ */
+export function companionStepToolShape(args: {
+  tools: AgentTurnRequest["tools"];
+  finalAnswerOnly: boolean;
+  requiresTool: boolean;
+  toolCallCount: number;
+}): { tools: AgentTurnRequest["tools"]; toolChoice: NonNullable<AgentTurnRequest["toolChoice"]> } {
+  const tools = args.finalAnswerOnly ? [] : args.tools;
+  return {
+    tools,
+    toolChoice: tools.length > 0 && args.requiresTool && args.toolCallCount === 0 ? "required" : "auto",
+  };
+}
+
 export function steerableToolNames(
   definitions: readonly { name: string; riskClass: string }[],
   kind: "lookup" | "action",
@@ -2000,11 +2076,12 @@ async function executeTool(
   );
   if (!authorization.allowed) {
     await updateToolCall(event, call.id, { status: "blocked", safeSummary: authorization.reason ?? "操作被权限阻止" });
-    throw new CompanionToolBlockedError(authorization.reason ?? "tool blocked by permission");
+    // `reason` 缺失时的兜底也会当 safeSummary 上屏（渲染层原样取用），所以这句同样是写给用户的。
+    throw new CompanionToolBlockedError(authorization.reason ?? "这一步超出了你给伴星的权限，我先不做");
   }
   if (authorization.requiresConfirmation) {
     const payload = await buildActionPayload(event, definition.name, call.arguments);
-    if (!payload) throw new CompanionToolError("requested action is not currently available");
+    if (!payload) throw new CompanionToolError("这一步现在做不了（要做的那件东西已经不在了）");
     const proposal = await createAgentProposal(event, definition, call, payload);
     await appendAgentEvent(event, "agent.tool", {
       tool: {
@@ -2697,7 +2774,14 @@ export async function runCompanionAgentLoop(args: {
     .filter((message) => message.role !== "system")
     .map((message) => ({ role: message.role, content: message.content } as AgentMessage));
   // 工具需要与否由模型理解本轮语义；简称、代词和间接表达不能靠动词表穷举。
-  const userRequiresTool = await companionNeedsTool(args.provider, args.baseMessages, args.ctx.signal) === true;
+  /**
+   * 本轮是不是"得做事才能回答"。P3-alt（39b §9.5，**独立于 S1 探针结果、必做**）：
+   * 分类器返回 `null`（8 秒超时、异常、答复不是那个形状）时**按 true 处理**——
+   * 判据在 `companionStepRequiresTool` 里，那里写着为什么 null 不等于不需要。
+   */
+  const userRequiresTool = companionStepRequiresTool(
+    await companionNeedsTool(args.provider, args.baseMessages, args.ctx.signal),
+  );
   const userAskedForAction = userRequiresTool;
   // "她报的数字有没有出处"要比对的出处 = 本轮给她的**数据**：system 里的环境块/记忆块，
   // 以及用户自己说过的话。**不含她自己说过的话**——实机 2026-09-21 她先编了一次
@@ -2786,6 +2870,17 @@ export async function runCompanionAgentLoop(args: {
     // tool can never be proposed on the final step, so a confirmation always
     // leaves at least one step to report the result back.
     const finalAnswerOnly = stepCount >= stepBudget;
+    /**
+     * 这一步的工具面与 `tool_choice`，**成对**算出来（判据在 `companionStepToolShape`：
+     * `tools: []` 配 `required` 是 provider 直接 400 的那一对，2026-09-22 实测 3 次
+     * INTERNAL_ERROR 里 2 次是它）。
+     */
+    const { tools: toolsOfferedThisStep, toolChoice: toolChoiceThisStep } = companionStepToolShape({
+      tools: toolDefinitions,
+      finalAnswerOnly,
+      requiresTool: userRequiresTool,
+      toolCallCount,
+    });
     const stepRequest: AgentTurnRequest = {
       role: AgentRole.COMPANION_AGENT,
       systemPrompt: [
@@ -2826,10 +2921,8 @@ export async function runCompanionAgentLoop(args: {
           : []),
       ].filter(Boolean).join("\n\n"),
       messages,
-      tools: finalAnswerOnly ? [] : toolDefinitions,
-      toolChoice: !finalAnswerOnly && userRequiresTool && toolCallCount === 0
-        ? "required"
-        : "auto",
+      tools: toolsOfferedThisStep,
+      toolChoice: toolChoiceThisStep,
       // maxTokens / temperature 分步（2026-09-19 内容质量 B+C；同日深夜修正预算）：
       // qwen3.8-flash 是**思考型模型**（tokenrhythm enableThinking=true）——reasoning
       // 也计入 completion 预算。700 的工具步预算会被思考整段吃光：流式路径只有
@@ -3235,11 +3328,14 @@ export async function runCompanionAgentLoop(args: {
           stepCount,
           chars: said.trim().length,
           claims: unverifiedClaims.slice(0, 4),
+          // 五种起因分开报（39b §9.6）。`by` 是唯一的区分口径——正文那句曾经写死成
+          // "answered an action request"，于是 `unverified-numbers`（编了没出处的数）
+          // 和 `promise-shape`（承诺了没做事）也被读成"动作请求"，按日志归因会归错。
           by: unverifiedClaims.length > 0 ? "unverified-numbers"
             : lookupClaim ? (nothingDueClaim ? "claimed-nothing-due" : "claimed-lookup")
             : userAskedForAction ? "action-request" : "promise-shape",
         },
-        "companion agent answered an action request without calling any tool; steering one more step",
+        "companion agent step needs a steer; cause in `by`",
       );
       continue;
     }

@@ -113,6 +113,7 @@ import {
 import {
   artifactAlreadyLocked,
   contextStale,
+  contextStaleFromFreezeCode,
   idempotencyConflict,
   invalidPhase,
   LearningRunServiceError,
@@ -723,7 +724,7 @@ export async function createRunV2(
     // server error. Keep the boundary typed and fail closed without exposing
     // target-snapshot internals or leaving a visible skeleton run behind.
     if (error instanceof TargetSnapshotError) {
-      throw contextStale("学习卡已变化或当前不可用，请刷新复习队列");
+      throw contextStaleFromFreezeCode(error.code);
     }
     throw error;
   }
@@ -1873,6 +1874,9 @@ export async function applyAction(
         taskId: run.activeTaskId,
         previousVariantId: currentRows.find((v) => v.id !== targetVariantId)?.id ?? null,
         activeVariantId: targetVariantId,
+        // §13.1：换题这一次修订要带上"为什么换"。取的是工具参数那一格，
+        // 不是她自己事后补的说法——理由与动作走同一条提案，才对得上同一行记录。
+        reason: input.action.reason,
       }, at, run.eventCursor);
       const snapshot = await getRunPublicView(tx, { workspaceId: input.workspaceId, userId: input.userId, runId: run.id });
       const snap = {

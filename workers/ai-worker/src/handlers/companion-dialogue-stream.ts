@@ -22,6 +22,7 @@ import {
   looksLikeJsonFragment,
   sanitizeCompanionVisibleText,
 } from "./companion-dialogue-content.ts";
+import { resolveFactSpans, withholdPartialFactSpanTail, type FactSpanValues } from "./companion-fact-spans.ts";
 import type { ReadContext } from "./companion-dialogue-store.ts";
 
 /** 行内标记：出现在哪里都可能被后续文本配对改写。 */
@@ -40,6 +41,21 @@ function lineIsStable(line: string): boolean {
 }
 
 /**
+ * 完整占位符（`{{f:today_minutes}}`）在判稳定之前先**遮成等长中性字符**。
+ *
+ * 为什么必须遮：`today_minutes` 里的下划线是 markdown 强调符，按行内不稳定字符处理，
+ * 于是"整行含占位符 ⇒ 整行压住等下一个换行"——而伴星回复 p50 只有 40 字、常常一整条
+ * 没有换行，等于**带占位符的回复彻底退回"憋一大口再吐出来"**（那正是流式管线要修的）。
+ * 遮成等长（`x`）是关键：切点是原文的下标，长度一变就对不上了。
+ * 没写完的 `{{f:today_min` **不遮**——它本来就该被压住，等它长完。
+ */
+const COMPLETE_FACT_SPAN = /\{\{\s*f:\s*[a-z_]{2,40}\s*\}\}/g;
+
+function maskCompleteFactSpans(line: string): string {
+  return line.replace(COMPLETE_FACT_SPAN, (match) => "x".repeat(match.length));
+}
+
+/**
  * 稳定可见前缀的切点（在 trimStart 后的原文上计算）。
  *
  * 规则：**行边界之后、标记干净的内容可以立刻下发**。
@@ -52,7 +68,9 @@ function lineIsStable(line: string): boolean {
  */
 export function stableVisibleCut(raw: string): number {
   const lineStart = raw.lastIndexOf("\n") + 1;
-  if (lineIsStable(raw.slice(lineStart))) return raw.length;
+  if (lineIsStable(raw.slice(lineStart)) || lineIsStable(maskCompleteFactSpans(raw.slice(lineStart)))) {
+    return raw.length;
+  }
   return lineStart;
 }
 
@@ -75,11 +93,19 @@ export class CompanionStreamStoppedError extends Error {
   }
 }
 
-/** 当前可安全下发的可见前缀（trimStart 后按稳定切点净化）。 */
-export function companionVisibleText(raw: string): string {
+/**
+ * 当前可安全下发的可见前缀（trimStart 后按稳定切点净化 + 读数占位符渲染）。
+ *
+ * 顺序是有讲究的：先净化（剥控制符/标签/孤立标点），再**扣住结尾没写完的占位符**
+ * （`…今天学了{{f:today_min`），最后渲染——不扣住的话用户会先看到半个标记，
+ * 下一拍再看到它变成数字。
+ */
+export function companionVisibleText(raw: string, factSpanValues?: FactSpanValues): string {
   const trimmed = raw.trimStart();
   const cut = stableVisibleCut(trimmed);
-  return sanitizeCompanionVisibleText(trimmed.slice(0, cut));
+  const sanitized = sanitizeCompanionVisibleText(trimmed.slice(0, cut));
+  if (!factSpanValues) return sanitized;
+  return resolveFactSpans(withholdPartialFactSpanTail(sanitized), factSpanValues).text;
 }
 
 export type CompanionVisibleProjection =
@@ -94,7 +120,7 @@ export type CompanionVisibleProjection =
  * - `envelope_guarded`：原文以 `{`/`[` 开头（JSON 信封），不发任何流式内容；
  * - `visible`：稳定前缀（可能为空串——尾巴还没稳定）。
  */
-export function projectCompanionVisible(raw: string): CompanionVisibleProjection {
+export function projectCompanionVisible(raw: string, factSpanValues?: FactSpanValues): CompanionVisibleProjection {
   const rejection = companionOutputRejectionReason(raw);
   if (rejection) return { kind: "rejected", reason: rejection };
   if (looksLikeEnvelopeHead(raw)) return { kind: "envelope_guarded" };
@@ -104,7 +130,7 @@ export function projectCompanionVisible(raw: string): CompanionVisibleProjection
   // 判 rejected（而不是 envelope_guarded），因为残片没有可靠的信封头可解析，
   // 整段下发给全文校验也解不出正文，只会白等一轮。
   if (looksLikeJsonFragment(raw)) return { kind: "rejected", reason: "json_envelope_leak" };
-  return { kind: "visible", text: companionVisibleText(raw) };
+  return { kind: "visible", text: companionVisibleText(raw, factSpanValues) };
 }
 
 export type CompanionStreamFinish =
@@ -144,6 +170,8 @@ interface CompanionDeliveryArgs {
   read: ReadContext;
   expiresAt: string;
   notifyCompanionEvent: (tx: { execute(q: unknown): Promise<unknown> }, seq: number) => Promise<void>;
+  /** 本轮可报读数的目录（39d W2-5）：下发前渲染 `{{f:key}}`；缺省 = 不渲染。 */
+  factSpanValues?: FactSpanValues;
   /** 落库节流：可见字符累积到这么多、或距上次落库超过这么久才写一次。 */
   flushChars?: number;
   flushIntervalMs?: number;
@@ -281,7 +309,7 @@ export function createCompanionStreamDelivery(args: CompanionDeliveryArgs): Comp
   /** 当前可下发的可见前缀；信封守卫命中后恒为空串（整段留给 finish 兜底）。 */
   function currentVisible(): string {
     if (envelopeGuarded) return "";
-    const projection = projectCompanionVisible(raw);
+    const projection = projectCompanionVisible(raw, args.factSpanValues);
     return projection.kind === "visible" ? projection.text : "";
   }
 
@@ -289,7 +317,7 @@ export function createCompanionStreamDelivery(args: CompanionDeliveryArgs): Comp
     async onRawDelta(rawDelta: string): Promise<boolean> {
       if (failure) return false;
       raw += rawDelta;
-      const projection = projectCompanionVisible(raw);
+      const projection = projectCompanionVisible(raw, args.factSpanValues);
       if (projection.kind === "rejected") {
         failure = projection.reason;
         return false;

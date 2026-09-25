@@ -123,16 +123,9 @@ describe("可读视图跟着屏幕一起进 bridge context", () => {
       .toBe("已写出 4 / 4 张候选");
   });
 
-  it("凭证页不带上任何可读内容", async () => {
-    useRoomStore.setState({
-      hudPage: "login",
-      pageReadableView: { token: "t-1", view: viewWith("已写出 3 / 4 张候选") },
-    });
-    render(<CompanionChatProvider><span /></CompanionChatProvider>);
-
-    await waitFor(() => expect(setContext).toHaveBeenCalled());
-    const page = publishedPages().at(-1)!;
-    expect(page.sensitivity).toBe("credential_surface");
-    expect(page.readableView).toBeUndefined();
-  });
+  // 这里原有一条「凭证页不带上任何可读内容」——它的主语（`hudPage: "login"`）已随
+  // `login`／`register` 两个死 HudPageId 一起删除（2026-09-24，39d W2-1）。
+  // 凭证面的保护没有消失：`credential_surface` 仍是契约里的取值，服务端的裁剪仍在
+  // （`companion-agent-runtime.ts:710`）；只是渲染层今天不再产生这一档，所以这条
+  // 渲染层用例已无主语可测。将来若出现应用内凭证面，它应当连同服务端裁剪一起补测。
 });

@@ -2,12 +2,15 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import type { DesktopSearchItem, DesktopSourceDetail } from "@ailearn/shared/desktop-surface-contracts";
 import type { LearningObjectiveSurfaceV3, ObjectivePersonalStateV3 } from "@ailearn/shared/learning-objective-surface-contracts";
 import type { NoteDetailV1, NoteBlockProjectionV1 } from "@ailearn/shared/note-projection-contracts";
+import type { PageReadableV1 } from "@ailearn/shared/companion-bridge-contracts";
 import { useRoomStore, type SearchTypeFilter } from "../../app/room-store";
 import { createRequestMeta, gatewayErrorMessage, unwrapGatewayResult } from "../../app/desktop-client";
 import { X } from "lucide-react";
 import { HudPage } from "../hud/HudPage";
 import { HudPicker } from "../hud/HudControls";
 import { useHudPage } from "../hud/use-hud-page";
+import { usePageReadableView } from "../hud/use-page-readable-view";
+import { HUD_PAGES } from "../hud/hud-pages";
 import { SurfaceDataState, formatRelative, readAuthenticatedSession, useSurfaceProjection } from "./surface-data";
 
 const PAGE_SIZE = 24;
@@ -59,6 +62,33 @@ function openLabel(objectType: DesktopSearchItem["objectType"]): string {
     case "source": return "打开这份来源";
     case "objective": return "打开学习卡";
   }
+}
+
+/**
+ * 这一屏那几句状态字各写一次：JSX 与登记给伴星的可读视图共用同一份。
+ * 抄成两处就是两个来源，而**视图字段写错不会红**（只有形状校验那道会喊），
+ * 最后只会变成"她说的与屏幕上不是一句"。
+ */
+const SEARCH_STATE_LINES = {
+  confirmingSession: "正在确认工作区",
+  searchingList: "正在搜索",
+  sessionUnavailable: "搜索范围暂时不可用",
+  listUnavailable: "搜索暂时不可用",
+  cannotCheckStates: "无法核对目标状态",
+} as const;
+const NO_QUERY_EMPTY = {
+  message: "输入关键词开始查找",
+  detail: "来源、笔记与学习卡共用同一组结果；选中后右侧直接预览。",
+} as const;
+const PREVIEW_EMPTY = {
+  message: "右侧预览等待一次选择",
+  detail: "在左侧选中一条结果，这里会读取它的真实内容与缺口。",
+} as const;
+/** 空结果有两条不同的说法（普通关键词没命中 vs 证据不足筛没了），两句都必须在屏上。 */
+function noResultEmpty(weakOnly: boolean, query: string): { readonly message: string; readonly detail: string } {
+  return weakOnly
+    ? { message: "没有证据不足的目标命中", detail: "可以关掉“证据不足”筛选，或换一个关键词。" }
+    : { message: `没有找到“${query.trim()}”`, detail: "可以换一个关键词，或把类型切回全部。" };
 }
 
 /**
@@ -410,6 +440,89 @@ export function SearchSurface() {
   // 关键词落在标题或图片说明里时，片段是唯一的命中锚点。
   const bodyHasMatch = previewBody.some((text) => containsQuery(text, query));
 
+  /**
+   * 这一屏登记给伴星读的可读视图（39d W2-7）。
+   *
+   * 页签上的计数、读取深度那一行、"证据不足"那颗标签、逐条结果的类型字，
+   * 全部**复用页面已经在渲染的派生值**（`progressLabel` / `depthLine` /
+   * `weakChipLabel` / `typeLabel`），一个都不在这里重算。
+   * `notice` 是一条按优先级选出的屏上原话：确认不了工作区 ＞ 没输入 ＞ 读结果中 ＞
+   * 核不了状态 ＞ 搜索失败 ＞ 没有命中 ＞ 还没选中任何一条 ＞ 读到哪儿了。
+   */
+  const emptyState = noResultEmpty(weakOnly, query);
+  const weakChipLabel
+    = `证据不足${objectiveData ? ` ${weakCount}${objectiveTruncated ? "+" : ""}` : ""}`;
+  const depthLine
+    = weakOnly
+      ? `命中 ${total} 条，其中证据不足 ${visible.length} 条；按更新时间从新到旧顺序读取。`
+      : `共 ${total} 条，约 ${estimatedPages} 页；按更新时间从新到旧顺序读取。`;
+  const tailLine
+    = nextCursor !== null ? null : searchTruncated
+      ? `已到读取上限（前 ${items.length} 条），请缩小关键词或筛选范围`
+      : "已到末尾";
+  const indexStateLine
+    = !sessionReady && !sessionFailure
+      ? SEARCH_STATE_LINES.confirmingSession
+      : sessionFailure
+        ? SEARCH_STATE_LINES.sessionUnavailable
+        : !hasQuery
+          ? NO_QUERY_EMPTY.message
+          : listBusy && items.length === 0
+            ? SEARCH_STATE_LINES.searchingList
+            : filterFailure
+              ? SEARCH_STATE_LINES.cannotCheckStates
+              : searchFailure && items.length === 0
+                ? SEARCH_STATE_LINES.listUnavailable
+                : visible.length === 0
+                  ? emptyState.message
+                  : null;
+  const searchNotice
+    = sessionFailure
+      ? `${SEARCH_STATE_LINES.sessionUnavailable}：${sessionFailure.slice(0, 60)}`
+      : !hasQuery
+        ? `${NO_QUERY_EMPTY.message}：${NO_QUERY_EMPTY.detail}`
+        : filterFailure
+          ? `${SEARCH_STATE_LINES.cannotCheckStates}：${filterFailure}「证据不足」筛选需要目标状态才能生效，所以这里不显示未过滤的结果。`
+          : searchFailure && items.length === 0
+            ? `${SEARCH_STATE_LINES.listUnavailable}：${searchFailure.slice(0, 60)}`
+            : visible.length === 0
+              ? `${emptyState.message}：${emptyState.detail}`
+              : !selected
+                ? `${PREVIEW_EMPTY.message}：${PREVIEW_EMPTY.detail}`
+                : tailLine;
+  const readableView = useMemo<PageReadableV1 | null>(() => {
+    // 连工作区都还没确认、也没报错：这一屏什么都还没开始，什么都不登记。
+    if (!sessionReady && !sessionFailure) return null;
+    return {
+      pageId: "search",
+      title: HUD_PAGES.search.title,
+      statusLine: indexStateLine ?? progressLabel,
+      metrics: [
+        { label: "结果", value: progressLabel.slice(0, 40) },
+        { label: "读取深度", value: depthLine.slice(0, 40) },
+      ],
+      filters: [
+        { label: "类型", value: typeFilterLabel(typeFilter).slice(0, 40) },
+        ...(hasQuery ? [{ label: "关键词", value: query.trim().slice(0, 40) }] : []),
+        ...(weakOnly ? [{ label: "证据不足筛选", value: weakChipLabel.slice(0, 40) }] : []),
+      ],
+      ...(visible.length > 0
+        ? {
+            items: visible.slice(0, 12).map((item, index) => ({
+              ordinal: index + 1,
+              label: (item.title ?? "未命名内容").slice(0, 120),
+              state: typeLabel(item.objectType).slice(0, 40),
+            })),
+          }
+        : {}),
+      ...(searchNotice ? { notice: searchNotice.slice(0, 200) } : {}),
+    };
+  }, [
+    depthLine, hasQuery, indexStateLine, progressLabel, query, searchNotice,
+    sessionFailure, sessionReady, typeFilter, visible, weakChipLabel, weakOnly,
+  ]);
+  usePageReadableView(readableView);
+
   return (
     <HudPage page="search">
       <section className="search-desk">
@@ -478,7 +591,7 @@ export function SearchSurface() {
                 : "只留下还没正式答过、有点生疏或上次答错的目标"}
             onClick={() => setWeakOnly(!weakOnly)}
           >
-            证据不足{objectiveData ? ` ${weakCount}${objectiveTruncated ? "+" : ""}` : ""}
+            {weakChipLabel}
           </button>
         </div>
 
@@ -491,33 +604,33 @@ export function SearchSurface() {
         <div className="search-layout">
           <div className="search-index" ref={indexRef}>
             {!sessionReady && !sessionFailure ? (
-              <SurfaceDataState kind="loading" message="正在确认工作区" detail="搜索的是这个空间已建好索引的内容。" />
+              <SurfaceDataState kind="loading" message={SEARCH_STATE_LINES.confirmingSession} detail="搜索的是这个空间已建好索引的内容。" />
             ) : null}
             {sessionFailure ? (
-              <SurfaceDataState kind="error" message="搜索范围暂时不可用" detail={sessionFailure} onRetry={retry} />
+              <SurfaceDataState kind="error" message={SEARCH_STATE_LINES.sessionUnavailable} detail={sessionFailure} onRetry={retry} />
             ) : null}
             {sessionReady && !hasQuery ? (
-              <SurfaceDataState kind="empty" message="输入关键词开始查找" detail="来源、笔记与学习卡共用同一组结果；选中后右侧直接预览。" />
+              <SurfaceDataState kind="empty" message={NO_QUERY_EMPTY.message} detail={NO_QUERY_EMPTY.detail} />
             ) : null}
             {sessionReady && hasQuery && listBusy && items.length === 0 ? (
-              <SurfaceDataState kind="loading" message="正在搜索" detail="结果只来自当前工作区的全局搜索接口。" />
+              <SurfaceDataState kind="loading" message={SEARCH_STATE_LINES.searchingList} detail="结果只来自当前工作区的全局搜索接口。" />
             ) : null}
             {sessionReady && hasQuery && !listBusy && filterFailure ? (
               <SurfaceDataState
                 kind="error"
-                message="无法核对目标状态"
+                message={SEARCH_STATE_LINES.cannotCheckStates}
                 detail={`${filterFailure}「证据不足」筛选需要目标状态才能生效，所以这里不显示未过滤的结果。`}
                 onRetry={() => void objectiveIndex.reload()}
               />
             ) : null}
             {sessionReady && hasQuery && !listBusy && !filterFailure && searchFailure && items.length === 0 ? (
-              <SurfaceDataState kind="error" message="搜索暂时不可用" detail={searchFailure} onRetry={retry} />
+              <SurfaceDataState kind="error" message={SEARCH_STATE_LINES.listUnavailable} detail={searchFailure} onRetry={retry} />
             ) : null}
             {sessionReady && hasQuery && !listBusy && !filterFailure && !searchFailure && visible.length === 0 ? (
               <SurfaceDataState
                 kind="empty"
-                message={weakOnly ? "没有证据不足的目标命中" : `没有找到“${query.trim()}”`}
-                detail={weakOnly ? "可以关掉“证据不足”筛选，或换一个关键词。" : "可以换一个关键词，或把类型切回全部。"}
+                message={emptyState.message}
+                detail={emptyState.detail}
               />
             ) : null}
             {sessionReady && hasQuery && visible.length > 0 ? (
@@ -588,23 +701,17 @@ export function SearchSurface() {
                       {searching ? "正在读取…" : "继续读取"}
                     </button>
                   ) : (
-                    <span>{searchTruncated ? `已到读取上限（前 ${items.length} 条），请缩小关键词或筛选范围` : "已到末尾"}</span>
+                    <span>{tailLine}</span>
                   )}
                 </div>
-                <p className="small index-depth">
-                  {weakOnly
-                    // The weak filter runs on the loaded rows, so the honest
-                    // numbers are "hits overall" plus "of those, how many are weak".
-                    ? `命中 ${total} 条，其中证据不足 ${visible.length} 条；按更新时间从新到旧顺序读取。`
-                    : `共 ${total} 条，约 ${estimatedPages} 页；按更新时间从新到旧顺序读取。`}
-                </p>
+                <p className="small index-depth">{depthLine}</p>
               </div>
             ) : null}
           </div>
 
           <article className="preview-page">
             {!selected ? (
-              <SurfaceDataState kind="empty" message="右侧预览等待一次选择" detail="在左侧选中一条结果，这里会读取它的真实内容与缺口。" />
+              <SurfaceDataState kind="empty" message={PREVIEW_EMPTY.message} detail={PREVIEW_EMPTY.detail} />
             ) : (
               <>
                 {gap ? (

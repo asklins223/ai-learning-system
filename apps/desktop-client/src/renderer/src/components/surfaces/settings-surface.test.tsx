@@ -1276,3 +1276,210 @@ it("转让失败时不许说成「已交出」", async () => {
   await waitFor(() => expect(api.workspace.transferOwnership).toHaveBeenCalledTimes(1));
   expect(screen.queryByText(/你不再是它的所有者/)).toBeNull();
 });
+
+/**
+ * 设置中心登记给伴星读的那一份（39d W2-7 的最后一页）。
+ *
+ * 每一格都同时读**屏幕**与 **store**：只断言 store 会放过"登记了一份屏上根本没有的东西"，
+ * 只断言屏幕会放过"屏上换了、那一格还留着上一轮"。
+ */
+describe("设置中心把这一屏登记给伴星读（39d W2-7）", () => {
+  function published() {
+    return useRoomStore.getState().pageReadableView?.view ?? null;
+  }
+
+  async function openSectionOf(label: string, options: Parameters<typeof installApi>[0] = {}) {
+    const installed = installApi(options);
+    render(<SettingsSurface />);
+    await screen.findByText("理解空间", { selector: ".space-identity h3" });
+    openSection(label);
+    await screen.findByRole("heading", { name: label, level: 2 });
+    return installed.api;
+  }
+
+  /**
+   * 屏上**真的露出**的每一行的行标题（`SettingRow` 的那一格 `<b>`）。
+   * 收在 `<details>` 里、还没展开的行不在其中——DOM 里有它们，屏幕上没有，
+   * 所以"登记漏了它们"不该红，"登记了它们"才该红。
+   */
+  function rowTitles(): string[] {
+    return [...document.querySelectorAll(".settings-row")]
+      .filter((row) => (row.closest("details") as HTMLDetailsElement | null)?.open !== false)
+      .map((row) => row.querySelector(".settings-row__body > b")?.textContent ?? "");
+  }
+
+  function rowByTitle(title: string): Element {
+    const row = [...document.querySelectorAll(".settings-row")]
+      .find((entry) => entry.querySelector(".settings-row__body > b")?.textContent === title);
+    expect(row, `屏上没有这一行：${title}`).toBeTruthy();
+    return row!;
+  }
+
+  /** 登记进来的行与屏上的行，只许差在**明写了不登记**的那几行上（漏登记与多登记都会红）。 */
+  function assertRowAccounting(labels: string[], omitted: readonly string[] = []) {
+    expect(rowTitles().slice().sort()).toEqual([...labels, ...omitted].sort());
+  }
+
+  function stateOf(label: string): string | undefined {
+    return published()!.items!.find((item) => item.label === label)?.state;
+  }
+
+  it("整页读不到时只发那一格状态与原因，分区那份读数一条都不带", async () => {
+    const { api } = installApi();
+    api.auth.getState.mockRejectedValue(new Error("会话读不到"));
+    render(<SettingsSurface />);
+    await screen.findByText("设置暂时不可用");
+
+    const view = published()!;
+    expect(view.pageId).toBe("settings");
+    expect(view.statusLine).toBe("设置暂时不可用");
+    expect(view.notice).toBeTruthy();
+    expect(view.items).toBeUndefined();
+    expect(view.metrics).toBeUndefined();
+  });
+
+  it("账户与空间：当前空间、身份、边界与名册四样都对得上屏幕", async () => {
+    await openSectionOf("账户与空间");
+    const view = published()!;
+
+    expect(view.filters).toEqual([
+      { label: "当前分区", value: "账户与空间" },
+      { label: "当前空间", value: document.querySelector(".space-identity h3")?.textContent },
+      { label: "你的身份", value: document.querySelector(".space-identity .meta span")?.textContent },
+    ]);
+    expect(view.metrics).toEqual([
+      { label: "数据边界", value: document.querySelector(".ledger-field .write-line")?.textContent?.trim() },
+    ]);
+
+    const rows = [...document.querySelectorAll(".settings-ledger__row")];
+    expect(rows.length).toBeGreaterThan(1);
+    expect(view.items).toEqual(rows.map((row, index) => ({
+      ordinal: index + 1,
+      label: row.querySelector("span b")?.textContent,
+      state: row.querySelector("span small")?.textContent,
+    })));
+  });
+
+  it("成员与邀请：邀请行与名册行的状态字各取自那一行自己", async () => {
+    await openSectionOf("成员与邀请", { collaborativeSpace: true });
+    const view = published()!;
+    await waitFor(() => expect(view.items!.some((item) => item.label === "peer@example.com")).toBe(true));
+
+    assertRowAccounting(view.items!.map((item) => item.label), ["角色", "有效期", "生成邀请"]);
+    const invite = view.items!.find((item) => item.label.startsWith("hint-1"))!;
+    expect(invite.state).toBe(rowByTitle(invite.label).querySelector(".settings-row__control .tag")?.textContent);
+    for (const email of ["reader@example.com", "peer@example.com"]) {
+      const item = view.items!.find((entry) => entry.label === email)!;
+      expect(item.state).toBeTruthy();
+      expect(rowByTitle(email).querySelector("small")?.textContent).toContain(item.state);
+    }
+
+    const roleValue = view.filters!.find((entry) => entry.label === "邀请角色")!.value;
+    expect(roleValue).toBe(document.querySelector('[aria-label="邀请角色"] [aria-checked="true"]')?.textContent);
+  });
+
+  it("主题与动效：每一行选中的那一档与那块被按下的主题板", async () => {
+    await openSectionOf("主题与动效");
+    const view = published()!;
+
+    expect(view.filters![1]).toEqual({
+      label: "环境主题",
+      value: document.querySelector('.settings-theme[aria-pressed="true"] .settings-theme__label')?.textContent?.trim(),
+    });
+    assertRowAccounting(view.items!.map((item) => item.label), ["重播首次进入引导"]);
+    for (const label of ["动效等级", "目录行为"]) {
+      expect(stateOf(label)).toBe(
+        document.querySelector(`[aria-label="${label}"] [aria-checked="true"]`)?.textContent,
+      );
+    }
+    expect(stateOf("系统减少动效")).toBe(rowByTitle("系统减少动效").querySelector(".tag")?.textContent);
+  });
+
+  it("语音与伴星：音色只登记当前引擎那一份，读不到的那行不演成读到了", async () => {
+    await openSectionOf("语音与伴星", { voice: undefined, voiceUnavailable: true });
+    const view = published()!;
+
+    expect(stateOf("用哪套声音合成"))
+      .toBe(rowByTitle("用哪套声音合成").querySelector(".tag")?.textContent);
+    expect(rowTitles().some((title) => title.includes("龙安")) || view.items!.length).toBeTruthy();
+    // 没有引擎偏好 ⇒ 屏上根本没有音色名单，一条音色都不许登记。
+    const voiceNames = QWEN_TTS_VOICE_OPTIONS.map((option) => option.name);
+    expect(view.items!.filter((item) => voiceNames.includes(item.label))).toEqual([]);
+    for (const label of ["实时对话", "对话能力", "本机语音识别", "语音对话"]) {
+      const state = stateOf(label);
+      expect(state === undefined || rowByTitle(label).querySelector(".tag")?.textContent === state).toBe(true);
+    }
+    expect(stateOf("模型状态")).toBe(rowByTitle("模型状态").querySelector(".tag")?.textContent);
+  });
+
+  it("音色名单登记的是当前引擎那一份，「在用」那一行对得上那枚 tag", async () => {
+    // 默认夹具就是 qwen 那一份名单（`explicit: false`，但引擎与音色读到了）。
+    await openSectionOf("语音与伴星");
+    const view = published()!;
+    const onScreen = rowTitles().filter((title) => QWEN_TTS_VOICE_OPTIONS.some((option) => option.name === title));
+
+    expect(onScreen.length).toBeGreaterThan(1);
+    expect(view.items!.map((item) => item.label).filter((label) => onScreen.includes(label))).toEqual(onScreen);
+    // 屏上被选中的那几档，登记里带状态的必须只有"在用"那一行。
+    const selected = view.items!.filter((item) => onScreen.includes(item.label) && item.state);
+    expect(selected).toHaveLength(1);
+    expect(rowByTitle(selected[0].label).querySelector(".tag.green")?.textContent).toBe(selected[0].state);
+    expect(rowTitles().some((title) => title.includes("晓晓"))).toBe(false);
+  });
+
+  it("AI 数据同意：报错纸换掉整张卡时，一行策略、一行授权都不登记", async () => {
+    // 第一手就读不到：这一格读失败时**整张卡**由那张报错纸顶替，一行策略都不该留下。
+    const { api } = installApi();
+    api.workspace.getAiSettings.mockRejectedValue(new Error("ai settings down"));
+    render(<SettingsSurface />);
+    await screen.findByText("理解空间", { selector: ".space-identity h3" });
+    openSection("AI 数据同意");
+    await screen.findByText("没能读到你的 AI 数据设置");
+
+    const view = published()!;
+    expect(view.statusLine).toBe("没能读到你的 AI 数据设置");
+    expect(view.notice).toContain("这一页不用默认值猜一个状态给你看，重试即可。");
+    expect(view.items).toBeUndefined();
+  });
+
+  it("AI 数据同意：同意、四个外发策略与四行授权都按屏上那一刻那格登记", async () => {
+    await openSectionOf("AI 数据同意");
+    const view = published()!;
+    assertRowAccounting(view.items!.map((item) => item.label));
+
+    expect(stateOf("AI 使用同意")).toBe(rowByTitle("AI 使用同意").querySelector(".tag")?.textContent);
+    for (const title of ["允许发送到外部模型服务", "允许发送图片内容", "外发前做个人信息检测", "记录 AI 审计日志"]) {
+      const checked = rowByTitle(title).querySelector('[role="switch"]')?.getAttribute("aria-checked");
+      expect(stateOf(title)).toBe(checked === "true" ? "已开启" : "未开启");
+    }
+    for (const title of ["伴星读取工作区内容", "向伴星发送消息", "确认伴星的提议", "代你改空间设置"]) {
+      expect(stateOf(title)).toBe(rowByTitle(title).querySelector(".tag")?.textContent);
+    }
+  });
+
+  it("数据与维护：三个计数、归属与本机通道都取自屏上那一格", async () => {
+    await openSectionOf("数据与维护");
+    const view = published()!;
+    expect(view.metrics).toEqual([...document.querySelectorAll(".settings-stat")].map((stat) => ({
+      label: stat.querySelector("span")?.textContent,
+      value: stat.querySelector("b")?.textContent,
+    })));
+    assertRowAccounting(view.items!.map((item) => item.label),
+      ["导出工作区（只读存档）", "导入 Markdown 笔记", "删除来源与笔记"]);
+    expect(stateOf("可见空间")).toBe(rowByTitle("可见空间").querySelector(".write-line")?.textContent);
+    expect(stateOf("当前工作区")).toBe(rowByTitle("当前工作区").querySelector(".write-line")?.textContent);
+  });
+
+  it("换一格目录：那一格跟着换成这一屏的读数，不留上一屏的行", async () => {
+    await openSectionOf("主题与动效");
+    const before = published()!;
+    expect(before.filters![0]).toEqual({ label: "当前分区", value: "主题与动效" });
+
+    openSection("语音与伴星");
+    await screen.findByRole("heading", { name: "语音与伴星", level: 2 });
+    const after = published()!;
+    expect(after.filters![0]).toEqual({ label: "当前分区", value: "语音与伴星" });
+    expect(after.items!.map((item) => item.label).filter((label) => before.items!.some((row) => row.label === label)))
+      .toEqual([]);
+  });
+});

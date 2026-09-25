@@ -11,6 +11,9 @@ import { useCompanionChat } from "../../app/companion-chat-session";
 import { useRoomStore } from "../../app/room-store";
 import { HudPage } from "../hud/HudPage";
 import { useHudPage } from "../hud/use-hud-page";
+import { usePageReadableView } from "../hud/use-page-readable-view";
+import { HUD_PAGES } from "../hud/hud-pages";
+import type { PageReadableV1 } from "@ailearn/shared/companion-bridge-contracts";
 import { CompanionSelect, type CompanionSelectOption } from "./companion-select";
 import { buildCompanionMemoryUniverse, routeForMemoryEntityTarget } from "./companion-memory-universe";
 import { UnderstandingUniverse, type UnderstandingUniverseHandle } from "./understanding-universe";
@@ -88,6 +91,12 @@ function indexKindPrefix(node: GraphNode) {
     : null;
 }
 
+/** 索引行那一格读起来是什么字：有类型前缀时前缀也在句子里，伴星读到的必须与屏幕同字。 */
+function indexCellText(node: GraphNode) {
+  const prefix = indexKindPrefix(node);
+  return prefix ? `${prefix} · ${node.label}` : node.label;
+}
+
 function groupIndexNodes(nodes: readonly GraphNode[]): ReadonlyArray<{ readonly id: IndexGroupId; readonly title: string; readonly nodes: readonly GraphNode[] }> {
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
@@ -104,6 +113,24 @@ function groupIndexNodes(nodes: readonly GraphNode[]): ReadonlyArray<{ readonly 
   });
 }
 
+
+/**
+ * 星图那一屏屏上就那几句标题与状态字，各写一次：JSX 与登记给伴星的可读视图引用同一份
+ * （39d W2-7。视图字段写错不会红，抄成两处迟早分叉）。
+ */
+const MAP_LINES = {
+  title: "记忆关联星图",
+  subtitle: "查看已确认记忆与学习内容的真实关联。",
+  loading: "正在读取记忆星图",
+  unavailable: "记忆星图当前不可用",
+  empty: { message: "当前筛选下没有节点", detail: "调整搜索或筛选条件即可继续探索。" },
+  indexTitle: "节点索引",
+} as const;
+
+/** 屏上那一格「N 个节点 · M 条关系」：她读的与屏幕上必须是同一句。 */
+function graphCountsLine(nodeCount: number, edgeCount: number): string {
+  return `${nodeCount} 个节点 · ${edgeCount} 条关系`;
+}
 
 export function CompanionCenterSurface() {
   useHudPage("companion");
@@ -569,6 +596,59 @@ export function CompanionCenterSurface() {
     indexRefs.current[nextIndex]?.focus();
   };
 
+  /**
+   * 「记忆 → 关联星图」这个展开态登记给伴星读的是什么（39d W2-7 的最后一块）。
+   *
+   * 它是唯一一块**登记落在壳层**的：`visibleGraph`／`railGroups` 这些派生值就住在壳层，
+   * 面板拿不到（rule「登记落在拥有清单的组件」在这里的落点就是壳层）。
+   * 与 `MemoryPanel` 不抢槽位：`mapOpen` 时列表整块被换掉，面板已卸载并 `retract`；
+   * 反过来这一格在未展开时**返回 null**，什么都不发。
+   */
+  const mapReadableView = useMemo<PageReadableV1 | null>(() => {
+    if (!(tab === "memory" && mapOpen)) return null;
+    const loadingMap = starMapProjection.loading && !starMapProjection.data;
+    const mapFailure = starMapProjection.data && !starMapProjection.data.ok
+      ? starMapProjection.data.message
+      : starMapProjection.failure;
+    if (loadingMap) {
+      return { pageId: "companion", title: HUD_PAGES.companion.title, statusLine: MAP_LINES.loading };
+    }
+    if (mapFailure) {
+      return {
+        pageId: "companion",
+        title: HUD_PAGES.companion.title,
+        statusLine: MAP_LINES.unavailable,
+        notice: `${MAP_LINES.unavailable}：${mapFailure.slice(0, 60)}`,
+      };
+    }
+    const optionLabel = (options: ReadonlyArray<{ value: string; label: string }>, value: string) =>
+      options.find((option) => option.value === value)?.label ?? value;
+    return {
+      pageId: "companion",
+      title: HUD_PAGES.companion.title,
+      statusLine: graphCountsLine(visibleGraph.nodes.length, visibleGraph.edges.length),
+      filters: [
+        { label: "记忆类型", value: optionLabel(MAP_MEMORY_KIND_OPTIONS, memoryKind).slice(0, 40) },
+        { label: "固定状态", value: optionLabel(MAP_PIN_OPTIONS, pinFilter).slice(0, 40) },
+        { label: "实体类型", value: optionLabel(ENTITY_FILTER_OPTIONS, entityFilter).slice(0, 40) },
+        ...(memoryQuery.trim() ? [{ label: "关键词", value: memoryQuery.trim().slice(0, 40) }] : []),
+      ],
+      ...(visibleGraph.nodes.length === 0
+        ? { notice: `${MAP_LINES.empty.message}：${MAP_LINES.empty.detail}` }
+        : {
+            items: railGroups
+              .flatMap((group) => [...group.nodes].map((node) => ({ node, title: group.title })))
+              .slice(0, 12)
+              .map((entry, index) => ({
+                ordinal: index + 1,
+                label: indexCellText(entry.node).slice(0, 120),
+                state: entry.title.slice(0, 40),
+              })),
+          }),
+    };
+  }, [entityFilter, mapOpen, memoryKind, memoryQuery, pinFilter, railGroups, starMapProjection.data, starMapProjection.failure, starMapProjection.loading, tab, visibleGraph.edges.length, visibleGraph.nodes.length, visibleGraph.nodes]);
+  usePageReadableView(mapReadableView);
+
   if (projection.loading && !data) return <HudPage page="companion" wide><div className="companion-center companion-center--state" aria-label="伴星中心"><SectionState message="正在读取伴星中心" /></div></HudPage>;
   if (!data && projection.failure) return <HudPage page="companion" wide><div className="companion-center companion-center--state" aria-label="伴星中心"><SectionState message="伴星中心暂时不可用" detail={projection.failure} onRetry={refresh} /></div></HudPage>;
   if (!data) return null;
@@ -607,8 +687,8 @@ export function CompanionCenterSurface() {
       {tab === "memory" ? <section className="companion-center__panel companion-center__panel--memory" id="companion-panel-memory" role="tabpanel" aria-labelledby="companion-tab-memory">
         {mapOpen ? <div className="companion-map-view">
           <div className="companion-map-view__head">
-            <div><button type="button" className="companion-text-link" onClick={() => setMapOpen(false)}><ChevronLeft size={16} />返回记忆列表</button><h2>记忆关联星图</h2><p>查看已确认记忆与学习内容的真实关联。</p></div>
-            {starMap ? <span>{visibleGraph.nodes.length} 个节点 · {visibleGraph.edges.length} 条关系</span> : null}
+            <div><button type="button" className="companion-text-link" onClick={() => setMapOpen(false)}><ChevronLeft size={16} />返回记忆列表</button><h2>{MAP_LINES.title}</h2><p>{MAP_LINES.subtitle}</p></div>
+            {starMap ? <span>{graphCountsLine(visibleGraph.nodes.length, visibleGraph.edges.length)}</span> : null}
           </div>
           <div className="companion-map-view__filters" role="group" aria-label="星图筛选">
             <label className="companion-search"><Search size={15} aria-hidden="true" /><input value={memoryQuery} onChange={(event) => setMemoryQuery(event.target.value)} placeholder="搜索记忆或关联内容" aria-label="搜索记忆或关联内容" />{memoryQuery ? <button type="button" className="companion-search__clear" onClick={() => setMemoryQuery("")} aria-label="清空星图搜索"><X size={13} /></button> : null}</label>
@@ -618,7 +698,7 @@ export function CompanionCenterSurface() {
           </div>
           <div className="companion-map-view__content">
             <div className="companion-map-view__canvas">
-              {starMapProjection.loading && !starMapProjection.data ? <SectionState message="正在读取记忆星图" />
+              {starMapProjection.loading && !starMapProjection.data ? <SectionState message={MAP_LINES.loading} />
                 : starMapProjection.data?.ok ? visibleGraph.nodes.length > 0 ? <UnderstandingUniverse
                     ref={universeRef} nodes={visibleGraph.nodes} edges={visibleGraph.edges} positions={universe.layout.positions}
                     selectedId={selectedNodeId} onSelect={selectNode} insets={COMPANION_MAP_INSETS}
@@ -626,11 +706,11 @@ export function CompanionCenterSurface() {
                     typeLabels={{ source: "来源", note: "笔记", card: "记忆", key_point: "学习实体" }}
                     stateLabels={MEMORY_STATE_LABEL} staticMotion labelPolicy="pinned"
                     offsetStorageKey="companion-memory-universe:v2" className="companion-memory-universe" />
-                  : <SectionState message="当前筛选下没有节点" detail="调整搜索或筛选条件即可继续探索。" />
-                : <SectionState message="记忆星图当前不可用" detail={starMapProjection.data && !starMapProjection.data.ok ? starMapProjection.data.message : starMapProjection.failure ?? undefined} onRetry={refresh} />}
+                  : <SectionState message={MAP_LINES.empty.message} detail={MAP_LINES.empty.detail} />
+                : <SectionState message={MAP_LINES.unavailable} detail={starMapProjection.data && !starMapProjection.data.ok ? starMapProjection.data.message : starMapProjection.failure ?? undefined} onRetry={refresh} />}
             </div>
             <aside className="companion-map-view__index" aria-label="星图节点列表">
-              <h3>节点索引</h3>
+              <h3>{MAP_LINES.indexTitle}</h3>
               <div className="companion-map-index" role="listbox" aria-label="星图等价节点索引">{railGroups.map((group) => <div key={group.id} role="group" aria-labelledby={`companion-index-${group.id}`}><h4 id={`companion-index-${group.id}`}>{group.title}<span>{group.nodes.length}</span></h4>{group.nodes.map((node) => { const index = selectedIndexByNode.get(node.id) ?? 0; return <button key={node.id} ref={(element) => { indexRefs.current[index] = element; }} type="button" role="option" data-role={node.metadata.visualRole === "memory" ? "memory" : "entity"} data-state={node.state ?? undefined} aria-selected={node.id === selectedNodeId} tabIndex={node.id === selectedNodeId || selectedNodeId === null && index === 0 ? 0 : -1} onClick={() => { selectNode(node.id); universeRef.current?.focusNode(node.id); }} onKeyDown={(event) => onIndexKeyDown(event, index)}><i aria-hidden="true" /><span>{indexKindPrefix(node) ? <em>{indexKindPrefix(node)} · </em> : null}{node.label}</span></button>; })}</div>)}</div>
               {selectedNode?.metadata.visualRole === "entity" ? <div className="companion-map-selection"><strong>{selectedNode.label}</strong><span>{ENTITY_LABEL[String(selectedNode.metadata.entityType)] ?? "学习实体"}{selectedNode.metadata.orphaned ? " · 原实体已失效" : ""}</span>{universe.targetsByNode.get(selectedNode.id) ? <button type="button" onClick={navigateEntity}>打开内容<ExternalLink size={14} /></button> : <small>关联已失效，不能打开。</small>}</div> : null}
             </aside>

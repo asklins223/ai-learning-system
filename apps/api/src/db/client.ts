@@ -104,6 +104,19 @@ const apiScope = new WorkspaceTransactionScope<string, ApiTransaction>({
   createError: (message) => new WorkspaceTransactionContextError(message),
 });
 
+/**
+ * 当前异步作用域里有没有活动的 API 事务（`undefined` = 没有）。
+ *
+ * 给**公共外部调用边界**用的那一个读数（D5 §5.2 第二件、39d W3-2）——API 与 worker
+ * 两侧都要覆盖（39c §5.2）。判据是"当前作用域有没有活动事务"，不是"代码文本里有没有
+ * `transaction`"：`AsyncLocalStorage` 沿 await 链传播，隐式嵌套一样读得到。
+ * worker 侧的同一条读数是 `workers/ai-worker/src/db.ts` 的
+ * `currentWorkerWorkspaceTransaction`。
+ */
+export function currentApiWorkspaceTransaction(): unknown {
+  return apiScope.current();
+}
+
 type ActiveApiWorkspaceTransaction = ActiveWorkspaceTransaction<string, ApiTransaction> & {
   /**
    * 当前请求的令牌哈希（`sessions.token`）。只有 actor 事务会写它；

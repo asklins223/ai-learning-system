@@ -25,7 +25,7 @@ import { and, eq, gte, inArray, sql, desc } from "drizzle-orm";
 import type { StructuredTaskKind } from "./run-structured.ts";
 import { isDeterministicStructuredPayload } from "./run-structured.ts";
 import { uncoveredFacets } from "./run-result-facets.ts";
-import { db, resolveApiStatementTimeoutMs, withWorkspaceTransaction } from "../../db/client.ts";
+import { db, resolveApiStatementTimeoutMs, withWorkspaceTransaction, currentApiWorkspaceTransaction } from "../../db/client.ts";
 import {
   canonicalLearningEventOutbox,
   learningAssessments,
@@ -59,6 +59,7 @@ import {
   CriticOutputError,
   CriticUnavailableError,
   createOpenAICompatibleCritic,
+  CRITIC_PROMPT_VERSION,
   flattenAnswerUnits,
   materializeCriticEvidenceRefs,
   type CriticInput,
@@ -90,7 +91,7 @@ function readPayloadString(payload: unknown, key: string): string {
 let criticTransport: CriticTransport | null = null;
 function getCriticTransport(): CriticTransport {
   if (criticTransport === null) {
-    criticTransport = createOpenAICompatibleCritic();
+    criticTransport = createOpenAICompatibleCritic({ currentActiveTransaction: currentApiWorkspaceTransaction });
   }
   return criticTransport;
 }
@@ -303,10 +304,20 @@ async function processClaimedCommand(row: ClaimedCommand, workerId: string): Pro
 
   if (criticContext) {
     // 事务外：真 Critic 调用（不持有任何 DB 连接）。
+    // 事务边界的核对挪进了任务运行基础（`createOpenAICompatibleCritic` 每步发调用前
+    // 读 `currentApiWorkspaceTransaction`）。这里再核一次就是两个来源——
+    // 留一处，且留在那一条判据**必然会被执行**的那一处。
     process.stderr.write(`[run-tick] calling critic for assessment=${criticContext.assessmentId}\n`);
     let verdicts: RubricVerdictOutput[];
     try {
-      verdicts = await getCriticTransport().assess(criticContext.input);
+      verdicts = await getCriticTransport().assess(criticContext.input, {
+        workspaceId: row.workspace_id,
+        userId: row.user_id,
+        assessmentId: criticContext.assessmentId,
+        // V2 的冻结公开载荷哈希就是这一步真正的输入身份；V1 没有那一项，退回
+        // assessment 行 id——至少"同一次评估的两次尝试"在台账里认得出是同一件事。
+        inputSnapshotHash: criticContext.input.v2?.publicPayloadHash ?? criticContext.assessmentId,
+      });
     } catch (err) {
       // 2026-08-15：Critic 不可用/输出非法（含 provider 网络失败）必须在
       // 事务外直接 fail closed → not_assessable（0 副作用），而不是冒泡让
@@ -925,7 +936,7 @@ async function gatherCriticInput(
       semanticTargetFingerprint: canon.semanticTargetFingerprint,
       targetRevisionHash: canon.targetRevisionHash,
       snapshotHash: snapshot.snapshotHash,
-      criticVersion: "critic-snapshot-v2.1",
+      criticVersion: CRITIC_PROMPT_VERSION,
     },
   };
 }

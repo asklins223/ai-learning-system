@@ -126,11 +126,14 @@ export const learningTargetSnapshotV2Schema = z
       .strictObject({
         objectiveId: z.string().uuid(),
         objectiveRevision: z.number().int().min(1),
-        cardId: z.string().uuid(),
-        publicationRevision: z.number().int().min(1),
-        cardRevision: z.number().int().min(1),
-        publicPayloadHash: z.string().regex(/^[0-9a-f]{64}$/),
-        revealPayloadHash: z.string().regex(/^[0-9a-f]{64}$/),
+        // 39d W3-4（D1 §4.3）：目标不再依赖卡片——这五个卡身份字段可空，
+        // 但 `cardContentEpoch`（上面）与 objective 那一组**不放宽**。
+        // 放宽的是类型，不是判据：无卡冻结仍然要求"非空且指向该修订的笔记依据"。
+        cardId: z.string().uuid().nullable(),
+        publicationRevision: z.number().int().min(1).nullable(),
+        cardRevision: z.number().int().min(1).nullable(),
+        publicPayloadHash: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+        revealPayloadHash: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
         objectiveStatement: z.string().min(1).max(2000),
         publicSummary: z.string().min(1).max(1500),
         knowledgeForm: knowledgeFormV2Schema,
@@ -209,10 +212,14 @@ export const learningRunTargetPublicV2Schema = z
   .strictObject({
     objectiveId: z.string().uuid(),
     objectiveRevision: z.number().int().min(1),
-    cardId: z.string().uuid(),
-    publicationRevision: z.number().int().min(1),
-    cardRevision: z.number().int().min(1),
-    publicPayloadHash: z.string().regex(/^[0-9a-f]{64}$/),
+    // 这条 schema **每次 V2 读都要 parse**（`run-service.ts:1258` 的 loadV2RunContext
+    // 撑起公共快照、动作与结果三个端点），所以无卡投影必须在它这里先通过，
+    // 否则第一条无卡快照就会把三个端点全打成 500。形状照已有的
+    // `learningRunTargetRevealV2Schema`（那两个字段早就是 .nullable()）。
+    cardId: z.string().uuid().nullable(),
+    publicationRevision: z.number().int().min(1).nullable(),
+    cardRevision: z.number().int().min(1).nullable(),
+    publicPayloadHash: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
     publicSummary: z.string().min(1).max(1500),
     semanticTargetFingerprint: z.string().regex(/^[0-9a-f]{64}$/),
     targetRevisionHash: z.string().regex(/^[0-9a-f]{64}$/),
@@ -240,4 +247,24 @@ export function parseLearningRunTargetPublicV2(
   input: unknown,
 ): LearningRunTargetPublicV2 {
   return learningRunTargetPublicV2Schema.parse(input);
+}
+
+/**
+ * 「为这个目标开一轮」该用哪一种 origin：**有卡走 `card`，没卡走 `today`**。
+ *
+ * 这条规则原本写在两个地方（39d W4-2 把它放进 api 的 `startPayload()`，而 worker 的
+ * `buildActionPayload` 只会 `JOIN learning_cards_v2` 拿卡，没卡就返回 null ⇒ 她说
+ * 「开始学习」时报"当前不可用"，页面上那颗「开始学习」却点得动）。现在两边都调这里，
+ * 少一个 origin 就少一处会各自漂移的地方。
+ *
+ * `today` 是这一族里唯一不带实体 id 的无卡档（`learningRunOriginV2Schema`），
+ * W3-4 已经证明它能冻结、能开跑、能结算。**不给 `objective` 那一档**——合同里没有。
+ */
+export function startRunOriginV2(input: {
+  readonly objectiveId: string;
+  readonly cardId: string | null | undefined;
+}): LearningRunOriginV2 {
+  return input.cardId
+    ? { kind: "card", cardId: input.cardId, objectiveId: input.objectiveId }
+    : { kind: "today", objectiveId: input.objectiveId };
 }

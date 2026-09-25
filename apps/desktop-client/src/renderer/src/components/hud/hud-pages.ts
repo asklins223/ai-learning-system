@@ -8,8 +8,6 @@
  */
 export type HudPageId =
   | "home"
-  | "login"
-  | "register"
   | "space"
   | "sources"
   | "source-detail"
@@ -53,6 +51,45 @@ export type CompanionSurfacePolicy = Readonly<{
   starter?: string;
 }>;
 
+/**
+ * 每一屏**能不能被她带过去**（39b §9.6 / 39d W2-1 的对账表）。
+ *
+ * 四套词表收一的最后一块：`HudPageId`（桌面端真有哪几屏，22）↔
+ * `COMPANION_PAGE_DESTINATIONS_V2`（她能跳回去哪几屏，10）。两者对不上的地方
+ * **必须显式写出来并给理由**，不能靠"反正没有"——那正是「她读得到 `generating`
+ * 却跳不回去」这个缺陷长期没人看见的原因。
+ *
+ * `null` 的三种情形（每一种都有理由，不是"忘了填"）：
+ *  - **死分支**（`login`／`register`）：没有任何组件发布这两屏，等删除；
+ *  - **要实体 id**（`generating`／`candidate`／`assessment`／`result`／`resumable`／
+ *    `goal-detail`／`note-read`／`note-edit`）：`companion_open_page` 只收**无参**落点
+ *    （`allowedMainRouteV2Schema` 里不带实体 id 的那一批），而路由白名单里**没有**
+ *    `card_generation` 这一档 —— 要把这几屏接上，先得有对应的路由 kind 或带参的打开动作；
+ *  - **没有对应落点档**（`space`）：空间切换走顶栏胶囊，不是伴星导航。
+ */
+export const HUD_PAGE_DESTINATIONS: Readonly<Record<HudPageId, string | null>> = {
+  home: "home",
+  space: null,
+  sources: "source",
+  "source-detail": "source",
+  notes: "note_library",
+  "note-read": null,
+  "note-edit": null,
+  goals: "objective_library",
+  "goal-detail": null,
+  generating: null,
+  candidate: null,
+  today: "today",
+  queue: "review",
+  assessment: null,
+  result: null,
+  search: "search",
+  graph: "star_map",
+  companion: "conversation",
+  settings: "settings",
+  resumable: null,
+};
+
 export type HudPageDefinition = {
   readonly id: HudPageId;
   readonly number: string;
@@ -78,22 +115,8 @@ export const HUD_PAGES: Readonly<Record<HudPageId, HudPageDefinition>> = {
       starter: "今天的学习从到期复习开始。",
     },
   },
-  login: {
-    id: "login",
-    number: "02",
-    title: "登录",
-    subtitle: "进入学习空间",
-    plate: "home",
-    companion: { mode: "hidden", seat: "none", framing: "bust", interaction: "none", proactive: "silent", draggable: false },
-  },
-  register: {
-    id: "register",
-    number: "03",
-    title: "注册",
-    subtitle: "创建你的学习空间",
-    plate: "home",
-    companion: { mode: "hidden", seat: "none", framing: "bust", interaction: "none", proactive: "silent", draggable: false },
-  },
+
+
   space: {
     id: "space",
     number: "04",

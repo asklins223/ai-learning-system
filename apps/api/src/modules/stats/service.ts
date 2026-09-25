@@ -5,7 +5,7 @@ import { reviewSchedules } from "@ailearn/shared/db-schema/evidence";
 import { notes } from "@ailearn/shared/db-schema/note";
 import type { AllWorkspacesStatsOverviewV1, StatsOverviewV1, WorkspaceStatsOverviewRowV1 } from "@ailearn/shared";
 import { visibleCardsCondition, visibleNotesCondition, visibleObjectivesCondition } from "../note/visibility.ts";
-import { reviewScheduleTargetsConsumableCardPredicate } from "../review/consumer-eligibility.ts";
+import { reviewScheduleTargetsConsumableCardPredicate } from "@ailearn/shared/review-consumable-target";
 import { ReviewStatus } from "@ailearn/shared";
 import { listUserWorkspaces, MAX_COLLABORATIVE_WORKSPACES, type WorkspaceInfo } from "../identity/service.ts";
 

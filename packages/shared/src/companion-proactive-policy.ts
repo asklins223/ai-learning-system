@@ -144,9 +144,22 @@ export function proactiveAvailabilityBlocked(availability: CompanionAvailability
 /**
  * 确定性主动策略（§10.2 的允许边界；不读模型输出）。
  *
- * **这是"她此刻能不能主动开口"的唯一实现**。顺序是有意排的，别重排：
- * `space_muted` 最前（"别在这个房间说话"是最具体的一句指令，压过一切账号级判断），
- * 然后设备在不在、是不是正在正式作答，再到时段/划走反馈/去重/节奏。
+ * **这是"她此刻能不能主动开口"的唯一实现**。
+ *
+ * 下面那条顺序**只适用于 `routine`**（例行主动消息）：`triggered` 在函数第一行就早退到
+ * `evaluateTriggeredPush`，**走不到** `formalAnswerInProgress` 那一条。这不是顺序写错了，
+ * 是两类消息的规则本来就不同——用户约好的提醒与"他正在等"的完成回执不受例行频率限制
+ * （承诺过的事不能因为节奏被丢掉）。它的既有例外行为由集测钉着
+ * （`proactive-hook-postgres.integration.ts:106`）。
+ *
+ * 上一版注释把顺序写成对两类都成立（"然后设备在不在、是不是正在正式作答"），
+ * 读的人会以为 triggered 也受作答安静管——2026-09-24 更正（39d W2-1）。
+ * 若将来要改这条行为本身（让约定提醒在正式作答期间也不弹），那是 39 §12.2 的阶段一决定，
+ * 改行为的同时改这段注释与那条集测，不要只改其中一处。
+ *
+ * `routine` 的顺序有意排的，别重排：`space_muted` 最前（"别在这个房间说话"是最具体的
+ * 一句指令，压过一切账号级判断），然后设备在不在、是不是正在正式作答，再到时段/划走
+ * 反馈/去重/节奏。
  */
 export function evaluateProactivePolicy(input: ProactivePolicyInput): ProactivePolicyDecision {
   if ((input.kind ?? "routine") === "triggered") {

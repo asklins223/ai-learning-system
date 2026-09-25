@@ -11,6 +11,11 @@
       "import": "./src/index.ts",
       "default": "./src/index.ts"
     },
+    "./ai-task-kernel": {
+      "types": "./src/ai-task-kernel.ts",
+      "import": "./src/ai-task-kernel.ts",
+      "default": "./src/ai-task-kernel.ts"
+    },
     "./ai-endpoints": {
       "types": "./src/ai-endpoints.ts",
       "import": "./src/ai-endpoints.ts",
@@ -186,6 +191,16 @@
       "import": "./src/companion-proactive-policy.ts",
       "default": "./src/companion-proactive-policy.ts"
     },
+    "./companion-leak-gates": {
+      "types": "./src/companion-leak-gates.ts",
+      "import": "./src/companion-leak-gates.ts",
+      "default": "./src/companion-leak-gates.ts"
+    },
+    "./companion-agent-registry": {
+      "types": "./src/companion-agent-registry.ts",
+      "import": "./src/companion-agent-registry.ts",
+      "default": "./src/companion-agent-registry.ts"
+    },
     "./companion-home-contracts": {
       "types": "./src/companion-home-contracts.ts",
       "import": "./src/companion-home-contracts.ts",
@@ -310,6 +325,11 @@
       "types": "./src/note-share-contracts.ts",
       "import": "./src/note-share-contracts.ts",
       "default": "./src/note-share-contracts.ts"
+    },
+    "./review-consumable-target": {
+      "types": "./src/review-consumable-target.ts",
+      "import": "./src/review-consumable-target.ts",
+      "default": "./src/review-consumable-target.ts"
     },
     "./note-visibility": {
       "types": "./src/note-visibility.ts",

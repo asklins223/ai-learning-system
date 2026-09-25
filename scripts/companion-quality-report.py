@@ -37,9 +37,11 @@ import base64
 import csv
 import io
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 
 CONTAINER = "ailearn-dev-postgres-1"
@@ -1191,6 +1193,110 @@ def render(metrics: dict) -> None:
           "   ← candidate 堆着不动就是抑制在起作用（间隔/熟悉度/去重/静默时段）")
 
 
+# ─── 逐闸台账（39d W1-2） ──────────────────────────────────────────────────
+
+# 台账的每一个数都必须能说清"它数的是什么"。三条口径：
+#   * 触发数：**不在这里重算**——判据只有一份实现，走 W1-1 的反事实重放台
+#     （`companion-gate-counterfactual.py --json`），本函数只读它写出的那份结果。
+#     同一判据在 Python 里再写一遍是这条链上最贵的错法（本文件 VISION_TIME_QUESTION
+#     的注释已经记过一次同类事故）。
+#   * 平均代价：触发那批轮次的 `step_count` / `agent_elapsed_ms` 均值，与同窗口全量对照。
+#     这是「这条闸是不是税」的读数——每次触发多烧一步，是把同一句话再交付一遍。
+#   * 改变比例：**哈希口径**。A 类多步轮（整轮零工具调用却走了不止一步 = 被补过步）
+#     里，相邻两步 `result_hash` 不相同的比例。它数的是"模型又给了一份不一样的结果"，
+#     不是"用户在屏幕上看到的那句话变了"——中间步正文没有落库，那一层推不出来，
+#     不要把它读成"steer 生效率"。见 39d W0-11 的第一份证据口径。
+# 去向**不在这里另立一份**：重放台的 JSON 带着 `dispositions`（它自己是 39b §9.1 的
+# 机器可读副本），这里只把它的三个取值翻成中文标签。以前这份表是手抄的 11 个键，
+# 与重放台各写一份——那正是"一个数字两个来源"，改一边另一边不会红。
+GATE_LEDGER_DISPOSITION_LABELS = {"delete": "删", "keep": "留", "conditional": "待 S1"}
+
+
+def gate_ledger(since: str | None) -> dict:
+    """逐闸台账。触发数从重放台取（不重算判据），代价与改变比例从库里现算。"""
+    counterfactual = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "companion-gate-counterfactual.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = os.path.join(tmp, "counterfactual.json")
+        proc = subprocess.run([sys.executable, counterfactual, "--json", out_path],
+                              capture_output=True, text=True)
+        if not os.path.exists(out_path):
+            return {"error": f"重放台没有写出结果（退出码 {proc.returncode}）：{proc.stderr.strip()[:200]}"}
+        with open(out_path, encoding="utf-8") as handle:
+            replay = json.load(handle)
+
+    scripted = scripted_run_ids()
+    real_list = ",".join(f"'{email}'" for email in DEV_REAL_ACCOUNT_EMAILS)
+    window = since_clause(since, "r.created_at") if since else " AND r.created_at > now() - interval '30 days'"
+    scripted_sql = ",".join("'" + value + "'" for value in sorted(scripted)) or "''"
+    scope = (f"r.id::text <> ALL(ARRAY[{scripted_sql}]::text[])"
+             f" AND r.user_id IN (SELECT id FROM users WHERE email IN ({real_list}))")
+    baseline = rows(f"""
+        SELECT count(*) n, round(avg(r.step_count), 2) avg_steps,
+               round(avg(r.agent_elapsed_ms)) avg_ms
+        FROM companion_turn_runs r WHERE true{window} AND {scope}
+    """)[0]
+
+    # A 类多步轮的"相邻两步结果是否不同"（哈希口径，见上方注释）。
+    changed = rows(f"""
+        SELECT count(*) FILTER (WHERE s.changed) || '/' || count(*) AS ratio FROM (
+          SELECT bool_or(s1.result_hash IS DISTINCT FROM s2.result_hash) AS changed
+          FROM companion_turn_runs r
+          JOIN companion_agent_steps s1 ON s1.run_id = r.id AND s1.step_no = 1
+          JOIN companion_agent_steps s2 ON s2.run_id = r.id AND s2.step_no = 2
+          WHERE true{window} AND {scope}
+            AND coalesce(r.tool_call_count, 0) = 0 AND coalesce(r.step_count, 0) > 1
+            AND s1.result_hash IS NOT NULL AND s2.result_hash IS NOT NULL
+          GROUP BY r.id) s
+    """)[0]["ratio"]
+
+    ledger = {"window_days": replay.get("window_days"), "baseline": baseline, "changed_ratio": changed, "gates": {}}
+    for gate, buckets in replay.get("buckets", {}).items():
+        entries = replay.get("fired", {}).get(gate, [])
+        # G10／G11 的输入是念头气泡，不是对话轮——按 source 分开，别拿念头 id 去 join
+        # `companion_turn_runs`（那会静默得到 0 行，把"触发数"印成 0）。
+        turn_ids = [item["run_id"] for item in entries if item.get("source") == "turn"]
+        thought_ids = [item["run_id"] for item in entries if item.get("source") == "thought"]
+        turn_sql = ",".join("'" + value + "'" for value in turn_ids) or "''"
+        cost = rows(f"""
+            SELECT count(*) n, round(avg(r.step_count), 2) avg_steps,
+                   round(avg(r.agent_elapsed_ms)) avg_ms
+            FROM companion_turn_runs r
+            WHERE r.id::text = ANY(ARRAY[{turn_sql}]::text[])
+        """)[0]
+        raw_disposition = (replay.get("dispositions") or {}).get(gate)
+        ledger["gates"][gate] = {"disposition": GATE_LEDGER_DISPOSITION_LABELS.get(
+            raw_disposition, f"?（重放台未给出：{raw_disposition}）"),
+                                "buckets": buckets, "fired": cost,
+                                "fired_turns": len(turn_ids), "fired_thoughts": len(thought_ids)}
+    return ledger
+
+
+def render_gate_ledger(ledger: dict) -> None:
+    print(f"\n{'='*66}\n逐闸台账（39d W1-2；触发数由反事实重放台重算，口径见其文件头）\n{'='*66}")
+    if ledger.get("error"):
+        print(f"  {ledger['error']}")
+        return
+    base = ledger["baseline"]
+    print(f"  对照：全量 {base['n']} 轮，平均 {base['avg_steps']} 步 / {base['avg_ms']} ms")
+    print(f"  正文改变比例（哈希口径，A 类多步轮）= {ledger['changed_ratio']}")
+    # `unknown` 一列必须有：重放台在没跑环境块重建时把 G3 判成"未知"（不许算成已覆盖），
+    # 少了这一列，那一行会显示触发 N 而三格全 0，看着像"读数丢了"而不是"判据没跑"。
+    print(f"  {'闸':<4}{'去向':<7}{'触发':>5}{'（轮/念）':>10}{'covered':>9}{'rescued':>9}{'leak':>6}{'unknown':>8}"
+          f"{'平均步':>8}{'平均ms':>8}")
+    for gate in sorted(ledger["gates"], key=lambda g: int(g[1:])):
+        entry = ledger["gates"][gate]
+        stat, cost = entry["buckets"], entry["fired"]
+        total = entry["fired_turns"] + entry["fired_thoughts"]
+        split = f"{entry['fired_turns']}/{entry['fired_thoughts']}"
+        steps = "-" if not cost["n"] else str(cost["avg_steps"])
+        millis = "-" if not cost["n"] else str(cost["avg_ms"])
+        print(f"  {gate:<4}{entry['disposition']:<7}{total:>5}{split:>10}{stat['covered']:>9}"
+              f"{stat['rescued-by-tool']:>9}{stat['still-leaks']:>6}{stat.get('unclassified', 0):>8}{steps:>8}{millis:>8}")
+    print("  触发 = 0 → 可删；触发 > 0 但正文改变 = 0 → 也可删（它不是控制，是税）。"
+          "没有任何读数的保留理由不被接受（39b §10）。")
+
+
 def compare(current: dict, baseline: dict) -> None:
     def flat(node, prefix=""):
         out = {}
@@ -1229,10 +1335,17 @@ def main() -> None:
     parser.add_argument("--since", default=None, help="只统计该时刻之后的数据，如 2026-09-20")
     parser.add_argument("--json", dest="json_out", default=None, help="把指标写成 JSON 供之后对照")
     parser.add_argument("--compare", default=None, help="与一份先前写出的 JSON 对照")
+    parser.add_argument("--no-gate-ledger", action="store_true",
+                        help="跳过逐闸台账（它会调用重放台，慢；纯看形态指标时用它）")
     args = parser.parse_args()
 
     metrics = collect(args.since)
     render(metrics)
+
+    if not args.no_gate_ledger:
+        ledger = gate_ledger(args.since)
+        render_gate_ledger(ledger)
+        metrics["gate_ledger"] = ledger
 
     if args.compare:
         with open(args.compare, encoding="utf-8") as handle:

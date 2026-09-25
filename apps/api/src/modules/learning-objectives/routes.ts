@@ -32,6 +32,8 @@ const listQuerySchema = z.object({
   lifecycle: z.enum(["active", "archived", "superseded"]).optional(),
   cursor: z.string().uuid().optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),
+  /** 只取这一篇笔记名下的目标（39d W4-2：笔记页要报"这一篇的主要动作"）。 */
+  noteId: z.string().uuid().optional(),
 });
 
 const historyQuerySchema = z.object({
@@ -61,6 +63,7 @@ export async function learningObjectiveRoutes(app: FastifyInstance) {
           lifecycle,
           cursor: query.cursor,
           limit: query.limit ?? 20,
+          noteId: query.noteId,
         });
         return {
           version: 3,

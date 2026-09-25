@@ -9,7 +9,7 @@ import {
 } from "@ailearn/shared/db-schema/card-generation-v2";
 import { ReviewStatus, reviewQueueV2Schema, type ReviewQueueV2 } from "@ailearn/shared";
 import { decodeCursor, encodeCursor } from "../../lib/pagination.ts";
-import { reviewScheduleTargetsConsumableCardPredicate } from "./consumer-eligibility.ts";
+import { reviewScheduleTargetsConsumableCardPredicate } from "@ailearn/shared/review-consumable-target";
 import { loadMissingFrozenRubricUnits } from "./frozen-evidence.ts";
 
 export type ReviewReason =

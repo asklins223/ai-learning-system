@@ -2526,6 +2526,24 @@
    9px voice, not to a page-level banner. */
 .hud-surface .notebook .notebook-note { margin: 0 0 8px; }
 
+/* The note's own learning action (39d W4-2) sits in the reading flow right
+   under the meta line: the button, then its reason in the paper's 9px voice.
+   It is deliberately not the `actions` box — that one is pinned absolute to the
+   paper's bottom-right corner, and a bare `actions` div with no rule of its own
+   would stack these lines with no gap at all. */
+.hud-surface .notebook .notebook-objective {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  /* 真窗口量出来按钮与下面那句理由是 0px（`notebook-note` 只带 bottom margin，
+     第一行因此贴死按钮下沿）。8px 是这一页自己那两行小字之间的既有距离；
+     既然由 gap 负责，就把这几行自己的 bottom 收掉，否则两行小字之间会变成 16px。 */
+  gap: 8px;
+  margin: 0 0 10px;
+}
+
+.hud-surface .notebook .notebook-objective .notebook-note { margin-bottom: 0; }
+
 @media (max-width: 760px) {
   .hud-surface .notebook .notebook-actions { right: 18px; bottom: 14px; }
   .hud-surface .notebook .notebook-actions--editor { right: 18px; bottom: 26px; }

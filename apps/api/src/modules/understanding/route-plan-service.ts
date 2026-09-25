@@ -1,12 +1,12 @@
 /**
  * 方案 16 §18：Understanding RoutePlan 确定性选路服务（可复用执行单元）。
  *
- * POST /understanding/routes/plan 与 §18 工具网关 plan_understanding_route
- * 共用同一事务体（单一事实源，禁止双份逻辑）：作用域/新鲜度校验 → 到期复习
- * 优先选路 → 作废旧 plan → 插入/幂等重放。
+ * 唯一调用方是 `POST /understanding/routes/plan`（Fastify handler）。§18 工具网关那条
+ * `plan_understanding_route` 的入口已随伴星工具 `companion_plan_route` 整条删除
+ * （2026-09-24，39d W2-1）——**本服务保留，因为 HTTP 路径仍然是活的**。
  *
- * 本服务只接受调用方的事务（不自行开启），供 Fastify handler 与工具网关在
- * 各自的事务内调用。
+ * 事务体（单一事实源）：作用域/新鲜度校验 → 到期复习优先选路 → 作废旧 plan →
+ * 插入/幂等重放。本服务只接受调用方的事务（不自行开启）。
  */
 
 import { and, desc, eq, gte, lte } from "drizzle-orm";

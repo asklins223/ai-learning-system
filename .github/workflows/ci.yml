@@ -570,6 +570,7 @@ jobs:
             src/integration-tests/note-document-state-postgres.integration.ts \
             src/integration-tests/note-collaboration-postgres.integration.ts \
             src/integration-tests/learning-objective-search.integration.ts \
+            src/integration-tests/learning-objective-parity.integration.ts \
             src/integration-tests/card-generation-run-ownership-postgres.integration.ts \
             src/integration-tests/note-trash-card-serving-postgres.integration.ts \
             src/integration-tests/note-purge-soft-deleted-postgres.integration.ts \
@@ -599,6 +600,23 @@ jobs:
           node --import tsx --test --test-concurrency=1 \
             src/integration-tests/learning-runs-postgres.integration.ts \
             2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/learning-runs.tap"
+
+      # 39d W3-4（2026-09-25）：无卡目标的冻结链三分支（D1 §4.3）。夹具走 DATABASE_URL
+      # （超级用户，只负责建数据），被测那一段 `withWorkspaceTransaction` 读
+      # DATABASE_URL_API（受限角色，与生产同口径）——两个都要给，缺一个就是静默 skip。
+      - name: Verify cardless target snapshot freeze branches against postgres
+        working-directory: apps/api
+        env:
+          NODE_ENV: test
+          DATABASE_URL: ${{ env.DATABASE_URL }}
+          DATABASE_URL_MIGRATOR: ${{ env.DATABASE_URL_MIGRATOR }}
+          DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
+          DATABASE_URL_WORKER: ${{ env.DATABASE_URL_WORKER }}
+        run: |
+          set -o pipefail
+          node --import tsx --test --test-concurrency=1 \
+            src/integration-tests/target-snapshot-cardless-postgres.integration.ts \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/target-snapshot-cardless.tap"
 
       # 空间隔离 schema 棘轮：把当前"带 workspace_id 但缺外键 / 缺 RLS"的表如实登记为
       # 基线，要求实际集合与基线完全相等——新增违规变红，修好一条也必须同步删基线，
@@ -695,6 +713,69 @@ jobs:
           set -o pipefail
           node --import tsx --test src/integration-tests/ai-audit-rls-context-postgres.integration.ts \
             2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/ai-audit-rls.tap"
+
+      # 公共任务运行内核（D5 / 39d W3-1）：三段形状 + 「旧尝试不许提交」那道闸接的是
+      # 真 `jobs.lease_token` 与 `lockJobLease`。此前这类文件只存在于仓库里、没有任何
+      # job 运行它——同一条失守机制（见 doc 34 与 39d §3 的"点名列"纪律）。
+      # 制卡 V2 的 C 案例集与规划提交集（2026-09-25 接进来）。这两份此前**没有任何
+      # job 或 script 运行**，代价实测到了：e2e-subset 在本地共享 dev 库上 30 条里
+      # 29 条红，查下来是两个独立成因（夹具把 30 个用例拴在同一篇笔记上，撞上
+      # 2026-09-21 为"旧卡不废弃"收紧的在制守卫；以及一次性库的引导本身在
+      # roles.sql 的权限完整性检查上就起不来）。两者都已修，且**必须单文件跑**
+      # ——worker 的 outbox claim 是全局的，同进程多文件会互相抢 job（见文件头）。
+      - name: Verify card generation V2 C-cases (single file, outbox claim is global)
+        working-directory: workers/ai-worker
+        env:
+          NODE_ENV: test
+          DATABASE_URL_MIGRATOR: ${{ env.DATABASE_URL_MIGRATOR }}
+          DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
+          DATABASE_URL_WORKER: ${{ env.DATABASE_URL_WORKER }}
+        run: |
+          set -o pipefail
+          node --import tsx --test --test-concurrency=1 \
+            src/integration-tests/card-generation-v2-e2e-subset.integration.ts \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/card-gen-v2-ccases.tap"
+
+      - name: Verify card generation V2 plan commit (single file)
+        working-directory: workers/ai-worker
+        env:
+          NODE_ENV: test
+          DATABASE_URL_MIGRATOR: ${{ env.DATABASE_URL_MIGRATOR }}
+          DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
+          DATABASE_URL_WORKER: ${{ env.DATABASE_URL_WORKER }}
+        run: |
+          set -o pipefail
+          node --import tsx --test --test-concurrency=1 \
+            src/integration-tests/card-generation-v2-plan-commit-postgres.integration.ts \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/card-gen-v2-plan-commit.tap"
+
+      # 竖向样例（39c §9 第一步 / 39d W3-3）：一条链跑在公共运行基础上——生成→检查→
+      # 保存一张卡→开放回答→评估，两种模式共用同一层外壳，失败分支与恢复逐条钉。
+      # 单文件跑（自己种 jobs 行，但与制卡那两组同理会抢 outbox，保持一步一档）。
+      - name: Verify the shared foundation carries one vertical slice
+        working-directory: workers/ai-worker
+        env:
+          NODE_ENV: test
+          DATABASE_URL_MIGRATOR: ${{ env.DATABASE_URL_MIGRATOR }}
+          DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
+          DATABASE_URL_WORKER: ${{ env.DATABASE_URL_WORKER }}
+        run: |
+          set -o pipefail
+          node --import tsx --test --test-concurrency=1 \
+            src/integration-tests/shared-foundation-vertical-slice-postgres.integration.ts \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/ai-task-vertical-slice.tap"
+
+      - name: Verify the shared AI task kernel against real job leases
+        working-directory: workers/ai-worker
+        env:
+          NODE_ENV: test
+          DATABASE_URL_MIGRATOR: ${{ env.DATABASE_URL_MIGRATOR }}
+          DATABASE_URL_API: ${{ env.DATABASE_URL_API }}
+          DATABASE_URL_WORKER: ${{ env.DATABASE_URL_WORKER }}
+        run: |
+          set -o pipefail
+          node --import tsx --test src/integration-tests/ai-task-kernel-postgres.integration.ts \
+            2>&1 | tee "$RUNNER_TEMP/postgres-test-logs/ai-task-kernel.tap"
 
       - name: Verify every journal migration was applied
         working-directory: apps/api

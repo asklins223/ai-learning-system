@@ -403,6 +403,10 @@ function continuationEvent(ws: string, uid: string, f: Fixture) {
       recentMessages: [],
       activeMemories: [],
       hereAndNow: null,
+      thisTurnFacts: null,
+      formalAnswerTarget: null,
+      livePageView: null,
+      factSpans: null,
       conversationSummary: null,
       petProfile: null,
       nextMessageSeq: 3,
@@ -573,9 +577,9 @@ test("Agent epoch fence：run 冻结的 epoch 与当前不一致 → 拒绝执�
  * 本地绿不等于它有闸（dev 的 api 角色还是 BYPASSRLS），所以断言写成
  * "换一个 user 就必须什么都读不到"——去掉任一条件都会让它红。
  */
-type ContextSeed = "live" | "revoked" | "expired";
+type ContextSeed = "live" | "revoked" | "expired" | "older-but-longer-lease";
 
-/** 按三种生命周期各造一条 context 行；时间全部在 JS 侧算，不拼裸 SQL。 */
+/** 按这几种生命周期各造一条 context 行；时间全部在 JS 侧算，不拼裸 SQL。 */
 async function seedPageContext(
   ws: string,
   uid: string,
@@ -584,8 +588,13 @@ async function seedPageContext(
 ): Promise<string> {
   const id = randomUUID();
   const now = Date.now();
-  const issuedAt = new Date(state === "expired" ? now - 60_000 : now);
-  const expiresAt = new Date(state === "expired" ? now - 5_000 : now + 30_000);
+  // `older-but-longer-lease`：发得更早、剩余租约却长得多（后台那一屏一直在续租）。
+  const issuedAt = new Date(
+    state === "expired" ? now - 60_000 : state === "older-but-longer-lease" ? now - 20_000 : now,
+  );
+  const expiresAt = new Date(
+    state === "expired" ? now - 5_000 : state === "older-but-longer-lease" ? now + 600_000 : now + 30_000,
+  );
   const revokedAt = state === "revoked" ? new Date(now) : null;
   const routeRef = { kind: "note", noteId: randomUUID() };
   const readableView = {
@@ -645,4 +654,36 @@ test("读页面：worker 绕过 RLS，但 workspace/user 两个条件仍然把�
   const none = await read(lonely.workspaceId, lonely.userId);
   assert.equal(none, null);
   assert.equal(currentPageToolResult(none).value.available, false);
+});
+
+test("读页面：同一账号同时两行活着时，认的是最新那一屏而不是剩得最久的那一行", async () => {
+  // 为什么现在要钉这一条：2026-09-25 修好续租之前，租约最多活 40 秒，"两行同时活着"
+  // 只可能出现在一次导航风暴里；修完之后一个挂着不动的窗口可以一直续下去，
+  // 于是"早发出去、租约还长"这一行会长期存在（dev 实测 14 天内 1 470 个瞬间同时有多行）。
+  // 读侧唯一的凭据就是 `ORDER BY issued_at DESC`——改成按剩余租约排就会说错屏。
+  const { withWorkerWorkspaceTransaction } = await import("../db.ts");
+  const { readLatestPageContextRow } = await import("../handlers/companion-agent-runtime.ts");
+  const read = (ws: string, uid: string) => withWorkerWorkspaceTransaction(
+    { workspaceId: ws, userId: uid },
+    (tx) => readLatestPageContextRow(tx, { workspaceId: ws, userId: uid }),
+  );
+  const titleOf = (row: { readable_view: unknown } | null) =>
+    (row?.readable_view as { title?: string } | undefined)?.title ?? null;
+
+  // 第一半是分母自证：单独造那一条"后台屏"时必须**读得到**。少了这一步，
+  // 第二半可能只是在比"谁被 expires／revoked 过滤掉了"，而不是比顺序。
+  const backStage = await seedBase();
+  await seedPageContext(backStage.workspaceId, backStage.userId, "后台那一屏（一直在续租）", "older-but-longer-lease");
+  assert.equal(titleOf(await read(backStage.workspaceId, backStage.userId)), "后台那一屏（一直在续租）",
+    "这条夹具形状本身就该是活的，否则下面那句比的是过滤不是顺序");
+
+  // 第二半：同一个账号再叠一条刚发出去的，读到的必须是新的那条。
+  const scope = await seedBase();
+  await seedPageContext(scope.workspaceId, scope.userId, "后台那一屏（一直在续租）", "older-but-longer-lease");
+  await seedPageContext(scope.workspaceId, scope.userId, "正在看的这一屏", "live");
+  const row = await read(scope.workspaceId, scope.userId);
+  assert.equal(titleOf(row), "正在看的这一屏",
+    "按剩余租约排就会把用户没在看的那一屏当成「这一页」");
+  assert.ok(Number(row?.content_age_seconds) <= 5,
+    "这一屏的年龄只由 issued_at 算：拿到 20 秒前那一条，说明读的是后台那一屏");
 });

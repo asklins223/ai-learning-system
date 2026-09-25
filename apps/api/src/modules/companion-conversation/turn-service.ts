@@ -9,6 +9,7 @@
  */
 
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { companionLeakGateVersionV1 } from "@ailearn/shared/companion-leak-gates";
 import { and, eq, sql } from "drizzle-orm";
 import type { ApiTransaction } from "../../db/client.ts";
 import { withWorkspaceTransaction } from "../../db/client.ts";
@@ -538,6 +539,9 @@ export async function createCompanionTurn(args: {
         idempotencyKeyHash,
         requestBodyHash,
         accountEpoch,
+        // 闸版本随回合落库（39d #28）：删闸要的是"真实流量 0 触发"**且能归因到某一版**；
+        leakGateVersion: companionLeakGateVersionV1(),
+        // 之前这一格没有，台子只能靠 git log 人工对（本轮就是这么分清的）。
         pageContext: sanitizeContext(request) as never,
         contextGrantId,
         createdAt: now,

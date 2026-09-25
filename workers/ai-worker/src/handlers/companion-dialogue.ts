@@ -28,12 +28,15 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { decideCompanionVoiceDelivery, isFormalAnswerInProgress } from "../lib/formal-answer-signal.ts";
+import { decideCompanionVoiceDelivery, findFormalAnswerTarget } from "../lib/formal-answer-signal.ts";
+import { assessAnswerExposure, isFormalAnswerLivePage, recordCompanionAnswerExposure } from "./companion-answer-exposure.ts";
 import { canonicalJsonV1, sha256Utf8V1 } from "@ailearn/shared/content-hash";
 import { sql } from "drizzle-orm";
 import { logger } from "../lib/logger.ts";
 import { withWorkerWorkspaceTransaction } from "../db.ts";
 import { loadHereAndNow, renderHereAndNow } from "./companion-here-and-now.ts";
+import { loadThisTurnFacts } from "./companion-this-turn-facts.ts";
+import { resolveFactSpans } from "./companion-fact-spans.ts";
 import { renderConversationSummary } from "./companion-summarizer.ts";
 import { createProvider, createEmbeddingProvider, withThinkingDisabled } from "../lib/ai-provider.ts";
 import {
@@ -274,10 +277,14 @@ export async function runCompanionDialogue(
         // 正式作答中就不念出来（doc 34 L15 的另一半）。判据与念头管线同一个来源，
         // 在**这一轮**读一次就够：一次 provider 调用远长于六个阶段的跃迁窗口，
         // 中途放开等于在用户正在答的那一题上开口。
-        const formalAnswerInProgress = await isFormalAnswerInProgress(tx, {
+        // 同一次读取顺手把**正在作答的那一题的身份**也带出来（39d W2-6 要往
+        // `learning_exposures_v2` 记一笔，必须拿到这一题冻结的那一版）。静音判据与
+        // 记账判据因此是同一条 SQL，不会一处放宽一处收紧。
+        const formalAnswerTarget = await findFormalAnswerTarget(tx, {
           workspaceId: ctx.workspaceId,
           userId: run.user_id,
         });
+        const formalAnswerInProgress = formalAnswerTarget !== null;
         const userRows = await tx.execute<{ blocks: unknown }>(sql`
           SELECT blocks FROM companion_messages
           WHERE conversation_id = ${run.conversation_id}
@@ -352,13 +359,28 @@ export async function runCompanionDialogue(
         );
         // 环境快照跑在**同一个** RLS 读事务里：它是一组常量级聚合 SQL，另开事务
         // 只会多一次往返，而且脱离这里的作用域边界（方案 29 §4.1）。
-        const hereAndNow = renderHereAndNow(await loadHereAndNow(tx, {
+        const snapshot = await loadHereAndNow(tx, {
           workspaceId: ctx.workspaceId,
           userId: run.user_id,
           conversationId: run.conversation_id,
           pageContext: run.page_context,
           userText,
-        }));
+        });
+        const hereAndNow = renderHereAndNow(snapshot);
+        // 实体先行解析（39d W2-3）：这句话指到的对象先查出来。同一事务、不新开连接；
+        // 没有指称时它一次查询都不发（`extractTurnReferences` 返回空就直接 null）。
+        const thisTurnFacts = await loadThisTurnFacts(tx, {
+          workspaceId: ctx.workspaceId,
+          userId: run.user_id,
+          conversationId: run.conversation_id,
+          userText,
+          liveView: snapshot.livePageView,
+        });
+        if (thisTurnFacts?.dropped) {
+          // 超预算丢弃是设计内的降级（39b §9.3），但**要留一条读数**：静默丢掉会让人
+          // 以为这块一直没触发，而它其实是每次都超时。
+          logger.warn({ runId: run.id, ms: thisTurnFacts.ms }, "companion turn facts dropped over budget");
+        }
         // 更早那段对话（历史回放只带最近 20 条，之外她本来看不见）。同一道
         // RLS 读事务里取最新一条摘要，不为它单开一次往返。
         const summaryRows = await tx.execute<{ summary: unknown }>(sql`
@@ -372,6 +394,8 @@ export async function runCompanionDialogue(
         return {
           runId: run.id,
           formalAnswerInProgress,
+          formalAnswerTarget,
+          livePageView: snapshot.livePageView,
           conversationId: run.conversation_id,
           userId: run.user_id,
           userMessageId: run.user_message_id,
@@ -384,6 +408,8 @@ export async function runCompanionDialogue(
           recentMessages,
           activeMemories,
           hereAndNow,
+          thisTurnFacts: thisTurnFacts?.block ?? null,
+          factSpans: snapshot.factSpans,
           conversationSummary,
           petProfile,
           nextMessageSeq: Number(conv.next_message_seq),
@@ -536,6 +562,8 @@ export async function runCompanionDialogue(
     groundedTutorContext: read.groundedTutorContext,
     activeMemories: read.activeMemories,
     hereAndNow: read.hereAndNow,
+    thisTurnFacts: read.thisTurnFacts,
+    factSpans: read.factSpans?.block ?? null,
     conversationSummary: read.conversationSummary,
     petProfile: read.petProfile,
   });
@@ -699,6 +727,8 @@ export async function runCompanionDialogue(
     ctx,
     read,
     expiresAt,
+    // 流式下发的每一段都要经过目录渲染，否则用户会先看到 `{{f:today_minutes}}`。
+    factSpanValues: read.factSpans?.values ?? {},
     notifyCompanionEvent,
     onVisibleCommitted: async (_committed, visibleText) => emitVisibleVoiceSegments(visibleText, false),
   });
@@ -770,6 +800,19 @@ export async function runCompanionDialogue(
   // 上游解包（2026-09-18）：个别轮次 provider 会把回复包成 JSON 信封，
   // TTS 朗读文本与校验/落库文本都必须用剥离后的版本。
   ttsRawText = unwrapCompanionJsonEnvelope(agentResult.text);
+  // P2（39d W2-5）：占位符在**任何下游之前**渲染——校验、流式对账、落库、TTS 看的是
+  // 同一份渲染后的文本。放在校验之后会让"已下发的前缀（已渲染）"与"校验后的全文
+  // （还带标记）"必然分叉，判成 stream_full_text_diverged 并整轮失败。
+  const spanResolved = resolveFactSpans(ttsRawText, read.factSpans?.values ?? {});
+  if (spanResolved.dropped.length > 0) {
+    // 目录之外的键：丢掉那半句、正文照留，但必须留痕——静默丢弃会让
+    // "她怎么少说了一句"无法复盘（日记那条策略）。
+    logger.warn(
+      { runId: read.runId, dropped: spanResolved.dropped.length, excerpt: spanResolved.dropped.join(" / ").slice(0, 160) },
+      "companion reply referenced fact spans outside this turn's catalog",
+    );
+  }
+  ttsRawText = spanResolved.text;
 
   // 信任边界：流式期间每个 flush 前都已跑过增量校验（长度/泄露），这里收尾；
   // 校验失败在此终结：已投递的稳定前缀仍在（它是最终文本的前缀），run 按失败收尾。
@@ -1019,6 +1062,39 @@ export async function runCompanionDialogue(
               finished_at = now()
           WHERE id = ${read.runId}
         `);
+
+        // P5（39b §9.7 / 39d W2-6）：**她自己是泄露源时由服务端记账**。写入门不在她嘴里
+        // （她没有一个"我泄露了"的工具），判据是她这句话与本题题面/答案的连续重合，
+        // 幂等用现成唯一键 `companion-turn:<本轮 runId>`——job 重试不会记成两次。
+        // 两个条件都要：①服务端确有正式题目在进行（拿到冻结的那一版身份）；
+        // ②这一轮问的时候人在作答页（实时那一行的 interaction_state）。
+        if (read.formalAnswerTarget
+          && isFormalAnswerLivePage(read.livePageView, read.formalAnswerTarget.runId)) {
+          const exposure = assessAnswerExposure({
+            replyText: assistantText,
+            taskPrompt: read.formalAnswerTarget.taskPrompt,
+            publicSummary: read.formalAnswerTarget.publicSummary,
+            canonicalAnswer: read.formalAnswerTarget.canonicalAnswer,
+          });
+          if (exposure) {
+            const recorded = await recordCompanionAnswerExposure(tx, {
+              workspaceId: ctx.workspaceId,
+              userId: read.userId,
+              companionRunId: read.runId,
+              target: read.formalAnswerTarget,
+              kind: exposure.kind,
+            });
+            // 记不上（撞幂等键）与记上了一样要留痕：这条读数是"绕过有没有真的被堵住"的唯一证据。
+            logger.info(
+              {
+                runId: read.runId, kind: exposure.kind,
+                overlapChars: exposure.overlapChars, promptCoverage: Number(exposure.promptCoverage.toFixed(2)),
+                recorded,
+              },
+              "companion answer exposure ledger",
+            );
+          }
+        }
 
         // 22 方案：终态事务内异步入队记忆提取/摘要任务。
         await enqueueCompanionMemoryJobs(tx, {

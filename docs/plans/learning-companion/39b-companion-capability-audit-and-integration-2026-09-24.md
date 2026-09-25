@@ -362,6 +362,72 @@ prompt 里写着规则、代码不去核对，等于没写。4 处从"叮嘱"改
 - 退出码非 0 条件：任一被标成"删除"的闸 `covered + rescued-by-tool < 100%`。即：**只有 `still-leaks = 0` 的闸才允许删。**
 - 逐闸台账（`scripts/companion-quality-report.py` 后追加）：每条闸 30 天触发次数、steer 之后正文实际改变的比例、平均代价（步数／毫秒）。触发 = 0 → 删；触发 > 0 但"改变结果" = 0 → 删（**它不是控制，是税**：每次触发多烧一步 + 一次模型调用，然后把同一句话再交付一遍）。台账数字必须打印在报告里，不接受"为了安全先留着"这种没有读数的保留理由。
 
+### 10.1 逐闸对账台账（2026-09-25 建；同日**自我更正一次**，见文末）
+
+先说这轮**撤回**的说法：初版台账写成"台子自己重写了一份判据"。**那句是错的**——
+`workers/ai-worker/scripts/companion-gate-eval.ts:40-57` 就是 `import` 生产那一份
+（文件头第 1 节还专门写了"不翻译成 Python 正则，直接 import 真函数"）。所以漂移只可能出在
+**输入、前置条件、生产侧语义**三处，而不是判据实现。逐条改核后如下（每格都注明是本轮自己 grep 到的、还是未核）：
+
+| 闸 | 生产位点 | 台子喂进去的东西 | 结论 | 依据（谁核的） |
+| --- | --- | --- | --- | --- |
+| G1 未证实数字 | `companion-agent-runtime.ts:3226` | `unverifiedNumericClaims(said, contextText)`，`contextText` 由 `keepRecomputedBlocks` 收窄后的存储 system 段 ＋ 现渲染的环境块拼成 | **计数口径不同**（不是判据不同） | 核过：`this_turn_facts`／`fact_spans` **在白名单里**（`companion-dialogue-content.ts:580`），所以初版"少了事实块"那句撤回；生产把 **G1｜G6 合成一个 `hasUnverifiedClaims`、共用一份 `actionSteerBudget`**（`runtime.ts:3235,3249`），台子按两条分别触发计数 |
+| G2 谎称没到期 ／ G3 谎称查过 | `runtime.ts:3239-3240` 合成一条 `lookupClaim`，共用一份 `lookupClaimSteered`（`:3288`） | 台子按 G2、G3 **两条分别计数** | **一条闸被数成两条** | 核过（同上一格的行号） |
+| G4 说了没做 | `runtime.ts:3250` 同时读短语表 `looksLikeUnfulfilledActionNarration(said)` 与结构化分类器 `userAskedForAction`（`:2772`，`null → true`） | 台子只能喂短语表那一支 | **一支可判、一支不可判**——分类器要一次模型调用，重放台按设计不发请求 | 核过：两个输入都在 `planStepSteer` 的入参里（`:3245-3252`）。**初版写"台子漏了主判据"是过重的说法**：那不是漂移，是**这台机器的能力边界**，须在报告里印成"不可判"而不是当成 0 |
+| G5 半截话 | 修复梯 `runtime.ts:3114-3121`，前置含 `!stepEmitted`；下限 `TRUNCATED_REPLY_MIN_CHARS[activeness]` | ①`stepEmitted` 只是 `:2946` 的内存 `let`，**库里没有**；②Python `run_bridge(activeness="active")` 写死（`companion-gate-counterfactual.py:247`）；③`GATE_CLASS["G5"]="A-prime"` 而前置过滤只作用于 `"A"`（`py:84,494`） | **前置条件根本没生效**：G5 是在"当轮是否已下发过字"未知的情况下被计数的 | 核过（三处都 grep 到） |
+| G6 编造引文 | `runtime.ts:3230-3234`：出处含 **`role==="tool"` 消息的原始内容** | 台子只能用 `companion_agent_tool_calls.result_safe_summary`（`py:188`）——**原始 tool 内容从未落库**（`0213:105` 只有这一列） | **数据条件，不是可修的分歧**：以摘要列为出处必然比生产窄 ⇒ 触发数是**上界（过报）**；要变准只能往前改运行时留原始内容，不能靠台子 | 核过（迁移与 schema 双向确认）。**初版"改成原始内容"这条待办作废——做不到** |
+| G7 内部词 | 两处（流式 `companion-dialogue-stream.ts:124`、全文 `companion-dialogue.ts:836`）＋念头 `companion-thought.ts:285,499` | 同一份 `containsCompanionInternalToken` | **对齐** | 未逐行重核（沿用 W1-1 时那轮） |
+| G8／G9 JSON 信封／碎片 | `companion-dialogue-content.ts:341-349`：判的是 `clean` **剥掉代码围栏之后**的 `envelopeProbe` | 台子把**原文**直接喂 `looksLikeJsonEnvelope/Fragment` | **输入形状差一截**：生产会先净化＋剥围栏，所以同一条文本两边结论可以相反 | 核过（`:336-349` 原文在此节上方引用过） |
+| G10 念头里的数字 | 生成侧 `companion-thought.ts:290`、`validateThoughtExpression`；**被拒不等于不发**：`:943` 是 `selectThoughtExpression(...) ?? candidate.text` | 台子 `thoughtGuardCovers = !validateThoughtExpression(...)`（`eval.ts:254-256`） | **"覆盖"这个字段站不住**：它把"产出侧校验返回 false"当成"不会交付"，而生产落回原文照发 | 核过（`:943` 直接读到）。附带一条**未核**：`allowedNumberSource` 是否为空——Python 确实传了这个字段（`py:458,516`，念头取 `ambient_by_user`），所以初版"每条都是空源"撤回，改成"要跑一次打印空源比例才知道"（`introducesUnverifiedNumbers` 在空源时短路返回 false，`companion-thought.ts:254`） |
+| G11 念数字播报 | 两处：`companion-thought.ts:505` 改写、`:1000` **真下发抑制**（`UPDATE assistant_thoughts SET status='suppressed'`） | 同一份 `readsOutStatistics` | **对齐**（唯一一条有真·下发位点的） | 核过（`:999-1008` 读到） |
+
+**这份台账真正支持的判断（比初版窄，也更硬）**：
+1. **G5 的触发数现在是假的**（前置条件没生效）；
+2. **G2／G3 是同一条闸的两个入参**，任何"按条删除"的处置都要先合并口径；
+3. **G1｜G6 共用一份 steer 预算** ⇒ "G1 触发 N 次"不等于"N 次拦截"；
+4. **G8／G9 的输入与生产差一道净化** ⇒ 逐条结论可以相反；
+5. **G4 的分类器一支、G6 的原始内容一支、G10 的空源比例**——三处是**台子的能力边界或数据条件**，只能在报告里印成"不可判／上界"，不能当成 0，也不能靠改台子修掉。
+
+⇒ 因此 §9.1 里所有标"删除"的处置**现在都不执行**：不是因为读数是 0，而是因为**有几条的读数与生产的计数单位都不一样**（0 也可能只是被并进了另一条）。
+修台的动作改成四件（原"改成 import"那条作废——本来就是 import）：①G2／G3、G1／G6 按生产的**合并单位**报告；
+②G5 要么落库 `stepEmitted`、要么在报告里印"不可判"并从删除依据中剔除；③G8／G9 走同一道净化＋剥围栏再判；
+④G4 分类器支、G6 原始内容、G10 空源比例各印一个显式的"上界／不可判"标签。**每条改动都要先证红**（改前改后各跑一次，打印逐闸触发差额）。
+
+**同日已修的部分**（细节与读数以 39d §19 2026-09-25 那三行为准）：重放台现在按生产的**合并单位**报 G1｜G6 与 G2｜G3，
+新增「可判分母」一列并接进退出码——`delete` 闸在"零触发"或"分母为 0"时都不再算通过。这一改当场翻出一个假绿灯：
+同一份数据改前 `EXIT=0`（把 G10 的 0 触发当成"这闸可以删"），改后 `EXIT=1` 并写明"空集 ≠ 测不出来"。
+**同日第二轮的两个新读数（比"再对齐一条判据"更要紧）**：
+① **G7／G8／G9 属于"入库前拒绝"的闸，反事实问题在库里没有可判输入**——`companion-dialogue.ts:877` 存的是
+`validated.text`，台子只能看见幸存者。三条的可判分母已写死 0（去向仍是 keep，但谁把它们翻成 delete，
+退出码会拒绝而不是给绿灯）。原计划里"G8／G9 判之前先过生产那道净化"这条**方向错了，作废**。
+② 新加的"每闸触发跨几天"告警当场抓到：**G3／G4／G6／G7／G9／G11 的触发各只落在一天**
+（G7、G9 落在 09-19＝那两道闸自己上线的当天，代码注释里就是"2026-09-19 T3"；G3／G6／G11 落在 09-21）。
+⇒ 那些触发**未归因**。我一度把它们读成"闸上线之前入库的行"，随后**撤回这个归因**：本项目所有改动都未提交、dev 栈是 `tsx watch` 热重载，
+`git log` 给出的是**提交日期**而不是"这版代码开始服务这台机器流量的日期"，用它切窗口会把两件事混掉。
+库里唯一的带内版本记号是 `companion_turn_runs.prompt_version`（30 天内实测三档：空 108 条、
+`companion-persona-v4` 299 条、`-v5` 295 条），它是**整包提示词版本**且有空档 ⇒ 也判不了逐闸。
+所以正确的结论是一句更基本的话：**重放台无法把一条历史样本归到服务它的那套代码上**——
+既不能说"触发挤在一天"是残留，也不能说它是当天真漏了。要让它可判，缺的是一个产品级动作：
+**闸的版本随 turn 落库**（并进 `prompt_version` 或另加一列），而那条改动在并行会话正在改的
+`companion-dialogue.ts`／runtime 里。在此之前，被标 `delete` 的 G3／G11 的"第一份证据"应当读作
+**未归因**而不是"已覆盖"。
+G5 要拿真数仍需把 `stepEmitted` 落库；最小样本量这道闸没设，与第二份证据一起在 W6-1 判。
+
+**这段"未归因"现在已经进退出码**（同日收尾，读数在 39d §19 最后两行）：台子的 `exit_code_for` 多了一条"某道 `delete` 闸的触发
+全部落在同一天 ⇒ 判不足"。同一份数据**改前 `EXIT=0`、改后 `EXIT=1`**，点名 G3、G11（各只落在 09-21 那一天）与 G10
+（零触发、可判分母 55 ⇒ 空集）。上面那句"G3 以 1 次触发通过"因此作废。于是这份台账的最终口径是一句更小的话：
+**11 道闸里只有 G1 的"第一份证据"读数不被挡**（12 次、跨多日、可判分母 404、still-leaks=0），而它仍缺 W0-11 的第二份证据
+⇒ **W6-1 现在没有任何一条闸够格执行**，一条守卫都没删。要往下走只有两条路：把闸的版本随 turn 落库（产品级、本台账之外），
+或等一份新的、落在版本可判窗口里的真实流量。
+
+**棘轮数的是什么**（核过）：`workers/ai-worker/src/companion-gate-ratchet.test.ts` 只证明"这些导出函数**仍被那三个运行文件调用**"（基线 `GATE_BASELINE = 11`、`:45-66`），不是"仍拦得住东西"。
+
+**漏清单（代码里有、G1–G11 没有的下发后过滤）**——这一组本轮未逐条重核，先按初版登记，动到再核：
+`resolveFactSpans`（丢半句）、`joinVisibleSegmentsDeduped`、`reconcileStreamedText`（前后缀不一致 ⇒ 整轮失败）、
+`unwrapCompanionJsonEnvelope`（剥壳而非拒）、`sanitizeCompanionVisibleText` 一族、长度上限与净化后为空、
+`isVolatileStatisticMemory`（**G11 的记忆写入孪生**，另一份词表）、`isDuplicateThought`、`purifyVoiceText`（TTS 专用），
+以及只记账不拦截的 `assessAnswerExposure`。
+
 ## 11. 实施批次与依赖顺序（B0–B7）
 
 顺序有硬依赖：**先有尺（B0）→ 收词表与工具形状（B1）→ 补感知（B2）→ 换供给（B3/B5）→ 动协议（B4）→ 接暴露（B6）→ 最后才删闸（B7）**。B6 排在 B5 之后（复用其 span）；B7 排最后（要前面每一批的读数）。
