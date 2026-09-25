@@ -3152,6 +3152,69 @@ export function candidateRowToObject(
  * 对新 revision 完整重跑 grounding/pedagogy/deck gate；旧 revision 保持不可变。
  * 通过则 review_ready，失败则 needs_attention（fail closed，用户编辑无绕 Gate 权）。
  */
+/**
+ * 复核的主体：这一轮的门禁判据 ＋ 被点名那一版候选的原文。
+ *
+ * 抽出来只为一件事——#19 把这条链拆成"读→判→写"三相以后，**读要发生两次**：
+ * 相位 1 取材料给模型判，相位 3 在真正提交前重验材料还在原位。两处判据与文案必须逐字
+ * 一致，否则第二次重验会红在不该红的地方。
+ */
+async function loadRecheckSubjectV2(
+  tx: WorkerTransaction,
+  args: { workspaceId: string; runId: string; candidateRevisionId?: string },
+): Promise<{
+  ctx: Awaited<ReturnType<typeof loadV2RunInputs>>;
+  /** 已经过"必须有计划"那道闸，所以这里显式收成非空（相位 2 在事务外用得到它）。 */
+  plan: NonNullable<Awaited<ReturnType<typeof loadV2RunInputs>>["plan"]>;
+  candidate: LearningCardCandidateRevisionV2;
+}> {
+  const { workspaceId, runId, candidateRevisionId } = args;
+  const ctx = await loadV2RunInputs(tx, workspaceId, runId);
+  const run = ctx.run;
+  if (!["review_ready", "needs_attention", "checking"].includes(run.status as string)) {
+    // jobType 状态门闩不合法：确定性业务违约，非重试。
+    // `checking` = 主管线在"候选被判 rewrite、等待复核"时保持的进行中状态。
+    throw new CardGenerationProviderErrorLike(false, `recheck requires review_ready/needs_attention/checking run (got ${String(run.status)})`);
+  }
+  if (!candidateRevisionId) throw new CardGenerationProviderErrorLike(false, "recheck job missing candidateRevisionId");
+  if (!ctx.plan) throw new CardGenerationProviderErrorLike(false, "recheck requires an existing plan");
+
+  const candRows = (await tx.execute(sql`
+    SELECT candidate_id, candidate_revision_id, revision,
+           plan_revision_id, plan_version, plan_hash, card_content_epoch,
+           plan_objective_local_id, recommendation, derived_from,
+           objective_draft, presentation_draft, evidence_set_hash,
+           candidate_revision_hash, publish_state
+    FROM public.card_generation_candidates_v2
+    WHERE workspace_id = ${workspaceId} AND run_id = ${runId}
+      AND candidate_revision_id = ${candidateRevisionId}
+    LIMIT 1
+  `)) as Array<Record<string, unknown>>;
+  if (candRows.length === 0) throw new CardGenerationProviderErrorLike(false, `candidate not found: ${candidateRevisionId}`);
+  const row = candRows[0];
+  if (row.publish_state !== "unpublished") {
+    throw new CardGenerationProviderErrorLike(false, `candidate ${candidateRevisionId} already ${String(row.publish_state)}, cannot recheck`);
+  }
+  return { ctx, plan: ctx.plan, candidate: candidateRowToObject(row, runId) };
+}
+
+/**
+ * 2026-09-25（#19 第一刀）：单候选复核重排成**三相：读 → 判（出网）→ 写**。
+ *
+ * 原来整条链挤在同一个 `withWorkerWorkspaceTransaction` 里：grounding 与 pedagogy 两次
+ * provider 调用都发生在事务内，一次慢响应就把这条 run 的行锁按住，同池上的后台扫表
+ * 只能等它。现在模型调用整个搬到事务外，**用的不是新机器**，而是主管线 2026-09-17
+ * 已经建好、并且已经被真实流量跑过的两套入参：
+ * - `precomputedGrounding`：按 `candidateRevisionId` 逐位供入，漏斗里缺任何一格都
+ *   fail-closed 抛错（不会静默跳过判定）；
+ * - `precomputedPedagogy`：走原有的**严格序列相等**守卫，守卫不过它自己在事务内重跑，
+ *   所以预计算最多省一次调用、绝不会错用一次判定。
+ *
+ * 事务外那一段读到的材料会过期，相位 3 因此重验：候选仍未启用、run 仍在可复核状态、
+ * **计划与证据闭包逐字没变**（哈希变了＝刚才那两次判定读的是旧材料，判不得，改判重试
+ * 让 job 从头再走一遍）。outbox 租约由 `processV2OutboxJob` 已有的心跳续着，末尾仍由
+ * `fenceV2OutboxLease` 兜底——这一段和改前一样。
+ */
 async function processRecheckCandidateJob(job: PendingOutboxJob, signal?: AbortSignal): Promise<void> {
   const { workspaceId, runId } = job;
   const useLLM = process.env.CARD_GENERATION_V2_LLM === "true";
@@ -3164,52 +3227,105 @@ async function processRecheckCandidateJob(job: PendingOutboxJob, signal?: AbortS
     ? await resolveCardGenerationGovernance(workspaceId, runId)
     : null;
 
+  // 相位 1：只读的一小段事务，把判据与候选原文取出来（一个字节都不写）。
+  const staged = await withWorkerWorkspaceTransaction({ workspaceId, userId: null }, async (tx) => {
+    throwIfPipelineAborted(signal);
+    return loadRecheckSubjectV2(tx, {
+      workspaceId,
+      runId,
+      candidateRevisionId: payload.candidateRevisionId,
+    });
+  });
+  const ctx = staged.ctx;
+  const plan = staged.plan;
+  const run = ctx.run;
+  const candidate = staged.candidate;
+
+  // 相位 2：出网。这一段的 provider 调用发生在**没有事务**的地方。
+  const providers = useLLM
+    ? await buildProvidersForRun({ workspaceId, job, semanticSpec: ctx.semanticSpec, governanceContext })
+    : null;
+  const precheck = buildCandidatePrecheck(candidate, ctx.sourceContent, ctx.sealed.evidenceManifest);
+  const stageAbort = new AbortController();
+  const stageSignal = signal ? AbortSignal.any([signal, stageAbort.signal]) : stageAbort.signal;
+  const groundingOutcome = await callGroundingCritic({
+    precheck,
+    sealed: ctx.sealed,
+    existingObjectives: ctx.existingObjectives,
+    providers,
+    stageSignal,
+    onRetryableError: (error) => stageAbort.abort(error),
+    signal,
+  });
+  /**
+   * pedagogy 只在"这一版显然进得了牌堆"时才预先发起：确定性 fatal、调用出错、
+   * grounding 判 fail 三种情况下漏斗会把候选剔掉、根本不需要集合级判定，先问就是
+   * 白花钱。真判错了（漏斗仍然要评审）漏斗按原路径在事务内自己跑一次——**贵一次，
+   * 不会少一次**。
+   */
+  const worthPrecomputingPedagogy =
+    groundingOutcome.fatalPre.length === 0 && !groundingOutcome.error && groundingOutcome.contract?.verdict === "pass";
+  const precomputedPedagogy: SpeculativePedagogy | null = worthPrecomputingPedagogy
+    ? await runPedagogyCritic(
+        {
+          runId,
+          candidate,
+          candidates: [candidate],
+          // 占位：真实 binding plan hash 要等事务内落库才有；复用路径会覆盖并重算哈希。
+          candidateEvidenceBindingPlanHashes: [candidate.candidateRevisionHash],
+          existingObjectives: ctx.existingObjectives.map((o) => ({
+            objectiveId: o.objectiveId, objectiveStatement: o.objectiveStatement, publicSummary: o.publicSummary,
+          })),
+          softPrecheckIssues: precheck.softPre.length > 0 ? { [candidate.candidateId]: precheck.softPre } : {},
+          plan: { planRevisionId: plan.planRevisionId, planVersion: plan.planVersion, planHash: plan.planHash },
+          inputHash: (run as unknown as { input_snapshot_hash: string }).input_snapshot_hash,
+          generationRequest: ctx.semanticSpec.semanticRequest,
+          signal: stageSignal,
+        },
+        providers ? providers.pedagogy : new DeterministicPedagogyProvider(),
+      ).then((report) => ({ report, judgedCandidateIds: [candidate.candidateId] }))
+        .catch((error) => {
+          // 与主管线同语义：预计算失败不改变判定，交给漏斗按最终集合正常调用一次。
+          logger.warn({ runId, err: String(error) }, "[v2-recheck] pre-transaction pedagogy failed; the funnel will run it");
+          return null;
+        })
+    : null;
+
+  // 相位 3：写。这一段里没有任何 provider 调用。
   await withWorkerWorkspaceTransaction({ workspaceId, userId: null }, async (tx) => {
     throwIfPipelineAborted(signal);
-    const ctx = await loadV2RunInputs(tx, workspaceId, runId);
-    const run = ctx.run;
-    if (!["review_ready", "needs_attention", "checking"].includes(run.status as string)) {
-      // jobType 状态门闩不合法：确定性业务违约，非重试。
-      // `checking` = 主管线在"候选被判 rewrite、等待复核"时保持的进行中状态。
-      throw new CardGenerationProviderErrorLike(false, `recheck requires review_ready/needs_attention/checking run (got ${String(run.status)})`);
+    const current = await loadRecheckSubjectV2(tx, {
+      workspaceId,
+      runId,
+      candidateRevisionId: payload.candidateRevisionId,
+    });
+    if (
+      current.candidate.candidateRevisionHash !== candidate.candidateRevisionHash
+      || String(current.plan.planHash) !== String(plan.planHash)
+      || String(current.plan.planRevisionId) !== String(plan.planRevisionId)
+      || current.ctx.sealed.evidenceSetHash !== ctx.sealed.evidenceSetHash
+      || String(current.ctx.run.input_snapshot_hash) !== String(run.input_snapshot_hash)
+    ) {
+      // 判定读的是旧材料 → 这一轮的结论不能落。抛可重试让 job 重走一遍（相位 2 会
+      // 照新材料重判），而不是把过期判定写进牌堆。
+      throw new CardGenerationProviderErrorLike(
+        true,
+        "recheck inputs changed while the gates were being judged; this pass is discarded",
+      );
     }
-    const candidateRevisionId = payload.candidateRevisionId;
-    if (!candidateRevisionId) throw new CardGenerationProviderErrorLike(false, "recheck job missing candidateRevisionId");
-    if (!ctx.plan) throw new CardGenerationProviderErrorLike(false, "recheck requires an existing plan");
-
-    const candRows = (await tx.execute(sql`
-      SELECT candidate_id, candidate_revision_id, revision,
-             plan_revision_id, plan_version, plan_hash, card_content_epoch,
-             plan_objective_local_id, recommendation, derived_from,
-             objective_draft, presentation_draft, evidence_set_hash,
-             candidate_revision_hash, publish_state
-      FROM public.card_generation_candidates_v2
-      WHERE workspace_id = ${workspaceId} AND run_id = ${runId}
-        AND candidate_revision_id = ${candidateRevisionId}
-      LIMIT 1
-    `)) as Array<Record<string, unknown>>;
-    if (candRows.length === 0) throw new CardGenerationProviderErrorLike(false, `candidate not found: ${candidateRevisionId}`);
-    const row = candRows[0];
-    if (row.publish_state !== "unpublished") {
-      throw new CardGenerationProviderErrorLike(false, `candidate ${candidateRevisionId} already ${String(row.publish_state)}, cannot recheck`);
-    }
-    const candidate = candidateRowToObject(row, runId);
-
-    const providers = useLLM
-      ? await buildProvidersForRun({ workspaceId, job, semanticSpec: ctx.semanticSpec, governanceContext })
-      : null;
-
     // 完整重跑门禁（§12.2/§12.3：编辑/合并产物无绕 Gate 权）
     await critiqueAndFinalizeCandidates(tx, {
       runId,
       workspaceId,
-      run: run as unknown as { input_snapshot_hash: string; semantic_spec_hash: string },
-      plan: ctx.plan,
+      run: current.ctx.run as unknown as { input_snapshot_hash: string; semantic_spec_hash: string },
+      plan: current.plan,
       candidates: [candidate],
-      sealed: ctx.sealed,
-      sourceContent: ctx.sourceContent,
-      existingObjectives: ctx.existingObjectives,
+      sealed: current.ctx.sealed,
+      sourceContent: current.ctx.sourceContent,
+      existingObjectives: current.ctx.existingObjectives,
       providers,
+      precomputedGrounding: new Map([[candidate.candidateRevisionId, groundingOutcome]]),
+      precomputedPedagogy,
       // The initial generation already consumed the single bounded repair
       // budget. A recheck must only rerun the gates for this immutable
       // authored revision; allowing another repair here creates an unbounded
@@ -3217,7 +3333,7 @@ async function processRecheckCandidateJob(job: PendingOutboxJob, signal?: AbortS
       // `rewrite`.
       allowBoundedRepair: false,
       signal,
-      generationRequest: ctx.semanticSpec.semanticRequest,
+      generationRequest: current.ctx.semanticSpec.semanticRequest,
     });
     // 单个候选复核失败不应让同一 run 中其它仍可启用的最新候选
     // 一并进入 needs_attention；用户仍应能保留并启用通过门禁的候选。
